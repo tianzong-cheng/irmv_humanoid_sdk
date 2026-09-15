@@ -1,0 +1,240 @@
+module irmv {
+  module protocol {
+    module wire {
+      const unsigned long PROTOCOL_VERSION = 1;
+      const unsigned long MAX_JOINTS = 64;
+
+      typedef octet Id[16];
+      typedef double Vector3[3];
+      typedef double JointValues[64];
+      typedef char Text64Bytes[64];
+      typedef char Text256Bytes[256];
+
+      @final
+      struct Text64 {
+        unsigned long count;
+        Text64Bytes bytes;
+      };
+
+      @final
+      struct Text256 {
+        unsigned long count;
+        Text256Bytes bytes;
+      };
+
+      enum ExecutionState {
+        BOOT,
+        ZERO_TORQUE,
+        DAMPING,
+        TRACKING,
+        FAULT
+      };
+
+      enum OutputAction {
+        OUTPUT_ZERO_TORQUE,
+        OUTPUT_DAMPING,
+        OUTPUT_TRACKING
+      };
+
+      enum Operation {
+        ACQUIRE_SESSION,
+        REQUEST_DAMPING,
+        REQUEST_ZERO_TORQUE,
+        REQUEST_TRACKING,
+        RESET
+      };
+
+      enum ResultStatus {
+        APPLIED,
+        REJECTED
+      };
+
+      enum RejectReason {
+        REJECT_NONE,
+        VERSION_MISMATCH,
+        MALFORMED,
+        WRONG_INSTANCE,
+        WRONG_SESSION,
+        SESSION_BUSY,
+        STALE_REQUEST,
+        REQUEST_CONFLICT,
+        EPOCH_MISMATCH,
+        INVALID_TRANSITION,
+        INVALID_COMMAND,
+        STALE_SOURCE,
+        DISCONTINUITY,
+        RECOVERY_NOT_READY,
+        FAULT_MISMATCH,
+        WRITE_FAILED,
+        QUEUE_FULL
+      };
+
+      enum FaultReason {
+        FAULT_NONE,
+        BOOT_FAILED,
+        FEEDBACK_INVALID,
+        DRIVER_ERROR,
+        IMU_INVALID,
+        JOINT_POSITION_EXCEEDED,
+        JOINT_VELOCITY_EXCEEDED,
+        COMMAND_INVALID,
+        FAULT_WRITE_FAILED,
+        PROTOCOL_EXHAUSTED
+      };
+
+      enum StopReason {
+        STOP_NONE,
+        STOP_REQUESTED,
+        COMMAND_TIMEOUT,
+        SOURCE_STATE_TIMEOUT,
+        SUPERVISOR_TIMEOUT
+      };
+
+      @final
+      struct JointVector {
+        unsigned long count;
+        JointValues q;
+        JointValues dq;
+        JointValues tau_ff;
+        JointValues kp;
+        JointValues kd;
+      };
+
+      @final
+      @topic
+      struct JointCommand {
+        unsigned long protocol_version;
+        Id runtime_id;
+        Id session_id;
+        Id producer_id;
+        unsigned long long epoch;
+        unsigned long long command_seq;
+        unsigned long long source_state_seq;
+        unsigned long long stamp_us;
+        Text64 layout_id;
+        JointVector joints;
+      };
+
+      @final
+      struct JointFeedback {
+        boolean valid;
+        boolean connected;
+        double q;
+        double dq;
+        double tau_est;
+        unsigned long long rx_stamp_us;
+        double freq_hz;
+        unsigned long error_code;
+      };
+
+      typedef JointFeedback JointFeedbackValues[64];
+
+      @final
+      struct ImuFeedback {
+        boolean valid;
+        Vector3 orientation_rpy;
+        Vector3 angular_velocity;
+        Vector3 linear_acceleration;
+        unsigned long long rx_stamp_us;
+      };
+
+      @final
+      struct FeedbackSnapshot {
+        unsigned long long snapshot_seq;
+        unsigned long long stamp_us;
+        unsigned long count;
+        JointFeedbackValues joints;
+        ImuFeedback imu;
+      };
+
+      @final
+      struct FaultDetail {
+        FaultReason reason;
+        unsigned long joint_index;
+        unsigned long error_code;
+        double observed_value;
+        double limit;
+        unsigned long long sample_stamp_us;
+        unsigned long long detected_stamp_us;
+        OutputAction output_action;
+        Text256 message;
+      };
+
+      typedef FaultDetail FaultDetails[64];
+
+      @final
+      struct FaultReport {
+        unsigned long count;
+        FaultDetails details;
+      };
+
+      @final
+      @topic
+      struct ExecutionRequest {
+        unsigned long protocol_version;
+        Id supervisor_id;
+        unsigned long long request_id;
+        Id session_id;
+        Id runtime_id;
+        unsigned long long expected_epoch;
+        unsigned long long proposed_epoch;
+        Id producer_id;
+        unsigned long long fault_id;
+        Operation operation;
+        JointCommand first_command;
+      };
+
+      @final
+      @topic
+      struct ExecutionResult {
+        unsigned long protocol_version;
+        Id supervisor_id;
+        unsigned long long request_id;
+        Id session_id;
+        Id runtime_id;
+        ExecutionState execution_state;
+        OutputAction output_action;
+        Id producer_id;
+        unsigned long long epoch;
+        unsigned long long fault_id;
+        unsigned long long stamp_us;
+        ResultStatus status;
+        RejectReason reason;
+      };
+
+      @final
+      @topic
+      struct SupervisorHeartbeat {
+        unsigned long protocol_version;
+        Id supervisor_id;
+        Id session_id;
+        Id runtime_id;
+        unsigned long long heartbeat_seq;
+        unsigned long long stamp_us;
+      };
+
+      @final
+      @topic
+      struct RobotState {
+        unsigned long protocol_version;
+        Id runtime_id;
+        Id session_id;
+        Id producer_id;
+        unsigned long long epoch;
+        unsigned long long state_seq;
+        unsigned long long stamp_us;
+        ExecutionState execution_state;
+        OutputAction output_action;
+        StopReason stop_reason;
+        unsigned long long fault_id;
+        unsigned long long last_applied_command_seq;
+        boolean healthy;
+        boolean damping_eligible;
+        Text64 config_id;
+        Text64 layout_id;
+        FeedbackSnapshot feedback;
+        FaultReport faults;
+      };
+    };
+  };
+};
