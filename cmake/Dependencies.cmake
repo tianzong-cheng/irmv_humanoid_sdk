@@ -7,6 +7,10 @@ set(IRMV_CYCLONEDDS_CXX_COMMIT
 set(IRMV_NLOHMANN_JSON_COMMIT
     "9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03")
 
+set(IRMV_NLOHMANN_JSON_SOURCE_DIR
+    ""
+    CACHE PATH "Optional local nlohmann/json source checkout at the pinned commit")
+
 function(irmv_declare_dependencies)
   FetchContent_Declare(
     cyclonedds
@@ -26,4 +30,27 @@ function(irmv_declare_dependencies)
     GIT_TAG "${IRMV_NLOHMANN_JSON_COMMIT}"
     GIT_SHALLOW FALSE
   )
+endfunction()
+
+function(irmv_make_nlohmann_json_available)
+  if(IRMV_NLOHMANN_JSON_SOURCE_DIR)
+    execute_process(
+      COMMAND git -C "${IRMV_NLOHMANN_JSON_SOURCE_DIR}" rev-parse HEAD
+      RESULT_VARIABLE git_result
+      OUTPUT_VARIABLE source_commit
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET
+    )
+    if(NOT git_result EQUAL 0 OR NOT source_commit STREQUAL IRMV_NLOHMANN_JSON_COMMIT)
+      message(
+        FATAL_ERROR
+          "IRMV_NLOHMANN_JSON_SOURCE_DIR must be a git checkout at ${IRMV_NLOHMANN_JSON_COMMIT}"
+      )
+    endif()
+    set(FETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON
+        "${IRMV_NLOHMANN_JSON_SOURCE_DIR}")
+  endif()
+
+  irmv_declare_dependencies()
+  FetchContent_MakeAvailable(nlohmann_json)
 endfunction()

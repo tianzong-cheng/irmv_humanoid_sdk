@@ -1,0 +1,263 @@
+#include "irmv/configuration/config.hpp"
+
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <string_view>
+
+#include "irmv/configuration/sha256.hpp"
+#include "support/check.hpp"
+
+namespace {
+
+using irmv::configuration::ConfigError;
+using irmv::configuration::LoadConfig;
+
+class TemporaryConfig {
+ public:
+  explicit TemporaryConfig(std::string_view contents) {
+    static unsigned int next_id = 0;
+    path_ = std::filesystem::temp_directory_path() /
+            ("irmv-config-test-" + std::to_string(next_id++) + ".json");
+    std::ofstream output(path_);
+    output << contents;
+  }
+
+  ~TemporaryConfig() { std::filesystem::remove(path_); }
+
+  const std::filesystem::path &path() const { return path_; }
+
+ private:
+  std::filesystem::path path_;
+};
+
+std::string ValidConfig() {
+  return R"({
+    "schema_version": 1,
+    "deployment": "fake_only",
+    "backend": "fake",
+    "robot": {
+      "units": {"position": "rad", "velocity": "rad_s", "torque": "Nm"},
+      "joints": [
+        {"name": "test_left", "position_min": -2, "position_max": 2},
+        {"name": "test_right", "position_min": -2, "position_max": 2}
+      ]
+    },
+    "runtime": {
+      "control_hz": 500,
+      "damping": {"kd": {"test_right": 2, "test_left": 2}},
+      "safety": {
+        "joint_velocity_limits": {"test_right": 10, "test_left": 10},
+        "torque_limits": {"test_left": 20, "test_right": 20},
+        "target_velocity_limits": {"test_left": 10, "test_right": 10},
+        "timeouts": {"command_us": 100000, "source_state_us": 150000,
+          "feedback_us": 20000, "imu_us": 20000, "supervisor_us": 300000}
+      },
+      "boot": {"frequency_grace_us": 1000000, "healthy_window_us": 100000,
+        "deadline_us": 2000000, "minimum_frequency_hz": 400},
+      "recovery": {"healthy_window_us": 100000, "minimum_frequency_hz": 400},
+      "imu_required": false,
+      "continuity": {
+        "position_delta": {"test_left": 0.1, "test_right": 0.1},
+        "velocity_delta": {"test_left": 0.5, "test_right": 0.5},
+        "torque_delta": {"test_left": 5, "test_right": 5}
+      },
+      "state_window_capacity": 1024
+    },
+    "telemetry": {"level": "INFO", "directory": "logs", "rotate_bytes": 1048576,
+      "retained_files": 3, "queue_capacity": 1024},
+    "dds": {"domain": 1, "interface": "lo"}
+  })";
+}
+
+std::string ReplaceOnce(std::string value, std::string_view from,
+                        std::string_view to) {
+  const auto position = value.find(from);
+  if (position == std::string::npos) {
+    return {};
+  }
+  value.replace(position, from.size(), to);
+  return value;
+}
+
+bool ThrowsAt(std::string_view contents, std::string_view field_path) {
+  const TemporaryConfig file(contents);
+  try {
+    static_cast<void>(LoadConfig(file.path()));
+  } catch (const ConfigError &error) {
+    return error.field_path() == field_path &&
+           std::string_view(error.what()).find(field_path) !=
+               std::string_view::npos;
+  }
+  return false;
+}
+
+std::string TwelveJointConfig() {
+  std::ostringstream joints;
+  std::ostringstream values;
+  for (int index = 0; index < 12; ++index) {
+    if (index != 0) {
+      joints << ',';
+      values << ',';
+    }
+    joints << "{\"name\":\"joint_" << index
+           << "\",\"position_min\":-2,\"position_max\":2}";
+    values << "\"joint_" << index << "\":" << (index + 1);
+  }
+  const std::string mapping = values.str();
+  std::ostringstream config;
+  config << R"({"schema_version":1,"deployment":"fake_only","backend":"fake",
+    "robot":{"units":{"position":"rad","velocity":"rad_s","torque":"Nm"},"joints":[)"
+         << joints.str()
+         << R"(]},"runtime":{"control_hz":500,"damping":{"kd":{)" << mapping
+         << R"(}},"safety":{"joint_velocity_limits":{)" << mapping
+         << R"(},"torque_limits":{)" << mapping
+         << R"(},"target_velocity_limits":{)" << mapping
+         << R"(},"timeouts":{"command_us":100000,"source_state_us":150000,
+         "feedback_us":20000,"imu_us":20000,"supervisor_us":300000}},
+         "boot":{"frequency_grace_us":1000000,"healthy_window_us":100000,
+         "deadline_us":2000000,"minimum_frequency_hz":400},
+         "recovery":{"healthy_window_us":100000,"minimum_frequency_hz":400},
+         "imu_required":false,"continuity":{"position_delta":{)"
+         << mapping << R"(},"velocity_delta":{)" << mapping
+         << R"(},"torque_delta":{)" << mapping
+         << R"(}},"state_window_capacity":1024},
+         "telemetry":{"level":"INFO","directory":"logs","rotate_bytes":1048576,
+         "retained_files":3,"queue_capacity":1024},
+         "dds":{"domain":1,"interface":"lo"}})";
+  return config.str();
+}
+
+}  // namespace
+
+int main() {
+  using irmv::configuration::LogLevel;
+  using irmv::configuration::Sha256;
+
+  CHECK(Sha256("") ==
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+  CHECK(Sha256("abc") ==
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  CHECK(Sha256("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") ==
+        "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+  CHECK(Sha256(std::string(1'000'000, 'a')) ==
+        "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+
+  const TemporaryConfig valid(ValidConfig());
+  const auto config = LoadConfig(valid.path());
+  const auto fixture = LoadConfig("config/sdk.json");
+  CHECK(config.schema_version == 1);
+  CHECK(config.deployment == "fake_only");
+  CHECK(config.backend == "fake");
+  CHECK(config.joint_names.size() == 2);
+  CHECK(config.joint_names[0] == "test_left");
+  CHECK(config.joint_names[1] == "test_right");
+  CHECK(config.position_min[0] == -2.0);
+  CHECK(config.position_max[1] == 2.0);
+  CHECK(config.control_hz == 500.0);
+  CHECK(config.control_period_us == 2000);
+  CHECK(config.damping_kd[0] == 2.0);
+  CHECK(config.joint_velocity_limits[1] == 10.0);
+  CHECK(config.torque_limits[0] == 20.0);
+  CHECK(config.target_velocity_limits[1] == 10.0);
+  CHECK(config.timeouts.command_us == 100000);
+  CHECK(config.timeouts.source_state_us == 150000);
+  CHECK(config.timeouts.feedback_us == 20000);
+  CHECK(config.timeouts.imu_us == 20000);
+  CHECK(config.timeouts.supervisor_us == 300000);
+  CHECK(config.boot.frequency_grace_us == 1000000);
+  CHECK(config.boot.healthy_window_us == 100000);
+  CHECK(config.boot.deadline_us == 2000000);
+  CHECK(config.boot.minimum_frequency_hz == 400.0);
+  CHECK(config.recovery.healthy_window_us == 100000);
+  CHECK(config.recovery.minimum_frequency_hz == 400.0);
+  CHECK(!config.imu_required);
+  CHECK(config.continuity.position_delta[0] == 0.1);
+  CHECK(config.continuity.velocity_delta[1] == 0.5);
+  CHECK(config.continuity.torque_delta[0] == 5.0);
+  CHECK(config.state_window_capacity == 1024);
+  CHECK(config.telemetry.level == LogLevel::Info);
+  CHECK(config.telemetry.directory == "logs");
+  CHECK(config.telemetry.rotate_bytes == 1048576);
+  CHECK(config.telemetry.retained_files == 3);
+  CHECK(config.telemetry.queue_capacity == 1024);
+  CHECK(config.dds.domain == 1);
+  CHECK(config.dds.interface == "lo");
+  CHECK(config.config_id.size() == 64);
+  CHECK(config.layout_id.size() == 64);
+  CHECK(fixture.config_id == config.config_id);
+  CHECK(fixture.layout_id == config.layout_id);
+
+  const std::string reordered = R"({"dds":{"interface":"lo","domain":1},
+    "telemetry":{"queue_capacity":1024,"retained_files":3,"rotate_bytes":1048576,
+      "directory":"logs","level":"INFO"},"backend":"fake","deployment":"fake_only",
+    "schema_version":1,"runtime":{"state_window_capacity":1024,
+      "continuity":{"torque_delta":{"test_right":5,"test_left":5},
+        "velocity_delta":{"test_right":0.5,"test_left":0.5},
+        "position_delta":{"test_right":0.1,"test_left":0.1}},"imu_required":false,
+      "recovery":{"minimum_frequency_hz":400,"healthy_window_us":100000},
+      "boot":{"minimum_frequency_hz":400,"deadline_us":2000000,
+        "healthy_window_us":100000,"frequency_grace_us":1000000},
+      "safety":{"timeouts":{"supervisor_us":300000,"imu_us":20000,
+          "feedback_us":20000,"source_state_us":150000,"command_us":100000},
+        "target_velocity_limits":{"test_right":10,"test_left":10},
+        "torque_limits":{"test_right":20,"test_left":20},
+        "joint_velocity_limits":{"test_left":10,"test_right":10}},
+      "damping":{"kd":{"test_left":2,"test_right":2}},"control_hz":500},
+    "robot":{"joints":[{"position_max":2,"position_min":-2,"name":"test_left"},
+      {"position_max":2,"position_min":-2,"name":"test_right"}],
+      "units":{"torque":"Nm","velocity":"rad_s","position":"rad"}}})";
+  const TemporaryConfig reordered_file(reordered);
+  const auto reordered_config = LoadConfig(reordered_file.path());
+  CHECK(reordered_config.config_id == config.config_id);
+  CHECK(reordered_config.layout_id == config.layout_id);
+
+  CHECK(
+      ThrowsAt(ReplaceOnce(ValidConfig(), "\"test_right\": 2, \"test_left\": 2",
+                           "\"test_left\": 2"),
+               "runtime.damping.kd.test_right"));
+  CHECK(ThrowsAt(ReplaceOnce(ValidConfig(), "\"test_right\", \"position_min\"",
+                             "\"test_left\", \"position_min\""),
+                 "robot.joints[1].name"));
+  CHECK(ThrowsAt(ReplaceOnce(ValidConfig(), "\"command_us\": 100000",
+                             "\"command_us\": -1"),
+                 "runtime.safety.timeouts.command_us"));
+  CHECK(ThrowsAt(ReplaceOnce(ValidConfig(), "\"backend\": \"fake\"",
+                             "\"backend\": \"real\""),
+                 "backend"));
+  CHECK(ThrowsAt(ReplaceOnce(ValidConfig(), "\"control_hz\": 500",
+                             "\"control_hz\": 1e400"),
+                 "$"));
+  CHECK(ThrowsAt(ReplaceOnce(ValidConfig(), "\"position_min\": -2",
+                             "\"position_min\": NaN"),
+                 "$"));
+  CHECK(ThrowsAt(ReplaceOnce(ValidConfig(), "\"state_window_capacity\": 1024",
+                             "\"state_window_capacity\": 8193"),
+                 "runtime.state_window_capacity"));
+  CHECK(ThrowsAt(ReplaceOnce(ValidConfig(),
+                             "\"target_velocity_limits\": {\"test_left\": 10, "
+                             "\"test_right\": 10},",
+                             ""),
+                 "runtime.safety.target_velocity_limits"));
+  CHECK(ThrowsAt(ReplaceOnce(ValidConfig(), "\"deadline_us\": 2000000",
+                             "\"deadline_us\": 1100000"),
+                 "runtime.boot.deadline_us"));
+  CHECK(ThrowsAt(ReplaceOnce(ValidConfig(), "\"domain\": 1",
+                             "\"domain\": 18446744073709551615"),
+                 "dds.domain"));
+  CHECK(ThrowsAt(ReplaceOnce(ValidConfig(), "\"control_hz\": 500",
+                             "\"control_hz\": 1e-300"),
+                 "runtime.control_hz"));
+
+  const TemporaryConfig twelve_file(TwelveJointConfig());
+  const auto twelve = LoadConfig(twelve_file.path());
+  CHECK(twelve.joint_names.size() == 12);
+  CHECK(twelve.joint_names[11] == "joint_11");
+  CHECK(twelve.damping_kd[0] == 1.0);
+  CHECK(twelve.damping_kd[11] == 12.0);
+  CHECK(twelve.target_velocity_limits[7] == 8.0);
+
+  CHECK(ThrowsAt("{}", "schema_version"));
+  return 0;
+}

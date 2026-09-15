@@ -1,0 +1,279 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://irmv.example/schema/runtime-sdk-v1.json",
+  "title": "IRMV fake-only runtime configuration",
+  "type": "object",
+  "$comment": "LoadConfig additionally enforces cross-field joint-name completeness, unique names, position_min < position_max, boot deadline ordering, minimum frequency versus control_hz, and state-window coverage.",
+  "required": [
+    "schema_version",
+    "deployment",
+    "backend",
+    "robot",
+    "runtime",
+    "telemetry",
+    "dds"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "deployment": {
+      "const": "fake_only"
+    },
+    "backend": {
+      "const": "fake"
+    },
+    "robot": {
+      "type": "object",
+      "required": ["units", "joints"],
+      "properties": {
+        "units": {
+          "type": "object",
+          "required": ["position", "velocity", "torque"],
+          "properties": {
+            "position": {
+              "const": "rad"
+            },
+            "velocity": {
+              "const": "rad_s"
+            },
+            "torque": {
+              "const": "Nm"
+            }
+          }
+        },
+        "joints": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "required": ["name", "position_min", "position_max"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "position_min": {
+                "type": "number"
+              },
+              "position_max": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "required": [
+        "control_hz",
+        "damping",
+        "safety",
+        "boot",
+        "recovery",
+        "imu_required",
+        "continuity",
+        "state_window_capacity"
+      ],
+      "properties": {
+        "control_hz": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1000000
+        },
+        "damping": {
+          "type": "object",
+          "required": ["kd"],
+          "properties": {
+            "kd": {
+              "$ref": "#/$defs/positiveJointMap"
+            }
+          }
+        },
+        "safety": {
+          "type": "object",
+          "required": [
+            "joint_velocity_limits",
+            "torque_limits",
+            "target_velocity_limits",
+            "timeouts"
+          ],
+          "properties": {
+            "joint_velocity_limits": {
+              "$ref": "#/$defs/positiveJointMap"
+            },
+            "torque_limits": {
+              "$ref": "#/$defs/positiveJointMap"
+            },
+            "target_velocity_limits": {
+              "$ref": "#/$defs/positiveJointMap"
+            },
+            "timeouts": {
+              "type": "object",
+              "required": [
+                "command_us",
+                "source_state_us",
+                "feedback_us",
+                "imu_us",
+                "supervisor_us"
+              ],
+              "properties": {
+                "command_us": {
+                  "$ref": "#/$defs/positiveTimeUs"
+                },
+                "source_state_us": {
+                  "$ref": "#/$defs/positiveTimeUs"
+                },
+                "feedback_us": {
+                  "$ref": "#/$defs/positiveTimeUs"
+                },
+                "imu_us": {
+                  "$ref": "#/$defs/positiveTimeUs"
+                },
+                "supervisor_us": {
+                  "$ref": "#/$defs/positiveTimeUs"
+                }
+              }
+            }
+          }
+        },
+        "boot": {
+          "type": "object",
+          "required": [
+            "frequency_grace_us",
+            "healthy_window_us",
+            "deadline_us",
+            "minimum_frequency_hz"
+          ],
+          "properties": {
+            "frequency_grace_us": {
+              "$ref": "#/$defs/positiveTimeUs"
+            },
+            "healthy_window_us": {
+              "$ref": "#/$defs/positiveTimeUs"
+            },
+            "deadline_us": {
+              "$ref": "#/$defs/positiveTimeUs"
+            },
+            "minimum_frequency_hz": {
+              "$ref": "#/$defs/positiveNumber"
+            }
+          }
+        },
+        "recovery": {
+          "type": "object",
+          "required": ["healthy_window_us", "minimum_frequency_hz"],
+          "properties": {
+            "healthy_window_us": {
+              "$ref": "#/$defs/positiveTimeUs"
+            },
+            "minimum_frequency_hz": {
+              "$ref": "#/$defs/positiveNumber"
+            }
+          }
+        },
+        "imu_required": {
+          "type": "boolean"
+        },
+        "continuity": {
+          "type": "object",
+          "required": ["position_delta", "velocity_delta", "torque_delta"],
+          "properties": {
+            "position_delta": {
+              "$ref": "#/$defs/nonNegativeJointMap"
+            },
+            "velocity_delta": {
+              "$ref": "#/$defs/nonNegativeJointMap"
+            },
+            "torque_delta": {
+              "$ref": "#/$defs/nonNegativeJointMap"
+            }
+          }
+        },
+        "state_window_capacity": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8192
+        }
+      }
+    },
+    "telemetry": {
+      "type": "object",
+      "required": [
+        "level",
+        "directory",
+        "rotate_bytes",
+        "retained_files",
+        "queue_capacity"
+      ],
+      "properties": {
+        "level": {
+          "enum": ["DEBUG", "INFO", "WARNING", "ERROR"]
+        },
+        "directory": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rotate_bytes": {
+          "$ref": "#/$defs/positiveTimeUs"
+        },
+        "retained_files": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "queue_capacity": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      }
+    },
+    "dds": {
+      "type": "object",
+      "required": ["domain", "interface"],
+      "properties": {
+        "domain": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 230
+        },
+        "interface": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  },
+  "$defs": {
+    "positiveTimeUs": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615
+    },
+    "positiveNumber": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "positiveJointMap": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 64,
+      "additionalProperties": {
+        "$ref": "#/$defs/positiveNumber"
+      }
+    },
+    "nonNegativeJointMap": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 64,
+      "additionalProperties": {
+        "type": "number",
+        "minimum": 0
+      }
+    }
+  }
+}

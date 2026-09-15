@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "deployment": "fake_only",
+  "backend": "fake",
+  "robot": {
+    "units": {
+      "position": "rad",
+      "velocity": "rad_s",
+      "torque": "Nm"
+    },
+    "joints": [
+      {
+        "name": "test_left",
+        "position_min": -2,
+        "position_max": 2
+      },
+      {
+        "name": "test_right",
+        "position_min": -2,
+        "position_max": 2
+      }
+    ]
+  },
+  "runtime": {
+    "control_hz": 500,
+    "damping": {
+      "kd": {
+        "test_left": 2,
+        "test_right": 2
+      }
+    },
+    "safety": {
+      "joint_velocity_limits": {
+        "test_left": 10,
+        "test_right": 10
+      },
+      "torque_limits": {
+        "test_left": 20,
+        "test_right": 20
+      },
+      "target_velocity_limits": {
+        "test_left": 10,
+        "test_right": 10
+      },
+      "timeouts": {
+        "command_us": 100000,
+        "source_state_us": 150000,
+        "feedback_us": 20000,
+        "imu_us": 20000,
+        "supervisor_us": 300000
+      }
+    },
+    "boot": {
+      "frequency_grace_us": 1000000,
+      "healthy_window_us": 100000,
+      "deadline_us": 2000000,
+      "minimum_frequency_hz": 400
+    },
+    "recovery": {
+      "healthy_window_us": 100000,
+      "minimum_frequency_hz": 400
+    },
+    "imu_required": false,
+    "continuity": {
+      "position_delta": {
+        "test_left": 0.1,
+        "test_right": 0.1
+      },
+      "velocity_delta": {
+        "test_left": 0.5,
+        "test_right": 0.5
+      },
+      "torque_delta": {
+        "test_left": 5,
+        "test_right": 5
+      }
+    },
+    "state_window_capacity": 1024
+  },
+  "telemetry": {
+    "level": "INFO",
+    "directory": "logs",
+    "rotate_bytes": 1048576,
+    "retained_files": 3,
+    "queue_capacity": 1024
+  },
+  "dds": {
+    "domain": 1,
+    "interface": "lo"
+  }
+}
