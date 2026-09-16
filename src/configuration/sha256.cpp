@@ -2,8 +2,6 @@
 
 #include <array>
 #include <cstdint>
-#include <iomanip>
-#include <sstream>
 #include <vector>
 
 namespace irmv::configuration {
@@ -102,12 +100,15 @@ std::string Sha256(std::string_view input) {
     hash[7] += h;
   }
 
-  std::ostringstream output;
-  output << std::hex << std::setfill('0');
+  constexpr std::string_view kHexDigits = "0123456789abcdef";
+  std::string output;
+  output.reserve(hash.size() * 8U);
   for (const std::uint32_t value : hash) {
-    output << std::setw(8) << value;
+    for (int shift = 28; shift >= 0; shift -= 4) {
+      output.push_back(kHexDigits[(value >> shift) & 0x0fU]);
+    }
   }
-  return output.str();
+  return output;
 }
 
 }  // namespace irmv::configuration

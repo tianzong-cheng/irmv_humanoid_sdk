@@ -3,7 +3,7 @@
   "$id": "https://irmv.example/schema/runtime-sdk-v1.json",
   "title": "IRMV fake-only runtime configuration",
   "type": "object",
-  "$comment": "LoadConfig additionally enforces cross-field joint-name completeness, unique names, position_min < position_max, boot deadline ordering, minimum frequency versus control_hz, and state-window coverage.",
+  "$comment": "Conforming validation MUST evaluate the irmv-joint-name format as a nonempty string whose UTF-8 encoding is at most 64 bytes; validators that ignore format annotations do not implement this contract. LoadConfig additionally enforces cross-field joint-name completeness, unique names, position_min < position_max, boot deadline ordering, minimum frequency versus control_hz, and state-window coverage.",
   "required": [
     "schema_version",
     "deployment",
@@ -51,9 +51,7 @@
             "required": ["name", "position_min", "position_max"],
             "properties": {
               "name": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 64
+                "$ref": "#/$defs/jointName"
               },
               "position_min": {
                 "type": "number"
@@ -249,6 +247,13 @@
     }
   },
   "$defs": {
+    "jointName": {
+      "type": "string",
+      "format": "irmv-joint-name",
+      "minLength": 1,
+      "maxLength": 64,
+      "$comment": "The required irmv-joint-name format checker accepts exactly 1..64 UTF-8 encoded bytes; maxLength alone counts Unicode code points and is not sufficient."
+    },
     "positiveTimeUs": {
       "type": "integer",
       "minimum": 1,

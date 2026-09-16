@@ -54,3 +54,13 @@ target_link_libraries(config_test PRIVATE irmv_configuration)
 
 add_test(NAME config_test COMMAND config_test)
 set_tests_properties(config_test PROPERTIES WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(
+  NAME config_schema_contract_test
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/unit/config_schema_contract_test.py"
+    "${PROJECT_SOURCE_DIR}/config/sdk.schema.json"
+    "${PROJECT_SOURCE_DIR}/config/sdk.json"
+)

@@ -1,7 +1,9 @@
 #include "irmv/configuration/config.hpp"
 
+#include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <locale>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -13,6 +15,12 @@ namespace {
 
 using irmv::configuration::ConfigError;
 using irmv::configuration::LoadConfig;
+
+class GroupingPunctuation : public std::numpunct<char> {
+ protected:
+  char do_thousands_sep() const override { return '_'; }
+  std::string do_grouping() const override { return "\1"; }
+};
 
 class TemporaryConfig {
  public:
@@ -81,6 +89,25 @@ std::string ReplaceOnce(std::string value, std::string_view from,
   return value;
 }
 
+std::string ReplaceAll(std::string value, std::string_view from,
+                       std::string_view to) {
+  std::size_t position = 0;
+  while ((position = value.find(from, position)) != std::string::npos) {
+    value.replace(position, from.size(), to);
+    position += to.size();
+  }
+  return value;
+}
+
+std::string Repeat(std::string_view value, std::size_t count) {
+  std::string result;
+  result.reserve(value.size() * count);
+  for (std::size_t index = 0; index < count; ++index) {
+    result.append(value);
+  }
+  return result;
+}
+
 bool ThrowsAt(std::string_view contents, std::string_view field_path) {
   const TemporaryConfig file(contents);
   try {
@@ -143,6 +170,11 @@ int main() {
         "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
   CHECK(Sha256(std::string(1'000'000, 'a')) ==
         "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+  const std::locale original_locale;
+  std::locale::global(std::locale(original_locale, new GroupingPunctuation));
+  CHECK(Sha256("abc") ==
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  std::locale::global(original_locale);
 
   const TemporaryConfig valid(ValidConfig());
   const auto config = LoadConfig(valid.path());
@@ -213,6 +245,43 @@ int main() {
   CHECK(reordered_config.config_id == config.config_id);
   CHECK(reordered_config.layout_id == config.layout_id);
 
+  const TemporaryConfig positive_zero_file(
+      ReplaceOnce(ValidConfig(), "\"test_left\": 0.1", "\"test_left\": 0.0"));
+  const TemporaryConfig negative_zero_file(
+      ReplaceOnce(ValidConfig(), "\"test_left\": 0.1", "\"test_left\": -0.0"));
+  const auto positive_zero = LoadConfig(positive_zero_file.path());
+  const auto negative_zero = LoadConfig(negative_zero_file.path());
+  CHECK(positive_zero.config_id == negative_zero.config_id);
+  CHECK(!std::signbit(negative_zero.continuity.position_delta[0]));
+
+  std::string mathematical_integers = ValidConfig();
+  mathematical_integers =
+      ReplaceOnce(mathematical_integers, "\"schema_version\": 1",
+                  "\"schema_version\": 1.0");
+  mathematical_integers = ReplaceOnce(
+      mathematical_integers, "\"command_us\": 100000", "\"command_us\": 1e5");
+  mathematical_integers =
+      ReplaceOnce(mathematical_integers, "\"state_window_capacity\": 1024",
+                  "\"state_window_capacity\": 1024.0");
+  mathematical_integers =
+      ReplaceOnce(mathematical_integers, "\"retained_files\": 3",
+                  "\"retained_files\": 3e0");
+  mathematical_integers =
+      ReplaceOnce(mathematical_integers, "\"domain\": 1", "\"domain\": 1.0");
+  const TemporaryConfig mathematical_integer_file(mathematical_integers);
+  const auto mathematical_integer_config =
+      LoadConfig(mathematical_integer_file.path());
+  CHECK(mathematical_integer_config.config_id == config.config_id);
+
+  const std::string unicode_name = Repeat("界", 21);
+  const TemporaryConfig unicode_file(
+      ReplaceAll(ValidConfig(), "test_left", unicode_name));
+  const auto unicode_config = LoadConfig(unicode_file.path());
+  CHECK(unicode_config.joint_names[0] == unicode_name);
+  const std::string oversized_unicode_name = Repeat("界", 22);
+  CHECK(ThrowsAt(ReplaceAll(ValidConfig(), "test_left", oversized_unicode_name),
+                 "robot.joints[0].name"));
+
   CHECK(
       ThrowsAt(ReplaceOnce(ValidConfig(), "\"test_right\": 2, \"test_left\": 2",
                            "\"test_left\": 2"),
@@ -249,6 +318,12 @@ int main() {
   CHECK(ThrowsAt(ReplaceOnce(ValidConfig(), "\"control_hz\": 500",
                              "\"control_hz\": 1e-300"),
                  "runtime.control_hz"));
+  CHECK(ThrowsAt(ReplaceOnce(ValidConfig(), "\"command_us\": 100000",
+                             "\"command_us\": 100000.5"),
+                 "runtime.safety.timeouts.command_us"));
+  CHECK(ThrowsAt(ReplaceOnce(ValidConfig(), "\"rotate_bytes\": 1048576",
+                             "\"rotate_bytes\": 1.8446744073709552e19"),
+                 "telemetry.rotate_bytes"));
 
   const TemporaryConfig twelve_file(TwelveJointConfig());
   const auto twelve = LoadConfig(twelve_file.path());

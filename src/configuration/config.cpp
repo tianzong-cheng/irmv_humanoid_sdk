@@ -61,7 +61,7 @@ double FiniteNumber(const Json &value, const std::string &path) {
   if (!std::isfinite(result)) {
     Fail(path, "must be finite");
   }
-  return result;
+  return result == 0.0 ? 0.0 : result;
 }
 
 double FiniteMember(const Json &object, std::string_view key,
@@ -71,25 +71,39 @@ double FiniteMember(const Json &object, std::string_view key,
   return FiniteNumber(Member(object, key, path), member_path);
 }
 
-std::uint64_t PositiveInteger(
-    const Json &value, const std::string &path,
-    std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max()) {
+std::uint64_t IntegerInRange(const Json &value, const std::string &path,
+                             std::uint64_t minimum, std::uint64_t maximum) {
   std::uint64_t result = 0;
   if (value.is_number_unsigned()) {
     result = value.get<std::uint64_t>();
   } else if (value.is_number_integer()) {
     const auto signed_result = value.get<std::int64_t>();
-    if (signed_result <= 0) {
-      Fail(path, "must be positive");
+    if (signed_result < 0) {
+      Fail(path, "is outside the supported range");
     }
     result = static_cast<std::uint64_t>(signed_result);
+  } else if (value.is_number_float()) {
+    const double floating_result = value.get<double>();
+    constexpr double kUint64ExclusiveUpper = 18'446'744'073'709'551'616.0;
+    if (!std::isfinite(floating_result) || floating_result < 0.0 ||
+        std::trunc(floating_result) != floating_result ||
+        floating_result >= kUint64ExclusiveUpper) {
+      Fail(path, "must be a mathematical integer in the supported range");
+    }
+    result = static_cast<std::uint64_t>(floating_result);
   } else {
-    Fail(path, "must be an integer");
+    Fail(path, "must be a mathematical integer");
   }
-  if (result == 0 || result > maximum) {
+  if (result < minimum || result > maximum) {
     Fail(path, "is outside the supported range");
   }
   return result;
+}
+
+std::uint64_t PositiveInteger(
+    const Json &value, const std::string &path,
+    std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max()) {
+  return IntegerInRange(value, path, 1U, maximum);
 }
 
 std::uint64_t PositiveIntegerMember(
@@ -433,22 +447,8 @@ RuntimeConfig LoadConfig(const std::filesystem::path &path) {
 
   const Json &dds = ObjectMember(document, "dds", "");
   const Json &domain = Member(dds, "domain", "dds");
-  if (!domain.is_number_integer()) {
-    Fail("dds.domain", "must be an integer");
-  }
-  if (domain.is_number_unsigned()) {
-    const auto domain_number = domain.get<std::uint64_t>();
-    if (domain_number > 230U) {
-      Fail("dds.domain", "must be in [0, 230]");
-    }
-    config.dds.domain = static_cast<std::uint32_t>(domain_number);
-  } else {
-    const auto domain_number = domain.get<std::int64_t>();
-    if (domain_number < 0 || domain_number > 230) {
-      Fail("dds.domain", "must be in [0, 230]");
-    }
-    config.dds.domain = static_cast<std::uint32_t>(domain_number);
-  }
+  config.dds.domain = static_cast<std::uint32_t>(
+      IntegerInRange(domain, "dds.domain", 0U, 230U));
   config.dds.interface = StringMember(dds, "interface", "dds");
   if (config.dds.interface.empty()) {
     Fail("dds.interface", "must not be empty");
