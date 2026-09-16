@@ -3,6 +3,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <locale>
 #include <sstream>
 #include <string>
@@ -321,9 +322,22 @@ int main() {
   CHECK(ThrowsAt(ReplaceOnce(ValidConfig(), "\"command_us\": 100000",
                              "\"command_us\": 100000.5"),
                  "runtime.safety.timeouts.command_us"));
+  CHECK(ThrowsAt(ReplaceOnce(ValidConfig(), "\"schema_version\": 1",
+                             "\"schema_version\": 1.00000000000000001"),
+                 "schema_version"));
   CHECK(ThrowsAt(ReplaceOnce(ValidConfig(), "\"rotate_bytes\": 1048576",
                              "\"rotate_bytes\": 1.8446744073709552e19"),
                  "telemetry.rotate_bytes"));
+  const TemporaryConfig maximum_decimal_file(
+      ReplaceOnce(ValidConfig(), "\"rotate_bytes\": 1048576",
+                  "\"rotate_bytes\": 18446744073709551615.0"));
+  CHECK(LoadConfig(maximum_decimal_file.path()).telemetry.rotate_bytes ==
+        std::numeric_limits<std::uint64_t>::max());
+  const TemporaryConfig maximum_exponent_file(
+      ReplaceOnce(ValidConfig(), "\"rotate_bytes\": 1048576",
+                  "\"rotate_bytes\": 1.8446744073709551615e19"));
+  CHECK(LoadConfig(maximum_exponent_file.path()).telemetry.rotate_bytes ==
+        std::numeric_limits<std::uint64_t>::max());
 
   const TemporaryConfig twelve_file(TwelveJointConfig());
   const auto twelve = LoadConfig(twelve_file.path());
