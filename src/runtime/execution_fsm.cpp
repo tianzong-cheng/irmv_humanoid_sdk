@@ -34,44 +34,9 @@ double RawTrackingTorque(const protocol::JointVector &joints,
 
 }  // namespace
 
-void ExecutionFsm::SourceStateIndex::Record(protocol::Sequence sequence,
-                                            protocol::TimeUs generation_us) {
-  if (capacity == 0) {
-    return;
-  }
-  if (has_newest && sequence <= newest) {
-    return;
-  }
-  const std::size_t tail = (head + size) % capacity;
-  sequences[tail] = sequence;
-  generations[tail] = generation_us;
-  if (size < capacity) {
-    ++size;
-  } else {
-    head = (head + 1) % capacity;
-  }
-  newest = sequence;
-  has_newest = true;
-}
-
-bool ExecutionFsm::SourceStateIndex::Find(
-    protocol::Sequence sequence, protocol::TimeUs *generation_us) const {
-  for (std::size_t offset = 0; offset < size; ++offset) {
-    const std::size_t slot = (head + (size - 1 - offset)) % capacity;
-    if (sequences[slot] == sequence) {
-      *generation_us = generations[slot];
-      return true;
-    }
-  }
-  return false;
-}
-
 ExecutionFsm::ExecutionFsm(const configuration::RuntimeConfig &config,
                            protocol::Id runtime_id)
-    : config_(config), runtime_id_(runtime_id), gate_(config) {
-  source_index_.capacity =
-      std::min(config.state_window_capacity, SourceStateIndex::kCapacity);
-}
+    : config_(config), runtime_id_(runtime_id), gate_(config) {}
 
 TickResult ExecutionFsm::Tick(protocol::TimeUs now_us,
                               const protocol::FeedbackSnapshot &feedback,
@@ -99,7 +64,6 @@ TickResult ExecutionFsm::Tick(protocol::TimeUs now_us,
       CheckFeedback(config_, feedback, now_us, boot_grace);
   scope.report = &report;
   gate_.RecordState(published_seq, now_us);
-  source_index_.Record(published_seq, now_us);
 
   // 3. Safety decision first: an observed fault is latched before any request is
   //    considered, so a fault and a motion request in the same tick can never
@@ -207,6 +171,11 @@ void ExecutionFsm::ProcessHeartbeats(TickScope &scope, const TickInput &input) {
     }
     if (session_id_ == protocol::kNoId ||
         heartbeat.session_id != session_id_) {
+      continue;
+    }
+    // A peer that only observes the published session id cannot extend a lease
+    // it does not own.
+    if (heartbeat.supervisor_id != session_supervisor_id_) {
       continue;
     }
     // Only a strictly newer heartbeat refreshes the lease: a repeated or
@@ -322,22 +291,37 @@ void ExecutionFsm::HandleRequest(
     return;
   }
 
-  // Exactly-once handling of the last request of this session.
-  if (request_record_.valid) {
+  // Exactly-once handling: the answers confirmed by earlier ticks, then the
+  // answer this tick staged but has not confirmed yet.
+  if (request_record_.valid &&
+      request.request_id <= request_record_.request_id) {
     if (request.request_id < request_record_.request_id) {
       QueueUnrecordedRejection(scope, request,
                                protocol::RejectReason::StaleRequest);
       return;
     }
-    if (request.request_id == request_record_.request_id) {
-      if (PayloadMatches(request, request_record_)) {
-        EmitResult(scope, request_record_.result);
-        return;
-      }
-      QueueUnrecordedRejection(scope, request,
-                               protocol::RejectReason::RequestConflict);
+    if (PayloadMatches(request, request_record_)) {
+      EmitResult(scope, request_record_.result);
       return;
     }
+    QueueUnrecordedRejection(scope, request,
+                             protocol::RejectReason::RequestConflict);
+    return;
+  }
+  if (staged_record_.valid && request.request_id <= staged_record_.request_id) {
+    if (request.request_id < staged_record_.request_id) {
+      QueueUnrecordedRejection(scope, request,
+                               protocol::RejectReason::StaleRequest);
+      return;
+    }
+    if (PayloadMatches(request, staged_record_)) {
+      // The same request twice in one tick: it is answered once, by the answer
+      // that is still being confirmed, and consumes no second result.
+      return;
+    }
+    QueueUnrecordedRejection(scope, request,
+                             protocol::RejectReason::RequestConflict);
+    return;
   }
 
   switch (request.operation) {
@@ -360,12 +344,22 @@ void ExecutionFsm::HandleRequest(
 void ExecutionFsm::HandleAcquireSession(
     TickScope &scope, const Received<protocol::ExecutionRequest> &packet) {
   const protocol::ExecutionRequest &request = packet.value;
+  // The session is issued by the runtime: a bootstrap request carrying one is
+  // malformed by contract.
+  if (request.session_id != protocol::kNoId) {
+    QueueUnrecordedRejection(scope, request, protocol::RejectReason::Malformed);
+    return;
+  }
   if (session_id_ != protocol::kNoId && LeaseValid(scope.now_us)) {
     // A healthy session is never silently taken over. The supervisor that owns
     // it can repeat its bootstrap request and read the issued session back.
     if (acquire_record_.valid &&
         acquire_record_.supervisor_id == request.supervisor_id &&
         acquire_record_.request_id == request.request_id) {
+      if (acquire_record_.answered_tick == tick_) {
+        // The same bootstrap packet twice in one batch: it is answered once.
+        return;
+      }
       EmitResult(scope, acquire_record_.result);
       return;
     }
@@ -488,7 +482,7 @@ void ExecutionFsm::HandleTracking(
     return;
   }
   protocol::TimeUs generation_us = 0;
-  if (!FindSourceGeneration(first.source_state_seq, &generation_us) ||
+  if (!gate_.GenerationOf(first.source_state_seq, &generation_us) ||
       scope.now_us - generation_us > config_.timeouts.source_state_us) {
     QueueRejected(scope, request, protocol::RejectReason::StaleSource);
     return;
@@ -505,7 +499,10 @@ void ExecutionFsm::HandleTracking(
   const GateResult gate_result =
       gate_.Accept({first, packet.rx_us}, scope.now_us);
   if (!gate_result.accepted()) {
-    gate_.Revoke();
+    // Every gate precondition was validated above, so this is defensive. The
+    // motion context is dropped together with the gate: the FSM never names an
+    // authorization the gate does not hold.
+    ClearMotion(scope);
     QueueRejected(scope, request, gate_result.reason);
     return;
   }
@@ -527,7 +524,7 @@ void ExecutionFsm::QueueApplied(TickScope &scope,
   protocol::ExecutionResult result = MakeResult(request, scope.now_us);
   result.status = protocol::ResultStatus::Applied;
   result.reason = protocol::RejectReason::None;
-  StoreRequestRecord(request, result);
+  StageRequestAnswer(request, result);
   if (pending_count_ >= pending_.size()) {
     ++dropped_results_;
     return;
@@ -541,7 +538,7 @@ void ExecutionFsm::QueueRejected(TickScope &scope,
   protocol::ExecutionResult result = MakeResult(request, scope.now_us);
   result.status = protocol::ResultStatus::Rejected;
   result.reason = reason;
-  StoreRequestRecord(request, result);
+  StageRequestAnswer(request, result);
   EmitEvent(scope, EventCode::RequestRejected, state_, state_, reason,
             protocol::FaultReason::None, protocol::StopReason::None,
             request.request_id);
@@ -568,27 +565,29 @@ void ExecutionFsm::QueueUnrecordedRejection(
   pending_[pending_count_++] = PendingResult{result, false, false};
 }
 
-void ExecutionFsm::StoreRequestRecord(
+void ExecutionFsm::StageRequestAnswer(
     const protocol::ExecutionRequest &request,
     const protocol::ExecutionResult &result) {
-  request_record_.valid = true;
-  request_record_.operation = request.operation;
-  request_record_.request_id = request.request_id;
-  request_record_.expected_epoch = request.expected_epoch;
-  request_record_.proposed_epoch = request.proposed_epoch;
-  request_record_.producer_id = request.producer_id;
-  request_record_.fault_id = request.fault_id;
-  request_record_.has_command =
+  staged_record_.valid = true;
+  staged_record_.operation = request.operation;
+  staged_record_.request_id = request.request_id;
+  staged_record_.supervisor_id = request.supervisor_id;
+  staged_record_.expected_epoch = request.expected_epoch;
+  staged_record_.proposed_epoch = request.proposed_epoch;
+  staged_record_.producer_id = request.producer_id;
+  staged_record_.fault_id = request.fault_id;
+  staged_record_.has_command =
       request.operation == protocol::Operation::Tracking;
-  if (request_record_.has_command) {
-    request_record_.first_command = request.first_command;
+  if (staged_record_.has_command) {
+    staged_record_.first_command = request.first_command;
   }
-  request_record_.result = result;
+  staged_record_.result = result;
 }
 
 bool ExecutionFsm::PayloadMatches(const protocol::ExecutionRequest &request,
                                  const RequestRecord &record) const {
   if (request.operation != record.operation ||
+      request.supervisor_id != record.supervisor_id ||
       request.expected_epoch != record.expected_epoch ||
       request.proposed_epoch != record.proposed_epoch ||
       request.producer_id != record.producer_id ||
@@ -632,20 +631,43 @@ bool ExecutionFsm::PayloadMatches(const protocol::ExecutionRequest &request,
 void ExecutionFsm::CommitPendingResults(TickScope &scope, bool write_accepted) {
   for (std::size_t index = 0; index < pending_count_; ++index) {
     PendingResult &pending = pending_[index];
-    if (pending.applied && !write_accepted) {
-      pending.result.status = protocol::ResultStatus::Rejected;
-      pending.result.reason = protocol::RejectReason::WriteFailed;
-      pending.applied = false;
+    if (pending.applied) {
+      if (!write_accepted) {
+        pending.result.status = protocol::ResultStatus::Rejected;
+        pending.result.reason = protocol::RejectReason::WriteFailed;
+        pending.applied = false;
+      } else if (!ImplementsAnswer(pending.result)) {
+        // The committed output of this tick does not implement the state the
+        // request was applied to: an in-tick fault, revocation or fallback
+        // superseded it, so the request is not confirmed.
+        pending.result.status = protocol::ResultStatus::Rejected;
+        pending.result.reason = protocol::RejectReason::InvalidTransition;
+        pending.applied = false;
+      }
     }
-    // A replay must repeat the answer that was actually given to the stored
-    // request; answers that were never recorded leave the session record alone.
-    if (pending.recorded && request_record_.valid &&
-        request_record_.request_id == pending.result.request_id) {
-      request_record_.result = pending.result;
+    // Only the confirmed answer of the staged request becomes the record that a
+    // later replay repeats; answers that were never recorded leave it alone.
+    if (pending.recorded && staged_record_.valid &&
+        staged_record_.request_id == pending.result.request_id) {
+      staged_record_.result = pending.result;
     }
     EmitResult(scope, pending.result);
   }
   pending_count_ = 0;
+
+  // A provisional answer is never replayable and never survives its tick as
+  // Applied: the record is published only here, after the write committed.
+  if (staged_record_.valid) {
+    request_record_ = staged_record_;
+    staged_record_ = RequestRecord{};
+  }
+}
+
+bool ExecutionFsm::ImplementsAnswer(
+    const protocol::ExecutionResult &answer) const {
+  return state_ == answer.execution_state &&
+         output_action_ == answer.output_action && epoch_ == answer.epoch &&
+         producer_id_ == answer.producer_id;
 }
 
 void ExecutionFsm::EmitResult(TickScope &scope,
@@ -855,6 +877,7 @@ bool ExecutionFsm::LeaseValid(protocol::TimeUs now_us) const {
 void ExecutionFsm::IssueSession(
     TickScope &scope, const protocol::ExecutionRequest &request) {
   session_id_ = GenerateSessionId();
+  session_supervisor_id_ = request.supervisor_id;
   last_heartbeat_rx_us_ = scope.now_us;
   last_heartbeat_seq_ = 0;
   heartbeat_seen_ = false;
@@ -865,9 +888,12 @@ void ExecutionFsm::IssueSession(
   acquire_record_.valid = true;
   acquire_record_.supervisor_id = request.supervisor_id;
   acquire_record_.request_id = request.request_id;
+  acquire_record_.answered_tick = tick_;
   acquire_record_.result = result;
-  // A session issue commands no torque, so its answer is not held back by the
-  // write confirmation of this tick.
+  // Issuing a session commands no torque, so its answer is complete the moment
+  // the session exists: it is released without waiting for the write
+  // confirmation of this tick, which is what keeps a lost handshake reply
+  // retryable even when the send path is failing.
   EmitResult(scope, result);
   EmitEvent(scope, EventCode::SessionAcquired, state_, state_,
             protocol::RejectReason::None, protocol::FaultReason::None,
@@ -879,6 +905,7 @@ void ExecutionFsm::ExpireSession(TickScope &scope) {
     return;
   }
   session_id_ = protocol::kNoId;
+  session_supervisor_id_ = protocol::kNoId;
   last_heartbeat_rx_us_ = 0;
   last_heartbeat_seq_ = 0;
   heartbeat_seen_ = false;
@@ -944,11 +971,6 @@ double ExecutionFsm::ExpectedCurrentTorque(
     return -config_.damping_kd[index] * feedback.joints[index].dq;
   }
   return 0.0;
-}
-
-bool ExecutionFsm::FindSourceGeneration(
-    protocol::Sequence sequence, protocol::TimeUs *generation_us) const {
-  return source_index_.Find(sequence, generation_us);
 }
 
 }  // namespace irmv::runtime

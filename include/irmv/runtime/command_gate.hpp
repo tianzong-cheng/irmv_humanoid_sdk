@@ -73,6 +73,13 @@ class CommandGate {
   // the source-state timeout. Both comparisons are strict.
   protocol::StopReason ExpireReason(protocol::TimeUs now_us) const;
 
+  // Looks up the generation time of a recorded snapshot sequence. The lookup
+  // has no side effect: it neither records nor evicts anything, so a caller can
+  // validate a source reference before changing the owner context. A sequence
+  // that was never recorded, or whose entry has been evicted, reports false.
+  bool GenerationOf(protocol::Sequence snapshot_seq,
+                    protocol::TimeUs *generation_us) const;
+
   // Drops the owner context, the accepted target and all deadlines.
   void Revoke();
 

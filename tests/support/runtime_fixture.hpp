@@ -284,7 +284,9 @@ class RuntimeFixture {
     request.supervisor_id = supervisor_id;
     request.request_id = request_id == kAutoSequence ? next_request_id_ + 1
                                                      : request_id;
-    request.session_id = state().session_id;
+    request.session_id = operation == Operation::AcquireSession
+                             ? protocol::kNoId
+                             : state().session_id;
     request.runtime_id = FixtureRuntimeId();
     request.expected_epoch =
         expected_epoch == kAutoSequence ? state().epoch : expected_epoch;

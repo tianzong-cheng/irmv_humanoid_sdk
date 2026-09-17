@@ -79,6 +79,14 @@ void CommandGate::Authorize(protocol::Id runtime_id, protocol::Id session_id,
   source_generation_us_ = 0;
 }
 
+bool CommandGate::GenerationOf(protocol::Sequence snapshot_seq,
+                              protocol::TimeUs *generation_us) const {
+  if (generation_us == nullptr) {
+    return false;
+  }
+  return FindGeneration(snapshot_seq, generation_us);
+}
+
 GateResult CommandGate::Accept(const Received<protocol::JointCommand> &packet,
                                protocol::TimeUs now_us) {
   const protocol::JointCommand &command = packet.value;

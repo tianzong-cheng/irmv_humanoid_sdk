@@ -1187,6 +1187,374 @@ int CheckBoundedResultCapacity() {
   return 0;
 }
 
+// ---- fix round 1: write-confirmed answers --------------------------------
+
+// F1: a duplicate of the same request inside one tick must be answered once, by
+// the answer that is confirmed after the write, never by a provisional Applied.
+int CheckSameTickDuplicateIsConfirmedOnce() {
+  RuntimeFixture f;
+  f.BootToZeroTorque();
+  f.Acquire();
+  CHECK(f.Request(Operation::Damping).applied());
+
+  const ExecutionRequest start = f.MakeRequest(Operation::Tracking);
+  f.backend.SetWriteAccepted(false);
+  f.QueueRequest(start);
+  f.QueueRequest(start);
+  f.Step();
+
+  std::uint32_t matching = 0;
+  for (std::uint32_t index = 0; index < f.last_tick().result_count; ++index) {
+    if (f.last_tick().results[index].request_id == start.request_id) {
+      ++matching;
+    }
+  }
+  CHECK(matching == 1);
+  const FixtureResult result =
+      RuntimeFixture::ResultFor(f.last_tick(), start.request_id);
+  CHECK(result.rejected());
+  CHECK(result.reason == RejectReason::WriteFailed);
+  CHECK(f.state().execution_state == kFault);
+  CHECK(f.state().producer_id == irmv::protocol::kNoId);
+
+  // The stored record carries the confirmed answer, not a provisional success.
+  f.backend.SetWriteAccepted(true);
+  const FixtureResult replay = f.Send(start);
+  CHECK(replay.rejected());
+  CHECK(replay.reason == RejectReason::WriteFailed);
+  CHECK(f.state().execution_state == kFault);
+  CHECK(f.state().producer_id == irmv::protocol::kNoId);
+
+  // A recorded rejection is deduplicated the same way.
+  {
+    RuntimeFixture g;
+    g.BootToZeroTorque();
+    g.Acquire();
+    const ExecutionRequest reset = g.MakeRequest(Operation::Reset, 9);
+    g.QueueRequest(reset, 0, true);
+    g.QueueRequest(reset, 0, true);
+    g.Step();
+    std::uint32_t reset_matches = 0;
+    for (std::uint32_t index = 0; index < g.last_tick().result_count; ++index) {
+      if (g.last_tick().results[index].request_id == reset.request_id) {
+        ++reset_matches;
+      }
+    }
+    CHECK(reset_matches == 1);
+    const FixtureResult reset_result =
+        RuntimeFixture::ResultFor(g.last_tick(), reset.request_id);
+    CHECK(reset_result.reason == RejectReason::InvalidTransition);
+    CHECK(g.state().execution_state == kZeroTorque);
+  }
+  return 0;
+}
+
+// F2 (a): a tracking grant superseded by an owner command fault in the same
+// tick is not confirmed.
+int CheckTrackingSupersededByCommandFault() {
+  RuntimeFixture f;
+  f.BootToZeroTorque();
+  f.Acquire();
+  CHECK(f.Request(Operation::Damping).applied());
+  CHECK(f.StartTracking().applied());
+  const Sequence epoch = f.state().epoch;
+
+  const ExecutionRequest start = f.MakeRequest(
+      Operation::Tracking, irmv::test::kAutoSequence,
+      irmv::test::FixtureSecondProducerId());
+  f.QueueRequest(start);
+  // A frame of the new authorization that fails the entry limits.
+  JointCommand bad = start.first_command;
+  bad.command_seq = start.first_command.command_seq + 1;
+  bad.joints.q[0] = 5.0;
+  f.QueueCommand(bad);
+  f.Step();
+
+  const FixtureResult result =
+      RuntimeFixture::ResultFor(f.last_tick(), start.request_id);
+  CHECK(result.rejected());
+  CHECK(result.reason == RejectReason::InvalidTransition);
+  CHECK(f.state().execution_state == kFault);
+  CHECK(f.state().producer_id == irmv::protocol::kNoId);
+  CHECK(f.state().epoch == epoch + 1);
+  CHECK(FindEvent(f.last_tick(), EventCode::AuthorizationGranted) != nullptr);
+  CHECK(FindEvent(f.last_tick(), EventCode::AuthorizationRevoked) != nullptr);
+  const RuntimeEvent *latched = FindEvent(f.last_tick(), EventCode::FaultLatched);
+  CHECK(latched != nullptr);
+  CHECK(latched->fault_reason == irmv::protocol::FaultReason::CommandInvalid);
+  return 0;
+}
+
+// F2 (b): a tracking grant superseded by the supervision lease expiry in the
+// same tick is not confirmed.
+int CheckTrackingSupersededBySupervisorTimeout() {
+  RuntimeFixture f;
+  f.BootToZeroTorque();
+  f.Acquire();
+  CHECK(f.Request(Operation::Damping).applied());
+  CHECK(f.StartTracking().applied());
+
+  f.SetHeartbeatEnabled(false);
+  f.Advance(150 * f.ControlPeriodUs());
+  CHECK(f.state().execution_state == kTracking);
+
+  // The grant and the lease expiry land in the same tick.
+  const ExecutionRequest start = f.MakeRequest(
+      Operation::Tracking, irmv::test::kAutoSequence,
+      irmv::test::FixtureSecondProducerId());
+  f.QueueRequest(start);
+  f.Advance(f.ControlPeriodUs());
+
+  const FixtureResult result =
+      RuntimeFixture::ResultFor(f.last_tick(), start.request_id);
+  CHECK(result.rejected());
+  CHECK(result.reason == RejectReason::InvalidTransition);
+  CHECK(f.state().execution_state == kDamping);
+  CHECK(f.state().stop_reason == StopReason::SupervisorTimeout);
+  CHECK(f.state().session_id == irmv::protocol::kNoId);
+  CHECK(f.state().epoch == start.proposed_epoch + 1);
+  return 0;
+}
+
+// F2 (c): requests that survive their tick are still confirmed as Applied.
+int CheckConfirmedStopStaysApplied() {
+  RuntimeFixture f;
+  f.BootToZeroTorque();
+  f.Acquire();
+
+  const ExecutionRequest damping = f.MakeRequest(Operation::Damping);
+  const FixtureResult damping_result = f.Send(damping, true);
+  CHECK(damping_result.applied());
+  CHECK(damping_result.reason == RejectReason::None);
+  CHECK(f.state().execution_state == kDamping);
+
+  const ExecutionRequest zero = f.MakeRequest(Operation::ZeroTorque);
+  const FixtureResult zero_result = f.Send(zero, true);
+  CHECK(zero_result.applied());
+  CHECK(zero_result.reason == RejectReason::None);
+  CHECK(f.state().execution_state == kZeroTorque);
+
+  // The confirmed answers stay replayable and the older one stays stale.
+  CHECK(f.Send(zero, true).applied());
+  CHECK(f.Send(damping, true).reason == RejectReason::StaleRequest);
+  return 0;
+}
+
+// F3: the continuity guard compares the new frame against the torque of the
+// current context, not against zero.
+int CheckContinuityOldContextTorque() {
+  {  // Damping: the reference is the damping output -kd * dq.
+    RuntimeFixture f;
+    f.BootToZeroTorque();
+    f.Acquire();
+    CHECK(f.Request(Operation::Damping).applied());
+    CHECK(f.last_tick().output.torque[0] == kDampingTorque0);
+
+    ExecutionRequest frame = f.MakeRequest(
+        Operation::Tracking, irmv::test::kAutoSequence,
+        irmv::test::FixtureSecondProducerId());
+    for (std::size_t index = 0; index < 2; ++index) {
+      frame.first_command.joints.q[index] = irmv::test::kFixtureQ[index];
+      frame.first_command.joints.dq[index] = irmv::test::kFixtureDq[index];
+    }
+    // A target equal to the measured state has no PD term, so the expected new
+    // torque is exactly tau_ff = 5.0: |5.0 - (-0.4)| = 5.4 > 5 while
+    // |5.0 - 0.0| = 5.0 <= 5.
+    frame.first_command.joints.tau_ff[0] = 5.0;
+    const FixtureResult result = f.Send(frame);
+    CHECK(result.rejected());
+    CHECK(result.reason == RejectReason::Discontinuity);
+    CHECK(f.state().execution_state == kDamping);
+    CHECK(f.state().producer_id == irmv::protocol::kNoId);
+  }
+  {  // Tracking: the reference is the accepted target's unclamped torque.
+    RuntimeFixture f;
+    f.BootToZeroTorque();
+    f.Acquire();
+    CHECK(f.Request(Operation::Damping).applied());
+
+    ExecutionRequest first = f.MakeRequest(Operation::Tracking);
+    for (std::size_t index = 0; index < 2; ++index) {
+      first.first_command.joints.q[index] = irmv::test::kFixtureQ[index];
+      first.first_command.joints.kp[index] = 0.0;
+      first.first_command.joints.kd[index] = 4.0;
+    }
+    CHECK(f.Send(first).applied());
+    CHECK(f.state().execution_state == kTracking);
+    // The accepted target holds 4 * (0 - dq): -0.8 for joint 0, +0.4 for joint
+    // 1 (the damping reference for joint 0 is only -0.4).
+    CHECK(f.last_tick().output.torque[0] == -0.8);
+
+    ExecutionRequest frame = f.MakeRequest(
+        Operation::Tracking, irmv::test::kAutoSequence,
+        irmv::test::FixtureSecondProducerId());
+    for (std::size_t index = 0; index < 2; ++index) {
+      frame.first_command.joints.q[index] = irmv::test::kFixtureQ[index];
+      frame.first_command.joints.dq[index] = irmv::test::kFixtureDq[index];
+      frame.first_command.joints.kp[index] = 0.0;
+      frame.first_command.joints.kd[index] = 0.0;
+    }
+    // Joint 0: |4.5 - (-0.8)| = 5.3 > 5, while |4.5 - 0.0| = 4.5 and
+    // |4.5 - (-0.4)| = 4.9 both stay inside the bound.
+    frame.first_command.joints.tau_ff[0] = 4.5;
+    const FixtureResult result = f.Send(frame);
+    CHECK(result.rejected());
+    CHECK(result.reason == RejectReason::Discontinuity);
+    CHECK(f.state().execution_state == kTracking);
+    CHECK(f.state().producer_id == irmv::test::FixtureProducerId());
+  }
+  return 0;
+}
+
+// G1: the payload key includes the supervisor identity.
+int CheckPayloadKeyIncludesSupervisor() {
+  RuntimeFixture f;
+  f.BootToZeroTorque();
+  f.Acquire();
+
+  const ExecutionRequest owned = f.MakeRequest(Operation::Damping, 42);
+  const FixtureResult owned_result = f.Send(owned, true);
+  CHECK(owned_result.applied());
+  const Sequence watermark = f.state().epoch;
+
+  // The same id and payload from another supervisor is not the owner's replay.
+  ExecutionRequest foreign = owned;
+  foreign.supervisor_id = irmv::test::FixtureOtherSupervisorId();
+  const FixtureResult foreign_result = f.Send(foreign, true);
+  CHECK(foreign_result.rejected());
+  CHECK(foreign_result.reason == RejectReason::RequestConflict);
+  CHECK(f.state().epoch == watermark);
+
+  // The owning supervisor still reads its own answer back.
+  const FixtureResult replay = f.Send(owned, true);
+  CHECK(replay.applied());
+  CHECK(replay.stamp_us == owned_result.stamp_us);
+  CHECK(f.state().epoch == watermark);
+  return 0;
+}
+
+// G2: a bootstrap request carries no session.
+int CheckAcquireRequiresEmptySession() {
+  RuntimeFixture f;
+  f.BootToZeroTorque();
+  const FixtureResult issued = f.Acquire(7);
+  CHECK(issued.applied());
+  CHECK(issued.session_id != irmv::protocol::kNoId);
+
+  // The retry keeps carrying an empty session and still reads the session back.
+  const FixtureResult retry = f.Acquire(7);
+  CHECK(retry.applied());
+  CHECK(retry.session_id == issued.session_id);
+  CHECK(f.state().session_id == issued.session_id);
+
+  // A non-empty session is malformed for a bootstrap request.
+  ExecutionRequest bad = f.MakeRequest(Operation::AcquireSession, 8);
+  bad.session_id = issued.session_id;
+  const FixtureResult result = f.Send(bad);
+  CHECK(result.rejected());
+  CHECK(result.reason == RejectReason::Malformed);
+  CHECK(f.state().session_id == issued.session_id);
+  CHECK(f.state().epoch == 0);
+
+  // The same bootstrap packet twice in one batch is answered once.
+  {
+    RuntimeFixture g;
+    g.BootToZeroTorque();
+    const ExecutionRequest acquire =
+        g.MakeRequest(Operation::AcquireSession, 12);
+    g.QueueRequest(acquire);
+    g.QueueRequest(acquire);
+    g.Step();
+    std::uint32_t matches = 0;
+    for (std::uint32_t index = 0; index < g.last_tick().result_count; ++index) {
+      if (g.last_tick().results[index].request_id == acquire.request_id) {
+        ++matches;
+      }
+    }
+    CHECK(matches == 1);
+    CHECK(RuntimeFixture::ResultFor(g.last_tick(), acquire.request_id).applied());
+    CHECK(g.state().session_id != irmv::protocol::kNoId);
+    CHECK(CountEvents(g.last_tick(), EventCode::SessionAcquired) == 1);
+  }
+  return 0;
+}
+
+// G3: only the supervisor that owns the session can refresh its lease.
+int CheckHeartbeatSupervisorOwnership() {
+  RuntimeFixture f;
+  f.BootToZeroTorque();
+  f.Acquire();
+  CHECK(f.Request(Operation::Damping).applied());
+  CHECK(f.StartTracking().applied());
+  const Id session = f.state().session_id;
+  const Sequence epoch = f.state().epoch;
+
+  f.SetHeartbeatEnabled(false);
+  f.Advance(100 * f.ControlPeriodUs());
+  CHECK(f.state().execution_state == kTracking);
+  irmv::protocol::SupervisorHeartbeat foreign;
+  foreign.protocol_version = irmv::protocol::kProtocolVersion;
+  foreign.runtime_id = irmv::test::FixtureRuntimeId();
+  foreign.session_id = session;
+  foreign.supervisor_id = irmv::test::FixtureOtherSupervisorId();
+  foreign.heartbeat_seq = 99'999;
+  foreign.stamp_us = f.now_us();
+  f.QueueRawHeartbeat(foreign);
+
+  // A foreign heartbeat with the right session and a much larger sequence
+  // refreshes nothing: the lease still lapses supervisor_us after the last owner
+  // heartbeat, not after the foreign one.
+  const std::size_t ticks = TicksUntil(f, kDamping, 400);
+  CHECK(ticks == 51);
+  CHECK(f.state().execution_state == kDamping);
+  CHECK(f.state().stop_reason == StopReason::SupervisorTimeout);
+  CHECK(f.state().session_id == irmv::protocol::kNoId);
+  CHECK(f.state().epoch == epoch + 1);
+  return 0;
+}
+
+// G4: a Reset cannot win against a fresh safety observation in the same tick.
+int CheckResetWithFreshSafetyObservation() {
+  RuntimeFixture f;
+  f.BootToZeroTorque();
+  f.Acquire();
+  CHECK(f.Request(Operation::Damping).applied());
+  f.mutable_feedback().joints[0].dq = 11.0;
+  f.Advance(f.ControlPeriodUs());
+  CHECK(f.state().execution_state == kFault);
+  const Sequence fault_id = f.state().fault_id;
+  const Sequence watermark = f.state().epoch;
+
+  // The measured state recovers and the recovery window completes.
+  f.mutable_feedback().joints[0].dq = irmv::test::kFixtureDq[0];
+  f.Advance(60 * f.ControlPeriodUs());
+
+  // A reset arriving in the tick of a fresh violation is refused: the safety
+  // observation restarts the recovery window before the request is considered.
+  ExecutionRequest reset = f.MakeRequest(Operation::Reset);
+  reset.fault_id = fault_id;
+  f.QueueRequest(reset, 0, true);
+  f.mutable_feedback().joints[0].dq = 11.0;
+  f.Step();
+  const FixtureResult refused =
+      RuntimeFixture::ResultFor(f.last_tick(), reset.request_id);
+  CHECK(refused.rejected());
+  CHECK(refused.reason == RejectReason::RecoveryNotReady);
+  CHECK(f.state().execution_state == kFault);
+  CHECK(f.state().fault_id == fault_id);
+  CHECK(f.state().epoch == watermark);
+
+  // Without the fresh violation the same reset succeeds, which shows the
+  // refusal came from the observation and not from a permanently unready state.
+  f.mutable_feedback().joints[0].dq = irmv::test::kFixtureDq[0];
+  f.Advance(60 * f.ControlPeriodUs());
+  const FixtureResult applied = f.ResetRequest(0, fault_id);
+  CHECK(applied.applied());
+  CHECK(f.state().execution_state == kZeroTorque);
+  CHECK(f.state().fault_id == 0);
+  return 0;
+}
+
 }  // namespace
 
 int main() {
@@ -1216,5 +1584,14 @@ int main() {
   CHECK(CheckStateRulesAndPublication() == 0);
   CHECK(CheckOwnedInvalidCommandLatches() == 0);
   CHECK(CheckBoundedResultCapacity() == 0);
+  CHECK(CheckSameTickDuplicateIsConfirmedOnce() == 0);
+  CHECK(CheckTrackingSupersededByCommandFault() == 0);
+  CHECK(CheckTrackingSupersededBySupervisorTimeout() == 0);
+  CHECK(CheckConfirmedStopStaysApplied() == 0);
+  CHECK(CheckContinuityOldContextTorque() == 0);
+  CHECK(CheckPayloadKeyIncludesSupervisor() == 0);
+  CHECK(CheckAcquireRequiresEmptySession() == 0);
+  CHECK(CheckHeartbeatSupervisorOwnership() == 0);
+  CHECK(CheckResetWithFreshSafetyObservation() == 0);
   return 0;
 }

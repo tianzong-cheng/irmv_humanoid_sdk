@@ -83,6 +83,7 @@ class ExecutionFsm {
     bool valid{false};
     protocol::Operation operation{protocol::Operation::AcquireSession};
     protocol::Sequence request_id{0};
+    protocol::Id supervisor_id{};
     protocol::Sequence expected_epoch{0};
     protocol::Sequence proposed_epoch{0};
     protocol::Id producer_id{};
@@ -98,28 +99,10 @@ class ExecutionFsm {
     bool valid{false};
     protocol::Id supervisor_id{};
     protocol::Sequence request_id{0};
+    // Tick that answered the bootstrap request, so a duplicate inside the same
+    // batch is answered once.
+    protocol::Sequence answered_tick{0};
     protocol::ExecutionResult result{};
-  };
-
-  // Local mirror of the published state-sequence index. The command gate owns
-  // the authoritative index; the FSM keeps the same mapping so a request's
-  // source reference can be validated before the gate is re-authorized, which
-  // is what makes a source switch atomic and a rejection side-effect free.
-  struct SourceStateIndex {
-    static constexpr std::size_t kCapacity =
-        CommandGate::kMaxStateWindowCapacity;
-
-    std::array<protocol::Sequence, kCapacity> sequences{};
-    std::array<protocol::TimeUs, kCapacity> generations{};
-    std::size_t head{0};
-    std::size_t size{0};
-    std::size_t capacity{0};
-    protocol::Sequence newest{0};
-    bool has_newest{false};
-
-    void Record(protocol::Sequence sequence, protocol::TimeUs generation_us);
-    bool Find(protocol::Sequence sequence,
-              protocol::TimeUs *generation_us) const;
   };
 
   // ---- tick phases (execution_fsm.cpp) -----------------------------------
@@ -169,13 +152,20 @@ class ExecutionFsm {
                                 const protocol::ExecutionRequest &request,
                                 protocol::RejectReason reason);
 
-  void StoreRequestRecord(const protocol::ExecutionRequest &request,
+  void StageRequestAnswer(const protocol::ExecutionRequest &request,
                           const protocol::ExecutionResult &result);
 
   bool PayloadMatches(const protocol::ExecutionRequest &request,
                       const RequestRecord &record) const;
 
+  // Releases the answers of this tick. An answer is Applied only when the write
+  // implementing the tick's output was accepted and the committed state, output
+  // action, epoch and producer still match the answer; otherwise it is
+  // downgraded, and only a confirmed answer becomes the session's request
+  // record.
   void CommitPendingResults(TickScope &scope, bool write_accepted);
+
+  bool ImplementsAnswer(const protocol::ExecutionResult &answer) const;
 
   // ---- events and results ------------------------------------------------
 
@@ -235,9 +225,6 @@ class ExecutionFsm {
 
   double ExpectedCurrentTorque(const protocol::FeedbackSnapshot &feedback,
                                std::size_t index) const;
-
-  bool FindSourceGeneration(protocol::Sequence sequence,
-                            protocol::TimeUs *generation_us) const;
 
   // ---- per-state implementation, one file per state ----------------------
 
@@ -303,7 +290,6 @@ class ExecutionFsm {
   const configuration::RuntimeConfig &config_;
   protocol::Id runtime_id_;
   CommandGate gate_;
-  SourceStateIndex source_index_;
 
   protocol::Sequence tick_{0};
   protocol::Sequence state_seq_{0};
@@ -318,6 +304,7 @@ class ExecutionFsm {
   protocol::TimeUs boot_window_start_us_{0};
 
   protocol::Id session_id_{};
+  protocol::Id session_supervisor_id_{};
   protocol::TimeUs last_heartbeat_rx_us_{0};
   protocol::Sequence last_heartbeat_seq_{0};
   bool heartbeat_seen_{false};
@@ -342,7 +329,11 @@ class ExecutionFsm {
   // permits recovery readiness and what degrades a latched fault.
   bool last_write_accepted_{true};
 
+  // Answers of the previous ticks that survived their confirmation, and the
+  // answer staged by the current tick that becomes the record only once the
+  // write commits. A staged answer is never replayable.
   RequestRecord request_record_{};
+  RequestRecord staged_record_{};
   AcquireRecord acquire_record_{};
 
   std::array<PendingResult, kRequestBatchCapacity + kStopRequestBatchCapacity>
