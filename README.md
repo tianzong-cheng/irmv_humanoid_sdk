@@ -44,10 +44,11 @@ build/robot_runtime --config config/sdk.json
 usage: robot_runtime --config PATH [--domain N] [--fake-scenario PATH] [--output-trace PATH]
 ```
 
-* `--config PATH` is mandatory. The file is validated against
-  `config/sdk.schema.json` and by the loader itself; `backend` must be `fake`,
-  and a configuration that selects `real` is refused before any device, DDS or
-  log directory is touched.
+* `--config PATH` is mandatory. The file is validated by the loader's own
+  checks - `config/sdk.schema.json` documents them and a contract test keeps the
+  two in step, but the schema file itself is not consulted at runtime. `backend`
+  must be `fake`, and a configuration that selects `real` is refused before any
+  device, DDS or log directory is touched.
 * `--domain N` overrides `dds.domain` for this run (0..230). The override is
   applied by the configuration layer, so the published `config_id` describes
   the configuration actually in effect, domain included.
@@ -55,8 +56,10 @@ usage: robot_runtime --config PATH [--domain N] [--fake-scenario PATH] [--output
   the fake backend (`tests/support/fake_scenario.json` is a documented
   example). It never adds a protocol topic and is refused for a non-fake
   backend.
-* `--output-trace PATH` writes one JSON line per applied torque write. It is a
-  test-only option of the fake deployment; without it nothing is written.
+* `--output-trace PATH` writes one JSON line per torque write attempt, so a tick
+  whose write was refused appears twice: the refused attempt and the effective
+  zero-torque fallback. It is a test-only option of the fake deployment; without
+  it nothing is written.
 
 Startup is ordered and fails loudly: parse the command line, load and validate
 the configuration, build the runtime identity, initialise the fake backend,
@@ -126,7 +129,9 @@ machine and run from any working directory:
 ```
 
 `robot_runtime` finds its libraries through the relative rpath
-`$ORIGIN/../lib`; no installed artifact carries a build or source path. The
+`$ORIGIN/../lib`; no installed artifact carries a build or source path in its
+dynamic section (a Debug build still embeds source paths in its DWARF debug
+information, so ship a release build if the tree must be path-clean). The
 installation bundles every shared library the runtime resolves outside the
 platform directories and fails if one cannot be resolved, and it verifies that
 the installed runtime has exactly that one relative rpath entry.

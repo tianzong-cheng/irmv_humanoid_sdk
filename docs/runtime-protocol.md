@@ -214,7 +214,7 @@ Stop reasons: `STOP_NONE`, `STOP_REQUESTED`, `COMMAND_TIMEOUT`,
 |---|---|---|---|
 | command | the **transport receive stamp** of the accepted frame | 100 ms | `Tracking` → `Damping`, session kept, `STOP_COMMAND_TIMEOUT` |
 | source state | the stored generation time of the last accepted state sequence | 150 ms | `Tracking` → `Damping`, session kept, `STOP_SOURCE_STATE_TIMEOUT` |
-| supervisor lease | the last accepted strictly-increasing heartbeat | 300 ms | session revoked, `ZERO_TORQUE`, `STOP_SUPERVISOR_TIMEOUT` |
+| supervisor lease | the last accepted strictly-increasing heartbeat | 300 ms | session revoked: `Tracking` → `Damping`, `STOP_SUPERVISOR_TIMEOUT`; `Damping`, `ZeroTorque` and a latched `Fault` keep their output |
 | feedback | the sample receive stamp | 20 ms | feedback invalid → fault |
 | IMU | the sample receive stamp | 20 ms | IMU invalid (only when the configuration requires it) |
 | boot grace / healthy window / boot deadline | process start | 1 s / 100 ms / 2 s | boot failure → `FAULT` |

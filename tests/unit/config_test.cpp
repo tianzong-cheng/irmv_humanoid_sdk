@@ -364,6 +364,12 @@ int main() {
   CHECK(ThrowsAt(ReplaceOnce(ValidConfig(), "\"position_min\": -2",
                              "\"position_min\": NaN"),
                  "$"));
+  CHECK(ThrowsAt(
+      ReplaceOnce(ValidConfig(), "\"position_min\": -2", "\"position_min\": 2"),
+      "robot.joints[0].position_min"));
+  CHECK(ThrowsAt(
+      ReplaceOnce(ValidConfig(), "\"position_min\": -2", "\"position_min\": 3"),
+      "robot.joints[0].position_min"));
   CHECK(ThrowsAt(ReplaceOnce(ValidConfig(), "\"state_window_capacity\": 1024",
                              "\"state_window_capacity\": 8193"),
                  "runtime.state_window_capacity"));

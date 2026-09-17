@@ -107,7 +107,18 @@ jobs:
 
       # The deterministic core suite only: it needs no peer and no real DDS
       # traffic. -DIRMV_SANITIZE adds -fno-sanitize-recover=all, so a report is
-      # a test failure and not a line in the log.
+      # a test failure and not a line in the log. A label filter that matches
+      # nothing exits 0, so the selection is asserted before it is run.
+      - name: Verify the core label selects the deterministic suite
+        run: |
+          set -euo pipefail
+          ctest --test-dir build-sanitize -N -L core | tee core-tests.txt
+          for test in protocol_test config_test fake_backend_test safety_test \
+                      command_gate_test execution_fsm_test logger_test \
+                      channel_test config_schema_contract_test; do
+            grep -Eq "Test +#[0-9]+: ${test}$" core-tests.txt
+          done
+
       - name: Test the core suite under the sanitizers
         run: ctest --test-dir build-sanitize -L core --output-on-failure
 
