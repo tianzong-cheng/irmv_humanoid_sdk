@@ -270,17 +270,13 @@ bool RotatingFileSink::Flush() {
 // Internal state of the logger. It is shared with the worker so that a worker
 // left behind by a blocked sink keeps everything it touches alive after Stop().
 struct Logger::Shared {
-  Shared(const configuration::TelemetryConfig &config, LogSink *sink)
+  Shared(const configuration::TelemetryConfig &config,
+         std::shared_ptr<LogSink> sink)
       : level_(config.level),
         capacity_(std::max<std::size_t>(config.queue_capacity, 1)),
-        slots_(capacity_) {
-    if (sink != nullptr) {
-      sink_ = sink;
-      return;
-    }
-    owned_sink_ = std::make_unique<RotatingFileSink>(config);
-    sink_ = owned_sink_.get();
-  }
+        slots_(capacity_),
+        sink_(sink != nullptr ? std::move(sink)
+                              : std::make_shared<RotatingFileSink>(config)) {}
 
   // Producer side. Returns false when the queue is full and leaves it
   // untouched.
@@ -320,8 +316,10 @@ struct Logger::Shared {
   std::atomic<std::size_t> write_{0};
   std::atomic<std::size_t> read_{0};
 
-  std::unique_ptr<RotatingFileSink> owned_sink_;
-  LogSink *sink_{nullptr};
+  // Shared with the caller and with a worker that Stop() had to leave behind:
+  // ownership of the sink lasts exactly as long as someone may still call into
+  // it. Worker side, except for the reference the constructor takes.
+  std::shared_ptr<LogSink> sink_;
 
   // Pending events are counted by the producer before they become visible to
   // the consumer, so the consumer can never decrement an entry it has not seen
@@ -350,8 +348,9 @@ struct Logger::Shared {
 Logger::Logger(const configuration::TelemetryConfig &config)
     : shared_(std::make_shared<Shared>(config, nullptr)) {}
 
-Logger::Logger(const configuration::TelemetryConfig &config, LogSink *sink)
-    : shared_(std::make_shared<Shared>(config, sink)) {}
+Logger::Logger(const configuration::TelemetryConfig &config,
+               std::shared_ptr<LogSink> sink)
+    : shared_(std::make_shared<Shared>(config, std::move(sink))) {}
 
 Logger::~Logger() { Stop(); }
 

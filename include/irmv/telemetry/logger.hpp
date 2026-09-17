@@ -111,14 +111,17 @@ class RotatingFileSink final : public LogSink {
 // log.
 //
 // Construction allocates the queue storage once; it performs no file I/O. The
-// injected sink is caller-owned and must outlive the logger, including the case
-// where Stop() leaves a blocked worker behind (see Stop()).
+// injected sink is shared with the caller: the logger holds its own reference for
+// as long as its worker may call into the sink, including a worker left behind
+// by a timed-out Stop() (see Stop()), so the caller may release its reference at
+// any time after the constructor returns.
 class Logger {
  public:
   explicit Logger(const configuration::TelemetryConfig &config);
 
-  // `sink` may be null to select the built-in RotatingFileSink.
-  Logger(const configuration::TelemetryConfig &config, LogSink *sink);
+  // A null `sink` selects the built-in RotatingFileSink.
+  Logger(const configuration::TelemetryConfig &config,
+         std::shared_ptr<LogSink> sink);
   ~Logger();
 
   Logger(const Logger &) = delete;
@@ -132,7 +135,8 @@ class Logger {
   // and joins it. A sink blocked inside Write() cannot be waited for forever, so
   // past that deadline the worker is left detached to finish on its own and the
   // events that were still queued are reported by Undrained(). No event is
-  // accepted after Stop() returns.
+  // accepted after Stop() returns. A detached worker keeps the sink alive
+  // through the logger's own reference, so releasing the sink is safe here.
   void Stop();
 
   // Producer side, non-blocking. Returns false without waiting when the logger

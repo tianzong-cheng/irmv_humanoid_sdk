@@ -231,13 +231,13 @@ int main() {
     const TemporaryDirectory directory("drop");
     TelemetryConfig config = BaseConfig(directory.path());
     config.queue_capacity = 1024;
-    RecordingSink sink;
-    sink.Block();
-    Logger logger(config, &sink);
+    std::shared_ptr<RecordingSink> sink = std::make_shared<RecordingSink>();
+    sink->Block();
+    Logger logger(config, sink);
     CHECK(logger.Start());
     CHECK(logger.started());
     CHECK(logger.TryLog(MakeEvent(LogLevel::Info, "in flight", 0)));
-    CHECK(sink.WaitForWriteEntry(kWait));
+    CHECK(sink->WaitForWriteEntry(kWait));
 
     const auto begin = std::chrono::steady_clock::now();
     int accepted = 0;
@@ -273,7 +273,7 @@ int main() {
     CHECK(logger.Dropped() == 2048);
     CHECK(refused_elapsed < std::chrono::milliseconds(500));
 
-    sink.Release();
+    sink->Release();
     logger.Stop();
     CHECK(!logger.started());
     CHECK(logger.Written() == 1025);
@@ -287,9 +287,9 @@ int main() {
     const TemporaryDirectory directory("stop-blocked");
     TelemetryConfig config = BaseConfig(directory.path());
     config.queue_capacity = 4;
-    RecordingSink sink;
-    sink.Block();
-    Logger logger(config, &sink);
+    std::shared_ptr<RecordingSink> sink = std::make_shared<RecordingSink>();
+    sink->Block();
+    Logger logger(config, sink);
     CHECK(logger.Start());
     int accepted = 0;
     for (int index = 0; index < 8; ++index) {
@@ -316,9 +316,9 @@ int main() {
     CHECK(logger.Dropped() == dropped);
 
     // The detached worker still finishes the events it owns.
-    sink.Release();
-    CHECK(sink.WaitForFlushes(1, kWait));
-    CHECK(sink.event_count() == static_cast<std::size_t>(accepted));
+    sink->Release();
+    CHECK(sink->WaitForFlushes(1, kWait));
+    CHECK(sink->event_count() == static_cast<std::size_t>(accepted));
     CHECK(logger.Written() == static_cast<std::uint64_t>(accepted));
   }
 
@@ -329,8 +329,8 @@ int main() {
     TelemetryConfig config = BaseConfig(directory.path());
     config.level = LogLevel::Warning;
     config.queue_capacity = 8;
-    RecordingSink sink;
-    Logger logger(config, &sink);
+    std::shared_ptr<RecordingSink> sink = std::make_shared<RecordingSink>();
+    Logger logger(config, sink);
     CHECK(logger.Start());
     CHECK(!logger.TryLog(MakeEvent(LogLevel::Trace, "trace", 0)));
     CHECK(!logger.TryLog(MakeEvent(LogLevel::Debug, "debug", 1)));
@@ -342,7 +342,7 @@ int main() {
     CHECK(logger.Dropped() == 0);
     logger.Stop();
 
-    const auto events = sink.events();
+    const auto events = sink->events();
     CHECK(events.size() == 3);
     CHECK(events[0].level == LogLevel::Warning);
     CHECK(events[1].level == LogLevel::Error);
@@ -358,8 +358,8 @@ int main() {
     const TemporaryDirectory directory("drain");
     TelemetryConfig config = BaseConfig(directory.path());
     config.queue_capacity = 8;
-    RecordingSink sink;
-    Logger logger(config, &sink);
+    std::shared_ptr<RecordingSink> sink = std::make_shared<RecordingSink>();
+    Logger logger(config, sink);
     CHECK(logger.Start());
     std::vector<std::uint64_t> accepted_ticks;
     for (std::uint64_t tick = 0; tick < 40; ++tick) {
@@ -372,7 +372,7 @@ int main() {
     logger.Stop();
     CHECK(logger.Undrained() == 0);
     CHECK(logger.Written() == accepted_ticks.size());
-    const auto events = sink.events();
+    const auto events = sink->events();
     CHECK(events.size() == accepted_ticks.size());
     for (std::size_t index = 0; index < events.size(); ++index) {
       CHECK(events[index].tick == accepted_ticks[index]);
@@ -385,8 +385,8 @@ int main() {
     const TemporaryDirectory directory("stopped");
     TelemetryConfig config = BaseConfig(directory.path());
     config.queue_capacity = 8;
-    RecordingSink sink;
-    Logger logger(config, &sink);
+    std::shared_ptr<RecordingSink> sink = std::make_shared<RecordingSink>();
+    Logger logger(config, sink);
     CHECK(!logger.started());
     CHECK(!logger.TryLog(MakeEvent(LogLevel::Info, "before start", 0)));
     CHECK(logger.Start());
@@ -394,7 +394,7 @@ int main() {
     CHECK(logger.TryLog(MakeEvent(LogLevel::Info, "written", 0)));
     logger.Stop();
     CHECK(!logger.started());
-    const std::size_t written = sink.event_count();
+    const std::size_t written = sink->event_count();
     CHECK(written == 1);
     for (int index = 0; index < 8; ++index) {
       CHECK(!logger.TryLog(MakeEvent(LogLevel::Info, "after stop",
@@ -403,8 +403,46 @@ int main() {
     logger.Stop();
     CHECK(logger.Dropped() == 0);
     CHECK(logger.Filtered() == 0);
-    CHECK(sink.event_count() == written);
+    CHECK(sink->event_count() == written);
     CHECK(logger.Written() == written);
+  }
+
+  // A worker left behind by a timed-out Stop() must not outlive the sink: the
+  // logger owns its own reference to the injected sink until that worker has
+  // finished, so releasing the caller's reference and destroying the logger
+  // right after Stop() is safe, and the events the worker still owns still land
+  // in the sink.
+  {
+    const TemporaryDirectory directory("sink-lifetime");
+    TelemetryConfig config = BaseConfig(directory.path());
+    config.queue_capacity = 4;
+    std::weak_ptr<RecordingSink> reference;
+    std::size_t accepted = 0;
+    std::shared_ptr<RecordingSink> sink = std::make_shared<RecordingSink>();
+    sink->Block();
+    {
+      Logger logger(config, sink);
+      CHECK(logger.Start());
+      for (int index = 0; index < 8; ++index) {
+        if (logger.TryLog(MakeEvent(LogLevel::Info, "detached",
+                                    static_cast<std::uint64_t>(index)))) {
+          ++accepted;
+        }
+      }
+      CHECK(accepted >= 4);
+      logger.Stop();
+      // The worker is detached inside Write() and still owns accepted events.
+      CHECK(logger.Undrained() == accepted);
+      reference = sink;
+    }
+    // Both the logger and the caller release the sink while that worker is still
+    // blocked. Only the logger's own reference keeps it alive now.
+    sink.reset();
+    const std::shared_ptr<RecordingSink> revived = reference.lock();
+    CHECK(revived != nullptr);
+    revived->Release();
+    CHECK(revived->WaitForFlushes(1, kWait));
+    CHECK(revived->event_count() == accepted);
   }
 
   // The default sink writes `LEVEL stamp tick [component] message` plus the
@@ -495,15 +533,15 @@ int main() {
     const TemporaryDirectory directory("failure");
     TelemetryConfig config = BaseConfig(directory.path());
     config.queue_capacity = 8;
-    RecordingSink sink;
-    sink.set_fail(true);
-    Logger logger(config, &sink);
+    std::shared_ptr<RecordingSink> sink = std::make_shared<RecordingSink>();
+    sink->set_fail(true);
+    Logger logger(config, sink);
     CHECK(logger.Start());
     for (std::uint64_t tick = 0; tick < 4; ++tick) {
       CHECK(logger.TryLog(MakeEvent(LogLevel::Info, "failed", tick)));
     }
     logger.Stop();
-    CHECK(sink.event_count() == 4);
+    CHECK(sink->event_count() == 4);
     CHECK(logger.Written() == 0);
     // Four failed writes plus the failed flush the worker performs on exit.
     CHECK(logger.error_count() == 5);
