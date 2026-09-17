@@ -37,13 +37,15 @@ struct LogField {
 };
 
 // One log record. Fixed capacity and trivially copyable: it moves through the
-// logger queue by copy and every string it holds is bounded.
+// logger queue by copy and every string it holds is bounded. `message` is the
+// full 256-byte diagnostic text the design freezes for fault and rejection
+// reasons, so a long reason is not silently replaced by an empty message.
 struct LogEvent {
   configuration::LogLevel level{configuration::LogLevel::Info};
   protocol::TimeUs stamp_us{0};
   protocol::Sequence tick{0};
   protocol::Text64 component;
-  protocol::Text64 message;
+  protocol::Text256 message;
   std::uint32_t event_code{0};
   std::uint32_t field_count{0};
   std::array<LogField, kMaxLogFields> fields{};
@@ -131,12 +133,17 @@ class Logger {
   // Start() per logger lifetime.
   bool Start();
 
-  // Idempotent. Asks the worker to drain the queue within kStopDrainTimeoutMs
-  // and joins it. A sink blocked inside Write() cannot be waited for forever, so
-  // past that deadline the worker is left detached to finish on its own and the
-  // events that were still queued are reported by Undrained(). No event is
-  // accepted after Stop() returns. A detached worker keeps the sink alive
-  // through the logger's own reference, so releasing the sink is safe here.
+  // Idempotent. Publishes the refusal (no TryLog after this returns accepts an
+  // event), then drains the queue within kStopDrainTimeoutMs and joins the
+  // worker. Before the drain is measured it waits, within the same deadline, for
+  // the producers already inside TryLog() to leave: every event that TryLog()
+  // accepted is then either written or reported by Undrained(), never silently
+  // dropped. A producer still inside TryLog() when the deadline expires is
+  // counted by Undrained() as well, so the report stays conservative. A sink
+  // blocked inside Write() cannot be waited for forever: past the deadline the
+  // worker is left detached to finish on its own and the events still queued are
+  // reported by Undrained(). A detached worker keeps the sink alive through the
+  // logger's own reference, so releasing the sink is safe here.
   void Stop();
 
   // Producer side, non-blocking. Returns false without waiting when the logger

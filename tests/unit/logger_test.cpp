@@ -1,12 +1,16 @@
 // Tests for the bounded asynchronous logger: the queue bound and its drop
-// accounting, level filtering, FIFO order, the drain on Stop(), rotation of the
-// default sink, the formatted line and the error reporting path.
+// accounting, level filtering, FIFO order, the drain on Stop(), the accounting
+// of an event that races with Stop(), the 256-byte message bound, rotation of
+// the default sink, the formatted line and the error reporting path.
 //
 // Waits are bounded and explicit: the blocking sink signals when the worker is
 // inside Write(), so filling a bounded queue is deterministic instead of
-// timing-based. The only wall-clock assertions are hang guards.
+// timing-based, and assertions after Stop() wait for the sink or for a counter
+// instead of assuming Stop() met its drain deadline. The only wall-clock
+// assertions are hang guards.
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -18,6 +22,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <vector>
 
 #include "irmv/configuration/config.hpp"
@@ -152,6 +157,30 @@ class RecordingSink final : public LogSink {
   bool fail_{false};
 };
 
+// Accepts everything immediately. The totals in the race test come from the
+// logger itself, and a recording sink would make the producer's window
+// unrealistically slow.
+class FastSink final : public LogSink {
+ public:
+  bool Write(const LogEvent &) override { return true; }
+  bool Flush() override { return true; }
+};
+
+// Waits for a condition the worker reaches asynchronously, so that assertions
+// after Stop() do not depend on Stop()'s drain deadline: a loaded machine may
+// leave the worker detached past it.
+template <typename Predicate>
+bool WaitFor(Predicate predicate, std::chrono::milliseconds timeout) {
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (!predicate()) {
+    if (std::chrono::steady_clock::now() >= deadline) {
+      return false;
+    }
+    std::this_thread::yield();
+  }
+  return true;
+}
+
 LogEvent MakeEvent(LogLevel level, std::string_view message, std::uint64_t tick) {
   LogEvent event;
   event.level = level;
@@ -273,11 +302,14 @@ int main() {
     CHECK(logger.Dropped() == 2048);
     CHECK(refused_elapsed < std::chrono::milliseconds(500));
 
+    // The worker takes every accepted event; the totals below are compared
+    // after the sink has them, so a machine that misses Stop()'s drain deadline
+    // cannot fail against a correct logger.
     sink->Release();
     logger.Stop();
     CHECK(!logger.started());
-    CHECK(logger.Written() == 1025);
-    CHECK(logger.Undrained() == 0);
+    CHECK(WaitFor([&logger] { return logger.Written() == 1025; }, kWait));
+    CHECK(logger.Dropped() == 2048);
   }
 
   // Stop() must not hang on a blocked sink: it returns after its bounded drain
@@ -341,6 +373,8 @@ int main() {
     CHECK(logger.Filtered() == 3);
     CHECK(logger.Dropped() == 0);
     logger.Stop();
+    CHECK(sink->WaitForEvents(3, kWait));
+    CHECK(sink->WaitForFlushes(1, kWait));
 
     const auto events = sink->events();
     CHECK(events.size() == 3);
@@ -370,7 +404,11 @@ int main() {
     // The queue absorbs its whole capacity even before the worker wakes up.
     CHECK(accepted_ticks.size() >= 8);
     logger.Stop();
-    CHECK(logger.Undrained() == 0);
+    // Stop()'s worker may have been left detached by a loaded machine, so the
+    // accepted events are awaited through the sink instead of being assumed
+    // already written.
+    CHECK(sink->WaitForEvents(accepted_ticks.size(), kWait));
+    CHECK(sink->WaitForFlushes(1, kWait));
     CHECK(logger.Written() == accepted_ticks.size());
     const auto events = sink->events();
     CHECK(events.size() == accepted_ticks.size());
@@ -394,6 +432,7 @@ int main() {
     CHECK(logger.TryLog(MakeEvent(LogLevel::Info, "written", 0)));
     logger.Stop();
     CHECK(!logger.started());
+    CHECK(sink->WaitForEvents(1, kWait));
     const std::size_t written = sink->event_count();
     CHECK(written == 1);
     for (int index = 0; index < 8; ++index) {
@@ -467,9 +506,10 @@ int main() {
       AddField(escaped, "detail", "a\\b\"c");
       CHECK(logger.TryLog(escaped));
       logger.Stop();
-      CHECK(logger.Written() == 2);
+      // The sink is invisible to the test, so the two writes are awaited rather
+      // than assumed to be finished before Stop()'s deadline.
+      CHECK(WaitFor([&logger] { return logger.Written() == 2; }, kWait));
       CHECK(logger.error_count() == 0);
-      CHECK(logger.Undrained() == 0);
     }
 
     const auto files = LogFiles(directory.path());
@@ -498,7 +538,7 @@ int main() {
         CHECK(logger.TryLog(MakeEvent(LogLevel::Info, message, tick)));
       }
       logger.Stop();
-      CHECK(logger.Written() == 60);
+      CHECK(WaitFor([&logger] { return logger.Written() == 60; }, kWait));
       CHECK(logger.error_count() == 0);
     }
 
@@ -541,11 +581,14 @@ int main() {
       CHECK(logger.TryLog(MakeEvent(LogLevel::Info, "failed", tick)));
     }
     logger.Stop();
+    // The sink took every event and the worker flushed once before it exited; on
+    // a machine slow enough to miss the drain deadline the bounded flush wait
+    // covers the detached worker instead of assuming Stop() finished it.
+    CHECK(sink->WaitForFlushes(1, kWait));
     CHECK(sink->event_count() == 4);
     CHECK(logger.Written() == 0);
     // Four failed writes plus the failed flush the worker performs on exit.
     CHECK(logger.error_count() == 5);
-    CHECK(logger.Undrained() == 0);
   }
 
   // An unusable log directory is an observable error, not a crash out of the
@@ -566,9 +609,106 @@ int main() {
     CHECK(logger.Start());
     CHECK(logger.TryLog(MakeEvent(LogLevel::Info, "no directory", 0)));
     logger.Stop();
+    CHECK(WaitFor([&logger] { return logger.error_count() == 1; }, kWait));
     CHECK(logger.Written() == 0);
-    CHECK(logger.error_count() == 1);
     CHECK(!std::filesystem::exists(file / "logs"));
+  }
+
+  // The message carries the full 256-byte diagnostic text the design freezes for
+  // fault and rejection reasons, and a longer value is refused without touching
+  // the event: a caller copying a long reason never logs an empty message.
+  {
+    const TemporaryDirectory directory("message-bound");
+    TelemetryConfig config = BaseConfig(directory.path());
+    config.queue_capacity = 8;
+    LogEvent event = MakeEvent(LogLevel::Error, "placeholder", 7);
+    // 253 printable bytes plus a backslash, a quote and a tab: 256 bytes.
+    const std::string longest = std::string(253, 'm') + "\\\"\t";
+    CHECK(longest.size() == 256);
+    CHECK(event.message.Assign(longest));
+    CHECK(event.message.View() == longest);
+    const std::string too_long(257, 'm');
+    CHECK(!event.message.Assign(too_long));
+    CHECK(event.message.View() == longest);
+
+    {
+      Logger logger(config);
+      CHECK(logger.Start());
+      CHECK(logger.TryLog(event));
+      logger.Stop();
+      CHECK(WaitFor([&logger] { return logger.Written() == 1; }, kWait));
+      CHECK(logger.error_count() == 0);
+    }
+
+    const auto files = LogFiles(directory.path());
+    CHECK(files.size() == 1);
+    const auto lines = ReadLines(files.at(0));
+    CHECK(lines.size() == 1);
+    std::string expected = "ERROR 1007 7 [test] " + std::string(253, 'm');
+    expected += "\\\\";   // the escaped backslash
+    expected += "\\\"";   // the escaped quote
+    expected += "\\x09";  // the escaped tab
+    CHECK(lines[0] == expected);
+  }
+
+  // A producer thread that keeps logging while another thread stops the logger:
+  // every event TryLog() accepted is either written or reported, so none of them
+  // disappears silently, and nothing is accepted once Stop() has returned.
+  {
+    const TemporaryDirectory directory("stop-race");
+    TelemetryConfig config = BaseConfig(directory.path());
+    config.queue_capacity = 8;
+    constexpr std::uint64_t kAttempts = 2048;
+    for (int round = 0; round < 128; ++round) {
+      std::shared_ptr<FastSink> sink = std::make_shared<FastSink>();
+      Logger logger(config, sink);
+      CHECK(logger.Start());
+      std::atomic<std::uint64_t> attempts{0};
+      std::atomic<std::uint64_t> accepted{0};
+      std::mutex done_mutex;
+      std::condition_variable done_cv;
+      bool done = false;
+      std::thread producer([&] {
+        for (std::uint64_t tick = 0; tick < kAttempts; ++tick) {
+          attempts.fetch_add(1, std::memory_order_relaxed);
+          if (logger.TryLog(MakeEvent(LogLevel::Info, "race", tick))) {
+            accepted.fetch_add(1, std::memory_order_relaxed);
+          }
+        }
+        {
+          std::lock_guard<std::mutex> lock(done_mutex);
+          done = true;
+        }
+        done_cv.notify_all();
+      });
+
+      logger.Stop();
+      // Stop() refuses every later event, so the producer's loop is bounded; the
+      // wait only guards against a stalled thread.
+      bool finished = false;
+      {
+        std::unique_lock<std::mutex> lock(done_mutex);
+        finished = done_cv.wait_for(lock, kWait, [&] { return done; });
+      }
+      CHECK(finished);
+      producer.join();
+
+      const std::uint64_t attempted = attempts.load(std::memory_order_relaxed);
+      const std::uint64_t granted = accepted.load(std::memory_order_relaxed);
+      CHECK(attempted == kAttempts);
+      // A stopped logger refuses a later event without counting it as a drop.
+      const std::uint64_t dropped = logger.Dropped();
+      CHECK(!logger.TryLog(MakeEvent(LogLevel::Info, "after stop", 0)));
+      CHECK(logger.Dropped() == dropped);
+      CHECK(logger.Filtered() == 0);
+      CHECK(dropped <= attempted - granted);
+      // Written is read before Undrained: the worker may still be writing events
+      // that the stop already reported, so this order can only over-count the
+      // two together, never under-count them.
+      const std::uint64_t written = logger.Written();
+      const std::uint64_t undrained = logger.Undrained();
+      CHECK(written + undrained >= granted);
+    }
   }
 
   return 0;

@@ -290,6 +290,38 @@ struct Logger::Shared {
     return true;
   }
 
+  // One producer inside TryLog(). Stop() waits for this count to reach zero
+  // before it measures the queue, so an event that a producer has accepted - it
+  // passed the accepting_ check but has not pushed yet - is never left outside
+  // the queue and outside the counters as well.
+  //
+  // The counter and `accepting_` are sequential-consistent on purpose: the
+  // argument is the store-buffer one. If Stop() reads a producer count of zero
+  // after publishing accepting_ = false, then a producer that increments the
+  // count later must see the published value in its own check, because a
+  // sequential-consistent load cannot read a value older than a write that
+  // precedes it in the total order. With acquire/release ordering on two
+  // independent locations both sides could read the stale value.
+  class ProducerScope {
+   public:
+    explicit ProducerScope(Shared &shared) : shared_(shared) {
+      shared_.producers_.fetch_add(1, std::memory_order_seq_cst);
+    }
+
+    ~ProducerScope() {
+      if (shared_.producers_.fetch_sub(1, std::memory_order_seq_cst) == 1) {
+        // The last producer leaves: Stop() may be waiting for exactly that.
+        shared_.cv_.notify_all();
+      }
+    }
+
+    ProducerScope(const ProducerScope &) = delete;
+    ProducerScope &operator=(const ProducerScope &) = delete;
+
+   private:
+    Shared &shared_;
+  };
+
   // Consumer side. Returns false when the queue is empty.
   bool TryPop(LogEvent &out) {
     const std::size_t read = read_.load(std::memory_order_relaxed);
@@ -325,8 +357,10 @@ struct Logger::Shared {
   // the consumer, so the consumer can never decrement an entry it has not seen
   // and Stop() can read how much is still in flight at its deadline.
   std::atomic<std::uint64_t> pending_{0};
+  std::atomic<std::uint32_t> producers_{0};
   std::atomic<std::uint64_t> written_{0};
   std::atomic<std::uint64_t> errors_{0};
+  // Sequential consistency is required by the argument in ProducerScope.
   std::atomic<bool> accepting_{false};
 
   // Producer-side counters: only the thread calling TryLog() touches them.
@@ -375,15 +409,31 @@ void Logger::Stop() {
       return;
     }
     shared->stopped_ = true;
-    shared->accepting_.store(false, std::memory_order_release);
+    const auto deadline =
+        std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(kStopDrainTimeoutMs);
+    // Publishing the refusal first is what makes "refused after Stop()" true for
+    // every producer that has not passed the check yet; the producers that did
+    // pass it are waited for below, so that their events are in the queue - and
+    // therefore in the counters - before the queue is measured.
+    shared->accepting_.store(false, std::memory_order_seq_cst);
     shared->stopping_ = true;
     shared->cv_.notify_all();
-    drained =
-        shared->cv_.wait_for(lock, std::chrono::milliseconds(kStopDrainTimeoutMs),
-                             [&shared] { return shared->worker_done_; });
+    // A producer never takes the mutex, so its wake-up can be missed: the wait
+    // is sliced and re-checked until the deadline, like the worker's own wait.
+    while (shared->producers_.load(std::memory_order_seq_cst) != 0 &&
+           std::chrono::steady_clock::now() < deadline) {
+      shared->cv_.wait_for(lock, std::chrono::milliseconds(kWorkerPollMs));
+    }
+    drained = shared->cv_.wait_until(
+        lock, deadline, [&shared] { return shared->worker_done_; });
     // Whatever is still in flight at the deadline is reported, not assumed
-    // written.
-    shared->undrained_ = shared->pending_.load(std::memory_order_acquire);
+    // written: the queued events plus a producer still inside TryLog(), whose
+    // event the queue measurement cannot see yet. That producer can only refuse
+    // or queue exactly one more event, so the last term is at most as large as
+    // the events it may still add.
+    shared->undrained_ = shared->pending_.load(std::memory_order_acquire) +
+                         shared->producers_.load(std::memory_order_seq_cst);
     if (!drained && shared->worker_.joinable()) {
       // A sink blocked inside Write() would make join() wait forever. The
       // worker owns its state through its shared_ptr, so it is left to finish on
@@ -398,7 +448,8 @@ void Logger::Stop() {
 
 bool Logger::TryLog(const LogEvent &event) {
   Shared &shared = *shared_;
-  if (!shared.accepting_.load(std::memory_order_acquire)) {
+  const Shared::ProducerScope scope(shared);
+  if (!shared.accepting_.load(std::memory_order_seq_cst)) {
     return false;
   }
   if (LevelRank(event.level) < LevelRank(shared.level_)) {
