@@ -1,0 +1,199 @@
+{
+  "name": "command_flood",
+  "description": "A flood of ordinary tracking requests cannot starve the stop lane and cannot block the control loop: the stop is applied while the flood runs, the target keeps being served, and the flood loses requests.",
+  "domain": 208,
+  "runtime": {
+    "config": "config/sdk.json",
+    "fake_scenario": "tests/support/fake_ramp.json",
+    "output_trace": "trace_run%d.jsonl"
+  },
+  "steps": [
+    {
+      "action": "start_runtime"
+    },
+    {
+      "action": "wait_log",
+      "pattern": "state=\"ZeroTorque\"",
+      "timeout_s": 15
+    },
+    {
+      "action": "client",
+      "name": "producer",
+      "mode": "producer",
+      "scenario": "producer",
+      "background": true,
+      "args": [
+        "--producer-id",
+        "0102030405060708090a0b0c0d0e0f33",
+        "--rate",
+        "50"
+      ]
+    },
+    {
+      "action": "client",
+      "name": "observer",
+      "mode": "observer",
+      "scenario": "observe",
+      "background": true
+    },
+    {
+      "action": "client",
+      "name": "flood",
+      "mode": "supervisor",
+      "scenario": "flood",
+      "background": true,
+      "args": [
+        "--rate",
+        "20000"
+      ]
+    },
+    {
+      "action": "client",
+      "name": "flood2",
+      "mode": "supervisor",
+      "scenario": "flood",
+      "background": true,
+      "args": [
+        "--rate",
+        "20000"
+      ]
+    },
+    {
+      "action": "client",
+      "name": "supervisor",
+      "mode": "supervisor",
+      "scenario": "command_flood",
+      "timeout_s": 30,
+      "args": [
+        "--producer-id",
+        "0102030405060708090a0b0c0d0e0f33",
+        "--rate",
+        "50"
+      ]
+    },
+    {
+      "action": "stop_runtime",
+      "signal": "SIGTERM",
+      "timeout_s": 10,
+      "expect_clean": true
+    },
+    {
+      "action": "signal_client",
+      "name": "flood",
+      "signal": "SIGTERM"
+    },
+    {
+      "action": "signal_client",
+      "name": "flood2",
+      "signal": "SIGTERM"
+    },
+    {
+      "action": "wait_client",
+      "name": "flood2",
+      "timeout_s": 15,
+      "allow_exit": [
+        0,
+        -15
+      ]
+    },
+    {
+      "action": "wait_client",
+      "name": "flood",
+      "timeout_s": 15,
+      "allow_exit": [
+        0,
+        -15
+      ]
+    },
+    {
+      "action": "signal_client",
+      "name": "producer",
+      "signal": "SIGTERM"
+    },
+    {
+      "action": "wait_client",
+      "name": "producer",
+      "timeout_s": 15,
+      "allow_exit": [
+        0,
+        -15
+      ]
+    },
+    {
+      "action": "signal_client",
+      "name": "observer",
+      "signal": "SIGTERM"
+    },
+    {
+      "action": "wait_client",
+      "name": "observer",
+      "timeout_s": 15,
+      "allow_exit": [
+        0,
+        -15
+      ]
+    }
+  ],
+  "checks": [
+    {
+      "check": "flood_drops",
+      "params": {
+        "client": "flood"
+      }
+    },
+    {
+      "check": "request_drops",
+      "params": {
+        "min": 1
+      }
+    },
+    {
+      "check": "client_check",
+      "params": {
+        "client": "supervisor",
+        "names": [
+          "stop_under_flood",
+          "tracking_granted",
+          "damping_applied",
+          "zero_torque_applied"
+        ]
+      }
+    },
+    {
+      "check": "targets_served",
+      "params": {
+        "file": "trace_run1.jsonl",
+        "min_command_seqs": 5
+      }
+    },
+    {
+      "check": "client_measurement",
+      "params": {
+        "client": "supervisor",
+        "name": "stop_latency_us",
+        "max": 250000
+      }
+    },
+    {
+      "check": "trace_complete",
+      "params": {
+        "file": "trace_run1.jsonl",
+        "min_ticks": 1000
+      }
+    },
+    {
+      "check": "deadlines",
+      "params": {
+        "file": "trace_run1.jsonl",
+        "max_gap_us": 10000,
+        "min_rate_hz": 450
+      }
+    },
+    {
+      "check": "overruns",
+      "params": {
+        "max_worst_overrun_us": 20000
+      }
+    }
+  ]
+}

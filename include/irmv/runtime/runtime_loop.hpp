@@ -18,12 +18,16 @@
 // the fake backend before it touches a device or DDS.
 //
 //   robot_runtime --config PATH [--domain N] [--fake-scenario PATH]
+//                 [--output-trace PATH]
 //
 // `--config` is mandatory. `--domain` overrides the configured DDS domain and
 // accepts the same inclusive 0..230 range the configuration parser enforces for
 // `dds.domain`. `--fake-scenario` is only meaningful for the fake backend and
 // injects scripted feedback and write acceptance into the backend; it never
-// adds a protocol topic.
+// adds a protocol topic. `--output-trace` is the test-only per-tick output
+// trace: one JSON-lines record per applied torque write, rendered off the
+// control thread. It belongs to the fake deployment like every other option of
+// this binary and is skipped entirely when it is absent.
 //
 // Startup order is fixed: parse the command line, load and validate the
 // configuration, build the runtime identity, initialize the fake backend,
@@ -59,6 +63,10 @@ struct RuntimeOptions {
   std::filesystem::path config_path;
   std::optional<std::uint32_t> dds_domain;
   std::optional<std::filesystem::path> fake_scenario_path;
+  // Test-only per-tick output trace. The file is created before the control
+  // loop starts and is refused when it cannot be opened; nothing else about the
+  // runtime changes when the option is absent.
+  std::optional<std::filesystem::path> output_trace_path;
 };
 
 // Result of parsing argv. `error` is set and `ok` is false for every rejected

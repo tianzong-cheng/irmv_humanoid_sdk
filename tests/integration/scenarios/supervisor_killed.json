@@ -1,0 +1,199 @@
+{
+  "name": "supervisor_killed",
+  "description": "The supervisor is SIGKILLed while tracking: the runtime falls back on the supervisor timeout although an independent producer keeps sending, and the packets of the dead supervisor, replayed afterwards, extend nothing. The runtime is left in Damping with a revoked session, which the shutdown policy deliberately refuses to leave on its own, so the process is killed after the SIGTERM attempt is reported.",
+  "domain": 204,
+  "runtime": {
+    "config": "config/sdk.json",
+    "fake_scenario": "tests/support/fake_ramp.json",
+    "output_trace": "trace_run%d.jsonl"
+  },
+  "steps": [
+    {
+      "action": "start_runtime"
+    },
+    {
+      "action": "wait_log",
+      "pattern": "state=\"ZeroTorque\"",
+      "timeout_s": 15
+    },
+    {
+      "action": "client",
+      "name": "producer",
+      "mode": "producer",
+      "scenario": "producer",
+      "background": true,
+      "args": [
+        "--producer-id",
+        "0102030405060708090a0b0c0d0e0f33",
+        "--rate",
+        "50"
+      ]
+    },
+    {
+      "action": "client",
+      "name": "observer",
+      "mode": "observer",
+      "scenario": "observe",
+      "background": true
+    },
+    {
+      "action": "client",
+      "name": "supervisor",
+      "mode": "supervisor",
+      "scenario": "supervisor_killed_record",
+      "background": true,
+      "args": [
+        "--producer-id",
+        "0102030405060708090a0b0c0d0e0f33",
+        "--rate",
+        "50",
+        "--replay",
+        "killed_packets.jsonl"
+      ]
+    },
+    {
+      "action": "wait_log",
+      "pattern": "AuthorizationGranted",
+      "timeout_s": 15
+    },
+    {
+      "action": "sleep_ms",
+      "ms": 300
+    },
+    {
+      "action": "signal_client",
+      "name": "supervisor",
+      "signal": "SIGKILL"
+    },
+    {
+      "action": "wait_client",
+      "name": "supervisor",
+      "timeout_s": 10,
+      "allow_exit": [
+        -9
+      ]
+    },
+    {
+      "action": "sleep_ms",
+      "ms": 900,
+      "note": "the supervisor timeout is 300 ms"
+    },
+    {
+      "action": "client",
+      "name": "replay",
+      "mode": "supervisor",
+      "scenario": "stale_context_replay",
+      "timeout_s": 30,
+      "args": [
+        "--replay",
+        "killed_packets.jsonl"
+      ]
+    },
+    {
+      "action": "signal_client",
+      "name": "producer",
+      "signal": "SIGTERM"
+    },
+    {
+      "action": "wait_client",
+      "name": "producer",
+      "timeout_s": 15,
+      "allow_exit": [
+        0,
+        -15
+      ]
+    },
+    {
+      "action": "signal_client",
+      "name": "observer",
+      "signal": "SIGTERM"
+    },
+    {
+      "action": "wait_client",
+      "name": "observer",
+      "timeout_s": 15,
+      "allow_exit": [
+        0,
+        -15
+      ]
+    },
+    {
+      "action": "stop_runtime",
+      "signal": "SIGTERM",
+      "timeout_s": 3,
+      "expect_clean": false,
+      "expect_exit": false
+    }
+  ],
+  "checks": [
+    {
+      "check": "fallback",
+      "params": {
+        "client": "observer",
+        "reason": "SupervisorTimeout",
+        "state": "Damping",
+        "session_revoked": true,
+        "base": {
+          "kind": "signal",
+          "client": "supervisor",
+          "signal": "SIGKILL"
+        },
+        "min_ms": 200,
+        "max_ms": 400
+      }
+    },
+    {
+      "check": "tracking_frozen",
+      "params": {
+        "client": "observer",
+        "min_states": 20,
+        "base": {
+          "kind": "after_reason",
+          "client": "observer",
+          "reason": "SupervisorTimeout"
+        }
+      }
+    },
+    {
+      "check": "client_check",
+      "params": {
+        "client": "replay",
+        "names": [
+          "replayed_session_scoped_rejected",
+          "no_automatic_tracking"
+        ]
+      }
+    },
+    {
+      "check": "replay_rejected",
+      "params": {
+        "client": "replay",
+        "reasons": [
+          "WrongSession",
+          "EpochMismatch",
+          "StaleRequest",
+          "WrongInstance",
+          "InvalidTransition",
+          "Malformed"
+        ],
+        "scope": "session"
+      }
+    },
+    {
+      "check": "trace_complete",
+      "params": {
+        "file": "trace_run1.jsonl",
+        "min_ticks": 1000,
+        "allow_missing_end": true
+      }
+    },
+    {
+      "check": "deadlines",
+      "params": {
+        "file": "trace_run1.jsonl",
+        "max_gap_us": 10000,
+        "min_rate_hz": 450
+      }
+    }
+  ]
+}

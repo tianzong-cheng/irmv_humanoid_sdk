@@ -1,0 +1,1258 @@
+#!/usr/bin/env python3
+"""Scenario harness of the runtime failure matrix (Task 10).
+
+Every file in tests/integration/scenarios/ is one scenario: an isolated DDS
+domain, the runtime invocation (configuration, fake scenario, output trace), the
+client invocations with their steps (start, wait, SIGSTOP/SIGCONT, SIGKILL,
+SIGTERM, restart) and the checks that must hold. This script runs exactly one of
+them and returns non-zero unless every check passed, so CTest can register each
+scenario as an independent entry:
+
+  run_integration.py --scenario FILE --runtime BIN --client BIN --source DIR \\
+                     --work-dir DIR
+
+`--all` runs every scenario of the source tree in one process and prints one
+summary line per scenario; it is meant for manual runs, never for CTest.
+
+Evidence: the runtime log, every client's JSON-lines observations and stderr and
+the per-tick output trace are collected in the work directory, the selected
+domain is recorded in domain.txt, and every check prints what it measured. A
+step that did not run is never reported as a pass: the scenario fails at the
+first step that does not complete.
+
+Only the standard library is used.
+"""
+
+import argparse
+import json
+import os
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+# The client and the runtime both stamp observations with the host monotonic
+# clock, which is the clock Python exposes as time.monotonic on Linux: arrival
+# stamps of different processes are therefore directly comparable.
+def now_us():
+    return time.monotonic_ns() // 1000
+
+
+class Failure(Exception):
+    """A step or a check that did not hold."""
+
+
+class Processes:
+    """Every process the scenario started, so nothing survives a failure."""
+
+    def __init__(self):
+        self.runtime = None
+        self.clients = {}
+
+    def shutdown(self):
+        for client in list(self.clients.values()):
+            client.kill()
+        if self.runtime is not None:
+            self.runtime.kill()
+
+
+class StreamDrain(threading.Thread):
+    """Reads one pipe into a byte sink without blocking the child."""
+
+    def __init__(self, stream, sink):
+        super().__init__(daemon=True)
+        self.stream = stream
+        self.sink = sink
+
+    def run(self):
+        try:
+            for line in iter(self.stream.readline, b""):
+                self.sink.append(line)
+        except (OSError, ValueError):
+            pass
+
+
+class Runtime:
+    """One robot_runtime process.
+
+    stdout is merged into stderr, which is where the structured log goes, and
+    both are left undrained until `drain()` is called: the slow-logger scenario
+    needs the logger's consumer to block on a full pipe.
+    """
+
+    def __init__(self, binary, work_dir, run_index):
+        self.binary = Path(binary)
+        self.work_dir = Path(work_dir)
+        self.run_index = run_index
+        self.log_path = self.work_dir / ("runtime_run%d.log" % run_index)
+        self.trace_path = self.work_dir / ("trace_run%d.jsonl" % run_index)
+        self.process = None
+        self.lines = []
+        self.drainer = None
+        self.arguments = []
+        self.started_us = 0
+
+    def start(self, arguments):
+        self.arguments = list(arguments)
+        self.lines = []
+        self.process = subprocess.Popen(
+            [str(self.binary)] + self.arguments,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            cwd=str(self.work_dir),
+        )
+        self.started_us = now_us()
+        return self
+
+    def drain(self):
+        if self.drainer is None and self.process is not None:
+            self.drainer = StreamDrain(self.process.stdout, self.lines)
+            self.drainer.start()
+
+    def text(self):
+        return b"".join(self.lines).decode("utf-8", "replace")
+
+    def wait_for(self, pattern, timeout_s):
+        """Waits for a log line while draining, and returns the matching line."""
+        self.drain()
+        deadline = time.monotonic() + timeout_s
+        expression = re.compile(pattern)
+        seen = 0
+        while time.monotonic() < deadline:
+            while seen < len(self.lines):
+                line = self.lines[seen].decode("utf-8", "replace")
+                seen += 1
+                if expression.search(line):
+                    return line
+            if self.process.poll() is not None and seen >= len(self.lines):
+                raise Failure(
+                    "the runtime exited with %s before matching %r"
+                    % (self.process.returncode, pattern)
+                )
+            time.sleep(0.02)
+        raise Failure("the runtime did not match %r within %.1f s" % (pattern, timeout_s))
+
+    def signal(self, name):
+        if self.process is None or self.process.poll() is not None:
+            raise Failure("the runtime is not running, cannot send %s" % name)
+        self.process.send_signal(getattr(signal, name))
+
+    def wait_exit(self, timeout_s):
+        """Drains and waits for the exit; returns the code or None on timeout."""
+        self.drain()
+        try:
+            return self.process.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            return None
+
+    def alive(self):
+        return self.process is not None and self.process.poll() is None
+
+    def kill(self):
+        if self.process is None or self.process.poll() is not None:
+            return
+        try:
+            self.process.kill()
+        except OSError:
+            pass
+        self.process.wait(timeout=10)
+        self.drain()
+
+    def write_log(self):
+        self.log_path.write_text(self.text())
+
+    def clean_stop(self):
+        """Parsed `clean shutdown:` line, or None when the run did not print it."""
+        found = re.search(r"robot_runtime: clean shutdown: ([^\n]*)\n", self.text())
+        if found is None:
+            return None
+        values = {}
+        for token in found.group(1).split():
+            if "=" not in token:
+                continue
+            key, value = token.split("=", 1)
+            try:
+                values[key] = int(value)
+            except ValueError:
+                values[key] = value
+        return values
+
+
+class Client:
+    """One runtime_client process with an unbounded JSON-lines reader."""
+
+    def __init__(self, binary, name, work_dir):
+        self.binary = Path(binary)
+        self.name = name
+        self.work_dir = Path(work_dir)
+        self.stdout_path = self.work_dir / ("client_%s.jsonl" % name)
+        self.stderr_path = self.work_dir / ("client_%s.err" % name)
+        self.process = None
+        self.out_lines = []
+        self.err_lines = []
+        self.out_drain = None
+        self.err_drain = None
+        self.command = []
+        self.started_us = 0
+
+    def start(self, arguments):
+        self.command = list(arguments)
+        self.process = subprocess.Popen(
+            [str(self.binary)] + self.command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=str(self.work_dir),
+        )
+        self.started_us = now_us()
+        self.out_drain = StreamDrain(self.process.stdout, self.out_lines)
+        self.err_drain = StreamDrain(self.process.stderr, self.err_lines)
+        self.out_drain.start()
+        self.err_drain.start()
+        return self
+
+    def signal(self, name):
+        if self.process is None or self.process.poll() is not None:
+            raise Failure("client %s is not running, cannot send %s"
+                          % (self.name, name))
+        self.process.send_signal(getattr(signal, name))
+        return now_us()
+
+    def wait_exit(self, timeout_s):
+        if self.process.poll() is None:
+            try:
+                return self.process.wait(timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                return None
+        return self.process.returncode
+
+    def alive(self):
+        return self.process is not None and self.process.poll() is None
+
+    def kill(self):
+        if self.process is None or self.process.poll() is not None:
+            return
+        try:
+            self.process.kill()
+        except OSError:
+            pass
+        self.process.wait(timeout=10)
+
+    def records(self):
+        """Every JSON line the client printed, in arrival order."""
+        parsed = []
+        for line in list(self.out_lines):
+            text = line.decode("utf-8", "replace").strip()
+            if not text:
+                continue
+            try:
+                parsed.append(json.loads(text))
+            except json.JSONDecodeError:
+                continue
+        return parsed
+
+    def summary(self):
+        for record in reversed(self.records()):
+            if record.get("kind") == "client_summary":
+                return record
+        return None
+
+    def stderr_text(self):
+        return b"".join(self.err_lines).decode("utf-8", "replace")
+
+    def write_logs(self):
+        self.stdout_path.write_bytes(b"".join(self.out_lines))
+        self.stderr_path.write_bytes(b"".join(self.err_lines))
+
+    def check(self, name):
+        summary = self.summary()
+        if summary is None:
+            raise Failure("client %s printed no summary" % self.name)
+        return bool(summary.get("checks", {}).get(name, False))
+
+    def measurement(self, name, default=None):
+        summary = self.summary()
+        if summary is None:
+            return default
+        return summary.get("measurements", {}).get(name, default)
+
+    def states(self):
+        return [r for r in self.records() if r.get("kind") == "state"]
+
+    def results(self):
+        return [r for r in self.records()
+                if r.get("kind") in ("result", "result_suppressed")]
+
+
+class Context:
+    """Everything a step or a check may look at, and the evidence collected."""
+
+    def __init__(self, scenario, source, work_dir):
+        self.scenario = scenario
+        self.source = Path(source)
+        self.work_dir = Path(work_dir)
+        self.processes = Processes()
+        self.domain = 0
+        self.steps = []
+        self.signals = []
+        self.runs = []
+        self.traces = []
+        self.domain_lock = None
+        self.measurements = []
+        self.report = []
+
+    def client(self, name):
+        client = self.processes.clients.get(name)
+        if client is None:
+            raise Failure("no client named %s was started" % name)
+        return client
+
+    def runtime(self):
+        if self.processes.runtime is None:
+            raise Failure("the runtime was never started")
+        return self.processes.runtime
+
+    def signal_time(self, client_name, signal_name):
+        for entry in reversed(self.signals):
+            if entry["client"] == client_name and entry["signal"] == signal_name:
+                return entry["t_us"]
+        raise Failure("no %s was sent to %s" % (signal_name, client_name))
+
+    def write_evidence(self):
+        self.processes.runtime and self.processes.runtime.write_log()
+        for client in self.processes.clients.values():
+            client.write_logs()
+        (self.work_dir / "domain.txt").write_text(
+            "%d\n" % self.domain, encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Scenario setup
+# ---------------------------------------------------------------------------
+
+def set_dotted(mapping, dotted, value):
+    parts = dotted.split(".")
+    target = mapping
+    for part in parts[:-1]:
+        target = target.setdefault(part, {})
+    target[parts[-1]] = value
+
+
+def rtps_ports(domain):
+    base = 7400 + 250 * domain
+    return [base, base + 1, base + 10, base + 11]
+
+
+def domain_is_free(domain):
+    """True when every RTPS port of the domain can be bound right now."""
+    sockets = []
+    try:
+        for port in rtps_ports(domain):
+            probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            probe.bind(("0.0.0.0", port))
+            sockets.append(probe)
+    except OSError:
+        return False
+    finally:
+        for probe in sockets:
+            probe.close()
+    return True
+
+
+def release_domain(lock_path):
+    if lock_path is not None:
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
+
+
+def choose_domain(declared, work_dir):
+    """The declared domain, claimed so that no two scenarios can share one.
+
+    Below 230 because the default RTPS port mapping overflows above it. Free
+    means every RTPS port of the domain can be bound right now, and it is
+    claimed with an exclusive lock file next to the work directories, so two
+    scenario entries running at the same time (ctest -j) never select the same
+    domain even when the declared one is already taken. The lock records the
+    process id, so a lock left behind by a killed run does not block a domain
+    for ever.
+    """
+    shared = Path(work_dir).resolve().parent
+    for offset in range(0, 40):
+        candidate = 190 + ((declared - 190 + offset) % 40)
+        if candidate >= 230:
+            continue
+        if not domain_is_free(candidate):
+            continue
+        lock = shared / (".domain-%d.lock" % candidate)
+        try:
+            handle = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            owner = None
+            try:
+                owner = int(lock.read_text().strip())
+            except (OSError, ValueError):
+                owner = None
+            if owner is not None:
+                try:
+                    os.kill(owner, 0)
+                    continue  # another scenario holds this domain right now
+                except OSError:
+                    pass
+            continue
+        os.write(handle, str(os.getpid()).encode())
+        os.close(handle)
+        (Path(work_dir) / "domain.txt").write_text("%d\n" % candidate,
+                                                   encoding="utf-8")
+        return candidate, lock
+    raise Failure("no free DDS domain below 230 was found for %d" % declared)
+
+
+def build_runtime_arguments(ctx, run_index):
+    settings = ctx.scenario.get("runtime", {})
+    base = ctx.source / settings.get("config", "config/sdk.json")
+    config = json.loads(base.read_text())
+    for dotted, value in settings.get("config_overrides", {}).items():
+        set_dotted(config, dotted, value)
+    config["dds"]["domain"] = ctx.domain
+    config["telemetry"]["directory"] = str(ctx.work_dir / "logs")
+    config_path = ctx.work_dir / "config.json"
+    config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+
+    arguments = ["--config", str(config_path), "--domain", str(ctx.domain)]
+    fake = settings.get("fake_scenario")
+    if fake:
+        source_path = ctx.source / fake
+        copied = ctx.work_dir / "fake_scenario.json"
+        shutil.copyfile(source_path, copied)
+        arguments += ["--fake-scenario", str(copied)]
+    trace = settings.get("output_trace")
+    if trace:
+        name = trace % run_index if "%" in trace else trace
+        arguments += ["--output-trace", str(ctx.work_dir / name)]
+    return arguments
+
+
+def start_runtime(ctx):
+    run_index = len(ctx.runs) + 1
+    runtime = Runtime(ctx.runtime_binary, ctx.work_dir, run_index)
+    arguments = build_runtime_arguments(ctx, run_index)
+    runtime.start(arguments)
+    ctx.processes.runtime = runtime
+    ctx.runs.append(runtime)
+    if "--output-trace" in arguments:
+        ctx.traces.append(runtime.trace_path)
+    return runtime
+
+
+def client_arguments(ctx, step):
+    arguments = [
+        "--mode", step["mode"],
+        "--scenario", step["scenario"],
+        "--domain", str(ctx.domain),
+        "--config", str(ctx.work_dir / "config.json"),
+    ]
+    arguments += [str(value) for value in step.get("args", [])]
+    return arguments
+
+
+# ---------------------------------------------------------------------------
+# Steps
+# ---------------------------------------------------------------------------
+
+def step_start_runtime(ctx, step):
+    runtime = start_runtime(ctx)
+    return "started %s" % " ".join(runtime.arguments)
+
+
+def step_restart_runtime(ctx, step):
+    previous = ctx.runtime()
+    previous.drain()
+    previous.signal("SIGTERM")
+    code = previous.wait_exit(step.get("timeout_s", 10.0))
+    if code is None:
+        previous.kill()
+        raise Failure("the runtime did not exit on SIGTERM; a restart cannot "
+                      "reuse its domain")
+    runtime = start_runtime(ctx)
+    return "restarted the runtime (previous exit %s), run %d" % (
+        code, len(ctx.runs))
+
+
+def step_kill_runtime(ctx, step):
+    runtime = ctx.runtime()
+    runtime.drain()
+    runtime.signal(step.get("signal", "SIGKILL"))
+    code = runtime.wait_exit(step.get("timeout_s", 5.0))
+    if code is None:
+        runtime.kill()
+        raise Failure("the runtime ignored %s" % step.get("signal", "SIGKILL"))
+    return "runtime exited with %s" % code
+
+
+def step_stop_runtime(ctx, step):
+    runtime = ctx.runtime()
+    # Orderly shutdown: the caller has already confirmed ZeroTorque, so the
+    # runtime only has to leave. The pipe is drained first so a full pipe can
+    # never delay the final report.
+    runtime.drain()
+    runtime.signal(step.get("signal", "SIGTERM"))
+    timeout_s = step.get("timeout_s", 10.0)
+    code = runtime.wait_exit(timeout_s)
+    if not step.get("expect_exit", True):
+        # A scenario may end in a state the shutdown policy deliberately refuses
+        # to leave on its own (Damping with a revoked session). That the process
+        # ignores the signal is then the assertion, and it is killed afterwards.
+        if code is not None:
+            raise Failure("the runtime left a state it must not leave without a "
+                          "supervisor (exit %s)" % code)
+        state = None
+        found = re.findall(r"state=(\w+)", runtime.text())
+        if found:
+            state = found[-1]
+        runtime.kill()
+        return ("the runtime stayed in %s and was killed" % state)
+    if code is None:
+        runtime.kill()
+        raise Failure("the runtime did not exit within %.1f s of %s"
+                      % (timeout_s, step.get("signal", "SIGTERM")))
+    clean = runtime.clean_stop()
+    if step.get("expect_clean", True):
+        if code != 0 or clean is None:
+            raise Failure("the runtime did not stop cleanly: exit %s, clean "
+                          "line %s" % (code, clean))
+    return "runtime exit=%s clean=%s" % (code, clean)
+
+
+def step_drain_runtime_logs(ctx, step):
+    ctx.runtime().drain()
+    time.sleep(step.get("ms", 100) / 1000.0)
+    return "runtime log drained (%d lines so far)" % len(ctx.runtime().lines)
+
+
+def step_wait_log(ctx, step):
+    line = ctx.runtime().wait_for(step["pattern"], step.get("timeout_s", 10.0))
+    return "matched %r" % line.strip()
+
+
+def step_client(ctx, step):
+    name = step["name"]
+    if name in ctx.processes.clients:
+        raise Failure("client %s was already started" % name)
+    client = Client(ctx.client_binary, name, ctx.work_dir)
+    client.start(client_arguments(ctx, step))
+    ctx.processes.clients[name] = client
+    if step.get("background"):
+        return "started %s in the background" % name
+    return wait_for_client(ctx, client, step)
+
+
+def wait_for_client(ctx, client, step):
+    timeout_s = step.get("timeout_s", 30.0)
+    code = client.wait_exit(timeout_s)
+    if code is None:
+        client.kill()
+        raise Failure("client %s did not finish within %.1f s"
+                      % (client.name, timeout_s))
+    allowed = step.get("allow_exit", [0])
+    if code not in allowed:
+        raise Failure("client %s exited with %s (allowed %s); stderr: %s"
+                      % (client.name, code, allowed,
+                         client.stderr_text().strip()[-800:]))
+    summary = client.summary()
+    if code == 0 and summary is None:
+        raise Failure("client %s exited 0 without a summary" % client.name)
+    return "%s exit=%s checks=%s" % (
+        client.name, code, None if summary is None
+        else json.dumps(summary.get("checks", {})))
+
+
+def step_wait_client(ctx, step):
+    client = ctx.client(step["name"])
+    return wait_for_client(ctx, client, step)
+
+
+def step_signal_client(ctx, step):
+    client = ctx.client(step["name"])
+    name = step["signal"]
+    if not client.alive():
+        # Pausing a process that already ended would be a step that did not run;
+        # stopping one that ended by itself is already satisfied.
+        if name in ("SIGTERM", "SIGKILL"):
+            return "%s had already exited with %s" % (client.name,
+                                                      client.process.returncode)
+        raise Failure("client %s had already exited, %s was not delivered"
+                      % (client.name, name))
+    sent_us = client.signal(name)
+    ctx.signals.append({"client": client.name, "signal": name, "t_us": sent_us})
+    return "%s received %s at %d" % (client.name, name, sent_us)
+
+
+def step_sleep(ctx, step):
+    milliseconds = step.get("ms", 100)
+    time.sleep(milliseconds / 1000.0)
+    return "slept %d ms" % milliseconds
+
+
+STEP_HANDLERS = {
+    "start_runtime": step_start_runtime,
+    "restart_runtime": step_restart_runtime,
+    "kill_runtime": step_kill_runtime,
+    "stop_runtime": step_stop_runtime,
+    "drain_runtime_logs": step_drain_runtime_logs,
+    "wait_log": step_wait_log,
+    "client": step_client,
+    "wait_client": step_wait_client,
+    "signal_client": step_signal_client,
+    "sleep_ms": step_sleep,
+}
+
+
+def run_steps(ctx):
+    for index, step in enumerate(ctx.scenario["steps"], start=1):
+        action = step.get("action")
+        handler = STEP_HANDLERS.get(action)
+        if handler is None:
+            raise Failure("step %d uses the unknown action %r" % (index, action))
+        started = now_us()
+        try:
+            detail = handler(ctx, step)
+        except Failure as failure:
+            ctx.steps.append({"index": index, "action": action, "ok": False,
+                              "detail": str(failure), "t_us": started})
+            ctx.report.append("    step %2d %-20s FAILED: %s"
+                              % (index, action, failure))
+            raise Failure("step %d (%s) failed: %s" % (index, action, failure))
+        ctx.steps.append({"index": index, "action": action, "ok": True,
+                          "detail": detail, "t_us": started})
+        line = "    step %2d %-20s %s" % (index, action, detail)
+        ctx.report.append(line)
+        print(line)
+
+
+# ---------------------------------------------------------------------------
+# Traces
+# ---------------------------------------------------------------------------
+
+def load_trace(ctx, name):
+    path = ctx.work_dir / name
+    if not path.exists():
+        raise Failure("the output trace %s does not exist" % name)
+    ticks = []
+    end = None
+    lines = 0
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        lines += 1
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            raise Failure("the output trace %s has an unparseable line" % name)
+        if record.get("kind") == "tick":
+            ticks.append(record)
+        elif record.get("kind") == "end":
+            end = record
+    if not ticks:
+        raise Failure("the output trace %s has no tick record" % name)
+    return {"path": path, "ticks": ticks, "end": end, "lines": lines}
+
+
+def tracked_ticks(trace):
+    return [t for t in trace["ticks"]
+            if t["action"] == "Tracking" and t["target_present"]]
+
+
+def clamp(value, limit):
+    return max(-limit, min(limit, value))
+
+
+# ---------------------------------------------------------------------------
+# Checks
+# ---------------------------------------------------------------------------
+
+def check_trace_complete(ctx, params):
+    trace = load_trace(ctx, params["file"])
+    ticks = trace["ticks"]
+    numbers = [t["tick"] for t in ticks]
+    contiguous = numbers == list(range(numbers[0], numbers[0] + len(numbers)))
+    end = trace["end"]
+    minimum = params.get("min_ticks", 1)
+    problems = []
+    if not contiguous:
+        gaps = [b - a for a, b in zip(numbers, numbers[1:]) if b != a + 1]
+        problems.append("%d tick gaps in the sequence (e.g. %s)"
+                        % (len(gaps), gaps[:3]))
+    if end is None:
+        if not params.get("allow_missing_end"):
+            problems.append(
+                "the trace has no end record: the writer never finished")
+    elif end.get("dropped") or end.get("write_failures"):
+        problems.append("the writer dropped %s records and failed %s writes"
+                        % (end.get("dropped"), end.get("write_failures")))
+    if len(ticks) < minimum:
+        problems.append("only %d ticks, expected at least %d"
+                        % (len(ticks), minimum))
+    detail = ("%d ticks %d..%d contiguous=%s end=%s"
+              % (len(ticks), numbers[0], numbers[-1], contiguous, end))
+    return (not problems, detail + ("" if not problems else "; " + "; ".join(problems)),
+            [("trace_ticks", len(ticks))])
+
+
+def check_output_formula(ctx, params):
+    trace = load_trace(ctx, params["file"])
+    limits = params["limits"]
+    tolerance = params.get("tolerance", 1e-9)
+    checked = 0
+    mismatches = []
+    for tick in tracked_ticks(trace):
+        for joint in range(tick["joint_count"]):
+            limit = limits[joint]
+            raw = (tick["target_kp"][joint] * (tick["target_q"][joint]
+                                               - tick["measured_q"][joint])
+                   + tick["target_kd"][joint] * (tick["target_dq"][joint]
+                                                 - tick["measured_dq"][joint])
+                   + tick["target_tau_ff"][joint])
+            expected = clamp(raw, limit)
+            checked += 1
+            if abs(expected - tick["torque"][joint]) > tolerance:
+                mismatches.append((tick["tick"], joint, expected,
+                                   tick["torque"][joint]))
+    detail = ("%d joint values over %d tracked ticks recomputed exactly, "
+              "%d mismatches%s"
+              % (checked, len(tracked_ticks(trace)), len(mismatches),
+                 "" if not mismatches else " e.g. %s" % (mismatches[:2],)))
+    return (not mismatches, detail, [("formula_joint_values", checked)])
+
+
+def check_command_recomputed(ctx, params):
+    trace = load_trace(ctx, params["file"])
+    groups = {}
+    for tick in tracked_ticks(trace):
+        key = (tick["epoch"], tick["target"]["command_seq"])
+        groups.setdefault(key, []).append(tick)
+    state_dependent = 0
+    varying = 0
+    stale = []
+    for key, ticks in groups.items():
+        # Only a frame whose gains read the measured state can require a
+        # different torque for a different measurement.
+        joint = next((index for index in range(ticks[0]["joint_count"])
+                      if ticks[0]["target_kp"][index] != 0.0
+                      or ticks[0]["target_kd"][index] != 0.0), None)
+        if joint is None:
+            continue
+        state_dependent += 1
+        # Only the measured quantities the frame really reads: a frame with kd=0
+        # does not look at the measured velocity at all.
+        def reading(tick, index=joint):
+            values = []
+            if tick["target_kp"][index] != 0.0:
+                values.append(round(tick["measured_q"][index], 9))
+            if tick["target_kd"][index] != 0.0:
+                values.append(round(tick["measured_dq"][index], 9))
+            return tuple(values)
+        measurements = {reading(t) for t in ticks}
+        if len(measurements) < 2:
+            continue
+        varying += 1
+        torques = {round(t["torque"][joint], 9) for t in ticks}
+        if len(torques) < 2:
+            stale.append(key)
+    minimum = params.get("min_command_seqs", 1)
+    ok = varying >= minimum and not stale
+    detail = ("%d of %d state-reading command sequences saw more than one "
+              "measurement and recomputed their torque; %d kept the torque "
+              "despite a different measurement%s"
+              % (varying, state_dependent, len(stale),
+                 "" if not stale else " %s" % stale[:3]))
+    return ok, detail, [("command_seqs_recomputed", varying),
+                        ("command_seqs_state_reading", state_dependent)]
+
+
+def check_torque_clamp(ctx, params):
+    trace = load_trace(ctx, params["file"])
+    limit = params["limit"]
+    bound = 0
+    for tick in tracked_ticks(trace):
+        for joint in range(tick["joint_count"]):
+            raw = (tick["target_kp"][joint] * (tick["target_q"][joint]
+                                               - tick["measured_q"][joint])
+                   + tick["target_kd"][joint] * (tick["target_dq"][joint]
+                                                 - tick["measured_dq"][joint])
+                   + tick["target_tau_ff"][joint])
+            if abs(raw) > limit and abs(abs(tick["torque"][joint]) - limit) < 1e-9:
+                bound += 1
+    minimum = params.get("min_values", 1)
+    detail = "%d joint values were held at the %g Nm limit" % (bound, limit)
+    return bound >= minimum, detail, [("clamped_joint_values", bound)]
+
+
+def check_torque_step(ctx, params):
+    trace = load_trace(ctx, params["file"])
+    ticks = trace["ticks"]
+    largest = 0.0
+    where = None
+    for previous, current in zip(ticks, ticks[1:]):
+        if current["tick"] != previous["tick"] + 1:
+            continue
+        for joint in range(min(previous["joint_count"], current["joint_count"])):
+            step = abs(current["torque"][joint] - previous["torque"][joint])
+            if step > largest:
+                largest = step
+                where = (previous["tick"], joint,
+                         previous["torque"][joint], current["torque"][joint])
+    minimum = params.get("min_step_nm", 1.0)
+    detail = ("largest torque change between neighbouring ticks is %.6g Nm at %s"
+              % (largest, where))
+    return largest >= minimum, detail, [("max_torque_step_nm", largest)]
+
+
+def check_target_expiry(ctx, params):
+    trace = load_trace(ctx, params["file"])
+    command_us = params["command_us"]
+    tracked = tracked_ticks(trace)
+    if not tracked:
+        raise Failure("no tracked tick holds a target")
+    epochs = sorted({t["epoch"] for t in tracked})
+    index = params.get("epoch_index", 0)
+    if index >= len(epochs):
+        raise Failure("the trace holds only %d tracking epochs" % len(epochs))
+    epoch = epochs[index]
+    ticks = trace["ticks"]
+    last_index = max(position for position, tick in enumerate(ticks)
+                     if tick["epoch"] == epoch and tick["target_present"])
+    last = ticks[last_index]
+    following = ticks[last_index + 1] if last_index + 1 < len(ticks) else None
+    if following is None:
+        raise Failure("the trace ends before the target expired")
+    held_us = last["stamp_us"] - last["target"]["rx_us"]
+    expired_us = following["stamp_us"] - last["target"]["rx_us"]
+    tolerance_us = params.get("tolerance_us", 0)
+    problems = []
+    if held_us > command_us + tolerance_us:
+        problems.append("the last tick that still held the target was already "
+                        "%.0f us past the deadline" % held_us)
+    if not (expired_us > command_us - tolerance_us):
+        problems.append("the next tick was only %.0f us past the receive stamp, "
+                        "so the target was not held to its deadline" % expired_us)
+    if following["target_present"]:
+        problems.append("the next tick still reported a target")
+    if following["action"] == "Tracking":
+        problems.append("the next tick was still tracking")
+    detail = ("target received at %d, last tick with the target %d us later, "
+              "next tick %d us later in state %s/%s"
+              % (last["target"]["rx_us"], held_us, expired_us,
+                 following["state"], following["action"]))
+    return not problems, detail + ("" if not problems else "; " + "; ".join(problems)), [
+        ("held_us", held_us), ("expired_us", expired_us)]
+
+
+def check_deadlines(ctx, params):
+    trace = load_trace(ctx, params["file"])
+    ticks = trace["ticks"]
+    largest = 0
+    for previous, current in zip(ticks, ticks[1:]):
+        if current["tick"] == previous["tick"] + 1:
+            largest = max(largest, current["stamp_us"] - previous["stamp_us"])
+    maximum = params.get("max_gap_us", 10000)
+    span_us = ticks[-1]["stamp_us"] - ticks[0]["stamp_us"]
+    rate = (len(ticks) - 1) * 1e6 / span_us if span_us > 0 else 0.0
+    minimum_rate = params.get("min_rate_hz", 400.0)
+    detail = ("largest tick gap %d us, %.1f Hz over %d ticks"
+              % (largest, rate, len(ticks)))
+    ok = largest <= maximum and rate >= minimum_rate
+    return ok, detail, [("max_tick_gap_us", largest), ("tick_rate_hz", rate)]
+
+
+def check_fallback(ctx, params):
+    client = ctx.client(params["client"])
+    base = params["base"]
+    if base["kind"] == "signal":
+        base_us = ctx.signal_time(base["client"], base["signal"])
+    elif base["kind"] == "client_start":
+        base_us = ctx.client(base["client"]).started_us
+    else:
+        base_us = 0
+    states = [s for s in client.states()
+              if s["t_us"] >= base_us and s["stop_reason"] == params["reason"]]
+    if not states:
+        raise Failure("no state with stop_reason %s was observed after %d"
+                      % (params["reason"], base_us))
+    first = states[0]
+    latency_ms = (first["t_us"] - base_us) / 1000.0
+    problems = []
+    if first["execution_state"] != params["state"]:
+        problems.append("the fallback state is %s" % first["execution_state"])
+    if params.get("session_required"):
+        if first["session_id"] == "0" * 32:
+            problems.append("the fallback revoked the session")
+    if params.get("session_revoked"):
+        if first["session_id"] != "0" * 32:
+            problems.append("the fallback kept the session %s" % first["session_id"])
+    if latency_ms < params.get("min_ms", 0.0):
+        problems.append("the fallback came after only %.1f ms" % latency_ms)
+    if latency_ms > params.get("max_ms", 1e9):
+        problems.append("the fallback came after %.1f ms" % latency_ms)
+    detail = ("%s after %.1f ms (state %s, action %s, session %s, epoch %s)"
+              % (params["reason"], latency_ms, first["execution_state"],
+                 first["output_action"], first["session_id"][:8], first["epoch"]))
+    return not problems, detail + ("" if not problems else "; " + "; ".join(problems)), [
+        ("fallback_latency_ms", latency_ms)]
+
+
+def check_tracking_frozen(ctx, params):
+    client = ctx.client(params["client"])
+    base = params["base"]
+    if base["kind"] == "signal":
+        base_us = ctx.signal_time(base["client"], base["signal"])
+    elif base["kind"] == "after_reason":
+        # The fallback needs a few control periods to be noticed: everything
+        # published before the state that reports it may still be tracking.
+        reported = [s for s in client.states()
+                    if s["stop_reason"] == base["reason"]]
+        if not reported:
+            raise Failure("no state reported the stop reason %s" % base["reason"])
+        base_us = reported[0]["t_us"]
+    else:
+        base_us = ctx.client(base["client"]).started_us
+    states = [s for s in client.states() if s["t_us"] >= base_us]
+    if len(states) < params.get("min_states", 5):
+        raise Failure("only %d states were observed after the event"
+                      % len(states))
+    tracking = [s for s in states if s["execution_state"] == "Tracking"]
+    sequences = {s["last_applied_command_seq"] for s in states}
+    detail = ("%d states after the event, %d still tracking, "
+              "last_applied_command_seq values %s"
+              % (len(states), len(tracking), sorted(sequences)))
+    ok = not tracking and len(sequences) <= params.get("max_sequences", 1)
+    return ok, detail, [("states_after_event", len(states))]
+
+
+def check_replay_rejected(ctx, params):
+    client = ctx.client(params["client"])
+    allowed = set(params["reasons"])
+    answers = [r for r in client.records() if r.get("kind") == "replay_answer"]
+    if not answers:
+        raise Failure("the replay produced no answer at all")
+    scope = params.get("scope", "session")
+    problems = []
+    scoped_applied = []
+    bootstrap_applied = []
+    unexpected = []
+    for answer in answers:
+        names_scope = (answer.get("sent_session_id", "0" * 32) != "0" * 32
+                       or answer.get("sent_epoch", 0) != 0)
+        if answer["status"] == "Applied":
+            (scoped_applied if names_scope else bootstrap_applied).append(answer)
+        elif answer["reason"] not in allowed:
+            unexpected.append(answer)
+    if scope == "session" and scoped_applied:
+        problems.append("%d replayed packets that named a session or an epoch "
+                        "were applied" % len(scoped_applied))
+    if scope == "all" and (scoped_applied or bootstrap_applied):
+        problems.append("%d replayed packets were applied"
+                        % (len(scoped_applied) + len(bootstrap_applied)))
+    if unexpected:
+        problems.append("unexpected rejection reasons %s"
+                        % sorted({a["reason"] for a in unexpected}))
+    counted = client.measurement("replay_session_scoped_applied", None)
+    if counted:
+        problems.append("the client counted %s applied session-scoped replays"
+                        % counted)
+    reasons = {}
+    for answer in answers:
+        reasons[answer["reason"]] = reasons.get(answer["reason"], 0) + 1
+    detail = ("%d replayed requests answered, %d applied session-scoped, "
+              "%d applied as a bootstrap, reasons %s"
+              % (len(answers), len(scoped_applied), len(bootstrap_applied),
+                 reasons))
+    return not problems, detail + ("" if not problems else "; " + "; ".join(problems)), [
+        ("replayed_answers", len(answers)),
+        ("replayed_session_scoped_applied", len(scoped_applied))]
+
+
+def check_request_drops(ctx, params):
+    """The transport's own count of inbound requests it could not deliver."""
+    clean = ctx.runtime().clean_stop()
+    if clean is None:
+        raise Failure("the runtime printed no clean shutdown line")
+    dropped = clean.get("request_dropped", 0)
+    commands = clean.get("command_dropped", 0)
+    detail = ("the runtime dropped %d inbound requests and %d joint commands "
+              "while the control loop kept running over %d ticks"
+              % (dropped, commands, clean.get("ticks", 0)))
+    return dropped >= params.get("min", 1), detail, [("request_dropped", dropped),
+                                                     ("command_dropped", commands)]
+
+
+def check_flood_drops(ctx, params):
+    client = ctx.client(params["client"])
+    sent = client.measurement("flood_sent", None)
+    answered = client.measurement("flood_answered", None)
+    if sent is None or answered is None:
+        raise Failure("the flood client reported no counts")
+    clean = ctx.runtime().clean_stop()
+    transport = clean.get("transport_dropped") if clean else "unknown"
+    detail = ("the flood sent %s requests and the runtime answered %s of them: "
+              "%s requests were never answered (its transport counter reports "
+              "%s dropped samples)" % (sent, answered, sent - answered, transport))
+    return answered < sent, detail, [("flood_sent", sent),
+                                     ("flood_answered", answered)]
+
+
+def check_client_check(ctx, params):
+    client = ctx.client(params["client"])
+    summary = client.summary()
+    if summary is None:
+        raise Failure("client %s printed no summary" % params["client"])
+    checks = summary.get("checks", {})
+    names = params["names"] if isinstance(params["names"], list) else [params["names"]]
+    missing = [name for name in names if not checks.get(name, False)]
+    detail = "%s: %s" % (params["client"], json.dumps(checks))
+    return not missing, detail, []
+
+
+def check_client_measurement(ctx, params):
+    client = ctx.client(params["client"])
+    value = client.measurement(params["name"], None)
+    if value is None:
+        raise Failure("client %s reported no measurement %s"
+                      % (params["client"], params["name"]))
+    problems = []
+    if "min" in params and not value >= params["min"]:
+        problems.append("%s < %s" % (value, params["min"]))
+    if "max" in params and not value <= params["max"]:
+        problems.append("%s > %s" % (value, params["max"]))
+    detail = "%s = %s" % (params["name"], value)
+    return not problems, detail + ("" if not problems else " (%s)"
+                                   % "; ".join(problems)), [
+        (params["name"], value)]
+
+
+def check_confirmation_orders(ctx, params):
+    client = ctx.client(params["client"])
+    orders = [r.get("order") for r in client.records()
+              if r.get("kind") == "confirmed"]
+    required = set(params["orders"])
+    detail = "%d confirmations, orders %s" % (len(orders), orders)
+    return required.issubset(set(orders)), detail, [("confirmations", len(orders))]
+
+
+def check_targets_served(ctx, params):
+    trace = load_trace(ctx, params["file"])
+    frames = {(t["epoch"], t["target"]["command_seq"])
+              for t in tracked_ticks(trace)}
+    minimum = params.get("min_command_seqs", 2)
+    detail = "%d distinct target frames were commanded" % len(frames)
+    return len(frames) >= minimum, detail, [("distinct_target_frames", len(frames))]
+
+
+def check_replay_no_authorization(ctx, params):
+    client = ctx.client(params["client"])
+    tracking = [s for s in client.states() if s["execution_state"] == "Tracking"]
+    sessions = {s["session_id"] for s in client.states()}
+    detail = ("%d states during the replay, %d in Tracking, sessions %s"
+              % (len(client.states()), len(tracking),
+                 sorted(value[:8] for value in sessions)))
+    ok = not tracking and client.measurement("replay_tracking_states", 0) == 0
+    return ok, detail, [("replay_tracking_states", len(tracking))]
+
+
+def check_instance_changed(ctx, params):
+    record = ctx.client(params["record_client"])
+    replay = ctx.client(params["replay_client"])
+
+    def instances(client):
+        return {s["runtime_id"] for s in client.states()}
+
+    before = instances(record)
+    after = instances(replay)
+    if len(before) != 1 or len(after) != 1:
+        raise Failure("expected one runtime instance per run, saw %s and %s"
+                      % (sorted(before), sorted(after)))
+    sent = {r["sent_runtime_id"] for r in replay.records()
+            if r.get("kind") == "replay"
+            and r.get("packet") == "request"
+            and "sent_runtime_id" in r}
+    old = next(iter(before))
+    new = next(iter(after))
+    detail = ("recorded instance %s, live instance %s%s"
+              % (old[:12], new[:12],
+                 "" if not sent else ", replayed packets named %s"
+                 % sorted(value[:12] for value in sent)))
+    return old != new and sent == {old}, detail, []
+
+
+def check_logger_dropped(ctx, params):
+    clean = ctx.runtime().clean_stop()
+    if clean is None:
+        raise Failure("the runtime printed no clean shutdown line")
+    dropped = clean.get("dropped", 0)
+    undrained = clean.get("undrained", 0)
+    detail = ("the logger dropped %d events and left %d undrained while the "
+              "consumer was blocked" % (dropped, undrained))
+    return dropped >= params.get("min", 1), detail, [("log_dropped", dropped),
+                                                     ("log_undrained", undrained)]
+
+
+def check_overruns(ctx, params):
+    clean = ctx.runtime().clean_stop()
+    if clean is None:
+        raise Failure("the runtime printed no clean shutdown line")
+    worst = clean.get("worst_overrun_us", 0)
+    overruns = clean.get("overruns", 0)
+    detail = ("the control loop counted %d overruns, worst %d us, over %d ticks"
+              % (overruns, worst, clean.get("ticks", 0)))
+    ok = (worst <= params.get("max_worst_overrun_us", 5000)
+          and overruns <= params.get("max_overruns", 10 ** 9))
+    return ok, detail, [("overruns", overruns), ("worst_overrun_us", worst)]
+
+
+CHECKS = {
+    "trace_complete": check_trace_complete,
+    "output_formula": check_output_formula,
+    "command_recomputed": check_command_recomputed,
+    "torque_clamp": check_torque_clamp,
+    "torque_step": check_torque_step,
+    "target_expiry": check_target_expiry,
+    "deadlines": check_deadlines,
+    "fallback": check_fallback,
+    "tracking_frozen": check_tracking_frozen,
+    "replay_rejected": check_replay_rejected,
+    "request_drops": check_request_drops,
+    "replay_no_authorization": check_replay_no_authorization,
+    "instance_changed": check_instance_changed,
+    "logger_dropped": check_logger_dropped,
+    "overruns": check_overruns,
+    "confirmation_orders": check_confirmation_orders,
+    "flood_drops": check_flood_drops,
+    "targets_served": check_targets_served,
+    "client_check": check_client_check,
+    "client_measurement": check_client_measurement,
+}
+
+
+# ---------------------------------------------------------------------------
+# Driver
+# ---------------------------------------------------------------------------
+
+def run_scenario(runtime_binary, client_binary, source, scenario_path, work_dir):
+    scenario = json.loads(Path(scenario_path).read_text())
+    name = scenario["name"]
+    work = Path(work_dir) / name
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True, exist_ok=True)
+    ctx = Context(scenario, source, work)
+    ctx.runtime_binary = Path(runtime_binary).resolve()
+    ctx.client_binary = Path(client_binary).resolve()
+    ctx.domain, ctx.domain_lock = choose_domain(scenario["domain"], work)
+    print("  scenario %s: domain %d, %s"
+          % (name, ctx.domain, scenario.get("description", "")))
+    failures = []
+    steps_done = False
+    try:
+        run_steps(ctx)
+        steps_done = True
+    except Failure as failure:
+        failures.append(str(failure))
+    finally:
+        ctx.write_evidence()
+        try:
+            ctx.processes.shutdown()
+        finally:
+            ctx.write_evidence()
+            release_domain(ctx.domain_lock)
+
+    if steps_done:
+        for check in scenario.get("checks", []):
+            handler = CHECKS.get(check["check"])
+            parameters = check.get("params", {})
+            if handler is None:
+                ok, detail, measurements = False, "unknown check", []
+            else:
+                try:
+                    ok, detail, measurements = handler(ctx, parameters)
+                except Failure as failure:
+                    ok, detail, measurements = False, str(failure), []
+                except Exception as error:  # noqa: BLE001 - reported, not hidden
+                    ok, detail, measurements = False, "check error: %r" % error, []
+            line = ("    check %-24s %s  %s"
+                    % (check["check"], "PASS" if ok else "FAIL", detail))
+            ctx.report.append(line)
+            print(line)
+            for key, value in measurements:
+                ctx.measurements.append("%s.%s=%s" % (check["check"], key, value))
+            if not ok:
+                failures.append("check %s: %s" % (check["check"], detail))
+    else:
+        print("    %d check(s) not evaluated: a step did not complete"
+              % len(scenario.get("checks", [])))
+
+    summary = ["  scenario %s: domain %d, %s"
+               % (name, ctx.domain, scenario.get("description", ""))
+               ] + ctx.report + [
+        "    domain=%d runtime_arguments=%s" % (
+            ctx.domain, " ".join(ctx.runs[0].arguments) if ctx.runs else "-")]
+    if ctx.measurements:
+        summary.append("    measurements: %s" % ", ".join(ctx.measurements))
+    for failure in failures:
+        summary.append("  failure: %s" % failure)
+    summary.append("  scenario %s: %s" % (name, "FAILED" if failures else "PASSED"))
+    (work / "report.txt").write_text("\n".join(summary) + "\n", encoding="utf-8")
+    for line in summary[1:]:
+        print(line)
+    return failures
+
+
+def scenario_files(source):
+    directory = Path(source) / "tests" / "integration" / "scenarios"
+    return sorted(directory.glob("*.json"))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--scenario", help="one scenario JSON file")
+    parser.add_argument("--all", action="store_true",
+                        help="run every scenario of the source tree")
+    parser.add_argument("--runtime", required=True)
+    parser.add_argument("--client", required=True)
+    parser.add_argument("--source", required=True)
+    parser.add_argument("--work-dir", required=True)
+    arguments = parser.parse_args()
+    if not arguments.scenario and not arguments.all:
+        parser.error("either --scenario or --all is required")
+
+    if arguments.all:
+        results = []
+        for path in scenario_files(arguments.source):
+            failures = run_scenario(arguments.runtime, arguments.client,
+                                    arguments.source, path, arguments.work_dir)
+            results.append((path.stem, failures))
+            # Participants of the previous scenario need a moment to release
+            # their ports before the next domain is claimed.
+            time.sleep(0.5)
+        print()
+        for name, failures in results:
+            print("%-20s %s" % (name, "FAILED" if failures else "PASSED"))
+            for failure in failures:
+                print("    %s" % failure)
+        return 1 if any(failures for _, failures in results) else 0
+
+    failures = run_scenario(arguments.runtime, arguments.client, arguments.source,
+                            arguments.scenario, arguments.work_dir)
+    if failures:
+        for failure in failures:
+            print("  failure: %s" % failure)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

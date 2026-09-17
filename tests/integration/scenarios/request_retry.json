@@ -1,0 +1,92 @@
+{
+  "name": "request_retry",
+  "description": "The answer of a tracking request is lost on purpose and the identical request is re-sent: the runtime answers the stored result without a second authorization and without applying anything twice.",
+  "domain": 202,
+  "runtime": {
+    "config": "config/sdk.json",
+    "fake_scenario": "tests/support/fake_scenario.json",
+    "output_trace": "trace_run%d.jsonl"
+  },
+  "steps": [
+    {
+      "action": "start_runtime"
+    },
+    {
+      "action": "wait_log",
+      "pattern": "state=\"ZeroTorque\"",
+      "timeout_s": 15
+    },
+    {
+      "action": "client",
+      "name": "supervisor",
+      "mode": "supervisor",
+      "scenario": "request_retry",
+      "timeout_s": 30,
+      "args": [
+        "--producer-id",
+        "0102030405060708090a0b0c0d0e0f33",
+        "--rate",
+        "50"
+      ]
+    },
+    {
+      "action": "stop_runtime",
+      "signal": "SIGTERM",
+      "timeout_s": 10,
+      "expect_clean": true
+    }
+  ],
+  "checks": [
+    {
+      "check": "client_check",
+      "params": {
+        "client": "supervisor",
+        "names": [
+          "retry_confirmed",
+          "retry_answered_twice",
+          "retry_same_answer",
+          "retry_no_second_authorization"
+        ]
+      }
+    },
+    {
+      "check": "client_measurement",
+      "params": {
+        "client": "supervisor",
+        "name": "retry_send_count",
+        "min": 2
+      }
+    },
+    {
+      "check": "client_measurement",
+      "params": {
+        "client": "supervisor",
+        "name": "max_epoch",
+        "max": 3
+      }
+    },
+    {
+      "check": "trace_complete",
+      "params": {
+        "file": "trace_run1.jsonl",
+        "min_ticks": 500
+      }
+    },
+    {
+      "check": "output_formula",
+      "params": {
+        "file": "trace_run1.jsonl",
+        "limits": [
+          20,
+          20
+        ]
+      }
+    },
+    {
+      "check": "overruns",
+      "params": {
+        "max_worst_overrun_us": 20000
+      }
+    }
+  ]
+}

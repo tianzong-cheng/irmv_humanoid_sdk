@@ -1,0 +1,193 @@
+{
+  "name": "normal",
+  "description": "Boot -> ZeroTorque -> Damping -> Tracking -> Damping -> ZeroTorque round trip over real DDS, confirmed in both arrival orders, with the per-tick output acceptance of the 50 Hz producer against the 500 Hz control loop.",
+  "domain": 201,
+  "runtime": {
+    "config": "config/sdk.json",
+    "fake_scenario": "tests/support/fake_ramp.json",
+    "output_trace": "trace_run%d.jsonl"
+  },
+  "steps": [
+    {
+      "action": "start_runtime"
+    },
+    {
+      "action": "wait_log",
+      "pattern": "state=\"ZeroTorque\"",
+      "timeout_s": 15
+    },
+    {
+      "action": "client",
+      "name": "producer",
+      "mode": "producer",
+      "scenario": "producer",
+      "background": true,
+      "args": [
+        "--producer-id",
+        "0102030405060708090a0b0c0d0e0f33",
+        "--rate",
+        "50"
+      ]
+    },
+    {
+      "action": "client",
+      "name": "observer",
+      "mode": "observer",
+      "scenario": "observe",
+      "background": true
+    },
+    {
+      "action": "client",
+      "name": "supervisor",
+      "mode": "supervisor",
+      "scenario": "normal",
+      "timeout_s": 30,
+      "args": [
+        "--producer-id",
+        "0102030405060708090a0b0c0d0e0f33",
+        "--rate",
+        "50"
+      ]
+    },
+    {
+      "action": "stop_runtime",
+      "signal": "SIGTERM",
+      "timeout_s": 10,
+      "expect_clean": true
+    },
+    {
+      "action": "signal_client",
+      "name": "producer",
+      "signal": "SIGTERM"
+    },
+    {
+      "action": "wait_client",
+      "name": "producer",
+      "timeout_s": 15,
+      "allow_exit": [
+        0,
+        -15
+      ]
+    },
+    {
+      "action": "signal_client",
+      "name": "observer",
+      "signal": "SIGTERM"
+    },
+    {
+      "action": "wait_client",
+      "name": "observer",
+      "timeout_s": 15,
+      "allow_exit": [
+        0,
+        -15
+      ]
+    }
+  ],
+  "checks": [
+    {
+      "check": "confirmation_orders",
+      "params": {
+        "client": "supervisor",
+        "orders": [
+          "state_first",
+          "result_first"
+        ]
+      }
+    },
+    {
+      "check": "client_check",
+      "params": {
+        "client": "supervisor",
+        "names": [
+          "target_expired_to_damping"
+        ]
+      }
+    },
+    {
+      "check": "client_check",
+      "params": {
+        "client": "producer",
+        "names": [
+          "producer_commanded",
+          "producer_source_state_fresh"
+        ]
+      }
+    },
+    {
+      "check": "trace_complete",
+      "params": {
+        "file": "trace_run1.jsonl",
+        "min_ticks": 1200
+      }
+    },
+    {
+      "check": "output_formula",
+      "params": {
+        "file": "trace_run1.jsonl",
+        "limits": [
+          20,
+          20
+        ],
+        "tolerance": 1e-09
+      }
+    },
+    {
+      "check": "command_recomputed",
+      "params": {
+        "file": "trace_run1.jsonl",
+        "min_command_seqs": 5
+      }
+    },
+    {
+      "check": "torque_clamp",
+      "params": {
+        "file": "trace_run1.jsonl",
+        "limit": 20,
+        "min_values": 10
+      }
+    },
+    {
+      "check": "torque_step",
+      "params": {
+        "file": "trace_run1.jsonl",
+        "min_step_nm": 14.0
+      }
+    },
+    {
+      "check": "target_expiry",
+      "params": {
+        "file": "trace_run1.jsonl",
+        "command_us": 100000
+      }
+    },
+    {
+      "check": "deadlines",
+      "params": {
+        "file": "trace_run1.jsonl",
+        "max_gap_us": 10000,
+        "min_rate_hz": 450
+      }
+    },
+    {
+      "check": "fallback",
+      "params": {
+        "client": "observer",
+        "reason": "CommandTimeout",
+        "state": "Damping",
+        "session_required": true,
+        "base": {
+          "kind": "client_start",
+          "client": "supervisor"
+        },
+        "max_ms": 3000
+      }
+    },
+    {
+      "check": "overruns",
+      "params": {
+        "max_worst_overrun_us": 20000
+      }
+    }
+  ]
+}

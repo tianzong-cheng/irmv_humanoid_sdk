@@ -58,6 +58,21 @@ class ExecutionFsm {
 
   protocol::Sequence tick() const { return tick_; }
 
+  // Read-only view of the accepted target the command gate holds: the frame the
+  // Tracking output is recomputed from on every tick, and the transport receive
+  // stamp of that frame. The test-only output trace reads them; nothing in the
+  // control path changes behaviour because of them. No target is held outside
+  // Tracking.
+  bool has_target() const { return gate_.has_target(); }
+
+  const protocol::JointCommand &current_target() const {
+    return gate_.current_target();
+  }
+
+  protocol::TimeUs target_rx_us() const {
+    return gate_.last_valid_command_rx_us();
+  }
+
  private:
   // Per-tick data shared with the per-state implementations in
   // src/runtime/states/*.cpp.

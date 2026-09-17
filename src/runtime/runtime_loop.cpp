@@ -1,6 +1,7 @@
 #include "irmv/runtime/runtime_loop.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -22,6 +23,7 @@
 
 #include "irmv/runtime/execution_fsm.hpp"
 #include "irmv/telemetry/logger.hpp"
+#include "irmv/transport/bounded_channel.hpp"
 #include "irmv/transport/dds_transport.hpp"
 
 namespace irmv::runtime {
@@ -287,6 +289,446 @@ bool ReportsOutputAction(EventCode code) {
 }
 
 // ---------------------------------------------------------------------------
+// Test-only output trace
+// ---------------------------------------------------------------------------
+//
+// One JSON-lines record per torque write of the fake backend, built from what
+// really happened: the backend's own output history and the state the tick
+// published. Nothing in the trace is recomputed or interpolated, so a tick whose
+// record went missing stays a hole in the recorded tick sequence and the
+// consumer must fail the acceptance instead of repairing it. A tick whose write
+// was refused and whose safe fallback was attempted carries two records - the
+// same tick twice - and the consumer reads the last one as the effective write.
+//
+// The control thread only copies a fixed-size record into a bounded channel; one
+// writer thread owns the file, so a slow or blocked file system can never delay
+// a control tick. A full channel drops the record and counts it, which is the
+// only honest report of a trace that is not complete.
+
+inline constexpr std::size_t kTraceChannelCapacity = 64;
+// Writes the control thread drains from the backend history per call. A tick
+// makes one write, or two when a refused write is followed by the safe
+// fallback, so the buffer stays small and the loop repeats the drain.
+inline constexpr std::size_t kTraceDrainBatch = 8;
+// Largest line a record renders to: eight joint arrays of 64 values, each
+// printed round-trip exact, plus the scalars. A record that does not fit is
+// refused and counted instead of being truncated into a wrong measurement.
+inline constexpr std::size_t kTraceLineCapacity = 24 * 1024;
+// Writer idle poll. Long enough to cost nothing, short enough that a record
+// reaches the file well inside the next control period.
+inline constexpr std::uint32_t kTraceIdleSleepUs = 250;
+
+struct OutputTraceRecord {
+  protocol::Sequence tick{0};
+  protocol::TimeUs stamp_us{0};
+  protocol::ExecutionState execution_state{protocol::ExecutionState::Boot};
+  protocol::OutputAction output_action{protocol::OutputAction::ZeroTorque};
+  protocol::Id runtime_id{};
+  protocol::Id session_id{};
+  protocol::Id producer_id{};
+  protocol::Sequence epoch{0};
+  protocol::Sequence fault_id{0};
+  protocol::Sequence last_applied_command_seq{0};
+  bool write_accepted{false};
+  bool has_target{false};
+  protocol::TimeUs target_rx_us{0};
+  protocol::Sequence target_command_seq{0};
+  protocol::Sequence target_epoch{0};
+  protocol::Sequence target_source_state_seq{0};
+  protocol::Id target_producer_id{};
+  std::uint32_t joint_count{0};
+  std::array<double, protocol::kMaxJoints> target_q{};
+  std::array<double, protocol::kMaxJoints> target_dq{};
+  std::array<double, protocol::kMaxJoints> target_kp{};
+  std::array<double, protocol::kMaxJoints> target_kd{};
+  std::array<double, protocol::kMaxJoints> target_tau_ff{};
+  std::array<double, protocol::kMaxJoints> measured_q{};
+  std::array<double, protocol::kMaxJoints> measured_dq{};
+  std::array<double, protocol::kMaxJoints> torque{};
+};
+
+// Allocation-free JSON writer over a caller buffer. Every append is checked:
+// overflow is reported once and the record is refused by the caller, so a
+// truncated line never looks like a measurement.
+class JsonLine {
+ public:
+  JsonLine(char *buffer, std::size_t capacity)
+      : buffer_(buffer), capacity_(capacity) {
+    if (capacity_ > 0) {
+      buffer_[0] = '\0';
+    }
+  }
+
+  void Field(std::string_view name, std::uint64_t value) {
+    if (Key(name)) {
+      AppendUint(value);
+    }
+  }
+
+  void Field(std::string_view name, bool value) {
+    if (Key(name)) {
+      Append(value ? "true" : "false");
+    }
+  }
+
+  void Field(std::string_view name, double value) {
+    if (!Key(name)) {
+      return;
+    }
+    char rendered[40];
+    const int written = std::snprintf(rendered, sizeof(rendered), "%.17g", value);
+    if (written <= 0) {
+      Fail();
+      return;
+    }
+    Append(std::string_view(rendered,
+                            std::min<std::size_t>(static_cast<std::size_t>(written),
+                                                  sizeof(rendered) - 1)));
+  }
+
+  void Field(std::string_view name, const char *text) {
+    Field(name, std::string_view(text));
+  }
+
+  void Field(std::string_view name, std::string_view text) {
+    if (!Key(name)) {
+      return;
+    }
+    Append("\"");
+    for (const char byte : text) {
+      if (byte == '"' || byte == '\\') {
+        Append("\\");
+        Append(std::string_view(&byte, 1));
+      } else if (static_cast<unsigned char>(byte) < 0x20) {
+        Append("?");
+      } else {
+        Append(std::string_view(&byte, 1));
+      }
+    }
+    Append("\"");
+  }
+
+  // Identifiers cross the trace as their lowercase hex form, the same
+  // rendering the log uses.
+  void IdField(std::string_view name, const protocol::Id &id) {
+    if (!Key(name)) {
+      return;
+    }
+    constexpr char kHex[] = "0123456789abcdef";
+    char text[2 * protocol::kIdSize];
+    for (std::size_t index = 0; index < id.size(); ++index) {
+      text[2 * index] = kHex[(id[index] >> 4) & 0x0f];
+      text[2 * index + 1] = kHex[id[index] & 0x0f];
+    }
+    Append("\"");
+    Append(std::string_view(text, sizeof(text)));
+    Append("\"");
+  }
+
+  void ArrayField(std::string_view name, const double *values,
+                  std::uint32_t count) {
+    if (!Key(name)) {
+      return;
+    }
+    Append("[");
+    for (std::uint32_t index = 0; index < count; ++index) {
+      if (index != 0) {
+        Append(",");
+      }
+      char rendered[40];
+      const int written =
+          std::snprintf(rendered, sizeof(rendered), "%.17g", values[index]);
+      if (written <= 0) {
+        Fail();
+        return;
+      }
+      Append(std::string_view(rendered,
+                              std::min<std::size_t>(
+                                  static_cast<std::size_t>(written),
+                                  sizeof(rendered) - 1)));
+    }
+    Append("]");
+  }
+
+  // Root object of one record. Begin() opens it and resets the field list of
+  // the root scope so the first key does not inherit a comma.
+  void Begin() {
+    if (overflow_) {
+      return;
+    }
+    Append("{");
+    has_field_[nested_] = false;
+  }
+
+  void End() { Append("}"); }
+
+  void OpenObject(std::string_view name) {
+    if (!Key(name)) {
+      return;
+    }
+    Append("{");
+    if (nested_ > 0) {
+      Fail();
+      return;
+    }
+    ++nested_;
+    has_field_[nested_] = false;
+  }
+
+  void CloseObject() {
+    if (nested_ == 0) {
+      Fail();
+      return;
+    }
+    Append("}");
+    --nested_;
+    has_field_[nested_] = true;
+  }
+
+  bool ok() const { return !overflow_; }
+
+  std::string_view line() const { return {buffer_, size_}; }
+
+ private:
+  bool Key(std::string_view name) {
+    if (overflow_) {
+      return false;
+    }
+    if (has_field_[nested_]) {
+      Append(",");
+    }
+    Append("\"");
+    Append(name);
+    Append("\":");
+    return !overflow_;
+  }
+
+  void Fail() { overflow_ = true; }
+
+  void Append(std::string_view text) {
+    if (overflow_ || size_ + text.size() + 1 > capacity_) {
+      overflow_ = true;
+      return;
+    }
+    std::copy(text.begin(), text.end(), buffer_ + size_);
+    size_ += text.size();
+    buffer_[size_] = '\0';
+    has_field_[nested_] = true;
+  }
+
+  void Append(const char *text) { Append(std::string_view(text)); }
+
+  void AppendUint(std::uint64_t value) {
+    char buffer[24];
+    Append(UintText(value, buffer));
+  }
+
+  // Nesting is at most one level; the flags of the open scopes are kept for both
+  // levels so a nested object starts its own field list.
+  static constexpr std::size_t kMaxDepth = 2;
+  char *buffer_;
+  std::size_t capacity_;
+  std::size_t size_{0};
+  bool overflow_{false};
+  std::size_t nested_{0};
+  std::array<bool, kMaxDepth + 1> has_field_{};
+};
+
+OutputTraceRecord MakeTraceRecord(const ExecutionFsm &fsm,
+                                  const runtime::TickResult &result,
+                                  const hardware::OutputRecord &output) {
+  OutputTraceRecord record;
+  record.tick = fsm.tick();
+  record.stamp_us = output.write_stamp_us;
+  record.execution_state = result.state.execution_state;
+  record.output_action = result.state.output_action;
+  record.runtime_id = result.state.runtime_id;
+  record.session_id = result.state.session_id;
+  record.producer_id = result.state.producer_id;
+  record.epoch = result.state.epoch;
+  record.fault_id = result.state.fault_id;
+  record.last_applied_command_seq = result.state.last_applied_command_seq;
+  record.write_accepted = output.result.accepted;
+  record.has_target = fsm.has_target();
+  if (record.has_target) {
+    const protocol::JointCommand &target = fsm.current_target();
+    record.target_rx_us = fsm.target_rx_us();
+    record.target_command_seq = target.command_seq;
+    record.target_epoch = target.epoch;
+    record.target_source_state_seq = target.source_state_seq;
+    record.target_producer_id = target.producer_id;
+    record.target_q = target.joints.q;
+    record.target_dq = target.joints.dq;
+    record.target_kp = target.joints.kp;
+    record.target_kd = target.joints.kd;
+    record.target_tau_ff = target.joints.tau_ff;
+  }
+  record.joint_count = std::min<std::uint32_t>(result.state.feedback.count,
+                                               protocol::kMaxJoints);
+  for (std::uint32_t index = 0; index < record.joint_count; ++index) {
+    record.measured_q[index] = result.state.feedback.joints[index].q;
+    record.measured_dq[index] = result.state.feedback.joints[index].dq;
+  }
+  record.torque = output.output.torque;
+  return record;
+}
+
+// Control-thread front end of the trace: accepts fixed-size records into a
+// bounded channel and owns the writer thread and the file.
+class OutputTrace {
+ public:
+  explicit OutputTrace(std::filesystem::path path)
+      : path_(std::move(path)), line_(new char[kTraceLineCapacity]) {}
+
+  OutputTrace(const OutputTrace &) = delete;
+  OutputTrace &operator=(const OutputTrace &) = delete;
+
+  ~OutputTrace() { Stop(); }
+
+  bool Start();
+  void TryRecord(const OutputTraceRecord &record);
+  void Stop();
+
+  std::uint64_t recorded() const { return recorded_; }
+
+  std::uint64_t dropped() const { return dropped_; }
+
+  std::uint64_t write_failures() const { return write_failures_; }
+
+ private:
+  void Run();
+  void Render(const OutputTraceRecord &record);
+
+  std::filesystem::path path_;
+  std::ofstream file_;
+  std::unique_ptr<char[]> line_;
+  transport::BoundedChannel<OutputTraceRecord, kTraceChannelCapacity> channel_;
+  std::thread worker_;
+  std::atomic<bool> stop_requested_{false};
+  std::uint64_t recorded_{0};
+  std::uint64_t dropped_{0};
+  std::uint64_t write_failures_{0};
+  bool running_{false};
+};
+
+bool OutputTrace::Start() {
+  file_.open(path_, std::ios::out | std::ios::trunc);
+  if (!file_) {
+    std::fprintf(stderr, "robot_runtime: cannot open the output trace %s\n",
+                 path_.c_str());
+    return false;
+  }
+  worker_ = std::thread([this]() { Run(); });
+  running_ = true;
+  return true;
+}
+
+void OutputTrace::TryRecord(const OutputTraceRecord &record) {
+  if (running_ && !channel_.TryPush(record)) {
+    // A dropped record is a hole in the trace and is reported as one; it is
+    // never papered over by delaying the control loop.
+    ++dropped_;
+  }
+}
+
+void OutputTrace::Stop() {
+  if (!running_) {
+    return;
+  }
+  stop_requested_.store(true, std::memory_order_relaxed);
+  worker_.join();
+  running_ = false;
+  // The end record makes a truncated file distinguishable from a complete one:
+  // a consumer that does not find it knows the writer never finished.
+  JsonLine line(line_.get(), kTraceLineCapacity);
+  line.Begin();
+  line.Field("kind", "end");
+  line.Field("recorded", recorded_);
+  line.Field("dropped", dropped_);
+  line.Field("write_failures", write_failures_);
+  line.End();
+  if (line.ok()) {
+    std::string_view text = line.line();
+    file_.write(text.data(), static_cast<std::streamsize>(text.size()));
+    file_.put('\n');
+  }
+  file_.flush();
+  file_.close();
+}
+
+void OutputTrace::Run() {
+  OutputTraceRecord record;
+  while (true) {
+    if (channel_.TryPop(record)) {
+      Render(record);
+      continue;
+    }
+    if (stop_requested_.load(std::memory_order_relaxed)) {
+      // The control thread is the only producer and has already stopped pushing.
+      while (channel_.TryPop(record)) {
+        Render(record);
+      }
+      return;
+    }
+    std::this_thread::sleep_for(std::chrono::microseconds(kTraceIdleSleepUs));
+  }
+}
+
+void OutputTrace::Render(const OutputTraceRecord &record) {
+  JsonLine line(line_.get(), kTraceLineCapacity);
+  line.Begin();
+  line.Field("kind", "tick");
+  line.Field("tick", record.tick);
+  line.Field("stamp_us", record.stamp_us);
+  line.IdField("runtime_id", record.runtime_id);
+  line.IdField("session_id", record.session_id);
+  line.IdField("producer_id", record.producer_id);
+  line.Field("state", StateName(record.execution_state));
+  line.Field("action", OutputActionName(record.output_action));
+  line.Field("epoch", record.epoch);
+  line.Field("fault_id", record.fault_id);
+  line.Field("last_applied_command_seq", record.last_applied_command_seq);
+  line.Field("write_accepted", record.write_accepted);
+  line.Field("target_present", record.has_target);
+  line.OpenObject("target");
+  line.Field("rx_us", record.target_rx_us);
+  line.Field("command_seq", record.target_command_seq);
+  line.Field("epoch", record.target_epoch);
+  line.Field("source_state_seq", record.target_source_state_seq);
+  line.IdField("producer_id", record.target_producer_id);
+  line.CloseObject();
+  line.Field("joint_count", static_cast<std::uint64_t>(record.joint_count));
+  line.ArrayField("target_q", record.target_q.data(), record.joint_count);
+  line.ArrayField("target_dq", record.target_dq.data(), record.joint_count);
+  line.ArrayField("target_kp", record.target_kp.data(), record.joint_count);
+  line.ArrayField("target_kd", record.target_kd.data(), record.joint_count);
+  line.ArrayField("target_tau_ff", record.target_tau_ff.data(),
+                  record.joint_count);
+  line.ArrayField("measured_q", record.measured_q.data(), record.joint_count);
+  line.ArrayField("measured_dq", record.measured_dq.data(), record.joint_count);
+  line.ArrayField("torque", record.torque.data(), record.joint_count);
+  line.End();
+  if (!line.ok()) {
+    // Refused instead of truncated: the consumer sees the tick missing.
+    ++write_failures_;
+    return;
+  }
+  const std::string_view text = line.line();
+  file_.write(text.data(), static_cast<std::streamsize>(text.size()));
+  file_.put('\n');
+  if (!file_) {
+    if (write_failures_ == 0) {
+      std::fprintf(stderr,
+                   "robot_runtime: the output trace %s cannot be written\n",
+                   path_.c_str());
+    }
+    ++write_failures_;
+    return;
+  }
+  ++recorded_;
+}
+
+// ---------------------------------------------------------------------------
 // Log records
 // ---------------------------------------------------------------------------
 
@@ -413,11 +855,15 @@ void LogSummary(telemetry::Logger &logger, std::string_view message,
 // Final line on stderr: the logger is already stopped here, so the numbers are
 // final. Nothing about a clean stop is claimed before this point.
 void ReportCleanStop(const telemetry::Logger &logger, const LoopCounters &counters,
-                     const transport::DdsTransport &transport) {
+                     const transport::DdsTransport &transport,
+                     const OutputTrace *trace) {
   std::fprintf(stderr,
                "robot_runtime: clean shutdown: state=ZeroTorque ticks=%llu "
                "overruns=%llu worst_overrun_us=%llu written=%llu undrained=%llu "
-               "dropped=%llu filtered=%llu errors=%llu transport_dropped=%llu\n",
+               "dropped=%llu filtered=%llu errors=%llu transport_dropped=%llu "
+               "request_dropped=%llu command_dropped=%llu heartbeat_dropped=%llu "
+               "trace_active=%d trace_written=%llu trace_dropped=%llu "
+               "trace_failures=%llu\n",
                static_cast<unsigned long long>(counters.ticks),
                static_cast<unsigned long long>(counters.overruns),
                static_cast<unsigned long long>(counters.worst_overrun_us),
@@ -426,7 +872,20 @@ void ReportCleanStop(const telemetry::Logger &logger, const LoopCounters &counte
                static_cast<unsigned long long>(logger.Dropped()),
                static_cast<unsigned long long>(logger.Filtered()),
                static_cast<unsigned long long>(logger.error_count()),
-               static_cast<unsigned long long>(TransportDropped(transport)));
+               static_cast<unsigned long long>(TransportDropped(transport)),
+               static_cast<unsigned long long>(transport.dropped_request_count()),
+               static_cast<unsigned long long>(transport.dropped_command_count()),
+               static_cast<unsigned long long>(transport.dropped_heartbeat_count()),
+               trace == nullptr ? 0 : 1,
+               static_cast<unsigned long long>(trace == nullptr
+                                                   ? 0
+                                                   : trace->recorded()),
+               static_cast<unsigned long long>(trace == nullptr
+                                                   ? 0
+                                                   : trace->dropped()),
+               static_cast<unsigned long long>(trace == nullptr
+                                                   ? 0
+                                                   : trace->write_failures()));
 }
 
 // ---------------------------------------------------------------------------
@@ -859,6 +1318,10 @@ namespace {
 
 class ShutdownPlanner {
  public:
+  // Why the loop keeps running after a stop was requested. Reported once per
+  // change, never at control frequency.
+  enum class Notice { None, Boot, Motion, MotionWithoutSession, Fault, WriteRefused };
+
   // Returns the input of this tick. A stop signal while motion may still be
   // authorized adds the runtime's own ZeroTorque stop request to the stop lane
   // of this tick; every other tick passes the transport input through.
@@ -876,7 +1339,7 @@ class ShutdownPlanner {
       // machine with WrongSession, so no local request can leave this state:
       // the runtime reports it and keeps commanding damping torque, which is
       // exactly what "never report a stop that did not happen" requires.
-      Report(Notice::MotionWithoutSession);
+      Record(Notice::MotionWithoutSession);
       return &inbound;
     }
     if (now_us < next_attempt_us_) {
@@ -892,7 +1355,7 @@ class ShutdownPlanner {
     next_attempt_us_ = now_us + kStopRetryIntervalUs;
     // Requesting the stop and telling the operator that the runtime still waits
     // for the confirmation belong together: the request alone is not a stop.
-    Report(Notice::Motion);
+    Record(Notice::Motion);
     return stop_input_.get();
   }
 
@@ -904,32 +1367,38 @@ class ShutdownPlanner {
         if (result.write_result.accepted) {
           return true;
         }
-        Report(Notice::WriteRefused);
+        Record(Notice::WriteRefused);
         return false;
       case protocol::ExecutionState::Fault:
-        Report(Notice::Fault);
+        Record(Notice::Fault);
         return false;
       case protocol::ExecutionState::Boot:
-        Report(Notice::Boot);
+        Record(Notice::Boot);
         return false;
       case protocol::ExecutionState::Damping:
       case protocol::ExecutionState::Tracking:
-        Report(Notice::Motion);
+        Record(Notice::Motion);
         return false;
     }
     return false;
   }
 
- private:
-  enum class Notice { None, Boot, Motion, MotionWithoutSession, Fault, WriteRefused };
+  // One tick makes two decisions - what to request and whether to leave - and
+  // both may have a reason to report. Only the last decision of the tick is
+  // reported, and only when it differs from the previous report, so a state the
+  // runtime cannot leave on its own never prints at control frequency.
+  void Record(Notice notice) { pending_ = notice; }
 
-  // One report per situation: the state can change while the loop waits, but a
-  // status that repeats at control frequency is never printed on stderr.
-  void Report(Notice notice) {
-    if (notice == last_notice_) {
+  void FlushNotice() {
+    if (pending_ == last_notice_) {
       return;
     }
-    last_notice_ = notice;
+    last_notice_ = pending_;
+    Print(pending_);
+  }
+
+ private:
+  void Print(Notice notice) {
     switch (notice) {
       case Notice::None:
         return;
@@ -987,6 +1456,7 @@ class ShutdownPlanner {
     input->stop_request_count = 1;
   }
 
+  Notice pending_{Notice::None};
   Notice last_notice_{Notice::None};
   protocol::TimeUs next_attempt_us_{0};
   std::unique_ptr<TickInput> stop_input_;
@@ -1002,7 +1472,7 @@ protocol::TimeUs MonotonicUs() {
 
 const char *UsageLine() {
   return "usage: robot_runtime --config PATH [--domain N] "
-         "[--fake-scenario PATH]";
+         "[--fake-scenario PATH] [--output-trace PATH]";
 }
 
 CommandLine ParseCommandLine(int argc, char **argv) {
@@ -1024,6 +1494,14 @@ CommandLine ParseCommandLine(int argc, char **argv) {
         return result;
       }
       result.options.fake_scenario_path = argv[++index];
+      continue;
+    }
+    if (argument == "--output-trace") {
+      if (!has_value) {
+        result.error = "--output-trace requires a path";
+        return result;
+      }
+      result.options.output_trace_path = argv[++index];
       continue;
     }
     if (argument == "--domain") {
@@ -1094,6 +1572,19 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
     }
   }
 
+  // The output trace records the fake backend's own output history, so it is
+  // part of the fake deployment only: the backend gate above has already
+  // refused every other backend, which is what keeps this option away from a
+  // real device. A trace file that cannot be created is a startup error, not a
+  // silently missing measurement.
+  std::unique_ptr<OutputTrace> trace;
+  if (options.output_trace_path) {
+    trace = std::make_unique<OutputTrace>(*options.output_trace_path);
+    if (!trace->Start()) {
+      return kExitStartupError;
+    }
+  }
+
   const RuntimeIdentity identity = MakeRuntimeId();
   hardware::FakeBackend backend(config);
   backend.Initialize();
@@ -1102,12 +1593,14 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
   telemetry::Logger logger(config.telemetry);
   if (!logger.Start()) {
     std::fprintf(stderr, "robot_runtime: the logger did not start\n");
+    trace.reset();
     backend.Close();
     return kExitStartupError;
   }
   if (!InstallStopHandlers()) {
     std::fprintf(stderr, "robot_runtime: cannot install the stop handlers\n");
     logger.Stop();
+    trace.reset();
     backend.Close();
     return kExitStartupError;
   }
@@ -1119,6 +1612,7 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
     std::fprintf(stderr, "robot_runtime: transport start failed: %s\n",
                  error.what());
     logger.Stop();
+    trace.reset();
     backend.Close();
     return kExitStartupError;
   }
@@ -1163,12 +1657,29 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
         result.dropped_result_count + result.dropped_event_count;
     LogTickEvents(logger, result);
 
+    if (trace) {
+      // The torque the backend really recorded, one record per write the tick
+      // made: hand it to the writer thread, never to a file.
+      hardware::OutputRecord written[kTraceDrainBatch];
+      std::size_t drained = 0;
+      while ((drained = backend.DrainOutputHistory(written, kTraceDrainBatch)) >
+             0) {
+        for (std::size_t index = 0; index < drained; ++index) {
+          trace->TryRecord(MakeTraceRecord(fsm, result, written[index]));
+        }
+      }
+    }
+
+    if (stop_requested) {
+      shutdown.FlushNotice();
+    }
     if (stop_requested && shutdown.MayExit(result, fsm)) {
       LogSummary(logger, "shutdown", fsm, counters, transport, logger.Dropped(),
                  now);
       transport.Stop();
       logger.Stop();
-      ReportCleanStop(logger, counters, transport);
+      ReportCleanStop(logger, counters, transport, trace.get());
+      trace.reset();
       backend.Close();
       return kExitOk;
     }

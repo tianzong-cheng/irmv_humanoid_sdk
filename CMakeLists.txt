@@ -279,3 +279,78 @@ set_tests_properties(
     TIMEOUT 180
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
+
+# Confirmation helper of the integration tests: pure protocol logic, no DDS.
+add_executable(confirmation_test tests/integration/confirmation_test.cpp)
+target_compile_features(confirmation_test PRIVATE cxx_std_17)
+target_include_directories(
+  confirmation_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(confirmation_test PRIVATE irmv_protocol)
+
+add_test(NAME confirmation_test COMMAND confirmation_test)
+set_tests_properties(
+  confirmation_test
+  PROPERTIES
+    LABELS integration
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
+# Real-DDS test client of the scenario matrix. It speaks the frozen protocol on
+# the same topics and the same interface as the runtime; nothing of it is part
+# of the shipped runtime.
+add_executable(runtime_client tests/integration/runtime_client.cpp)
+target_compile_features(runtime_client PRIVATE cxx_std_17)
+target_include_directories(
+  runtime_client
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(
+  runtime_client
+  PRIVATE
+    irmv_transport
+    irmv_configuration
+    irmv_protocol
+    nlohmann_json::nlohmann_json
+    Threads::Threads
+)
+
+# Every scenario file is one independent CTest entry under the `integration`
+# label; the harness isolates the DDS domain of each entry below 230 itself.
+set(
+  IRMV_INTEGRATION_SCENARIOS
+  normal
+  request_retry
+  stale_context
+  supervisor_killed
+  supervisor_paused
+  producer_paused
+  runtime_restarted
+  command_flood
+  slow_logger
+)
+foreach(scenario IN LISTS IRMV_INTEGRATION_SCENARIOS)
+  add_test(
+    NAME integration_${scenario}
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${PROJECT_SOURCE_DIR}/tools/run_integration.py"
+      --scenario "${PROJECT_SOURCE_DIR}/tests/integration/scenarios/${scenario}.json"
+      --runtime "$<TARGET_FILE:robot_runtime>"
+      --client "$<TARGET_FILE:runtime_client>"
+      --source "${PROJECT_SOURCE_DIR}"
+      --work-dir "${CMAKE_CURRENT_BINARY_DIR}/integration"
+  )
+  set_tests_properties(
+    integration_${scenario}
+    PROPERTIES
+      LABELS integration
+      TIMEOUT 300
+      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+  )
+endforeach()

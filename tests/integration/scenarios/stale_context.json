@@ -1,0 +1,115 @@
+{
+  "name": "stale_context",
+  "description": "A complete cycle is recorded, the supervision lease is left to expire, and every saved packet (old session, old epoch, old commands and heartbeats) is replayed: nothing is re-authorized and nothing is extended.",
+  "domain": 203,
+  "runtime": {
+    "config": "config/sdk.json",
+    "fake_scenario": "tests/support/fake_scenario.json",
+    "output_trace": "trace_run%d.jsonl"
+  },
+  "steps": [
+    {
+      "action": "start_runtime"
+    },
+    {
+      "action": "wait_log",
+      "pattern": "state=\"ZeroTorque\"",
+      "timeout_s": 15
+    },
+    {
+      "action": "client",
+      "name": "record",
+      "mode": "supervisor",
+      "scenario": "stale_context_record",
+      "timeout_s": 30,
+      "args": [
+        "--producer-id",
+        "0102030405060708090a0b0c0d0e0f33",
+        "--rate",
+        "50",
+        "--replay",
+        "packets.jsonl"
+      ]
+    },
+    {
+      "action": "sleep_ms",
+      "ms": 900,
+      "note": "the lease of supervisor_us expires here"
+    },
+    {
+      "action": "client",
+      "name": "replay",
+      "mode": "supervisor",
+      "scenario": "stale_context_replay",
+      "timeout_s": 30,
+      "args": [
+        "--replay",
+        "packets.jsonl"
+      ]
+    },
+    {
+      "action": "stop_runtime",
+      "signal": "SIGTERM",
+      "timeout_s": 10,
+      "expect_clean": true
+    }
+  ],
+  "checks": [
+    {
+      "check": "client_check",
+      "params": {
+        "client": "replay",
+        "names": [
+          "replayed_session_scoped_rejected",
+          "no_automatic_tracking",
+          "replay_file_not_empty"
+        ]
+      }
+    },
+    {
+      "check": "replay_rejected",
+      "params": {
+        "client": "replay",
+        "reasons": [
+          "WrongSession",
+          "EpochMismatch",
+          "StaleRequest",
+          "WrongInstance",
+          "InvalidTransition",
+          "Malformed"
+        ],
+        "scope": "session"
+      }
+    },
+    {
+      "check": "replay_no_authorization",
+      "params": {
+        "client": "replay"
+      }
+    },
+    {
+      "check": "tracking_frozen",
+      "params": {
+        "client": "replay",
+        "min_states": 10,
+        "base": {
+          "kind": "client_start",
+          "client": "replay"
+        }
+      }
+    },
+    {
+      "check": "trace_complete",
+      "params": {
+        "file": "trace_run1.jsonl",
+        "min_ticks": 500
+      }
+    },
+    {
+      "check": "overruns",
+      "params": {
+        "max_worst_overrun_us": 20000
+      }
+    }
+  ]
+}
