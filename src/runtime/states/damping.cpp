@@ -12,9 +12,7 @@ void ExecutionFsm::EnterDamping(TickScope &scope) {
   output_action_ = protocol::OutputAction::Damping;
 }
 
-void ExecutionFsm::LeaveDamping(TickScope &scope) {
-  static_cast<void>(scope);
-}
+void ExecutionFsm::LeaveDamping(TickScope &scope) { static_cast<void>(scope); }
 
 hardware::TorqueOutput ExecutionFsm::StepDamping(TickScope &scope) {
   const ControlOutput control = ComputeDamping(config_, *scope.feedback);

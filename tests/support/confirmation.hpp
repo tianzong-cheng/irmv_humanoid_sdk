@@ -48,13 +48,15 @@ struct StateObservation {
 
 // Test-only log of the requests a client sent and the runtime traffic it saw.
 // An entry is only confirmed when an Applied result identifies the request and
-// the first state published at or after that result agrees with it, so a latched
-// fault, a revoked session, a newer epoch or another instance cannot be mistaken
-// for an answer. Entries are never removed: confirmation and supersession are
-// terminal, which keeps a stale answer from re-arming a withdrawn request.
+// the first state published at or after that result agrees with it, so a
+// latched fault, a revoked session, a newer epoch or another instance cannot be
+// mistaken for an answer. Entries are never removed: confirmation and
+// supersession are terminal, which keeps a stale answer from re-arming a
+// withdrawn request.
 class ConfirmationLog {
  public:
-  void Track(const protocol::ExecutionRequest &request, protocol::TimeUs send_us,
+  void Track(const protocol::ExecutionRequest &request,
+             protocol::TimeUs send_us,
              const ConfirmationExpectations &expectations = {}) {
     const std::size_t existing = FindIndex(request.request_id);
     if (existing != tracked_.size()) {
@@ -120,7 +122,8 @@ class ConfirmationLog {
     return entry != nullptr && LatestResult(entry->request) != nullptr;
   }
 
-  // Matching result observation of a request id, the latest one; nullptr when none.
+  // Matching result observation of a request id, the latest one; nullptr when
+  // none.
   const ResultObservation *result_of(protocol::Sequence request_id) const {
     const TrackedRequest *entry = Find(request_id);
     return entry == nullptr ? nullptr : LatestResult(entry->request);
@@ -286,8 +289,9 @@ class ConfirmationLog {
     }
     entry.status = ConfirmationStatus::Confirmed;
     entry.confirmed_session = result->result.session_id;
-    entry.order = witness->order < result->order ? ConfirmationOrder::StateFirst
-                                                : ConfirmationOrder::ResultFirst;
+    entry.order = witness->order < result->order
+                      ? ConfirmationOrder::StateFirst
+                      : ConfirmationOrder::ResultFirst;
   }
 
   std::vector<TrackedRequest> tracked_;

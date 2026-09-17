@@ -20,12 +20,14 @@
 // whose name ends in `_replay` re-sends the saved packets unchanged and reports
 // what the runtime answers.
 //
-// SIGSTOP and SIGCONT need no handling: the process simply stops running. SIGINT
-// and SIGTERM only set a flag, so the client leaves its loop, flushes its
-// observations and reports what it had reached.
+// SIGSTOP and SIGCONT need no handling: the process simply stops running.
+// SIGINT and SIGTERM only set a flag, so the client leaves its loop, flushes
+// its observations and reports what it had reached.
 //
 // Exit codes: 0 all checks of the scenario passed, 1 a check failed, 2 the
 // command line was rejected, 3 startup (configuration or DDS) failed.
+
+#include <unistd.h>
 
 #include <algorithm>
 #include <array>
@@ -35,6 +37,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <dds/dds.hpp>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -49,10 +52,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
-#include <unistd.h>
 #include <vector>
-
-#include <dds/dds.hpp>
 
 #include "execution.hpp"
 #include "irmv/configuration/config.hpp"
@@ -110,9 +110,9 @@ TimeUs NowUs() {
 constexpr Sequence kFloodBandWidth = 1ULL << 25;
 constexpr Sequence kFloodBandCount = 30000;
 
-// Random band of this process. Two live floods collide with probability 1/30000,
-// and a collision is caught by the client's own answered/sent cross-check rather
-// than corrupting the drop count.
+// Random band of this process. Two live floods collide with probability
+// 1/30000, and a collision is caught by the client's own answered/sent
+// cross-check rather than corrupting the drop count.
 Sequence MakeFloodBand() {
   std::uint64_t seed = 0;
   try {
@@ -301,10 +301,10 @@ const char *StopReasonName(StopReason reason) {
 // Pins the participant to the interface the runtime binds, exactly like the
 // transport does: both processes must meet on one domain and one network.
 std::string InterfaceConfig(const std::string &interface_name) {
-  return "<CycloneDDS><Domain id=\"any\"><General><Interfaces><NetworkInterface "
+  return "<CycloneDDS><Domain "
+         "id=\"any\"><General><Interfaces><NetworkInterface "
          "name=\"" +
-         interface_name +
-         "\"/></Interfaces></General></Domain></CycloneDDS>";
+         interface_name + "\"/></Interfaces></General></Domain></CycloneDDS>";
 }
 
 void Diagnostic(std::string_view text) {
@@ -480,8 +480,9 @@ class Traffic {
                                             : InterfaceConfig(interface_name)),
         publisher_(participant_),
         subscriber_(participant_),
-        request_topic_(participant_,
-                       std::string(irmv::protocol::kExecutionRequestTopic.name)),
+        request_topic_(
+            participant_,
+            std::string(irmv::protocol::kExecutionRequestTopic.name)),
         command_topic_(participant_,
                        std::string(irmv::protocol::kJointCommandTopic.name)),
         heartbeat_topic_(
@@ -1014,7 +1015,8 @@ void Client::Poll(bool result_first) {
       if (entry.status != ConfirmationStatus::Pending) {
         continue;
       }
-      if (earliest == nullptr || entry.first_send_us < earliest->first_send_us) {
+      if (earliest == nullptr ||
+          entry.first_send_us < earliest->first_send_us) {
         earliest = &entry;
       }
     }
@@ -1198,8 +1200,7 @@ ExecutionRequest Client::MakeRequest(Operation operation, Sequence request_id) {
   request.first_command.session_id = request.session_id;
   request.first_command.producer_id = producer_id_;
   request.first_command.stamp_us = now();
-  static_cast<void>(
-      request.first_command.layout_id.Assign(config_.layout_id));
+  static_cast<void>(request.first_command.layout_id.Assign(config_.layout_id));
   request.first_command.joints.count = joint_count();
   return request;
 }
@@ -1237,19 +1238,19 @@ bool Client::SendAndConfirm(ExecutionRequest request,
       if (observed != nullptr && entry != nullptr) {
         *observed = *entry;
       }
-      Emit(json{{"kind", "confirmed"},
-                {"t_us", now()},
-                {"request_id", request.request_id},
-                {"operation", OperationName(request.operation)},
-                {"order",
-                 entry != nullptr && entry->order == ConfirmationOrder::StateFirst
-                     ? "state_first"
-                     : "result_first"},
-                {"send_count", entry == nullptr ? 0 : entry->send_count},
-                {"session_id", IdHex(entry == nullptr
-                                         ? irmv::protocol::kNoId
-                                         : entry->confirmed_session)},
-                {"suppressed_results", drop_results}});
+      Emit(json{
+          {"kind", "confirmed"},
+          {"t_us", now()},
+          {"request_id", request.request_id},
+          {"operation", OperationName(request.operation)},
+          {"order",
+           entry != nullptr && entry->order == ConfirmationOrder::StateFirst
+               ? "state_first"
+               : "result_first"},
+          {"send_count", entry == nullptr ? 0 : entry->send_count},
+          {"session_id", IdHex(entry == nullptr ? irmv::protocol::kNoId
+                                                : entry->confirmed_session)},
+          {"suppressed_results", drop_results}});
       if (latest_state() != nullptr) {
         last_known_epoch_ = latest_state()->epoch;
       }
@@ -1280,10 +1281,9 @@ bool Client::SendAndConfirm(ExecutionRequest request,
 
   const ResultObservation *answer = confirm_.result_of(request.request_id);
   const std::string detail =
-      answer == nullptr
-          ? "no answer"
-          : std::string(StatusName(answer->result.status)) + "/" +
-                ReasonName(answer->result.reason);
+      answer == nullptr ? "no answer"
+                        : std::string(StatusName(answer->result.status)) + "/" +
+                              ReasonName(answer->result.reason);
   Diagnostic("request " + std::to_string(request.request_id) + " (" +
              OperationName(request.operation) + ") not confirmed: " + detail);
   Emit(json{{"kind", "unconfirmed"},
@@ -1371,8 +1371,7 @@ bool Client::EnsureTracking(bool result_first, int drop_results) {
   }
   const Sequence request_id = NextRequestId();
   const Sequence expected = state->epoch;
-  const Sequence proposed =
-      options_.epoch != 0 ? options_.epoch : expected + 1;
+  const Sequence proposed = options_.epoch != 0 ? options_.epoch : expected + 1;
   ExecutionRequest request = MakeRequest(Operation::Tracking, request_id);
   request.expected_epoch = expected;
   request.proposed_epoch = proposed;
@@ -1387,7 +1386,8 @@ bool Client::EnsureTracking(bool result_first, int drop_results) {
   TrackedRequest observed;
   const bool confirmed = SendAndConfirm(request, expectations, result_first,
                                         drop_results, 3'000'000, &observed);
-  Check(confirmed, "tracking_granted", "the tracking request was not confirmed");
+  Check(confirmed, "tracking_granted",
+        "the tracking request was not confirmed");
   if (!confirmed) {
     return false;
   }
@@ -1404,8 +1404,7 @@ bool Client::RequestZeroTorque(bool result_first) {
   TrackedRequest observed;
   const bool confirmed = SendAndConfirm(request, expectations, result_first, 0,
                                         3'000'000, &observed);
-  Check(confirmed, "zero_torque_applied",
-        "the stop request was not confirmed");
+  Check(confirmed, "zero_torque_applied", "the stop request was not confirmed");
   if (!confirmed) {
     return false;
   }
@@ -1533,7 +1532,8 @@ int Client::RunSupervisor() {
     request.expected_epoch = watermark;
     request.proposed_epoch = proposed;
     request.producer_id = producer_id_;
-    request.first_command = MakeFirstCommand(*state, command_seq_ + 1, proposed);
+    request.first_command =
+        MakeFirstCommand(*state, command_seq_ + 1, proposed);
     command_seq_ = request.first_command.command_seq;
     ConfirmationExpectations expectations;
     expectations.execution_state = ExecutionState::Tracking;
@@ -1610,7 +1610,8 @@ int Client::RunSupervisor() {
             window_epoch_ = state->epoch;
             window_start_us_ = now();
             ++window_index_;
-            command_seq_ = std::max(command_seq_, state->last_applied_command_seq);
+            command_seq_ =
+                std::max(command_seq_, state->last_applied_command_seq);
           }
           SendProducerCommand(*state);
         }
@@ -1629,15 +1630,17 @@ int Client::RunSupervisor() {
     return Finish("supervisor");
   }
 
-  if (scenario == "supervisor_killed" || scenario == "supervisor_killed_record" ||
+  if (scenario == "supervisor_killed" ||
+      scenario == "supervisor_killed_record" ||
       scenario == "supervisor_paused") {
     EnsureSession();
     EnsureDamping(true);
     if (!EnsureTracking(true, 0)) {
       return Finish("supervisor");
     }
-    // Stay in tracking and keep the lease alive; the harness stops or kills this
-    // process and the client reports the recovery it had to make afterwards.
+    // Stay in tracking and keep the lease alive; the harness stops or kills
+    // this process and the client reports the recovery it had to make
+    // afterwards.
     const TimeUs deadline = now() + 25'000'000;
     std::uint64_t recoveries = 0;
     bool recovered_and_held = false;
@@ -1689,9 +1692,10 @@ int Client::RunSupervisor() {
   }
 
   if (scenario == "write_refused") {
-    // The fake scenario refuses the torque write of a tracking tick. The runtime
-    // must latch the refusal as a fault, command zero torque instead, and leave
-    // the fault only for a matching Reset once the write path is healthy again.
+    // The fake scenario refuses the torque write of a tracking tick. The
+    // runtime must latch the refusal as a fault, command zero torque instead,
+    // and leave the fault only for a matching Reset once the write path is
+    // healthy again.
     EnsureSession();
     EnsureDamping(true);
     if (!EnsureTracking(true, 0)) {
@@ -1704,8 +1708,7 @@ int Client::RunSupervisor() {
       Poll(true);
       PumpHeartbeat();
       const RobotState *state = latest_state();
-      if (state != nullptr &&
-          state->execution_state == ExecutionState::Fault &&
+      if (state != nullptr && state->execution_state == ExecutionState::Fault &&
           state->fault_id != 0) {
         faulted = true;
         fault_id = state->fault_id;
@@ -1735,8 +1738,8 @@ int Client::RunSupervisor() {
         expectations.output_action = OutputAction::ZeroTorque;
         expectations.producer_id = irmv::protocol::kNoId;
         TrackedRequest observed;
-        reset = SendAndConfirm(request, expectations, true, 0, 500'000,
-                               &observed);
+        reset =
+            SendAndConfirm(request, expectations, true, 0, 500'000, &observed);
         // The pause keeps the lease alive: the supervisor timeout is 300 ms, so
         // waiting without a heartbeat would cost the session, not just the
         // attempt.
@@ -1762,19 +1765,17 @@ int Client::RunSupervisor() {
     if (!EnsureTracking(true, 0)) {
       return Finish("supervisor");
     }
-    const Sequence pre_fallback_seq = latest_state() == nullptr
-                                          ? 0
-                                          : latest_state()->last_applied_command_seq;
+    const Sequence pre_fallback_seq =
+        latest_state() == nullptr ? 0
+                                  : latest_state()->last_applied_command_seq;
     bool fell_back = false;
     const TimeUs grant_us = now();
     HoldTracking(5'000'000, true, grant_us, &fell_back);
     Check(fell_back, "command_timeout_damping",
           "the command timeout did not stop tracking");
     const RobotState *fallback = latest_state();
-    Check(fallback != nullptr &&
-              fallback->session_id != irmv::protocol::kNoId,
-          "fallback_keeps_session",
-          "the command timeout revoked the session");
+    Check(fallback != nullptr && fallback->session_id != irmv::protocol::kNoId,
+          "fallback_keeps_session", "the command timeout revoked the session");
     measurements_["pre_fallback_command_seq"] = pre_fallback_seq;
     // Re-authorizing is the only way back: the producer resumes under the epoch
     // of a second tracking request.
@@ -1799,9 +1800,9 @@ int Client::RunSupervisor() {
       return Finish("supervisor");
     }
     HoldTracking(1'000'000, false, now(), nullptr);
-    const Sequence applied_before = latest_state() == nullptr
-                                        ? 0
-                                        : latest_state()->last_applied_command_seq;
+    const Sequence applied_before =
+        latest_state() == nullptr ? 0
+                                  : latest_state()->last_applied_command_seq;
     // The stop travels on the dedicated stop lane and must not be starved,
     // whatever the ordinary request lane is carrying.
     // The state may well have fallen back to Damping already (a starved command
@@ -1836,7 +1837,8 @@ int Client::RunFlood() {
   // answers, and no band reaches the supervisor's own ids. The client also
   // cross-checks its count against what it sent (a band collision would show up
   // as more answers than sends instead of a silently wrong drop count).
-  const Sequence flood_base = kFloodRequestBase + MakeFloodBand() * kFloodBandWidth;
+  const Sequence flood_base =
+      kFloodRequestBase + MakeFloodBand() * kFloodBandWidth;
   Sequence request_id = flood_base;
   Id observed_session = irmv::protocol::kNoId;
   bool ever_had_session = false;
@@ -2001,9 +2003,10 @@ int Client::RunProducer() {
       std::this_thread::sleep_for(std::chrono::microseconds(kPollSleepUs));
       continue;
     }
-    const bool authorized = state->execution_state == ExecutionState::Tracking &&
-                            state->producer_id == producer_id_ &&
-                            state->session_id != irmv::protocol::kNoId;
+    const bool authorized =
+        state->execution_state == ExecutionState::Tracking &&
+        state->producer_id == producer_id_ &&
+        state->session_id != irmv::protocol::kNoId;
     if (!authorized) {
       // Nothing is published without an authorization: a producer that keeps
       // commanding a revoked epoch would only be ignored by the runtime.
@@ -2135,10 +2138,10 @@ int Client::RunReplay() {
         bool answered = false;
         while (now() < answer_deadline && !answered && !StopRequested()) {
           Poll(true);
-          // A replayed packet is answered by an instance that may not be the one
-          // the packet names, so the answer is matched on the request id and the
-          // arrival time only: the identity check of the confirmation log would
-          // hide exactly the rejection this scenario measures.
+          // A replayed packet is answered by an instance that may not be the
+          // one the packet names, so the answer is matched on the request id
+          // and the arrival time only: the identity check of the confirmation
+          // log would hide exactly the rejection this scenario measures.
           const ExecutionResult *answer = nullptr;
           for (const auto &entry : all_results_) {
             if (entry.first.request_id == request.request_id &&
@@ -2240,7 +2243,8 @@ int main(int argc, char **argv) {
   Options options;
   std::string error;
   if (!ParseOptions(argc, argv, &options, &error)) {
-    std::fprintf(stderr, "runtime_client: %s\n%s\n", error.c_str(), UsageLine());
+    std::fprintf(stderr, "runtime_client: %s\n%s\n", error.c_str(),
+                 UsageLine());
     return kExitUsage;
   }
   if (std::signal(SIGINT, HandleStopSignal) == SIG_ERR ||

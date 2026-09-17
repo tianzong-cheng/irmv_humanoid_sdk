@@ -148,8 +148,8 @@ class ExecutionFsm {
 
   void HandleRequest(TickScope &scope,
                      const Received<protocol::ExecutionRequest> &packet);
-  void HandleAcquireSession(
-      TickScope &scope, const Received<protocol::ExecutionRequest> &packet);
+  void HandleAcquireSession(TickScope &scope,
+                            const Received<protocol::ExecutionRequest> &packet);
   void HandleStop(TickScope &scope,
                   const Received<protocol::ExecutionRequest> &packet);
   void HandleReset(TickScope &scope,
@@ -158,8 +158,7 @@ class ExecutionFsm {
                       const Received<protocol::ExecutionRequest> &packet);
 
   protocol::ExecutionResult MakeResult(
-      const protocol::ExecutionRequest &request,
-      protocol::TimeUs now_us) const;
+      const protocol::ExecutionRequest &request, protocol::TimeUs now_us) const;
 
   void QueueApplied(TickScope &scope,
                     const protocol::ExecutionRequest &request);
@@ -197,17 +196,15 @@ class ExecutionFsm {
 
   // ---- events and results ------------------------------------------------
 
-  void EmitResult(TickScope &scope,
-                  const protocol::ExecutionResult &result);
+  void EmitResult(TickScope &scope, const protocol::ExecutionResult &result);
 
-  void EmitEvent(TickScope &scope, EventCode code,
-                 protocol::ExecutionState from, protocol::ExecutionState to,
-                 protocol::RejectReason reject_reason =
-                     protocol::RejectReason::None,
-                 protocol::FaultReason fault_reason =
-                     protocol::FaultReason::None,
-                 protocol::StopReason stop_reason = protocol::StopReason::None,
-                 protocol::Sequence request_id = 0);
+  void EmitEvent(
+      TickScope &scope, EventCode code, protocol::ExecutionState from,
+      protocol::ExecutionState to,
+      protocol::RejectReason reject_reason = protocol::RejectReason::None,
+      protocol::FaultReason fault_reason = protocol::FaultReason::None,
+      protocol::StopReason stop_reason = protocol::StopReason::None,
+      protocol::Sequence request_id = 0);
 
   // ---- state plumbing ----------------------------------------------------
 
@@ -217,8 +214,8 @@ class ExecutionFsm {
                 EventCode code);
   hardware::TorqueOutput ComputeStateOutput(TickScope &scope);
   hardware::TorqueOutput ZeroTorqueOutput() const;
-  protocol::RejectReason CheckStateAllows(
-      protocol::ExecutionState state, protocol::Operation operation) const;
+  protocol::RejectReason CheckStateAllows(protocol::ExecutionState state,
+                                          protocol::Operation operation) const;
 
   // ---- authorization, session and supervision ----------------------------
 

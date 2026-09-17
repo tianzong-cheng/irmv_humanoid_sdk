@@ -2,14 +2,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <dds/dds.hpp>
 #include <exception>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <thread>
 #include <utility>
-
-#include <dds/dds.hpp>
 
 #include "execution.hpp"
 #include "irmv/configuration/config.hpp"
@@ -223,8 +222,8 @@ RobotState MakeState(Sequence state_seq) {
     joint.tau_est = 3.0 + static_cast<double>(index);
     joint.rx_stamp_us = 1'699'000 + index;
     joint.freq_hz = 500.0;
-    joint.error_code = index == 0 ? kHighBitErrorCode
-                                  : static_cast<std::uint32_t>(index);
+    joint.error_code =
+        index == 0 ? kHighBitErrorCode : static_cast<std::uint32_t>(index);
   }
   state.feedback.imu.valid = true;
   state.feedback.imu.orientation_rpy = {0.1, -0.2, 0.3};
@@ -255,9 +254,9 @@ bool SameText(const irmv::protocol::BoundedText<Capacity> &left,
 }
 
 bool Same(const JointVector &left, const JointVector &right) {
-  return left.count == right.count && left.q == right.q && left.dq == right.dq &&
-         left.tau_ff == right.tau_ff && left.kp == right.kp &&
-         left.kd == right.kd;
+  return left.count == right.count && left.q == right.q &&
+         left.dq == right.dq && left.tau_ff == right.tau_ff &&
+         left.kp == right.kp && left.kd == right.kd;
 }
 
 bool Same(const JointCommand &left, const JointCommand &right) {
@@ -312,8 +311,7 @@ bool Same(const JointFeedback &left, const JointFeedback &right) {
          left.q == right.q && left.dq == right.dq &&
          left.tau_est == right.tau_est &&
          left.rx_stamp_us == right.rx_stamp_us &&
-         left.freq_hz == right.freq_hz &&
-         left.error_code == right.error_code;
+         left.freq_hz == right.freq_hz && left.error_code == right.error_code;
 }
 
 bool Same(const ImuFeedback &left, const ImuFeedback &right) {
@@ -387,7 +385,8 @@ bool RoundTripSamples() {
   codec::ToWire(command, wire_command);
   if (wire_command.joints().count() != kMaxJoints ||
       wire_command.layout_id().count() != kMaxNameBytes ||
-      wire_command.joints().q()[kMaxJoints - 1] != command.joints.q[kMaxJoints - 1]) {
+      wire_command.joints().q()[kMaxJoints - 1] !=
+          command.joints.q[kMaxJoints - 1]) {
     std::cerr << "codec: JointCommand wire fields do not match the source\n";
     return false;
   }
@@ -409,9 +408,9 @@ bool RoundTripSamples() {
     return false;
   }
 
-  const ExecutionResult result = MakeResult(
-      ExecutionState::Tracking, OutputAction::Tracking, ResultStatus::Applied,
-      RejectReason::None);
+  const ExecutionResult result =
+      MakeResult(ExecutionState::Tracking, OutputAction::Tracking,
+                 ResultStatus::Applied, RejectReason::None);
   wire::ExecutionResult wire_result;
   codec::ToWire(result, wire_result);
   ExecutionResult restored_result;
@@ -435,7 +434,8 @@ bool RoundTripSamples() {
   wire::RobotState wire_state;
   codec::ToWire(state, wire_state);
   RobotState restored_state;
-  if (!codec::FromWire(wire_state, restored_state) || !Same(state, restored_state)) {
+  if (!codec::FromWire(wire_state, restored_state) ||
+      !Same(state, restored_state)) {
     std::cerr << "codec: RobotState did not round trip\n";
     return false;
   }
@@ -445,14 +445,15 @@ bool RoundTripSamples() {
       restored_state.faults.details[0].error_code != kHighBitErrorCode ||
       restored_state.faults.details[0].message.count != kMaxReasonBytes ||
       restored_state.layout_id.count != kMaxNameBytes) {
-    std::cerr << "codec: boundary values did not survive the RobotState round trip\n";
+    std::cerr
+        << "codec: boundary values did not survive the RobotState round trip\n";
     return false;
   }
 
   // Every enum value of every frozen message survives both directions.
-  const Operation operations[] = {
-      Operation::AcquireSession, Operation::Damping, Operation::ZeroTorque,
-      Operation::Tracking, Operation::Reset};
+  const Operation operations[] = {Operation::AcquireSession, Operation::Damping,
+                                  Operation::ZeroTorque, Operation::Tracking,
+                                  Operation::Reset};
   for (const Operation operation : operations) {
     const ExecutionRequest expected = MakeRequest(operation, kAcquireRequestId);
     wire::ExecutionRequest wire;
@@ -469,9 +470,9 @@ bool RoundTripSamples() {
       ExecutionState::Boot, ExecutionState::ZeroTorque, ExecutionState::Damping,
       ExecutionState::Tracking, ExecutionState::Fault};
   for (const ExecutionState value : states) {
-    const ExecutionResult expected = MakeResult(
-        value, OutputAction::Damping, ResultStatus::Rejected,
-        RejectReason::QueueFull);
+    const ExecutionResult expected =
+        MakeResult(value, OutputAction::Damping, ResultStatus::Rejected,
+                   RejectReason::QueueFull);
     wire::ExecutionResult wire;
     codec::ToWire(expected, wire);
     ExecutionResult restored;
@@ -482,13 +483,12 @@ bool RoundTripSamples() {
     }
   }
 
-  const OutputAction actions[] = {OutputAction::ZeroTorque,
-                                  OutputAction::Damping,
-                                  OutputAction::Tracking};
+  const OutputAction actions[] = {
+      OutputAction::ZeroTorque, OutputAction::Damping, OutputAction::Tracking};
   for (const OutputAction value : actions) {
-    const ExecutionResult expected = MakeResult(ExecutionState::Fault, value,
-                                               ResultStatus::Applied,
-                                               RejectReason::None);
+    const ExecutionResult expected =
+        MakeResult(ExecutionState::Fault, value, ResultStatus::Applied,
+                   RejectReason::None);
     wire::ExecutionResult wire;
     codec::ToWire(expected, wire);
     ExecutionResult restored;
@@ -499,7 +499,8 @@ bool RoundTripSamples() {
     }
   }
 
-  const ResultStatus statuses[] = {ResultStatus::Applied, ResultStatus::Rejected};
+  const ResultStatus statuses[] = {ResultStatus::Applied,
+                                   ResultStatus::Rejected};
   for (const ResultStatus value : statuses) {
     const ExecutionResult expected =
         MakeResult(ExecutionState::Fault, OutputAction::ZeroTorque, value,
@@ -515,19 +516,19 @@ bool RoundTripSamples() {
   }
 
   const RejectReason reasons[] = {
-      RejectReason::None,          RejectReason::VersionMismatch,
-      RejectReason::Malformed,     RejectReason::WrongInstance,
-      RejectReason::WrongSession,  RejectReason::SessionBusy,
-      RejectReason::StaleRequest,  RejectReason::RequestConflict,
-      RejectReason::EpochMismatch, RejectReason::InvalidTransition,
+      RejectReason::None,           RejectReason::VersionMismatch,
+      RejectReason::Malformed,      RejectReason::WrongInstance,
+      RejectReason::WrongSession,   RejectReason::SessionBusy,
+      RejectReason::StaleRequest,   RejectReason::RequestConflict,
+      RejectReason::EpochMismatch,  RejectReason::InvalidTransition,
       RejectReason::InvalidCommand, RejectReason::StaleSource,
-      RejectReason::Discontinuity, RejectReason::RecoveryNotReady,
-      RejectReason::FaultMismatch, RejectReason::WriteFailed,
+      RejectReason::Discontinuity,  RejectReason::RecoveryNotReady,
+      RejectReason::FaultMismatch,  RejectReason::WriteFailed,
       RejectReason::QueueFull};
   for (const RejectReason value : reasons) {
-    const ExecutionResult expected = MakeResult(
-        ExecutionState::Tracking, OutputAction::ZeroTorque,
-        ResultStatus::Rejected, value);
+    const ExecutionResult expected =
+        MakeResult(ExecutionState::Tracking, OutputAction::ZeroTorque,
+                   ResultStatus::Rejected, value);
     wire::ExecutionResult wire;
     codec::ToWire(expected, wire);
     ExecutionResult restored;
@@ -538,12 +539,16 @@ bool RoundTripSamples() {
     }
   }
 
-  const FaultReason fault_reasons[] = {
-      FaultReason::None,          FaultReason::BootFailed,
-      FaultReason::FeedbackInvalid, FaultReason::DriverError,
-      FaultReason::ImuInvalid,    FaultReason::JointPositionExceeded,
-      FaultReason::JointVelocityExceeded, FaultReason::CommandInvalid,
-      FaultReason::WriteFailed,   FaultReason::ProtocolExhausted};
+  const FaultReason fault_reasons[] = {FaultReason::None,
+                                       FaultReason::BootFailed,
+                                       FaultReason::FeedbackInvalid,
+                                       FaultReason::DriverError,
+                                       FaultReason::ImuInvalid,
+                                       FaultReason::JointPositionExceeded,
+                                       FaultReason::JointVelocityExceeded,
+                                       FaultReason::CommandInvalid,
+                                       FaultReason::WriteFailed,
+                                       FaultReason::ProtocolExhausted};
   for (const FaultReason value : fault_reasons) {
     RobotState expected = MakeState(kStateSeq);
     expected.faults.details[0].reason = value;
@@ -580,7 +585,8 @@ bool RoundTripSamples() {
   wire::RobotState wire_empty;
   codec::ToWire(empty, wire_empty);
   RobotState restored_empty;
-  if (!codec::FromWire(wire_empty, restored_empty) || !Same(empty, restored_empty)) {
+  if (!codec::FromWire(wire_empty, restored_empty) ||
+      !Same(empty, restored_empty)) {
     std::cerr << "codec: empty snapshot/fault report did not round trip\n";
     return false;
   }
@@ -605,8 +611,10 @@ bool RejectInvalidSamples() {
     wire_command.joints().count(static_cast<std::uint32_t>(kMaxJoints) + 1);
     JointCommand destination = command;
     const JointCommand before = command;
-    if (codec::FromWire(wire_command, destination) || !Same(before, destination)) {
-      std::cerr << "codec: a joint vector count above kMaxJoints was accepted\n";
+    if (codec::FromWire(wire_command, destination) ||
+        !Same(before, destination)) {
+      std::cerr
+          << "codec: a joint vector count above kMaxJoints was accepted\n";
       return false;
     }
   }
@@ -616,7 +624,8 @@ bool RejectInvalidSamples() {
     wire_command.joints().count(0);
     JointCommand destination = command;
     const JointCommand before = command;
-    if (codec::FromWire(wire_command, destination) || !Same(before, destination)) {
+    if (codec::FromWire(wire_command, destination) ||
+        !Same(before, destination)) {
       std::cerr << "codec: a zero joint count was accepted\n";
       return false;
     }
@@ -628,7 +637,8 @@ bool RejectInvalidSamples() {
     wire_state.feedback().count(static_cast<std::uint32_t>(kMaxJoints) + 1);
     RobotState destination = state;
     const RobotState before = state;
-    if (codec::FromWire(wire_state, destination) || !Same(before, destination)) {
+    if (codec::FromWire(wire_state, destination) ||
+        !Same(before, destination)) {
       std::cerr << "codec: a feedback count above kMaxJoints was accepted\n";
       return false;
     }
@@ -640,7 +650,8 @@ bool RejectInvalidSamples() {
     wire_state.faults().count(static_cast<std::uint32_t>(kMaxJoints) + 1);
     RobotState destination = state;
     const RobotState before = state;
-    if (codec::FromWire(wire_state, destination) || !Same(before, destination)) {
+    if (codec::FromWire(wire_state, destination) ||
+        !Same(before, destination)) {
       std::cerr << "codec: a fault count above kMaxJoints was accepted\n";
       return false;
     }
@@ -650,10 +661,12 @@ bool RejectInvalidSamples() {
   {
     wire::JointCommand wire_command;
     codec::ToWire(command, wire_command);
-    wire_command.layout_id().count(static_cast<std::uint32_t>(kMaxNameBytes) + 1);
+    wire_command.layout_id().count(static_cast<std::uint32_t>(kMaxNameBytes) +
+                                   1);
     JointCommand destination = command;
     const JointCommand before = command;
-    if (codec::FromWire(wire_command, destination) || !Same(before, destination)) {
+    if (codec::FromWire(wire_command, destination) ||
+        !Same(before, destination)) {
       std::cerr << "codec: an over-long layout id was accepted\n";
       return false;
     }
@@ -666,7 +679,8 @@ bool RejectInvalidSamples() {
         static_cast<std::uint32_t>(kMaxReasonBytes) + 1);
     RobotState destination = state;
     const RobotState before = state;
-    if (codec::FromWire(wire_state, destination) || !Same(before, destination)) {
+    if (codec::FromWire(wire_state, destination) ||
+        !Same(before, destination)) {
       std::cerr << "codec: an over-long fault message was accepted\n";
       return false;
     }
@@ -680,7 +694,8 @@ bool RejectInvalidSamples() {
     wire_request.operation(static_cast<wire::Operation>(99));
     ExecutionRequest destination = MakeRequest(Operation::Damping, 1);
     const ExecutionRequest before = destination;
-    if (codec::FromWire(wire_request, destination) || !Same(before, destination)) {
+    if (codec::FromWire(wire_request, destination) ||
+        !Same(before, destination)) {
       std::cerr << "codec: an unknown operation was accepted\n";
       return false;
     }
@@ -695,7 +710,8 @@ bool RejectInvalidSamples() {
         MakeResult(ExecutionState::Boot, OutputAction::ZeroTorque,
                    ResultStatus::Rejected, RejectReason::StaleRequest);
     const ExecutionResult before = destination;
-    if (codec::FromWire(wire_result, destination) || !Same(before, destination)) {
+    if (codec::FromWire(wire_result, destination) ||
+        !Same(before, destination)) {
       std::cerr << "codec: an unknown execution state was accepted\n";
       return false;
     }
@@ -710,7 +726,8 @@ bool RejectInvalidSamples() {
         MakeResult(ExecutionState::Boot, OutputAction::ZeroTorque,
                    ResultStatus::Rejected, RejectReason::StaleRequest);
     const ExecutionResult before = destination;
-    if (codec::FromWire(wire_result, destination) || !Same(before, destination)) {
+    if (codec::FromWire(wire_result, destination) ||
+        !Same(before, destination)) {
       std::cerr << "codec: an unknown output action was accepted\n";
       return false;
     }
@@ -725,7 +742,8 @@ bool RejectInvalidSamples() {
         MakeResult(ExecutionState::Boot, OutputAction::ZeroTorque,
                    ResultStatus::Rejected, RejectReason::StaleRequest);
     const ExecutionResult before = destination;
-    if (codec::FromWire(wire_result, destination) || !Same(before, destination)) {
+    if (codec::FromWire(wire_result, destination) ||
+        !Same(before, destination)) {
       std::cerr << "codec: an unknown result status was accepted\n";
       return false;
     }
@@ -740,7 +758,8 @@ bool RejectInvalidSamples() {
         MakeResult(ExecutionState::Boot, OutputAction::ZeroTorque,
                    ResultStatus::Rejected, RejectReason::StaleRequest);
     const ExecutionResult before = destination;
-    if (codec::FromWire(wire_result, destination) || !Same(before, destination)) {
+    if (codec::FromWire(wire_result, destination) ||
+        !Same(before, destination)) {
       std::cerr << "codec: an unknown reject reason was accepted\n";
       return false;
     }
@@ -751,7 +770,8 @@ bool RejectInvalidSamples() {
     wire_state.stop_reason(static_cast<wire::StopReason>(99));
     RobotState destination = MakeState(kFreshStateSeq);
     const RobotState before = destination;
-    if (codec::FromWire(wire_state, destination) || !Same(before, destination)) {
+    if (codec::FromWire(wire_state, destination) ||
+        !Same(before, destination)) {
       std::cerr << "codec: an unknown stop reason was accepted\n";
       return false;
     }
@@ -762,7 +782,8 @@ bool RejectInvalidSamples() {
     wire_state.faults().details()[0].reason(static_cast<wire::FaultReason>(99));
     RobotState destination = MakeState(kFreshStateSeq);
     const RobotState before = destination;
-    if (codec::FromWire(wire_state, destination) || !Same(before, destination)) {
+    if (codec::FromWire(wire_state, destination) ||
+        !Same(before, destination)) {
       std::cerr << "codec: an unknown fault reason was accepted\n";
       return false;
     }
@@ -798,9 +819,9 @@ bool CheckTransportEndpointQos(DdsTransport &transport,
             << (qos.reader ? "reader" : "writer")
             << " durability=" << (qos.durable ? "NOT_VOLATILE" : "VOLATILE")
             << " reliability=" << (qos.reliable ? "RELIABLE" : "BEST_EFFORT")
-            << " blocking_us=" << qos.max_blocking_time_us << " history="
-            << (qos.keep_last ? "KEEP_LAST" : "NOT_KEEP_LAST") << '/'
-            << qos.history_depth << " limits=" << qos.max_samples << '/'
+            << " blocking_us=" << qos.max_blocking_time_us
+            << " history=" << (qos.keep_last ? "KEEP_LAST" : "NOT_KEEP_LAST")
+            << '/' << qos.history_depth << " limits=" << qos.max_samples << '/'
             << qos.max_instances << '/' << qos.max_samples_per_instance << '\n';
 
   if (!qos.available) {
@@ -890,7 +911,8 @@ struct Receiver {
 
   bool Take(int timeout_ms, T *out) {
     try {
-      if (waitset.wait(dds::core::Duration::from_millisecs(timeout_ms)).empty()) {
+      if (waitset.wait(dds::core::Duration::from_millisecs(timeout_ms))
+              .empty()) {
         return false;
       }
     } catch (const dds::core::TimeoutError &) {
@@ -932,13 +954,15 @@ bool StartTransport(RunningTransport *running) {
   std::uint32_t base = kDefaultDomain;
   std::uint32_t attempts = kDomainAttempts;
   if (const char *override_domain = std::getenv("IRMV_TEST_DDS_DOMAIN")) {
-    base = static_cast<std::uint32_t>(std::strtoul(override_domain, nullptr, 10));
+    base =
+        static_cast<std::uint32_t>(std::strtoul(override_domain, nullptr, 10));
     attempts = 1;
   }
 
   for (std::uint32_t attempt = 0; attempt < attempts; ++attempt) {
     const std::uint32_t domain = base + attempt;
-    auto config = std::make_unique<RuntimeConfig>(LoadConfig(kFixtureConfigPath));
+    auto config =
+        std::make_unique<RuntimeConfig>(LoadConfig(kFixtureConfigPath));
     config->dds.domain = domain;
     const std::string interface = InterfaceOverride();
     if (!interface.empty()) {
@@ -971,10 +995,10 @@ int main() {
   // applied to the endpoints CycloneDDS actually uses.
   {
     const char *override_domain = std::getenv("IRMV_TEST_DDS_DOMAIN");
-    const std::uint32_t base =
-        override_domain != nullptr
-            ? static_cast<std::uint32_t>(std::strtoul(override_domain, nullptr, 10))
-            : kDefaultDomain;
+    const std::uint32_t base = override_domain != nullptr
+                                   ? static_cast<std::uint32_t>(std::strtoul(
+                                         override_domain, nullptr, 10))
+                                   : kDefaultDomain;
     RuntimeConfig config = LoadConfig(kFixtureConfigPath);
     config.dds.domain = base + kDomainAttempts + 1;
     config.dds.interface = "irmv-no-such-interface0";
@@ -1071,7 +1095,8 @@ int main() {
   {
     Sender<wire::ExecutionRequest> sender(
         publisher, request_topic, irmv::protocol::kExecutionRequestTopic);
-    const ExecutionRequest expected = MakeRequest(Operation::Reset, kStopRequestId);
+    const ExecutionRequest expected =
+        MakeRequest(Operation::Reset, kStopRequestId);
     wire::ExecutionRequest wire_request;
     codec::ToWire(expected, wire_request);
 
@@ -1088,7 +1113,8 @@ int main() {
               ordinary_lane_traffic = true;
             }
           }
-          for (std::size_t index = 0; index < input.stop_request_count; ++index) {
+          for (std::size_t index = 0; index < input.stop_request_count;
+               ++index) {
             if (input.stop_requests[index].value.request_id == kStopRequestId) {
               received = input.stop_requests[index].value;
               rx_us = input.stop_requests[index].rx_us;
@@ -1172,17 +1198,17 @@ int main() {
     CHECK(delivered);
     CHECK(Same(expected, received));
     CHECK(rx_us >= test_start_us);
-    std::cout << "[dds_codec_test] supervisor_heartbeat received, rx_us=" << rx_us
-              << '\n';
+    std::cout << "[dds_codec_test] supervisor_heartbeat received, rx_us="
+              << rx_us << '\n';
   }
 
   // (5) execution_result published by the transport.
   {
     Receiver<wire::ExecutionResult> receiver(
         subscriber, result_topic, irmv::protocol::kExecutionResultTopic);
-    const ExecutionResult expected = MakeResult(
-        ExecutionState::Tracking, OutputAction::Tracking, ResultStatus::Applied,
-        RejectReason::None);
+    const ExecutionResult expected =
+        MakeResult(ExecutionState::Tracking, OutputAction::Tracking,
+                   ResultStatus::Applied, RejectReason::None);
     TickResult tick;
     tick.result_count = 1;
     tick.results[0] = expected;
@@ -1204,7 +1230,7 @@ int main() {
   // A state reader that outlives the publishes below: the replay check needs a
   // peer that has already received the flushed sample.
   Receiver<wire::RobotState> state_receiver(subscriber, state_topic,
-                                           irmv::protocol::kRobotStateTopic);
+                                            irmv::protocol::kRobotStateTopic);
 
   // (6) robot_state published by the transport.
   {
@@ -1221,9 +1247,10 @@ int main() {
     CHECK(codec::FromWire(wire_state, restored));
     CHECK(Same(expected, restored));
     CHECK(restored.layout_id.count == kMaxNameBytes);
-    std::cout << "[dds_codec_test] robot_state published and received, state_seq="
-              << restored.state_seq << " joints=" << restored.feedback.count
-              << " text_bytes=" << restored.layout_id.count << '\n';
+    std::cout
+        << "[dds_codec_test] robot_state published and received, state_seq="
+        << restored.state_seq << " joints=" << restored.feedback.count
+        << " text_bytes=" << restored.layout_id.count << '\n';
   }
 
   // (7) VOLATILE has no replay. The outbound path is flushed first: a marker
@@ -1265,20 +1292,20 @@ int main() {
     tick.state = MakeState(kFreshStateSeq);
     bool fresh_seen = false;
     bool history_seen = false;
-    const bool delivered = RepeatUntil(
-        [&transport, &tick]() { transport.Publish(tick); },
-        [&]() {
-          if (!late.Take(50, &replayed)) {
-            return false;
-          }
-          const Sequence sequence = replayed.state_seq();
-          if (sequence == kStateSeq || sequence == kFlushStateSeq) {
-            history_seen = true;
-          }
-          fresh_seen = sequence == kFreshStateSeq;
-          return fresh_seen;
-        },
-        3'000'000);
+    const bool delivered =
+        RepeatUntil([&transport, &tick]() { transport.Publish(tick); },
+                    [&]() {
+                      if (!late.Take(50, &replayed)) {
+                        return false;
+                      }
+                      const Sequence sequence = replayed.state_seq();
+                      if (sequence == kStateSeq || sequence == kFlushStateSeq) {
+                        history_seen = true;
+                      }
+                      fresh_seen = sequence == kFreshStateSeq;
+                      return fresh_seen;
+                    },
+                    3'000'000);
     CHECK(delivered);
     CHECK(fresh_seen);
     CHECK(!history_seen);

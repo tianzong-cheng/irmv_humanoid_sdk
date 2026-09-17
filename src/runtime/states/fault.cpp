@@ -1,7 +1,7 @@
-#include "irmv/runtime/execution_fsm.hpp"
-
 #include <cmath>
 #include <cstddef>
+
+#include "irmv/runtime/execution_fsm.hpp"
 
 namespace irmv::runtime {
 
@@ -105,8 +105,7 @@ void ExecutionFsm::UpdateFaultEligibility(TickScope &scope) {
     fault_damping_eligible_ = false;
     fault_output_degraded_ = true;
     EmitEvent(scope, EventCode::FaultOutputDegraded,
-              protocol::ExecutionState::Fault,
-              protocol::ExecutionState::Fault);
+              protocol::ExecutionState::Fault, protocol::ExecutionState::Fault);
   }
 
   // 2. Recovery window over consecutive healthy ticks.
@@ -120,9 +119,8 @@ void ExecutionFsm::UpdateFaultEligibility(TickScope &scope) {
     recovery_window_started_ = true;
     recovery_window_start_us_ = scope.now_us;
   }
-  if (!recovery_ready_ &&
-      scope.now_us - recovery_window_start_us_ >=
-          config_.recovery.healthy_window_us) {
+  if (!recovery_ready_ && scope.now_us - recovery_window_start_us_ >=
+                              config_.recovery.healthy_window_us) {
     recovery_ready_ = true;
     EmitEvent(scope, EventCode::RecoveryReady, protocol::ExecutionState::Fault,
               protocol::ExecutionState::Fault);
@@ -166,21 +164,19 @@ bool ExecutionFsm::RecoveryTickHealthy(TickScope &scope) const {
 }
 
 void ExecutionFsm::DegradeForWriteFailure(TickScope &scope,
-                                         std::uint32_t error_code) {
+                                          std::uint32_t error_code) {
   if (state_ != protocol::ExecutionState::Fault) {
     LatchFault(scope, protocol::FaultReason::WriteFailed,
                EventCode::FaultLatched, false,
-               MakeFaultReport(protocol::FaultReason::WriteFailed,
-                               scope.now_us, error_code,
-                               "torque write refused"));
+               MakeFaultReport(protocol::FaultReason::WriteFailed, scope.now_us,
+                               error_code, "torque write refused"));
     return;
   }
   if (fault_damping_eligible_) {
     fault_damping_eligible_ = false;
     fault_output_degraded_ = true;
     EmitEvent(scope, EventCode::FaultOutputDegraded,
-              protocol::ExecutionState::Fault,
-              protocol::ExecutionState::Fault);
+              protocol::ExecutionState::Fault, protocol::ExecutionState::Fault);
   }
 }
 

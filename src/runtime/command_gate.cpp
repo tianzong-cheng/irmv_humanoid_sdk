@@ -52,8 +52,7 @@ bool CommandGate::FindGeneration(protocol::Sequence snapshot_seq,
     const StateEntry *end = begin + lengths[segment];
     const StateEntry probe{snapshot_seq, 0};
     const StateEntry *found = std::lower_bound(
-        begin, end, probe,
-        [](const StateEntry &left, const StateEntry &right) {
+        begin, end, probe, [](const StateEntry &left, const StateEntry &right) {
           return left.seq < right.seq;
         });
     if (found != end && found->seq == snapshot_seq) {
@@ -80,7 +79,7 @@ void CommandGate::Authorize(protocol::Id runtime_id, protocol::Id session_id,
 }
 
 bool CommandGate::GenerationOf(protocol::Sequence snapshot_seq,
-                              protocol::TimeUs *generation_us) const {
+                               protocol::TimeUs *generation_us) const {
   if (generation_us == nullptr) {
     return false;
   }

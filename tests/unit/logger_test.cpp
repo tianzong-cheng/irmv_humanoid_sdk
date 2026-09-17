@@ -9,6 +9,8 @@
 // instead of assuming Stop() met its drain deadline. The only wall-clock
 // assertions are hang guards.
 
+#include "irmv/telemetry/logger.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -26,7 +28,6 @@
 #include <vector>
 
 #include "irmv/configuration/config.hpp"
-#include "irmv/telemetry/logger.hpp"
 #include "support/check.hpp"
 
 namespace {
@@ -181,7 +182,8 @@ bool WaitFor(Predicate predicate, std::chrono::milliseconds timeout) {
   return true;
 }
 
-LogEvent MakeEvent(LogLevel level, std::string_view message, std::uint64_t tick) {
+LogEvent MakeEvent(LogLevel level, std::string_view message,
+                   std::uint64_t tick) {
   LogEvent event;
   event.level = level;
   event.stamp_us = 1000 + tick;
@@ -290,8 +292,8 @@ int main() {
     CHECK(elapsed < std::chrono::milliseconds(2000));
     CHECK(logger.Filtered() == 0);
 
-    // While the worker stays blocked the queue stays full: every further call is
-    // refused, and it is refused immediately rather than after a wait.
+    // While the worker stays blocked the queue stays full: every further call
+    // is refused, and it is refused immediately rather than after a wait.
     const auto refused_begin = std::chrono::steady_clock::now();
     for (int index = 0; index < 1024; ++index) {
       CHECK(!logger.TryLog(MakeEvent(LogLevel::Info, "refused", 0)));
@@ -337,8 +339,7 @@ int main() {
     logger.Stop();
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - begin);
-    CHECK(elapsed <
-          std::chrono::milliseconds(4 * kStopDrainTimeoutMs + 1000));
+    CHECK(elapsed < std::chrono::milliseconds(4 * kStopDrainTimeoutMs + 1000));
     CHECK(!logger.started());
     CHECK(logger.Undrained() == static_cast<std::uint64_t>(accepted));
 
@@ -474,8 +475,8 @@ int main() {
       CHECK(logger.Undrained() == accepted);
       reference = sink;
     }
-    // Both the logger and the caller release the sink while that worker is still
-    // blocked. Only the logger's own reference keeps it alive now.
+    // Both the logger and the caller release the sink while that worker is
+    // still blocked. Only the logger's own reference keeps it alive now.
     sink.reset();
     const std::shared_ptr<RecordingSink> revived = reference.lock();
     CHECK(revived != nullptr);
@@ -520,7 +521,8 @@ int main() {
           "WARNING 1234567 42 [fsm] tracking entered "
           "{event=3 from=\"damping\" to=\"tracking\"}");
     CHECK(lines[1] ==
-          "ERROR 1043 43 [test] reason\\x09quoted {event=12 detail=\"a\\\\b\\\"c\"}");
+          "ERROR 1043 43 [test] reason\\x09quoted {event=12 "
+          "detail=\"a\\\\b\\\"c\"}");
   }
 
   // The default sink rotates by size and keeps only the retained files.
@@ -581,9 +583,9 @@ int main() {
       CHECK(logger.TryLog(MakeEvent(LogLevel::Info, "failed", tick)));
     }
     logger.Stop();
-    // The sink took every event and the worker flushed once before it exited; on
-    // a machine slow enough to miss the drain deadline the bounded flush wait
-    // covers the detached worker instead of assuming Stop() finished it.
+    // The sink took every event and the worker flushed once before it exited;
+    // on a machine slow enough to miss the drain deadline the bounded flush
+    // wait covers the detached worker instead of assuming Stop() finished it.
     CHECK(sink->WaitForFlushes(1, kWait));
     CHECK(sink->event_count() == 4);
     CHECK(logger.Written() == 0);
@@ -614,9 +616,10 @@ int main() {
     CHECK(!std::filesystem::exists(file / "logs"));
   }
 
-  // The message carries the full 256-byte diagnostic text the design freezes for
-  // fault and rejection reasons, and a longer value is refused without touching
-  // the event: a caller copying a long reason never logs an empty message.
+  // The message carries the full 256-byte diagnostic text the design freezes
+  // for fault and rejection reasons, and a longer value is refused without
+  // touching the event: a caller copying a long reason never logs an empty
+  // message.
   {
     const TemporaryDirectory directory("message-bound");
     TelemetryConfig config = BaseConfig(directory.path());
@@ -652,8 +655,8 @@ int main() {
   }
 
   // A producer thread that keeps logging while another thread stops the logger:
-  // every event TryLog() accepted is either written or reported, so none of them
-  // disappears silently, and nothing is accepted once Stop() has returned.
+  // every event TryLog() accepted is either written or reported, so none of
+  // them disappears silently, and nothing is accepted once Stop() has returned.
   {
     const TemporaryDirectory directory("stop-race");
     TelemetryConfig config = BaseConfig(directory.path());
@@ -683,8 +686,8 @@ int main() {
       });
 
       logger.Stop();
-      // Stop() refuses every later event, so the producer's loop is bounded; the
-      // wait only guards against a stalled thread.
+      // Stop() refuses every later event, so the producer's loop is bounded;
+      // the wait only guards against a stalled thread.
       bool finished = false;
       {
         std::unique_lock<std::mutex> lock(done_mutex);
@@ -702,9 +705,9 @@ int main() {
       CHECK(logger.Dropped() == dropped);
       CHECK(logger.Filtered() == 0);
       CHECK(dropped <= attempted - granted);
-      // Written is read before Undrained: the worker may still be writing events
-      // that the stop already reported, so this order can only over-count the
-      // two together, never under-count them.
+      // Written is read before Undrained: the worker may still be writing
+      // events that the stop already reported, so this order can only
+      // over-count the two together, never under-count them.
       const std::uint64_t written = logger.Written();
       const std::uint64_t undrained = logger.Undrained();
       CHECK(written + undrained >= granted);

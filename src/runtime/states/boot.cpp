@@ -66,10 +66,10 @@ hardware::TorqueOutput ExecutionFsm::StepBoot(TickScope &scope) {
   }
   output_action_ = protocol::OutputAction::ZeroTorque;
   if (scope.now_us - boot_start_us_ > config_.boot.deadline_us) {
-    LatchFault(scope, protocol::FaultReason::BootFailed,
-               EventCode::BootFailed, false,
-               MakeFaultReport(protocol::FaultReason::BootFailed,
-                               scope.now_us, 0, "boot deadline exceeded"));
+    LatchFault(scope, protocol::FaultReason::BootFailed, EventCode::BootFailed,
+               false,
+               MakeFaultReport(protocol::FaultReason::BootFailed, scope.now_us,
+                               0, "boot deadline exceeded"));
     return ZeroTorqueOutput();
   }
   if (BootReady(scope)) {

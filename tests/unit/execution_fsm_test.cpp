@@ -1,3 +1,5 @@
+#include "irmv/runtime/execution_fsm.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -6,7 +8,6 @@
 #include "irmv/hardware/backend.hpp"
 #include "irmv/protocol/types.hpp"
 #include "irmv/runtime/execution_context.hpp"
-#include "irmv/runtime/execution_fsm.hpp"
 #include "support/check.hpp"
 #include "support/runtime_fixture.hpp"
 
@@ -217,7 +218,8 @@ int CheckWriteFailure() {
     CHECK(f.last_tick().results[index].status == ResultStatus::Rejected);
     CHECK(f.last_tick().results[index].reason == RejectReason::WriteFailed);
   }
-  const RuntimeEvent *latched = FindEvent(f.last_tick(), EventCode::FaultLatched);
+  const RuntimeEvent *latched =
+      FindEvent(f.last_tick(), EventCode::FaultLatched);
   CHECK(latched != nullptr);
   CHECK(latched->fault_reason == irmv::protocol::FaultReason::WriteFailed);
   CHECK(latched->to == kFault);
@@ -238,7 +240,8 @@ int CheckIncompleteSnapshotFaults() {
   f.Advance(f.ControlPeriodUs());
 
   CHECK(f.state().execution_state == kFault);
-  const RuntimeEvent *latched = FindEvent(f.last_tick(), EventCode::FaultLatched);
+  const RuntimeEvent *latched =
+      FindEvent(f.last_tick(), EventCode::FaultLatched);
   CHECK(latched != nullptr);
   CHECK(latched->fault_reason == irmv::protocol::FaultReason::FeedbackInvalid);
   // The reason survives even though an incomplete snapshot carries no detail.
@@ -315,7 +318,8 @@ int CheckBootObservedFaults() {
     f.SetJointVelocity(11.0);
     f.Advance(f.ControlPeriodUs());
     CHECK(f.state().execution_state == kFault);
-    const RuntimeEvent *event = FindEvent(f.last_tick(), EventCode::FaultLatched);
+    const RuntimeEvent *event =
+        FindEvent(f.last_tick(), EventCode::FaultLatched);
     CHECK(event != nullptr);
     CHECK(event->fault_reason ==
           irmv::protocol::FaultReason::JointVelocityExceeded);
@@ -325,7 +329,8 @@ int CheckBootObservedFaults() {
     f.mutable_feedback().joints[1].q = -2.5;
     f.Advance(f.ControlPeriodUs());
     CHECK(f.state().execution_state == kFault);
-    const RuntimeEvent *event = FindEvent(f.last_tick(), EventCode::FaultLatched);
+    const RuntimeEvent *event =
+        FindEvent(f.last_tick(), EventCode::FaultLatched);
     CHECK(event != nullptr);
     CHECK(event->fault_reason ==
           irmv::protocol::FaultReason::JointPositionExceeded);
@@ -335,7 +340,8 @@ int CheckBootObservedFaults() {
     f.SetDriverError();
     f.Advance(f.ControlPeriodUs());
     CHECK(f.state().execution_state == kFault);
-    const RuntimeEvent *event = FindEvent(f.last_tick(), EventCode::FaultLatched);
+    const RuntimeEvent *event =
+        FindEvent(f.last_tick(), EventCode::FaultLatched);
     CHECK(event != nullptr);
     CHECK(event->fault_reason == irmv::protocol::FaultReason::DriverError);
     CHECK(f.state().faults.count > 0);
@@ -367,7 +373,8 @@ int CheckBootRequiresImu() {
     f.Advance(f.ControlPeriodUs());
     // An observed invalid IMU faults immediately, grace or not.
     CHECK(f.state().execution_state == kFault);
-    const RuntimeEvent *event = FindEvent(f.last_tick(), EventCode::FaultLatched);
+    const RuntimeEvent *event =
+        FindEvent(f.last_tick(), EventCode::FaultLatched);
     CHECK(event != nullptr);
     CHECK(event->fault_reason == irmv::protocol::FaultReason::ImuInvalid);
   }
@@ -406,8 +413,7 @@ int CheckRequestIdempotency() {
   CHECK(f.state().epoch == applied_watermark);
 
   // Same request id, different payload: conflict, and the stored record stays.
-  ExecutionRequest conflict =
-      f.MakeRequest(Operation::Damping, id_first);
+  ExecutionRequest conflict = f.MakeRequest(Operation::Damping, id_first);
   conflict.producer_id = irmv::test::FixtureSecondProducerId();
   const FixtureResult conflict_result = f.Send(conflict, true);
   CHECK(conflict_result.rejected());
@@ -419,7 +425,8 @@ int CheckRequestIdempotency() {
   CHECK(repeated.stamp_us == first_stamp);
 
   // A smaller request id is stale and changes nothing.
-  const ExecutionRequest stale = f.MakeRequest(Operation::Damping, id_first - 1);
+  const ExecutionRequest stale =
+      f.MakeRequest(Operation::Damping, id_first - 1);
   const FixtureResult stale_result = f.Send(stale, true);
   CHECK(stale_result.rejected());
   CHECK(stale_result.reason == RejectReason::StaleRequest);
@@ -447,8 +454,8 @@ int CheckStopWinsInSameTick() {
   const Sequence tracking_epoch = f.state().epoch;
 
   // The stop lane is processed first, so the start loses the epoch context it
-  // was built for even though both arrive in the same tick. The stop carries the
-  // smaller request id so the start is not classified as stale instead.
+  // was built for even though both arrive in the same tick. The stop carries
+  // the smaller request id so the start is not classified as stale instead.
   const ExecutionRequest stop = f.MakeRequest(Operation::Damping);
   const ExecutionRequest start =
       f.MakeRequest(Operation::Tracking, irmv::test::kAutoSequence,
@@ -597,7 +604,8 @@ int CheckSessionTakeover() {
   f.Advance(f.config.timeouts.supervisor_us + f.ControlPeriodUs());
   CHECK(f.state().session_id == irmv::protocol::kNoId);
   CHECK(f.state().execution_state == kZeroTorque);
-  const FixtureResult taken = f.Acquire(20, irmv::test::FixtureOtherSupervisorId());
+  const FixtureResult taken =
+      f.Acquire(20, irmv::test::FixtureOtherSupervisorId());
   CHECK(taken.applied());
   CHECK(taken.session_id != session);
   CHECK(taken.session_id != irmv::protocol::kNoId);
@@ -742,9 +750,9 @@ int CheckContinuityGuards() {
 
   // Position delta
   {
-    ExecutionRequest jump = f.MakeRequest(
-        Operation::Tracking, irmv::test::kAutoSequence,
-        irmv::test::FixtureSecondProducerId());
+    ExecutionRequest jump =
+        f.MakeRequest(Operation::Tracking, irmv::test::kAutoSequence,
+                      irmv::test::FixtureSecondProducerId());
     jump.first_command.joints.q[1] += 0.11;
     const FixtureResult result = f.Send(jump);
     CHECK(result.rejected());
@@ -752,9 +760,9 @@ int CheckContinuityGuards() {
   }
   // Velocity delta
   {
-    ExecutionRequest jump = f.MakeRequest(
-        Operation::Tracking, irmv::test::kAutoSequence,
-        irmv::test::FixtureSecondProducerId());
+    ExecutionRequest jump =
+        f.MakeRequest(Operation::Tracking, irmv::test::kAutoSequence,
+                      irmv::test::FixtureSecondProducerId());
     jump.first_command.joints.dq[0] = irmv::test::kFixtureDq[0] + 0.51;
     const FixtureResult result = f.Send(jump);
     CHECK(result.rejected());
@@ -762,9 +770,9 @@ int CheckContinuityGuards() {
   }
   // Torque delta
   {
-    ExecutionRequest jump = f.MakeRequest(
-        Operation::Tracking, irmv::test::kAutoSequence,
-        irmv::test::FixtureSecondProducerId());
+    ExecutionRequest jump =
+        f.MakeRequest(Operation::Tracking, irmv::test::kAutoSequence,
+                      irmv::test::FixtureSecondProducerId());
     jump.first_command.joints.tau_ff[0] = 10.0;
     const FixtureResult result = f.Send(jump);
     CHECK(result.rejected());
@@ -783,9 +791,9 @@ int CheckContinuityGuards() {
 
   // A compliant new source switches atomically: the same tick commands the new
   // gains and the new producer owns the new epoch.
-  ExecutionRequest compliant = f.MakeRequest(
-      Operation::Tracking, irmv::test::kAutoSequence,
-      irmv::test::FixtureSecondProducerId());
+  ExecutionRequest compliant =
+      f.MakeRequest(Operation::Tracking, irmv::test::kAutoSequence,
+                    irmv::test::FixtureSecondProducerId());
   compliant.first_command.joints.kp[0] = 0.0;
   compliant.first_command.joints.kd[0] = 2.0;
   const FixtureResult switched = f.Send(compliant);
@@ -816,8 +824,9 @@ int CheckForeignPacketsChangeNothing() {
   const JointCommand owned = f.last_frame();
   const double nan = std::numeric_limits<double>::quiet_NaN();
 
-  // Foreign instance, foreign session, foreign epoch and a foreign producer: all
-  // dropped by the gate, none of them faults the owner or refreshes a deadline.
+  // Foreign instance, foreign session, foreign epoch and a foreign producer:
+  // all dropped by the gate, none of them faults the owner or refreshes a
+  // deadline.
   {
     JointCommand foreign = owned;
     foreign.runtime_id = irmv::test::FixtureForeignId();
@@ -1057,9 +1066,11 @@ int CheckEpochWatermarkExhaustion() {
   CHECK(f.state().producer_id == irmv::protocol::kNoId);
   CHECK(f.state().epoch == last_epoch);
   CHECK(IsZeroTorque(f.last_tick().output));
-  const RuntimeEvent *latched = FindEvent(f.last_tick(), EventCode::FaultLatched);
+  const RuntimeEvent *latched =
+      FindEvent(f.last_tick(), EventCode::FaultLatched);
   CHECK(latched != nullptr);
-  CHECK(latched->fault_reason == irmv::protocol::FaultReason::ProtocolExhausted);
+  CHECK(latched->fault_reason ==
+        irmv::protocol::FaultReason::ProtocolExhausted);
   CHECK(FindEvent(f.last_tick(), EventCode::ProtocolExhausted) != nullptr);
   CHECK(f.state().faults.details[0].reason ==
         irmv::protocol::FaultReason::ProtocolExhausted);
@@ -1149,7 +1160,8 @@ int CheckOwnedInvalidCommandLatches() {
   f.Advance(f.ControlPeriodUs());
 
   CHECK(f.state().execution_state == kFault);
-  const RuntimeEvent *latched = FindEvent(f.last_tick(), EventCode::FaultLatched);
+  const RuntimeEvent *latched =
+      FindEvent(f.last_tick(), EventCode::FaultLatched);
   CHECK(latched != nullptr);
   CHECK(latched->fault_reason == irmv::protocol::FaultReason::CommandInvalid);
   CHECK(f.state().producer_id == irmv::protocol::kNoId);
@@ -1259,9 +1271,9 @@ int CheckTrackingSupersededByCommandFault() {
   CHECK(f.StartTracking().applied());
   const Sequence epoch = f.state().epoch;
 
-  const ExecutionRequest start = f.MakeRequest(
-      Operation::Tracking, irmv::test::kAutoSequence,
-      irmv::test::FixtureSecondProducerId());
+  const ExecutionRequest start =
+      f.MakeRequest(Operation::Tracking, irmv::test::kAutoSequence,
+                    irmv::test::FixtureSecondProducerId());
   f.QueueRequest(start);
   // A frame of the new authorization that fails the entry limits.
   JointCommand bad = start.first_command;
@@ -1279,7 +1291,8 @@ int CheckTrackingSupersededByCommandFault() {
   CHECK(f.state().epoch == epoch + 1);
   CHECK(FindEvent(f.last_tick(), EventCode::AuthorizationGranted) != nullptr);
   CHECK(FindEvent(f.last_tick(), EventCode::AuthorizationRevoked) != nullptr);
-  const RuntimeEvent *latched = FindEvent(f.last_tick(), EventCode::FaultLatched);
+  const RuntimeEvent *latched =
+      FindEvent(f.last_tick(), EventCode::FaultLatched);
   CHECK(latched != nullptr);
   CHECK(latched->fault_reason == irmv::protocol::FaultReason::CommandInvalid);
   return 0;
@@ -1299,9 +1312,9 @@ int CheckTrackingSupersededBySupervisorTimeout() {
   CHECK(f.state().execution_state == kTracking);
 
   // The grant and the lease expiry land in the same tick.
-  const ExecutionRequest start = f.MakeRequest(
-      Operation::Tracking, irmv::test::kAutoSequence,
-      irmv::test::FixtureSecondProducerId());
+  const ExecutionRequest start =
+      f.MakeRequest(Operation::Tracking, irmv::test::kAutoSequence,
+                    irmv::test::FixtureSecondProducerId());
   f.QueueRequest(start);
   f.Advance(f.ControlPeriodUs());
 
@@ -1350,9 +1363,9 @@ int CheckContinuityOldContextTorque() {
     CHECK(f.Request(Operation::Damping).applied());
     CHECK(f.last_tick().output.torque[0] == kDampingTorque0);
 
-    ExecutionRequest frame = f.MakeRequest(
-        Operation::Tracking, irmv::test::kAutoSequence,
-        irmv::test::FixtureSecondProducerId());
+    ExecutionRequest frame =
+        f.MakeRequest(Operation::Tracking, irmv::test::kAutoSequence,
+                      irmv::test::FixtureSecondProducerId());
     for (std::size_t index = 0; index < 2; ++index) {
       frame.first_command.joints.q[index] = irmv::test::kFixtureQ[index];
       frame.first_command.joints.dq[index] = irmv::test::kFixtureDq[index];
@@ -1385,9 +1398,9 @@ int CheckContinuityOldContextTorque() {
     // 1 (the damping reference for joint 0 is only -0.4).
     CHECK(f.last_tick().output.torque[0] == -0.8);
 
-    ExecutionRequest frame = f.MakeRequest(
-        Operation::Tracking, irmv::test::kAutoSequence,
-        irmv::test::FixtureSecondProducerId());
+    ExecutionRequest frame =
+        f.MakeRequest(Operation::Tracking, irmv::test::kAutoSequence,
+                      irmv::test::FixtureSecondProducerId());
     for (std::size_t index = 0; index < 2; ++index) {
       frame.first_command.joints.q[index] = irmv::test::kFixtureQ[index];
       frame.first_command.joints.dq[index] = irmv::test::kFixtureDq[index];
@@ -1472,7 +1485,8 @@ int CheckAcquireRequiresEmptySession() {
       }
     }
     CHECK(matches == 1);
-    CHECK(RuntimeFixture::ResultFor(g.last_tick(), acquire.request_id).applied());
+    CHECK(
+        RuntimeFixture::ResultFor(g.last_tick(), acquire.request_id).applied());
     CHECK(g.state().session_id != irmv::protocol::kNoId);
     CHECK(CountEvents(g.last_tick(), EventCode::SessionAcquired) == 1);
   }
@@ -1502,8 +1516,8 @@ int CheckHeartbeatSupervisorOwnership() {
   f.QueueRawHeartbeat(foreign);
 
   // A foreign heartbeat with the right session and a much larger sequence
-  // refreshes nothing: the lease still lapses supervisor_us after the last owner
-  // heartbeat, not after the foreign one.
+  // refreshes nothing: the lease still lapses supervisor_us after the last
+  // owner heartbeat, not after the foreign one.
   const std::size_t ticks = TicksUntil(f, kDamping, 400);
   CHECK(ticks == 51);
   CHECK(f.state().execution_state == kDamping);
@@ -1581,7 +1595,8 @@ int CheckTakeoverDoesNotInheritStagedAnswer() {
   f.QueueRequest(takeover);
   f.Advance(f.ControlPeriodUs());
 
-  CHECK(RuntimeFixture::ResultFor(f.last_tick(), takeover.request_id).applied());
+  CHECK(
+      RuntimeFixture::ResultFor(f.last_tick(), takeover.request_id).applied());
   const Id new_session = f.state().session_id;
   CHECK(new_session != irmv::protocol::kNoId);
   CHECK(new_session != old_session);
@@ -1704,9 +1719,9 @@ int CheckRuntimeStopKeepsInboundStop() {
   CHECK(driver.state().execution_state == kZeroTorque);
 
   irmv::runtime::TickInput bootstrap{};
-  bootstrap.requests[0] = {
-      MakeLaneRequest(driver.fsm, driver.state(), Operation::AcquireSession, 10),
-      driver.now_us()};
+  bootstrap.requests[0] = {MakeLaneRequest(driver.fsm, driver.state(),
+                                           Operation::AcquireSession, 10),
+                           driver.now_us()};
   bootstrap.request_count = 1;
   driver.Tick(bootstrap);
   CHECK(driver.state().session_id != irmv::protocol::kNoId);
@@ -1768,10 +1783,10 @@ int CheckRuntimeStopIsNeverStale() {
 
   constexpr Sequence kLargeRequestId = 1'000'000;
   irmv::runtime::TickInput bootstrap{};
-  bootstrap.requests[0] = {MakeLaneRequest(driver.fsm, driver.state(),
-                                           Operation::AcquireSession,
-                                           kLargeRequestId),
-                           driver.now_us()};
+  bootstrap.requests[0] = {
+      MakeLaneRequest(driver.fsm, driver.state(), Operation::AcquireSession,
+                      kLargeRequestId),
+      driver.now_us()};
   bootstrap.request_count = 1;
   driver.Tick(bootstrap);
   CHECK(driver.state().session_id != irmv::protocol::kNoId);

@@ -70,9 +70,9 @@ class LogSink {
 // The structured tail appears only when the event carries an event code or
 // fields; field values are quoted and control bytes, backslashes and quotes are
 // escaped so that one event is always exactly one line. Files live in
-// <directory>/run_<UTC timestamp>/humanoid.log. The file is created, rotated and
-// flushed only inside Write()/Flush(), that is only on the worker thread, and a
-// failing file system turns into a false return plus a one-time stderr
+// <directory>/run_<UTC timestamp>/humanoid.log. The file is created, rotated
+// and flushed only inside Write()/Flush(), that is only on the worker thread,
+// and a failing file system turns into a false return plus a one-time stderr
 // diagnostic instead of an exception.
 class RotatingFileSink final : public LogSink {
  public:
@@ -107,16 +107,16 @@ class RotatingFileSink final : public LogSink {
 //
 // The queue is bounded by configuration::TelemetryConfig::queue_capacity, so a
 // slow or blocked consumer cannot grow memory or delay the producer: an event
-// that does not fit is counted in Dropped() instead. Events below the configured
-// level are counted in Filtered() and never reach the queue. The logger reports
-// what it did not write, so a suffix of a run is never mistaken for a complete
-// log.
+// that does not fit is counted in Dropped() instead. Events below the
+// configured level are counted in Filtered() and never reach the queue. The
+// logger reports what it did not write, so a suffix of a run is never mistaken
+// for a complete log.
 //
 // Construction allocates the queue storage once; it performs no file I/O. The
-// injected sink is shared with the caller: the logger holds its own reference for
-// as long as its worker may call into the sink, including a worker left behind
-// by a timed-out Stop() (see Stop()), so the caller may release its reference at
-// any time after the constructor returns.
+// injected sink is shared with the caller: the logger holds its own reference
+// for as long as its worker may call into the sink, including a worker left
+// behind by a timed-out Stop() (see Stop()), so the caller may release its
+// reference at any time after the constructor returns.
 class Logger {
  public:
   explicit Logger(const configuration::TelemetryConfig &config);
@@ -135,20 +135,21 @@ class Logger {
 
   // Idempotent. Publishes the refusal (no TryLog after this returns accepts an
   // event), then drains the queue within kStopDrainTimeoutMs and joins the
-  // worker. Before the drain is measured it waits, within the same deadline, for
-  // the producers already inside TryLog() to leave: every event that TryLog()
-  // accepted is then either written or reported by Undrained(), never silently
-  // dropped. A producer still inside TryLog() when the deadline expires is
-  // counted by Undrained() as well, so the report stays conservative. A sink
-  // blocked inside Write() cannot be waited for forever: past the deadline the
-  // worker is left detached to finish on its own and the events still queued are
-  // reported by Undrained(). A detached worker keeps the sink alive through the
-  // logger's own reference, so releasing the sink is safe here.
+  // worker. Before the drain is measured it waits, within the same deadline,
+  // for the producers already inside TryLog() to leave: every event that
+  // TryLog() accepted is then either written or reported by Undrained(), never
+  // silently dropped. A producer still inside TryLog() when the deadline
+  // expires is counted by Undrained() as well, so the report stays
+  // conservative. A sink blocked inside Write() cannot be waited for forever:
+  // past the deadline the worker is left detached to finish on its own and the
+  // events still queued are reported by Undrained(). A detached worker keeps
+  // the sink alive through the logger's own reference, so releasing the sink is
+  // safe here.
   void Stop();
 
   // Producer side, non-blocking. Returns false without waiting when the logger
-  // is not running, when the event is below the configured level (Filtered()) or
-  // when the queue is full (Dropped()).
+  // is not running, when the event is below the configured level (Filtered())
+  // or when the queue is full (Dropped()).
   bool TryLog(const LogEvent &event);
 
   // Events the producer refused because the queue was full. Producer side.

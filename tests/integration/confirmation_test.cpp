@@ -1,13 +1,14 @@
 // Order-of-arrival tests for the test-only confirmation helper: a request is
 // only proven when an Applied result and a later-published agreeing state both
 // identify it. No clock reads: every stamp is explicit.
+#include "support/confirmation.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
 
 #include "irmv/protocol/types.hpp"
 #include "support/check.hpp"
-#include "support/confirmation.hpp"
 
 namespace {
 
@@ -428,7 +429,8 @@ int MismatchedIdentityDoesNotConfirm() {
   session_less.ObserveResult(no_session, kResultRxUs);
   session_less.ObserveState(MakeState(no_session, no_session.stamp_us),
                             kStateRxUs);
-  const TrackedRequest *session_less_entry = session_less.Find(kSecondRequestId);
+  const TrackedRequest *session_less_entry =
+      session_less.Find(kSecondRequestId);
   CHECK(session_less_entry != nullptr);
   CHECK(session_less_entry->status == ConfirmationStatus::Pending);
   CHECK(!session_less.confirmed(kSecondRequestId));
@@ -595,9 +597,8 @@ int RetryKeepsPendingAndConfirmsWithStoredStamp() {
   return 0;
 }
 
-
-// Every clause of the agreement between an answer and the state it publishes has
-// to be able to refuse a confirmation on its own: a witness that differs in
+// Every clause of the agreement between an answer and the state it publishes
+// has to be able to refuse a confirmation on its own: a witness that differs in
 // exactly one field is what pins one clause down, and the untouched witness is
 // the control that shows the case fails on that clause alone.
 int WitnessMismatchDoesNotConfirm() {
@@ -606,10 +607,12 @@ int WitnessMismatchDoesNotConfirm() {
     void (*mutate)(RobotState &state);
   };
   const WitnessCase cases[] = {
-      {"runtime_id", [](RobotState &state) { state.runtime_id = MakeId(0x99); }},
+      {"runtime_id",
+       [](RobotState &state) { state.runtime_id = MakeId(0x99); }},
       {"session_id",
        [](RobotState &state) { state.session_id = OtherSessionId(); }},
-      {"producer_id", [](RobotState &state) { state.producer_id = MakeId(0x77); }},
+      {"producer_id",
+       [](RobotState &state) { state.producer_id = MakeId(0x77); }},
       {"output_action",
        [](RobotState &state) { state.output_action = OutputAction::Damping; }},
   };
@@ -654,8 +657,9 @@ int WitnessMismatchDoesNotConfirm() {
   return 0;
 }
 
-// Same for the expectations: each clause has to keep a request pending against an
-// answer that would otherwise confirm it, and the matching answer is the control.
+// Same for the expectations: each clause has to keep a request pending against
+// an answer that would otherwise confirm it, and the matching answer is the
+// control.
 int ExpectationMismatchDoesNotConfirm() {
   struct ExpectationCase {
     const char *field;

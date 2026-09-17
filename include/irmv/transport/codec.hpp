@@ -36,7 +36,8 @@ void ToWire(const protocol::ExecutionResult &source,
             protocol::wire::ExecutionResult &target);
 void ToWire(const protocol::SupervisorHeartbeat &source,
             protocol::wire::SupervisorHeartbeat &target);
-void ToWire(const protocol::RobotState &source, protocol::wire::RobotState &target);
+void ToWire(const protocol::RobotState &source,
+            protocol::wire::RobotState &target);
 
 bool FromWire(const protocol::wire::JointCommand &source,
               protocol::JointCommand &target);

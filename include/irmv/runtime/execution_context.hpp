@@ -32,7 +32,8 @@ struct TickInput {
   std::array<Received<protocol::ExecutionRequest>, kStopRequestBatchCapacity>
       stop_requests{};
   std::size_t stop_request_count{0};
-  std::array<Received<protocol::JointCommand>, kCommandBatchCapacity> commands{};
+  std::array<Received<protocol::JointCommand>, kCommandBatchCapacity>
+      commands{};
   std::size_t command_count{0};
   std::array<Received<protocol::SupervisorHeartbeat>, kHeartbeatBatchCapacity>
       heartbeats{};

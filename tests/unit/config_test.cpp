@@ -255,9 +255,9 @@ int main() {
   CHECK(ThrowsAt(ReplaceOnce(ValidConfig(), "\"level\": \"INFO\"",
                              "\"level\": \"VERBOSE\""),
                  "telemetry.level"));
-  CHECK(ThrowsAt(ReplaceOnce(ValidConfig(), "\"level\": \"INFO\"",
-                             "\"level\": \"info\""),
-                 "telemetry.level"));
+  CHECK(ThrowsAt(
+      ReplaceOnce(ValidConfig(), "\"level\": \"INFO\"", "\"level\": \"info\""),
+      "telemetry.level"));
 
   CHECK(config.dds.domain == 1);
   CHECK(config.dds.interface == "lo");

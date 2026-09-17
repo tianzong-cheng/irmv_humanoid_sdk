@@ -5,14 +5,13 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <dds/dds.hpp>
 #include <exception>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
-
-#include <dds/dds.hpp>
 
 #include "irmv/protocol/types.hpp"
 #include "irmv/transport/codec.hpp"
@@ -32,8 +31,8 @@ constexpr int kWaitTimeoutMs = 10;
 constexpr int kReadBatch = 16;
 
 // Bound Stop() gives the transport thread to leave its loop before it joins.
-// The loop only blocks in bounded operations (a ten millisecond WaitSet wait and
-// DDS writes bounded by their max_blocking_time), so the thread leaves well
+// The loop only blocks in bounded operations (a ten millisecond WaitSet wait
+// and DDS writes bounded by their max_blocking_time), so the thread leaves well
 // inside this bound and the join that follows returns immediately.
 constexpr int kStopTimeoutMs = 2000;
 
@@ -49,10 +48,10 @@ protocol::TimeUs NowUs() {
 // it starts with '<'; this is the only per-participant configuration route the
 // pinned version has.
 std::string InterfaceConfig(const std::string &interface) {
-  return "<CycloneDDS><Domain id=\"any\"><General><Interfaces><NetworkInterface "
+  return "<CycloneDDS><Domain "
+         "id=\"any\"><General><Interfaces><NetworkInterface "
          "name=\"" +
-         interface +
-         "\"/></Interfaces></General></Domain></CycloneDDS>";
+         interface + "\"/></Interfaces></General></Domain></CycloneDDS>";
 }
 
 // A reliable writer can refuse a sample when its history is full and the
@@ -101,12 +100,14 @@ EndpointQos ReportEndpointQos(const Endpoint &endpoint, bool reader) {
   report.available = true;
   report.reader = reader;
   report.topic_name = endpoint.topic_description().name();
-  report.durable = durability.kind() != dds::core::policy::DurabilityKind::VOLATILE;
+  report.durable =
+      durability.kind() != dds::core::policy::DurabilityKind::VOLATILE;
   report.reliable =
       reliability.kind() == dds::core::policy::ReliabilityKind::RELIABLE;
   report.max_blocking_time_us = static_cast<std::uint64_t>(
       reliability.max_blocking_time().to_microsecs());
-  report.keep_last = history.kind() == dds::core::policy::HistoryKind::KEEP_LAST;
+  report.keep_last =
+      history.kind() == dds::core::policy::HistoryKind::KEEP_LAST;
   report.history_depth = history.depth();
   report.max_samples = limits.max_samples();
   report.max_instances = limits.max_instances();
@@ -125,11 +126,11 @@ bool IsStopLaneOperation(protocol::Operation operation) {
 // Every DDS entity lives here and is created by the constructor, which only
 // runs from Start(). The transport thread owns all of them after that.
 struct DdsTransport::Impl {
-  Impl(const configuration::RuntimeConfig &config, DdsTransport &owner_transport)
+  Impl(const configuration::RuntimeConfig &config,
+       DdsTransport &owner_transport)
       : owner(owner_transport),
-        participant(config.dds.domain,
-                    dds::domain::qos::DomainParticipantQos(), nullptr,
-                    dds::core::status::StatusMask::none(),
+        participant(config.dds.domain, dds::domain::qos::DomainParticipantQos(),
+                    nullptr, dds::core::status::StatusMask::none(),
                     config.dds.interface.empty()
                         ? std::string()
                         : InterfaceConfig(config.dds.interface)),
@@ -139,29 +140,25 @@ struct DdsTransport::Impl {
                       std::string(protocol::kExecutionRequestTopic.name)),
         command_topic(participant,
                       std::string(protocol::kJointCommandTopic.name)),
-        heartbeat_topic(
-            participant,
-            std::string(protocol::kSupervisorHeartbeatTopic.name)),
+        heartbeat_topic(participant,
+                        std::string(protocol::kSupervisorHeartbeatTopic.name)),
         result_topic(participant,
                      std::string(protocol::kExecutionResultTopic.name)),
-        state_topic(participant,
-                    std::string(protocol::kRobotStateTopic.name)),
-        request_reader(subscriber, request_topic,
-                       codec::ToReaderQos(protocol::kExecutionRequestTopic.qos)),
+        state_topic(participant, std::string(protocol::kRobotStateTopic.name)),
+        request_reader(
+            subscriber, request_topic,
+            codec::ToReaderQos(protocol::kExecutionRequestTopic.qos)),
         command_reader(subscriber, command_topic,
                        codec::ToReaderQos(protocol::kJointCommandTopic.qos)),
         heartbeat_reader(
             subscriber, heartbeat_topic,
             codec::ToReaderQos(protocol::kSupervisorHeartbeatTopic.qos)),
-        result_writer(
-            publisher, result_topic,
-            codec::ToWriterQos(protocol::kExecutionResultTopic.qos)),
+        result_writer(publisher, result_topic,
+                      codec::ToWriterQos(protocol::kExecutionResultTopic.qos)),
         state_writer(publisher, state_topic,
                      codec::ToWriterQos(protocol::kRobotStateTopic.qos)),
-        request_condition(request_reader,
-                          dds::sub::status::DataState::any()),
-        command_condition(command_reader,
-                          dds::sub::status::DataState::any()),
+        request_condition(request_reader, dds::sub::status::DataState::any()),
+        command_condition(command_reader, dds::sub::status::DataState::any()),
         heartbeat_condition(heartbeat_reader,
                             dds::sub::status::DataState::any()) {
     waitset += request_condition;
@@ -404,8 +401,9 @@ const runtime::TickInput &DdsTransport::TakeInput() {
          requests_.TryPop(input_.requests[input_.request_count])) {
     ++input_.request_count;
   }
-  while (input_.stop_request_count < runtime::kStopRequestBatchCapacity &&
-         stop_requests_.TryPop(input_.stop_requests[input_.stop_request_count])) {
+  while (
+      input_.stop_request_count < runtime::kStopRequestBatchCapacity &&
+      stop_requests_.TryPop(input_.stop_requests[input_.stop_request_count])) {
     ++input_.stop_request_count;
   }
   while (input_.command_count < runtime::kCommandBatchCapacity &&

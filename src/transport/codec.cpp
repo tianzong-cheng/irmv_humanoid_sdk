@@ -110,7 +110,8 @@ bool ReadText(const protocol::wire::Text64 &source, protocol::Text64 &target) {
   return target.Assign(std::string_view(source.bytes().data(), source.count()));
 }
 
-bool ReadText(const protocol::wire::Text256 &source, protocol::Text256 &target) {
+bool ReadText(const protocol::wire::Text256 &source,
+              protocol::Text256 &target) {
   if (source.count() > kMaxReasonBytes) {
     return false;
   }
@@ -327,11 +328,12 @@ bool ReadState(const protocol::wire::RobotState &source,
 
 template <typename Qos>
 void ApplyTopicQos(Qos &target, const protocol::TopicQos &source) {
-  const std::uint32_t depth = source.history_depth == 0 ? 1 : source.history_depth;
+  const std::uint32_t depth =
+      source.history_depth == 0 ? 1 : source.history_depth;
   target << dds::core::policy::Durability::Volatile()
          << dds::core::policy::History::KeepLast(depth)
          << dds::core::policy::ResourceLimits(static_cast<int32_t>(depth), 1,
-                                             static_cast<int32_t>(depth));
+                                              static_cast<int32_t>(depth));
   if (source.reliability == protocol::Reliability::Reliable) {
     target << dds::core::policy::Reliability::Reliable(
         dds::core::Duration::from_microsecs(

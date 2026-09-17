@@ -1,5 +1,7 @@
 #include "irmv/runtime/runtime_loop.hpp"
 
+#include <unistd.h>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -18,7 +20,6 @@
 #include <string>
 #include <string_view>
 #include <thread>
-#include <unistd.h>
 #include <utility>
 
 #include "irmv/runtime/execution_fsm.hpp"
@@ -284,8 +285,7 @@ configuration::LogLevel EventLevel(EventCode code) {
 bool ReportsOutputAction(EventCode code) {
   return code == EventCode::FaultLatched ||
          code == EventCode::FaultOutputDegraded ||
-         code == EventCode::BootFailed ||
-         code == EventCode::ProtocolExhausted;
+         code == EventCode::BootFailed || code == EventCode::ProtocolExhausted;
 }
 
 // ---------------------------------------------------------------------------
@@ -294,16 +294,16 @@ bool ReportsOutputAction(EventCode code) {
 //
 // One JSON-lines record per torque write of the fake backend, built from what
 // really happened: the backend's own output history and the state the tick
-// published. Nothing in the trace is recomputed or interpolated, so a tick whose
-// record went missing stays a hole in the recorded tick sequence and the
+// published. Nothing in the trace is recomputed or interpolated, so a tick
+// whose record went missing stays a hole in the recorded tick sequence and the
 // consumer must fail the acceptance instead of repairing it. A tick whose write
 // was refused and whose safe fallback was attempted carries two records - the
 // same tick twice - and the consumer reads the last one as the effective write.
 //
-// The control thread only copies a fixed-size record into a bounded channel; one
-// writer thread owns the file, so a slow or blocked file system can never delay
-// a control tick. A full channel drops the record and counts it, which is the
-// only honest report of a trace that is not complete.
+// The control thread only copies a fixed-size record into a bounded channel;
+// one writer thread owns the file, so a slow or blocked file system can never
+// delay a control tick. A full channel drops the record and counts it, which is
+// the only honest report of a trace that is not complete.
 
 inline constexpr std::size_t kTraceChannelCapacity = 64;
 // Writes the control thread drains from the backend history per call. A tick
@@ -376,14 +376,15 @@ class JsonLine {
       return;
     }
     char rendered[40];
-    const int written = std::snprintf(rendered, sizeof(rendered), "%.17g", value);
+    const int written =
+        std::snprintf(rendered, sizeof(rendered), "%.17g", value);
     if (written <= 0) {
       Fail();
       return;
     }
-    Append(std::string_view(rendered,
-                            std::min<std::size_t>(static_cast<std::size_t>(written),
-                                                  sizeof(rendered) - 1)));
+    Append(std::string_view(
+        rendered, std::min<std::size_t>(static_cast<std::size_t>(written),
+                                        sizeof(rendered) - 1)));
   }
 
   void Field(std::string_view name, const char *text) {
@@ -442,10 +443,9 @@ class JsonLine {
         Fail();
         return;
       }
-      Append(std::string_view(rendered,
-                              std::min<std::size_t>(
-                                  static_cast<std::size_t>(written),
-                                  sizeof(rendered) - 1)));
+      Append(std::string_view(
+          rendered, std::min<std::size_t>(static_cast<std::size_t>(written),
+                                          sizeof(rendered) - 1)));
     }
     Append("]");
   }
@@ -523,8 +523,8 @@ class JsonLine {
     Append(UintText(value, buffer));
   }
 
-  // Nesting is at most one level; the flags of the open scopes are kept for both
-  // levels so a nested object starts its own field list.
+  // Nesting is at most one level; the flags of the open scopes are kept for
+  // both levels so a nested object starts its own field list.
   static constexpr std::size_t kMaxDepth = 2;
   char *buffer_;
   std::size_t capacity_;
@@ -659,8 +659,7 @@ void OutputTrace::Stop() {
   line.Field("kind", "end");
   line.Field("recorded", recorded_.load(std::memory_order_relaxed));
   line.Field("dropped", dropped_);
-  line.Field("write_failures",
-             write_failures_.load(std::memory_order_relaxed));
+  line.Field("write_failures", write_failures_.load(std::memory_order_relaxed));
   line.End();
   if (line.ok()) {
     std::string_view text = line.line();
@@ -679,7 +678,8 @@ void OutputTrace::Run() {
       continue;
     }
     if (stop_requested_.load(std::memory_order_relaxed)) {
-      // The control thread is the only producer and has already stopped pushing.
+      // The control thread is the only producer and has already stopped
+      // pushing.
       while (channel_.TryPop(record)) {
         Render(record);
       }
@@ -788,8 +788,8 @@ class LogRecord {
 
 void LogStartup(telemetry::Logger &logger,
                 const configuration::RuntimeConfig &config,
-                const protocol::Id &runtime_id,
-                protocol::ExecutionState state, protocol::TimeUs stamp_us) {
+                const protocol::Id &runtime_id, protocol::ExecutionState state,
+                protocol::TimeUs stamp_us) {
   LogRecord record(configuration::LogLevel::Info, stamp_us, 0, "runtime",
                    "runtime started");
   record.Field("backend", config.backend);
@@ -869,32 +869,33 @@ void LogSummary(telemetry::Logger &logger, std::string_view message,
 
 // Final line on stderr: the logger is already stopped here, so the numbers are
 // final. Nothing about a clean stop is claimed before this point.
-void ReportCleanStop(const telemetry::Logger &logger, const LoopCounters &counters,
+void ReportCleanStop(const telemetry::Logger &logger,
+                     const LoopCounters &counters,
                      const transport::DdsTransport &transport,
                      const OutputTrace::Counters &trace) {
-  std::fprintf(stderr,
-               "robot_runtime: clean shutdown: state=ZeroTorque ticks=%llu "
-               "overruns=%llu worst_overrun_us=%llu written=%llu undrained=%llu "
-               "dropped=%llu filtered=%llu errors=%llu transport_dropped=%llu "
-               "request_dropped=%llu command_dropped=%llu heartbeat_dropped=%llu "
-               "trace_active=%d trace_written=%llu trace_dropped=%llu "
-               "trace_failures=%llu\n",
-               static_cast<unsigned long long>(counters.ticks),
-               static_cast<unsigned long long>(counters.overruns),
-               static_cast<unsigned long long>(counters.worst_overrun_us),
-               static_cast<unsigned long long>(logger.Written()),
-               static_cast<unsigned long long>(logger.Undrained()),
-               static_cast<unsigned long long>(logger.Dropped()),
-               static_cast<unsigned long long>(logger.Filtered()),
-               static_cast<unsigned long long>(logger.error_count()),
-               static_cast<unsigned long long>(TransportDropped(transport)),
-               static_cast<unsigned long long>(transport.dropped_request_count()),
-               static_cast<unsigned long long>(transport.dropped_command_count()),
-               static_cast<unsigned long long>(transport.dropped_heartbeat_count()),
-               trace.active ? 1 : 0,
-               static_cast<unsigned long long>(trace.recorded),
-               static_cast<unsigned long long>(trace.dropped),
-               static_cast<unsigned long long>(trace.write_failures));
+  std::fprintf(
+      stderr,
+      "robot_runtime: clean shutdown: state=ZeroTorque ticks=%llu "
+      "overruns=%llu worst_overrun_us=%llu written=%llu undrained=%llu "
+      "dropped=%llu filtered=%llu errors=%llu transport_dropped=%llu "
+      "request_dropped=%llu command_dropped=%llu heartbeat_dropped=%llu "
+      "trace_active=%d trace_written=%llu trace_dropped=%llu "
+      "trace_failures=%llu\n",
+      static_cast<unsigned long long>(counters.ticks),
+      static_cast<unsigned long long>(counters.overruns),
+      static_cast<unsigned long long>(counters.worst_overrun_us),
+      static_cast<unsigned long long>(logger.Written()),
+      static_cast<unsigned long long>(logger.Undrained()),
+      static_cast<unsigned long long>(logger.Dropped()),
+      static_cast<unsigned long long>(logger.Filtered()),
+      static_cast<unsigned long long>(logger.error_count()),
+      static_cast<unsigned long long>(TransportDropped(transport)),
+      static_cast<unsigned long long>(transport.dropped_request_count()),
+      static_cast<unsigned long long>(transport.dropped_command_count()),
+      static_cast<unsigned long long>(transport.dropped_heartbeat_count()),
+      trace.active ? 1 : 0, static_cast<unsigned long long>(trace.recorded),
+      static_cast<unsigned long long>(trace.dropped),
+      static_cast<unsigned long long>(trace.write_failures));
 }
 
 // ---------------------------------------------------------------------------
@@ -1116,9 +1117,9 @@ ScenarioFeedbackEntry ParseFeedback(const Json &value, const std::string &path,
         parsed.freq_hz = value_hz;
       }
       if (const Json *error = FindMember(joint, "error_code")) {
-        parsed.error_code = static_cast<std::uint32_t>(CountValue(
-            *error, Join(joint_path, "error_code"),
-            std::numeric_limits<std::uint32_t>::max()));
+        parsed.error_code = static_cast<std::uint32_t>(
+            CountValue(*error, Join(joint_path, "error_code"),
+                       std::numeric_limits<std::uint32_t>::max()));
       }
       feedback.joints.push_back(parsed);
     }
@@ -1171,8 +1172,7 @@ FakeScenario LoadFakeScenario(const std::filesystem::path &path,
 
   FakeScenario scenario;
   scenario.entries.reserve(entries.size());
-  auto effective_count =
-      static_cast<std::uint32_t>(config.joint_count());
+  auto effective_count = static_cast<std::uint32_t>(config.joint_count());
   bool has_previous = false;
   protocol::TimeUs previous_elapsed = 0;
   for (std::size_t index = 0; index < entries.size(); ++index) {
@@ -1184,12 +1184,13 @@ FakeScenario LoadFakeScenario(const std::filesystem::path &path,
     RejectUnknownMembers(entry, entry_path,
                          {"elapsed_us", "paused", "feedback", "write_result"});
     ScenarioEntry parsed;
-    parsed.elapsed_us = CountValue(
-        RequiredMember(entry, "elapsed_us", entry_path),
-        Join(entry_path, "elapsed_us"),
-        std::numeric_limits<protocol::TimeUs>::max());
+    parsed.elapsed_us =
+        CountValue(RequiredMember(entry, "elapsed_us", entry_path),
+                   Join(entry_path, "elapsed_us"),
+                   std::numeric_limits<protocol::TimeUs>::max());
     if (has_previous && parsed.elapsed_us <= previous_elapsed) {
-      ScenarioFail(Join(entry_path, "elapsed_us"), "must be strictly increasing");
+      ScenarioFail(Join(entry_path, "elapsed_us"),
+                   "must be strictly increasing");
     }
     has_previous = true;
     previous_elapsed = parsed.elapsed_us;
@@ -1197,9 +1198,8 @@ FakeScenario LoadFakeScenario(const std::filesystem::path &path,
       parsed.paused = BoolValue(*paused, Join(entry_path, "paused"));
     }
     if (const Json *feedback = FindMember(entry, "feedback")) {
-      parsed.feedback =
-          ParseFeedback(*feedback, Join(entry_path, "feedback"),
-                        &effective_count);
+      parsed.feedback = ParseFeedback(*feedback, Join(entry_path, "feedback"),
+                                      &effective_count);
     }
     if (const Json *write = FindMember(entry, "write_result")) {
       const std::string write_path = Join(entry_path, "write_result");
@@ -1329,7 +1329,14 @@ class ShutdownPlanner {
  public:
   // Why the loop keeps running after a stop was requested. Reported once per
   // change, never at control frequency.
-  enum class Notice { None, Boot, Motion, MotionWithoutSession, Fault, WriteRefused };
+  enum class Notice {
+    None,
+    Boot,
+    Motion,
+    MotionWithoutSession,
+    Fault,
+    WriteRefused
+  };
 
   // Returns the input of this tick. A stop signal while motion may still be
   // authorized adds the runtime's own ZeroTorque stop request to the stop lane
@@ -1518,8 +1525,7 @@ CommandLine ParseCommandLine(int argc, char **argv) {
         result.error = "--domain must be an integer, got \"" + value + "\"";
         return result;
       }
-      if (consumed != value.size() ||
-          domain > configuration::kMaxDdsDomain) {
+      if (consumed != value.size() || domain > configuration::kMaxDdsDomain) {
         result.error = "--domain must be between 0 and " +
                        std::to_string(configuration::kMaxDdsDomain) +
                        ", got \"" + value + "\"";
@@ -1725,8 +1731,8 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
                           work_end - deadline)
                           .count();
     ++counters.overruns;
-    counters.worst_overrun_us =
-        std::max(counters.worst_overrun_us, static_cast<protocol::TimeUs>(late));
+    counters.worst_overrun_us = std::max(counters.worst_overrun_us,
+                                         static_cast<protocol::TimeUs>(late));
     if (late >= static_cast<std::chrono::microseconds::rep>(period_us)) {
       deadline = work_end;
     }

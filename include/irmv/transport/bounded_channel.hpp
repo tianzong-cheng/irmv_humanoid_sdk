@@ -79,17 +79,19 @@ class BoundedChannel {
       }
       const std::size_t index = read % Capacity;
       const std::size_t generation = Generation(read);
-      if (slot_generation_[index].load(std::memory_order_acquire) != generation) {
+      if (slot_generation_[index].load(std::memory_order_acquire) !=
+          generation) {
         continue;
       }
       // The producer may overwrite this slot at any time, whatever the ring
-      // looked like when the indices above were read: it publishes the new write
-      // index only after the payload and both markers, so a producer that laps
-      // the consumer can be writing this slot right now and a check before the
-      // copy cannot rule it out. Copy through a local and accept the entry only
-      // when the slot still holds the same generation.
+      // looked like when the indices above were read: it publishes the new
+      // write index only after the payload and both markers, so a producer that
+      // laps the consumer can be writing this slot right now and a check before
+      // the copy cannot rule it out. Copy through a local and accept the entry
+      // only when the slot still holds the same generation.
       const T candidate = storage_[index];
-      if (slot_generation_[index].load(std::memory_order_acquire) != generation) {
+      if (slot_generation_[index].load(std::memory_order_acquire) !=
+          generation) {
         continue;
       }
       out = candidate;
@@ -145,7 +147,8 @@ class BoundedChannel {
 
   void PublishSlot(std::size_t write, const T &value) {
     const std::size_t index = write % Capacity;
-    slot_generation_[index].store(Generation(write) - 1, std::memory_order_release);
+    slot_generation_[index].store(Generation(write) - 1,
+                                  std::memory_order_release);
     storage_[index] = value;
     slot_generation_[index].store(Generation(write), std::memory_order_release);
     write_.store(write + 1, std::memory_order_release);

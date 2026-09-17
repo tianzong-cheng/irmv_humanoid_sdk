@@ -37,14 +37,14 @@ struct EndpointQos {
   bool available{false};
   bool reader{false};
   std::string topic_name;
-  bool durable{false};   // true when durability is not VOLATILE
-  bool reliable{false};  // reliability kind
-  bool keep_last{false}; // history kind
+  bool durable{false};    // true when durability is not VOLATILE
+  bool reliable{false};   // reliability kind
+  bool keep_last{false};  // history kind
   std::uint32_t history_depth{0};
   std::uint64_t max_blocking_time_us{0};
-  std::int32_t max_samples{0};              // -1 means unlimited
-  std::int32_t max_instances{0};            // -1 means unlimited
-  std::int32_t max_samples_per_instance{0}; // -1 means unlimited
+  std::int32_t max_samples{0};               // -1 means unlimited
+  std::int32_t max_instances{0};             // -1 means unlimited
+  std::int32_t max_samples_per_instance{0};  // -1 means unlimited
 };
 
 // Bounded DDS transport for the five frozen topics in protocol/types.hpp.
@@ -61,10 +61,10 @@ struct EndpointQos {
 // string on the participant constructor, which is the only per-participant
 // configuration route it has (there is no property QoS policy and no property
 // accessor in the pinned C runtime). Start() passes an inline XML snippet that
-// pins Domain/General/Interfaces to config.dds.interface, or no configuration at
-// all when the configured interface is empty. CycloneDDS caches domain
-// configurations per domain id inside the process and the first creator wins, so
-// the binding is process wide for that domain: a participant created earlier
+// pins Domain/General/Interfaces to config.dds.interface, or no configuration
+// at all when the configured interface is empty. CycloneDDS caches domain
+// configurations per domain id inside the process and the first creator wins,
+// so the binding is process wide for that domain: a participant created earlier
 // with other settings keeps them. An interface that does not exist makes
 // participant creation fail, because the pinned version marks interfaces listed
 // explicitly in the configuration as required to be present.

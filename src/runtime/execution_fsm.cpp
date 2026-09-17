@@ -40,7 +40,8 @@ ExecutionFsm::ExecutionFsm(const configuration::RuntimeConfig &config,
 
 TickResult ExecutionFsm::Tick(protocol::TimeUs now_us,
                               const protocol::FeedbackSnapshot &feedback,
-                              const TickInput &input, hardware::Backend &backend) {
+                              const TickInput &input,
+                              hardware::Backend &backend) {
   TickResult out;
   TickScope scope;
   scope.now_us = now_us;
@@ -65,7 +66,8 @@ TickResult ExecutionFsm::Tick(protocol::TimeUs now_us,
   scope.report = &report;
   gate_.RecordState(published_seq, now_us);
 
-  // 3. Safety decision first: an observed fault is latched before any request is
+  // 3. Safety decision first: an observed fault is latched before any request
+  // is
   //    considered, so a fault and a motion request in the same tick can never
   //    let the request win.
   if (report.fault && state_ != protocol::ExecutionState::Fault) {
@@ -138,8 +140,8 @@ void ExecutionFsm::ProcessCommands(TickScope &scope, const TickInput &input) {
   const std::size_t count =
       std::min(input.command_count, kCommandBatchCapacity);
   for (std::size_t index = 0; index < count; ++index) {
-    const GateResult gate_result = gate_.Accept(input.commands[index],
-                                                scope.now_us);
+    const GateResult gate_result =
+        gate_.Accept(input.commands[index], scope.now_us);
     if (gate_result.accepted()) {
       last_applied_command_seq_ = input.commands[index].value.command_seq;
       continue;
@@ -147,11 +149,11 @@ void ExecutionFsm::ProcessCommands(TickScope &scope, const TickInput &input) {
     // Only the authorized owner can produce an invalid owner command; a foreign
     // or stale packet is dropped by the gate without a fault.
     if (gate_result.invalid_owner_command()) {
-      LatchFault(scope, protocol::FaultReason::CommandInvalid,
-                 EventCode::FaultLatched, DampingEligible(*scope.report),
-                 MakeFaultReport(protocol::FaultReason::CommandInvalid,
-                                 scope.now_us, 0,
-                                 "authorized joint command rejected"));
+      LatchFault(
+          scope, protocol::FaultReason::CommandInvalid, EventCode::FaultLatched,
+          DampingEligible(*scope.report),
+          MakeFaultReport(protocol::FaultReason::CommandInvalid, scope.now_us,
+                          0, "authorized joint command rejected"));
     }
   }
 }
@@ -169,8 +171,7 @@ void ExecutionFsm::ProcessHeartbeats(TickScope &scope, const TickInput &input) {
     if (heartbeat.runtime_id != runtime_id_) {
       continue;
     }
-    if (session_id_ == protocol::kNoId ||
-        heartbeat.session_id != session_id_) {
+    if (session_id_ == protocol::kNoId || heartbeat.session_id != session_id_) {
       continue;
     }
     // A peer that only observes the published session id cannot extend a lease
@@ -247,8 +248,7 @@ void ExecutionFsm::PublishState(TickScope &scope) {
 }
 
 protocol::ExecutionResult ExecutionFsm::MakeResult(
-    const protocol::ExecutionRequest &request,
-    protocol::TimeUs now_us) const {
+    const protocol::ExecutionRequest &request, protocol::TimeUs now_us) const {
   protocol::ExecutionResult result;
   result.protocol_version = protocol::kProtocolVersion;
   result.supervisor_id = request.supervisor_id;
@@ -434,9 +434,9 @@ void ExecutionFsm::HandleReset(
   stop_reason_ = protocol::StopReason::None;
   SetState(protocol::ExecutionState::ZeroTorque, scope, EventCode::None);
   EmitEvent(scope, EventCode::ResetApplied, previous,
-            protocol::ExecutionState::ZeroTorque,
-            protocol::RejectReason::None, protocol::FaultReason::None,
-            protocol::StopReason::None, request.request_id);
+            protocol::ExecutionState::ZeroTorque, protocol::RejectReason::None,
+            protocol::FaultReason::None, protocol::StopReason::None,
+            request.request_id);
   QueueApplied(scope, request);
 }
 
@@ -457,13 +457,11 @@ void ExecutionFsm::HandleTracking(
   // motion authorization to a new epoch; the identical replay was answered
   // above from the stored record.
   if (state_ == protocol::ExecutionState::Tracking &&
-      request.producer_id == producer_id_ &&
-      request.expected_epoch == epoch_) {
+      request.producer_id == producer_id_ && request.expected_epoch == epoch_) {
     QueueRejected(scope, request, protocol::RejectReason::RequestConflict);
     return;
   }
-  if (request.expected_epoch != epoch_ ||
-      request.proposed_epoch <= epoch_) {
+  if (request.expected_epoch != epoch_ || request.proposed_epoch <= epoch_) {
     QueueRejected(scope, request, protocol::RejectReason::EpochMismatch);
     return;
   }
@@ -572,9 +570,8 @@ void ExecutionFsm::StartRequestRecord() {
   staged_record_ = RequestRecord{};
 }
 
-void ExecutionFsm::StageRequestAnswer(
-    const protocol::ExecutionRequest &request,
-    const protocol::ExecutionResult &result) {
+void ExecutionFsm::StageRequestAnswer(const protocol::ExecutionRequest &request,
+                                      const protocol::ExecutionResult &result) {
   staged_record_.valid = true;
   staged_record_.operation = request.operation;
   staged_record_.request_id = request.request_id;
@@ -592,7 +589,7 @@ void ExecutionFsm::StageRequestAnswer(
 }
 
 bool ExecutionFsm::PayloadMatches(const protocol::ExecutionRequest &request,
-                                 const RequestRecord &record) const {
+                                  const RequestRecord &record) const {
   if (request.operation != record.operation ||
       request.supervisor_id != record.supervisor_id ||
       request.expected_epoch != record.expected_epoch ||
@@ -838,11 +835,11 @@ bool ExecutionFsm::RevokeMotion(TickScope &scope) {
 
 bool ExecutionFsm::AdvanceWatermark(TickScope &scope) {
   if (epoch_ == std::numeric_limits<protocol::Sequence>::max()) {
-    LatchFault(scope, protocol::FaultReason::ProtocolExhausted,
-               EventCode::ProtocolExhausted, false,
-               MakeFaultReport(protocol::FaultReason::ProtocolExhausted,
-                               scope.now_us, 0,
-                               "authorization epoch watermark exhausted"));
+    LatchFault(
+        scope, protocol::FaultReason::ProtocolExhausted,
+        EventCode::ProtocolExhausted, false,
+        MakeFaultReport(protocol::FaultReason::ProtocolExhausted, scope.now_us,
+                        0, "authorization epoch watermark exhausted"));
     return false;
   }
   ++epoch_;
@@ -857,10 +854,9 @@ protocol::Id ExecutionFsm::GenerateSessionId() {
       std::size_t index = 0;
       while (index < id.size()) {
         const std::random_device::result_type value = entropy();
-        for (std::size_t byte = 0;
-             byte < sizeof(value) && index < id.size(); ++byte, ++index) {
-          id[index] =
-              static_cast<std::uint8_t>((value >> (8 * byte)) & 0xFFu);
+        for (std::size_t byte = 0; byte < sizeof(value) && index < id.size();
+             ++byte, ++index) {
+          id[index] = static_cast<std::uint8_t>((value >> (8 * byte)) & 0xFFu);
         }
       }
       if (id != protocol::kNoId) {
@@ -881,8 +877,8 @@ bool ExecutionFsm::LeaseValid(protocol::TimeUs now_us) const {
          now_us - last_heartbeat_rx_us_ <= config_.timeouts.supervisor_us;
 }
 
-void ExecutionFsm::IssueSession(
-    TickScope &scope, const protocol::ExecutionRequest &request) {
+void ExecutionFsm::IssueSession(TickScope &scope,
+                                const protocol::ExecutionRequest &request) {
   session_id_ = GenerateSessionId();
   session_supervisor_id_ = request.supervisor_id;
   last_heartbeat_rx_us_ = scope.now_us;
@@ -927,8 +923,8 @@ void ExecutionFsm::ExpireSession(TickScope &scope) {
     SetState(protocol::ExecutionState::Damping, scope, EventCode::None);
     stop_reason_ = protocol::StopReason::SupervisorTimeout;
     EmitEvent(scope, EventCode::SupervisorTimeout, previous,
-              protocol::ExecutionState::Damping,
-              protocol::RejectReason::None, protocol::FaultReason::None,
+              protocol::ExecutionState::Damping, protocol::RejectReason::None,
+              protocol::FaultReason::None,
               protocol::StopReason::SupervisorTimeout);
     return;
   }
@@ -938,13 +934,12 @@ void ExecutionFsm::ExpireSession(TickScope &scope) {
                      : protocol::StopReason::SupervisorTimeout;
 }
 
-bool ExecutionFsm::CheckContinuity(TickScope &scope,
-                                  const protocol::JointCommand &command) const {
+bool ExecutionFsm::CheckContinuity(
+    TickScope &scope, const protocol::JointCommand &command) const {
   const protocol::FeedbackSnapshot &feedback = *scope.feedback;
   const std::size_t joint_count = config_.joint_count();
   if (joint_count == 0 || joint_count > protocol::kMaxJoints ||
-      feedback.count != joint_count ||
-      command.joints.count != joint_count) {
+      feedback.count != joint_count || command.joints.count != joint_count) {
     return false;
   }
   for (std::size_t index = 0; index < joint_count; ++index) {

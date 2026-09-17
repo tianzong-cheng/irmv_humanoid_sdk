@@ -23,9 +23,7 @@ constexpr int kWorkerPollMs = 10;
 
 // Severity order is the declaration order of configuration::LogLevel, which is
 // documented as running from the most verbose to the most severe.
-int LevelRank(configuration::LogLevel level) {
-  return static_cast<int>(level);
-}
+int LevelRank(configuration::LogLevel level) { return static_cast<int>(level); }
 
 // Appends to a fixed buffer and never writes past its end. An event that
 // respects the fixed string capacities always fits (see kMaxLogLine), so a
@@ -159,8 +157,8 @@ bool RotatingFileSink::ReportError(std::string_view what,
   error_reported_ = true;
   const std::string message = error ? error.message() : std::string();
   std::fprintf(stderr, "irmv logger: %.*s: %s%s%s\n",
-               static_cast<int>(what.size()), what.data(), path_.string().c_str(),
-               error ? ": " : "", message.c_str());
+               static_cast<int>(what.size()), what.data(),
+               path_.string().c_str(), error ? ": " : "", message.c_str());
   return false;
 }
 
@@ -184,8 +182,7 @@ bool RotatingFileSink::OpenIfNeeded() {
 }
 
 bool RotatingFileSink::RotateIfNeeded(std::size_t line_bytes) {
-  if (rotate_bytes_ == 0 || size_ == 0 ||
-      size_ + line_bytes <= rotate_bytes_) {
+  if (rotate_bytes_ == 0 || size_ == 0 || size_ + line_bytes <= rotate_bytes_) {
     return true;
   }
   file_.close();
@@ -249,8 +246,8 @@ bool RotatingFileSink::Write(const LogEvent &event) {
   // stderr is the sink that never rotates: a run keeps its diagnostics even
   // when the file backend is unusable.
   const bool reportable = std::fwrite(line, 1, length, stderr) == length;
-  const bool stored = OpenIfNeeded() && RotateIfNeeded(length) &&
-                      AppendLine(line, length);
+  const bool stored =
+      OpenIfNeeded() && RotateIfNeeded(length) && AppendLine(line, length);
   return reportable && stored;
 }
 
@@ -409,13 +406,12 @@ void Logger::Stop() {
       return;
     }
     shared->stopped_ = true;
-    const auto deadline =
-        std::chrono::steady_clock::now() +
-        std::chrono::milliseconds(kStopDrainTimeoutMs);
-    // Publishing the refusal first is what makes "refused after Stop()" true for
-    // every producer that has not passed the check yet; the producers that did
-    // pass it are waited for below, so that their events are in the queue - and
-    // therefore in the counters - before the queue is measured.
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(kStopDrainTimeoutMs);
+    // Publishing the refusal first is what makes "refused after Stop()" true
+    // for every producer that has not passed the check yet; the producers that
+    // did pass it are waited for below, so that their events are in the queue -
+    // and therefore in the counters - before the queue is measured.
     shared->accepting_.store(false, std::memory_order_seq_cst);
     shared->stopping_ = true;
     shared->cv_.notify_all();
@@ -436,24 +432,24 @@ void Logger::Stop() {
     // producer increments producers_ before it touches the queue and decrements
     // it after the push, through sequential-consistent read-modify-writes, so:
     //   * a count of zero means every producer that entered has already
-    //     published its pending_ increment with release/acquire ordering through
-    //     that decrement, and the queue measurement below cannot miss an event
-    //     it accepted;
+    //     published its pending_ increment with release/acquire ordering
+    //     through that decrement, and the queue measurement below cannot miss
+    //     an event it accepted;
     //   * a non-zero count names the producers that may still accept one event
     //     each - at most one per producer - which is why they are added. A
     //     producer that enters after this load cannot accept anything, because
-    //     publishing the refusal precedes this load in the sequential-consistent
-    //     order and its own check follows its increment.
+    //     publishing the refusal precedes this load in the
+    //     sequential-consistent order and its own check follows its increment.
     // The sum therefore over-reports in the worst case instead of losing an
     // event.
     const std::uint64_t producers =
         shared->producers_.load(std::memory_order_seq_cst);
-    shared->undrained_ = shared->pending_.load(std::memory_order_acquire) +
-                         producers;
+    shared->undrained_ =
+        shared->pending_.load(std::memory_order_acquire) + producers;
     if (!drained && shared->worker_.joinable()) {
       // A sink blocked inside Write() would make join() wait forever. The
-      // worker owns its state through its shared_ptr, so it is left to finish on
-      // its own instead of hanging the shutting-down control loop.
+      // worker owns its state through its shared_ptr, so it is left to finish
+      // on its own instead of hanging the shutting-down control loop.
       shared->worker_.detach();
     }
   }
@@ -528,10 +524,9 @@ void Logger::WorkerMain(std::shared_ptr<Shared> shared) {
       break;
     }
     std::unique_lock<std::mutex> lock(shared->mutex_);
-    shared->cv_.wait_for(lock, std::chrono::milliseconds(kWorkerPollMs),
-                         [&shared] {
-                           return shared->stopping_ || !shared->Empty();
-                         });
+    shared->cv_.wait_for(
+        lock, std::chrono::milliseconds(kWorkerPollMs),
+        [&shared] { return shared->stopping_ || !shared->Empty(); });
   }
   try {
     if (!shared->sink_->Flush()) {

@@ -104,8 +104,8 @@ class RuntimeFixture {
     ResetFeedback();
   }
 
-  explicit RuntimeFixture(const std::filesystem::path &config_path =
-                              kFixtureConfigPath)
+  explicit RuntimeFixture(
+      const std::filesystem::path &config_path = kFixtureConfigPath)
       : RuntimeFixture(configuration::LoadConfig(config_path)) {}
 
   // Public state required by the plan: the configuration the FSM references
@@ -144,7 +144,8 @@ class RuntimeFixture {
   // elapsed. The simulated clock never moves backwards.
   void Advance(TimeUs duration_us) {
     TimeUs remaining = duration_us;
-    const TimeUs period = config.control_period_us == 0 ? 1 : config.control_period_us;
+    const TimeUs period =
+        config.control_period_us == 0 ? 1 : config.control_period_us;
     while (remaining > 0) {
       const TimeUs step = remaining < period ? remaining : period;
       now_us_ += step;
@@ -174,7 +175,8 @@ class RuntimeFixture {
     const TimeUs stamp = rx_us == 0 ? now_us_ : rx_us;
     if (stop_queue) {
       if (pending_stop_request_count_ < kStopRequestBatchCapacity) {
-        pending_stop_requests_[pending_stop_request_count_++] = {request, stamp};
+        pending_stop_requests_[pending_stop_request_count_++] = {request,
+                                                                 stamp};
       }
       return;
     }
@@ -185,8 +187,8 @@ class RuntimeFixture {
 
   void QueueCommand(const JointCommand &command, TimeUs rx_us = 0) {
     if (pending_command_count_ < kCommandBatchCapacity) {
-      pending_commands_[pending_command_count_++] = {command,
-                                                     rx_us == 0 ? now_us_ : rx_us};
+      pending_commands_[pending_command_count_++] = {
+          command, rx_us == 0 ? now_us_ : rx_us};
     }
   }
 
@@ -195,7 +197,8 @@ class RuntimeFixture {
   // test repeat or reorder heartbeats). The identity is taken from the latest
   // published state, so a session acquired during the next tick is not yet
   // visible here.
-  void QueueHeartbeat(Sequence heartbeat_seq = kAutoSequence, TimeUs rx_us = 0) {
+  void QueueHeartbeat(Sequence heartbeat_seq = kAutoSequence,
+                      TimeUs rx_us = 0) {
     if (pending_heartbeat_count_ >= kHeartbeatBatchCapacity) {
       return;
     }
@@ -242,8 +245,7 @@ class RuntimeFixture {
   // Builds a full first frame for a tracking authorization: it sits on the
   // current measured state, has finite gains and is therefore acceptable for
   // the entry continuity guards unless the caller changes it.
-  JointCommand MakeFirstFrame(Id producer_id,
-                              Sequence epoch = kAutoSequence,
+  JointCommand MakeFirstFrame(Id producer_id, Sequence epoch = kAutoSequence,
                               Sequence command_seq = kAutoSequence,
                               Sequence source_state_seq = kAutoSequence) const {
     JointCommand command;
@@ -273,26 +275,26 @@ class RuntimeFixture {
   // Builds a complete request for the current context. Zero epochs mean "the
   // current watermark" and "the next epoch"; request_id 0 means "the next
   // request id".
-  ExecutionRequest MakeRequest(
-      Operation operation, Sequence request_id = kAutoSequence,
-      Id producer_id = FixtureProducerId(),
-      Id supervisor_id = FixtureSupervisorId(),
-      Sequence expected_epoch = kAutoSequence,
-      Sequence proposed_epoch = kAutoSequence) {
+  ExecutionRequest MakeRequest(Operation operation,
+                               Sequence request_id = kAutoSequence,
+                               Id producer_id = FixtureProducerId(),
+                               Id supervisor_id = FixtureSupervisorId(),
+                               Sequence expected_epoch = kAutoSequence,
+                               Sequence proposed_epoch = kAutoSequence) {
     ExecutionRequest request;
     request.protocol_version = protocol::kProtocolVersion;
     request.supervisor_id = supervisor_id;
-    request.request_id = request_id == kAutoSequence ? next_request_id_ + 1
-                                                     : request_id;
+    request.request_id =
+        request_id == kAutoSequence ? next_request_id_ + 1 : request_id;
     request.session_id = operation == Operation::AcquireSession
                              ? protocol::kNoId
                              : state().session_id;
     request.runtime_id = FixtureRuntimeId();
     request.expected_epoch =
         expected_epoch == kAutoSequence ? state().epoch : expected_epoch;
-    request.proposed_epoch =
-        proposed_epoch == kAutoSequence ? request.expected_epoch + 1
-                                        : proposed_epoch;
+    request.proposed_epoch = proposed_epoch == kAutoSequence
+                                 ? request.expected_epoch + 1
+                                 : proposed_epoch;
     request.producer_id = producer_id;
     request.fault_id = state().fault_id;
     request.operation = operation;
@@ -324,8 +326,10 @@ class RuntimeFixture {
                             FixtureProducerId(), supervisor_id));
   }
 
-  FixtureResult Request(Operation operation, Sequence request_id = kAutoSequence) {
-    return Send(MakeRequest(operation, request_id), !IsNormalOperation(operation));
+  FixtureResult Request(Operation operation,
+                        Sequence request_id = kAutoSequence) {
+    return Send(MakeRequest(operation, request_id),
+                !IsNormalOperation(operation));
   }
 
   FixtureResult StopRequest(Operation operation,
@@ -372,8 +376,8 @@ class RuntimeFixture {
   void ResetFeedback() {
     feedback_ = protocol::FeedbackSnapshot{};
     feedback_.snapshot_seq = 0;
-    for (std::size_t index = 0; index < config.joint_count() &&
-                                index < protocol::kMaxJoints;
+    for (std::size_t index = 0;
+         index < config.joint_count() && index < protocol::kMaxJoints;
          ++index) {
       protocol::JointFeedback &joint = feedback_.joints[index];
       joint.valid = true;
@@ -453,12 +457,13 @@ class RuntimeFixture {
                           : static_cast<std::uint32_t>(config.joint_count());
     feedback_.stamp_us = now_us_;
     feedback_.snapshot_seq = ++feedback_seq_;
-    for (std::size_t index = 0; index < config.joint_count() &&
-                                index < protocol::kMaxJoints;
+    for (std::size_t index = 0;
+         index < config.joint_count() && index < protocol::kMaxJoints;
          ++index) {
       feedback_.joints[index].rx_stamp_us = now_us_;
     }
-    feedback_.imu.rx_stamp_us = imu_fresh_ ? now_us_ : feedback_.imu.rx_stamp_us;
+    feedback_.imu.rx_stamp_us =
+        imu_fresh_ ? now_us_ : feedback_.imu.rx_stamp_us;
   }
 
   void AppendQueuedHeartbeats(TickInput &input) {
@@ -494,9 +499,8 @@ class RuntimeFixture {
                               : kRequestBatchCapacity;
     pending_request_count_ = 0;
 
-    for (std::size_t index = 0;
-         index < pending_stop_request_count_ &&
-         index < kStopRequestBatchCapacity;
+    for (std::size_t index = 0; index < pending_stop_request_count_ &&
+                                index < kStopRequestBatchCapacity;
          ++index) {
       input.stop_requests[index] = pending_stop_requests_[index];
     }
@@ -508,9 +512,8 @@ class RuntimeFixture {
   }
 
   void AppendQueuedCommands(TickInput &input) {
-    for (std::size_t index = 0;
-         index < pending_command_count_ &&
-         input.command_count < kCommandBatchCapacity;
+    for (std::size_t index = 0; index < pending_command_count_ &&
+                                input.command_count < kCommandBatchCapacity;
          ++index) {
       input.commands[input.command_count++] = pending_commands_[index];
     }
@@ -559,8 +562,7 @@ class RuntimeFixture {
   std::array<Received<ExecutionRequest>, kStopRequestBatchCapacity>
       pending_stop_requests_{};
   std::size_t pending_stop_request_count_{0};
-  std::array<Received<JointCommand>, kCommandBatchCapacity>
-      pending_commands_{};
+  std::array<Received<JointCommand>, kCommandBatchCapacity> pending_commands_{};
   std::size_t pending_command_count_{0};
   std::array<Received<SupervisorHeartbeat>, kHeartbeatBatchCapacity>
       pending_heartbeats_{};
