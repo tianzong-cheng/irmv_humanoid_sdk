@@ -71,16 +71,47 @@ void TryWrite(Writer &writer, const Sample &sample,
 // Every read in the transport thread runs behind this guard. The thread entry
 // function must not let an exception escape it, so a failing DDS call ends the
 // transport loop cleanly - the same policy as the guarded WaitSet wait - and is
-// counted as an inbound error.
+// counted on its own counter, apart from samples that fail validation.
 template <typename Body>
-bool ReadGuarded(std::atomic<std::uint64_t> &inbound_errors, Body body) {
+bool ReadGuarded(std::atomic<std::uint64_t> &read_failures, Body body) {
   try {
     body();
     return true;
   } catch (const std::exception &) {
-    inbound_errors.fetch_add(1, std::memory_order_relaxed);
+    read_failures.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
+}
+
+// Reads the effective policies back from a live endpoint. Diagnostic only: the
+// control path never calls it, and a failing query is reported instead of being
+// thrown at the caller.
+template <typename Endpoint>
+EndpointQos ReportEndpointQos(const Endpoint &endpoint, bool reader) {
+  const auto durability =
+      endpoint.qos().template policy<dds::core::policy::Durability>();
+  const auto reliability =
+      endpoint.qos().template policy<dds::core::policy::Reliability>();
+  const auto history =
+      endpoint.qos().template policy<dds::core::policy::History>();
+  const auto limits =
+      endpoint.qos().template policy<dds::core::policy::ResourceLimits>();
+
+  EndpointQos report;
+  report.available = true;
+  report.reader = reader;
+  report.topic_name = endpoint.topic_description().name();
+  report.durable = durability.kind() != dds::core::policy::DurabilityKind::VOLATILE;
+  report.reliable =
+      reliability.kind() == dds::core::policy::ReliabilityKind::RELIABLE;
+  report.max_blocking_time_us = static_cast<std::uint64_t>(
+      reliability.max_blocking_time().to_microsecs());
+  report.keep_last = history.kind() == dds::core::policy::HistoryKind::KEEP_LAST;
+  report.history_depth = history.depth();
+  report.max_samples = limits.max_samples();
+  report.max_instances = limits.max_instances();
+  report.max_samples_per_instance = limits.max_samples_per_instance();
+  return report;
 }
 
 }  // namespace
@@ -208,9 +239,12 @@ bool DdsTransport::Impl::ReadInbound() {
   // Each lane is drained behind the same guard: a failing read ends the
   // transport loop cleanly and is counted, and the lanes that follow are left
   // untouched.
-  return ReadGuarded(owner.inbound_rejected_, [this]() { ReadRequests(); }) &&
-         ReadGuarded(owner.inbound_rejected_, [this]() { ReadCommands(); }) &&
-         ReadGuarded(owner.inbound_rejected_, [this]() { ReadHeartbeats(); });
+  return ReadGuarded(owner.inbound_read_failures_,
+                     [this]() { ReadRequests(); }) &&
+         ReadGuarded(owner.inbound_read_failures_,
+                     [this]() { ReadCommands(); }) &&
+         ReadGuarded(owner.inbound_read_failures_,
+                     [this]() { ReadHeartbeats(); });
 }
 
 void DdsTransport::Impl::ReadRequests() {
@@ -429,6 +463,33 @@ std::uint64_t DdsTransport::dropped_heartbeat_count() const {
 
 std::uint64_t DdsTransport::inbound_rejected_count() const {
   return inbound_rejected_.load(std::memory_order_relaxed);
+}
+
+std::uint64_t DdsTransport::inbound_read_failure_count() const {
+  return inbound_read_failures_.load(std::memory_order_relaxed);
+}
+
+EndpointQos DdsTransport::endpoint_qos(ChannelKind kind) const {
+  if (!impl_) {
+    return EndpointQos{};
+  }
+  try {
+    switch (kind) {
+      case ChannelKind::Request:
+        return ReportEndpointQos(impl_->request_reader, true);
+      case ChannelKind::Result:
+        return ReportEndpointQos(impl_->result_writer, false);
+      case ChannelKind::Command:
+        return ReportEndpointQos(impl_->command_reader, true);
+      case ChannelKind::Heartbeat:
+        return ReportEndpointQos(impl_->heartbeat_reader, true);
+      case ChannelKind::State:
+        return ReportEndpointQos(impl_->state_writer, false);
+    }
+  } catch (const std::exception &) {
+    return EndpointQos{};
+  }
+  return EndpointQos{};
 }
 
 }  // namespace irmv::transport

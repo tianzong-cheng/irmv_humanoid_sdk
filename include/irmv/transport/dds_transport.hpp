@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <string>
 
 #include "irmv/configuration/config.hpp"
 #include "irmv/protocol/types.hpp"
@@ -16,6 +17,35 @@ namespace irmv::transport {
 // block or drop a stop request; AcquireSession and Tracking are ordinary
 // requests.
 bool IsStopLaneOperation(protocol::Operation operation);
+
+// Which frozen channel one diagnostic query addresses.
+enum class ChannelKind {
+  Request,
+  Result,
+  Command,
+  Heartbeat,
+  State,
+};
+
+// Effective policies of the live DDS endpoint that carries one channel. The
+// transport reads Request, Command and Heartbeat and writes Result and State,
+// so `reader` names the direction of the queried endpoint. This is a
+// read-only diagnostic view for tests and operators; the control path never
+// consults it, and `available` is false while the transport is not started or
+// the endpoint cannot be queried.
+struct EndpointQos {
+  bool available{false};
+  bool reader{false};
+  std::string topic_name;
+  bool durable{false};   // true when durability is not VOLATILE
+  bool reliable{false};  // reliability kind
+  bool keep_last{false}; // history kind
+  std::uint32_t history_depth{0};
+  std::uint64_t max_blocking_time_us{0};
+  std::int32_t max_samples{0};              // -1 means unlimited
+  std::int32_t max_instances{0};            // -1 means unlimited
+  std::int32_t max_samples_per_instance{0}; // -1 means unlimited
+};
 
 // Bounded DDS transport for the five frozen topics in protocol/types.hpp.
 //
@@ -96,9 +126,18 @@ class DdsTransport {
   std::uint64_t dropped_command_count() const;
   // Supervisor heartbeats dropped because the inbound heartbeat queue was full.
   std::uint64_t dropped_heartbeat_count() const;
-  // Inbound samples that failed FromWire validation and were discarded whole,
-  // plus reads that failed and ended the transport loop.
+  // Inbound samples that failed FromWire validation and were discarded whole.
   std::uint64_t inbound_rejected_count() const;
+  // Reads that failed and ended the transport loop, counted separately so that
+  // a malformed sample can be told apart from a broken endpoint.
+  std::uint64_t inbound_read_failure_count() const;
+
+  // Reads the durability, reliability, history and resource policies back from
+  // the live endpoint that carries one frozen channel. Diagnostic only: it does
+  // not change transport behaviour, is safe to call while the transport runs,
+  // and reports `available == false` instead of throwing when the endpoint is
+  // not there.
+  EndpointQos endpoint_qos(ChannelKind kind) const;
 
  private:
   struct Impl;
@@ -135,6 +174,7 @@ class DdsTransport {
   std::atomic<std::uint64_t> dropped_commands_{0};
   std::atomic<std::uint64_t> dropped_heartbeats_{0};
   std::atomic<std::uint64_t> inbound_rejected_{0};
+  std::atomic<std::uint64_t> inbound_read_failures_{0};
 };
 
 }  // namespace irmv::transport

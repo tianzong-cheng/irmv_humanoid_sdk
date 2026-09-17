@@ -45,6 +45,7 @@ using irmv::protocol::kProtocolVersion;
 using irmv::protocol::Operation;
 using irmv::protocol::OutputAction;
 using irmv::protocol::RejectReason;
+using irmv::protocol::Reliability;
 using irmv::protocol::ResultStatus;
 using irmv::protocol::RobotState;
 using irmv::protocol::Sequence;
@@ -54,7 +55,9 @@ using irmv::protocol::TimeUs;
 using irmv::protocol::TopicDescriptor;
 using irmv::runtime::TickInput;
 using irmv::runtime::TickResult;
+using irmv::transport::ChannelKind;
 using irmv::transport::DdsTransport;
+using irmv::transport::EndpointQos;
 
 constexpr const char *kFixtureConfigPath = "config/sdk.json";
 
@@ -70,6 +73,11 @@ constexpr Sequence kInvalidRequestId = 0xDEADBEEFULL;
 constexpr Sequence kStateSeq = 4242;
 constexpr Sequence kFreshStateSeq = 4243;
 constexpr Sequence kFlushStateSeq = 4244;
+
+// Quiescence before the replay probe: the transport looks at its outbound
+// channels at least every ten milliseconds, so a publish that is still queued
+// cannot survive fifty milliseconds without being written.
+constexpr int kQuiescenceMs = 50;
 
 // Deliberately not a plausible host monotonic value, so a receive stamp copied
 // from the sender would be visible as such.
@@ -765,106 +773,95 @@ bool RejectInvalidSamples() {
   return true;
 }
 
-// ---- endpoint QoS ---------------------------------------------------------
+// ---- transport endpoint QoS ----------------------------------------------
 
-template <typename EndpointQos>
-bool CheckEndpointQos(const EndpointQos &qos, const TopicDescriptor &descriptor,
-                      const char *role, const std::string &name) {
-  const auto durability = qos.template policy<dds::core::policy::Durability>();
-  const auto reliability = qos.template policy<dds::core::policy::Reliability>();
-  const auto history = qos.template policy<dds::core::policy::History>();
-  const auto limits = qos.template policy<dds::core::policy::ResourceLimits>();
+struct ExpectedEndpoint {
+  ChannelKind kind;
+  const TopicDescriptor *descriptor;
+  bool reader;
+  Reliability reliability;
+};
 
-  const bool reliable = descriptor.qos.reliability ==
-                        irmv::protocol::Reliability::Reliable;
-  const std::uint32_t depth = descriptor.qos.history_depth;
+// Reads one of the transport's own endpoints back and compares it with the
+// frozen descriptor. Querying the live writer/reader of the running transport -
+// rather than a copy the test built itself - is what makes this durability
+// evidence for the transport.
+bool CheckTransportEndpointQos(DdsTransport &transport,
+                               const ExpectedEndpoint &expected) {
+  const EndpointQos qos = transport.endpoint_qos(expected.kind);
+  const std::string name(expected.descriptor->name);
+  const std::uint32_t depth = expected.descriptor->qos.history_depth;
+  const bool reliable = expected.reliability == Reliability::Reliable;
 
-  std::cout << "[dds_codec_test] qos " << name << ' ' << role
-            << " durability="
-            << (durability.kind() == dds::core::policy::DurabilityKind::VOLATILE
-                    ? "VOLATILE"
-                    : "NOT_VOLATILE")
-            << " reliability="
-            << (reliability.kind() == dds::core::policy::ReliabilityKind::RELIABLE
-                    ? "RELIABLE"
-                    : "BEST_EFFORT")
-            << " blocking_ms=" << reliability.max_blocking_time().to_millisecs()
-            << " history="
-            << (history.kind() == dds::core::policy::HistoryKind::KEEP_LAST
-                    ? "KEEP_LAST"
-                    : "NOT_KEEP_LAST")
-            << '/' << history.depth() << " limits=" << limits.max_samples() << '/'
-            << limits.max_instances() << '/' << limits.max_samples_per_instance()
-            << '\n';
+  std::cout << "[dds_codec_test] transport endpoint "
+            << (qos.available ? qos.topic_name : name) << ' '
+            << (qos.reader ? "reader" : "writer")
+            << " durability=" << (qos.durable ? "NOT_VOLATILE" : "VOLATILE")
+            << " reliability=" << (qos.reliable ? "RELIABLE" : "BEST_EFFORT")
+            << " blocking_us=" << qos.max_blocking_time_us << " history="
+            << (qos.keep_last ? "KEEP_LAST" : "NOT_KEEP_LAST") << '/'
+            << qos.history_depth << " limits=" << qos.max_samples << '/'
+            << qos.max_instances << '/' << qos.max_samples_per_instance << '\n';
 
-  if (durability.kind() != dds::core::policy::DurabilityKind::VOLATILE) {
-    std::cerr << "qos: " << name << ' ' << role << " is not VOLATILE\n";
+  if (!qos.available) {
+    std::cerr << "qos: the " << name << " endpoint is not available\n";
     return false;
   }
-  if (reliable != (reliability.kind() ==
-                   dds::core::policy::ReliabilityKind::RELIABLE)) {
-    std::cerr << "qos: " << name << ' ' << role
-              << " has the wrong reliability kind\n";
+  if (qos.reader != expected.reader) {
+    std::cerr << "qos: " << name << " is queried in the wrong direction\n";
     return false;
   }
-  if (reliable &&
-      reliability.max_blocking_time() !=
-          dds::core::Duration::from_millisecs(
-              static_cast<int64_t>(descriptor.qos.max_blocking_time_us / 1000))) {
-    std::cerr << "qos: " << name << ' ' << role
-              << " has the wrong max_blocking_time\n";
+  if (qos.topic_name != name) {
+    std::cerr << "qos: " << name << " endpoint carries topic " << qos.topic_name
+              << '\n';
     return false;
   }
-  if (history.kind() != dds::core::policy::HistoryKind::KEEP_LAST ||
-      history.depth() != depth) {
-    std::cerr << "qos: " << name << ' ' << role
-              << " has the wrong history depth\n";
+  if (qos.durable) {
+    std::cerr << "qos: " << name << " is not VOLATILE\n";
     return false;
   }
-  if (limits.max_samples() != depth || limits.max_instances() != 1 ||
-      limits.max_samples_per_instance() != depth) {
-    std::cerr << "qos: " << name << ' ' << role
+  if (qos.reliable != reliable) {
+    std::cerr << "qos: " << name << " has the wrong reliability kind\n";
+    return false;
+  }
+  if (reliable && qos.max_blocking_time_us !=
+                      expected.descriptor->qos.max_blocking_time_us) {
+    std::cerr << "qos: " << name << " has the wrong max_blocking_time\n";
+    return false;
+  }
+  if (!qos.keep_last || qos.history_depth != depth) {
+    std::cerr << "qos: " << name << " has the wrong history depth\n";
+    return false;
+  }
+  if (qos.max_samples != static_cast<std::int32_t>(depth) ||
+      qos.max_instances != 1 ||
+      qos.max_samples_per_instance != static_cast<std::int32_t>(depth)) {
+    std::cerr << "qos: " << name
               << " has non-finite or wrong resource limits\n";
     return false;
   }
   return true;
 }
 
-template <typename T>
-bool CheckTopicQos(dds::pub::Publisher &publisher,
-                   dds::sub::Subscriber &subscriber,
-                   const TopicDescriptor &descriptor) {
-  const std::string name(descriptor.name);
-  dds::topic::Topic<T> topic(publisher.participant(), name);
-  if (topic.name() != name) {
-    std::cerr << "qos: topic name " << topic.name() << " differs from " << name
-              << '\n';
-    return false;
-  }
-  dds::pub::DataWriter<T> writer(publisher, topic,
-                                 codec::ToWriterQos(descriptor.qos));
-  dds::sub::DataReader<T> reader(subscriber, topic,
-                                 codec::ToReaderQos(descriptor.qos));
-  const bool writer_ok =
-      CheckEndpointQos(writer.qos(), descriptor, "writer", name);
-  const bool reader_ok =
-      CheckEndpointQos(reader.qos(), descriptor, "reader", name);
-  return writer_ok && reader_ok;
-}
+bool CheckTransportQos(DdsTransport &transport) {
+  const ExpectedEndpoint expectations[] = {
+      {ChannelKind::Request, &irmv::protocol::kExecutionRequestTopic, true,
+       Reliability::Reliable},
+      {ChannelKind::Result, &irmv::protocol::kExecutionResultTopic, false,
+       Reliability::Reliable},
+      {ChannelKind::Command, &irmv::protocol::kJointCommandTopic, true,
+       Reliability::BestEffort},
+      {ChannelKind::Heartbeat, &irmv::protocol::kSupervisorHeartbeatTopic, true,
+       Reliability::BestEffort},
+      {ChannelKind::State, &irmv::protocol::kRobotStateTopic, false,
+       Reliability::BestEffort},
+  };
 
-bool CheckFrozenQos(dds::pub::Publisher &publisher,
-                    dds::sub::Subscriber &subscriber) {
-  return CheckTopicQos<wire::ExecutionRequest>(
-             publisher, subscriber, irmv::protocol::kExecutionRequestTopic) &&
-         CheckTopicQos<wire::ExecutionResult>(
-             publisher, subscriber, irmv::protocol::kExecutionResultTopic) &&
-         CheckTopicQos<wire::JointCommand>(
-             publisher, subscriber, irmv::protocol::kJointCommandTopic) &&
-         CheckTopicQos<wire::SupervisorHeartbeat>(
-             publisher, subscriber,
-             irmv::protocol::kSupervisorHeartbeatTopic) &&
-         CheckTopicQos<wire::RobotState>(
-             publisher, subscriber, irmv::protocol::kRobotStateTopic);
+  bool ok = true;
+  for (const ExpectedEndpoint &expected : expectations) {
+    ok = CheckTransportEndpointQos(transport, expected) && ok;
+  }
+  return ok;
 }
 
 // ---- peers ----------------------------------------------------------------
@@ -1012,7 +1009,7 @@ int main() {
   dds::pub::Publisher publisher(participant);
   dds::sub::Subscriber subscriber(participant);
 
-  CHECK(CheckFrozenQos(publisher, subscriber));
+  CHECK(CheckTransportQos(transport));
 
   dds::topic::Topic<wire::ExecutionRequest> request_topic(
       participant, std::string(irmv::protocol::kExecutionRequestTopic.name));
@@ -1252,6 +1249,13 @@ int main() {
     CHECK(flushed_ok);
     CHECK(flushed_seen);
 
+    // Quiescence: nothing is published for several transport wait periods, so
+    // the capacity-1 state channel is empty and no sample can be in flight when
+    // the late reader joins. Without it, a queued marker write could land right
+    // after the join and the silence check would measure a pending write
+    // instead of durability.
+    std::this_thread::sleep_for(std::chrono::milliseconds(kQuiescenceMs));
+
     Receiver<wire::RobotState> late(subscriber, state_topic,
                                     irmv::protocol::kRobotStateTopic);
     wire::RobotState replayed;
@@ -1260,19 +1264,27 @@ int main() {
     TickResult tick;
     tick.state = MakeState(kFreshStateSeq);
     bool fresh_seen = false;
+    bool history_seen = false;
     const bool delivered = RepeatUntil(
         [&transport, &tick]() { transport.Publish(tick); },
         [&]() {
-          if (late.Take(50, &replayed)) {
-            fresh_seen = replayed.state_seq() == kFreshStateSeq;
+          if (!late.Take(50, &replayed)) {
+            return false;
           }
+          const Sequence sequence = replayed.state_seq();
+          if (sequence == kStateSeq || sequence == kFlushStateSeq) {
+            history_seen = true;
+          }
+          fresh_seen = sequence == kFreshStateSeq;
           return fresh_seen;
         },
         3'000'000);
     CHECK(delivered);
     CHECK(fresh_seen);
-    std::cout << "[dds_codec_test] volatile no-replay after a flushed publish: "
-                 "old sample absent, new sample state_seq="
+    CHECK(!history_seen);
+    std::cout << "[dds_codec_test] volatile no-replay after " << kQuiescenceMs
+              << " ms of quiescence: no historical sample, post-join sample "
+                 "state_seq="
               << replayed.state_seq() << " received\n";
   }
 
@@ -1302,9 +1314,12 @@ int main() {
         3'000'000);
     CHECK(rejected);
     CHECK(!applied);
+    CHECK(transport.inbound_read_failure_count() == 0);
     std::cout << "[dds_codec_test] invalid request rejected whole, "
                  "inbound_rejected_count="
               << transport.inbound_rejected_count()
+              << " inbound_read_failure_count="
+              << transport.inbound_read_failure_count()
               << " applied=" << applied << '\n';
   }
 
