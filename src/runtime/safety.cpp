@@ -1,0 +1,310 @@
+#include "irmv/runtime/safety.hpp"
+
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <string_view>
+
+#include "irmv/protocol/validation.hpp"
+
+namespace irmv::runtime {
+namespace {
+
+// The detail array is bounded by the protocol payload. The flag booleans and
+// the reported reason never depend on the details array having room: higher
+// priority passes are appended first and later passes are dropped at capacity.
+constexpr std::uint32_t kDetailCapacity =
+    static_cast<std::uint32_t>(protocol::kMaxJoints);
+
+// Lower value means lower priority. FeedbackInvalid > DriverError > ImuInvalid
+// > JointPositionExceeded > JointVelocityExceeded.
+int ReasonPriority(protocol::FaultReason reason) {
+  switch (reason) {
+    case protocol::FaultReason::JointVelocityExceeded:
+      return 1;
+    case protocol::FaultReason::JointPositionExceeded:
+      return 2;
+    case protocol::FaultReason::ImuInvalid:
+      return 3;
+    case protocol::FaultReason::DriverError:
+      return 4;
+    case protocol::FaultReason::FeedbackInvalid:
+      return 5;
+    default:
+      return 0;
+  }
+}
+
+void RaiseReason(protocol::FaultReason *reason,
+                 protocol::FaultReason candidate) {
+  if (ReasonPriority(candidate) > ReasonPriority(*reason)) {
+    *reason = candidate;
+  }
+}
+
+bool IsJointSampleFinite(const protocol::JointFeedback &joint) {
+  return std::isfinite(joint.q) && std::isfinite(joint.dq) &&
+         std::isfinite(joint.tau_est) && std::isfinite(joint.freq_hz);
+}
+
+bool IsImuSampleFinite(const protocol::ImuFeedback &imu) {
+  for (const double value : imu.orientation_rpy) {
+    if (!std::isfinite(value)) {
+      return false;
+    }
+  }
+  for (const double value : imu.angular_velocity) {
+    if (!std::isfinite(value)) {
+      return false;
+    }
+  }
+  for (const double value : imu.linear_acceleration) {
+    if (!std::isfinite(value)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// A timestamp from the future is as unusable as one older than the configured
+// timeout, so both are treated as stale.
+bool IsStale(protocol::TimeUs rx_stamp_us, protocol::TimeUs now_us,
+             protocol::TimeUs timeout_us) {
+  return rx_stamp_us > now_us || now_us - rx_stamp_us > timeout_us;
+}
+
+// detected_stamp_us and output_action are filled in once the whole snapshot has
+// been evaluated and the damping decision is known.
+void AppendDetail(protocol::FaultReport *report, protocol::FaultReason reason,
+                  std::uint32_t joint_index, std::uint32_t error_code,
+                  double observed_value, double limit,
+                  protocol::TimeUs sample_stamp_us, std::string_view message) {
+  if (report->count >= kDetailCapacity) {
+    return;
+  }
+
+  protocol::FaultDetail *detail = &report->details[report->count];
+  *detail = protocol::FaultDetail{};
+  detail->reason = reason;
+  detail->joint_index = joint_index;
+  detail->error_code = error_code;
+  detail->observed_value = observed_value;
+  detail->limit = limit;
+  detail->sample_stamp_us = sample_stamp_us;
+  static_cast<void>(detail->message.Assign(message));
+  ++report->count;
+}
+
+double ClampToLimit(double value, double limit) {
+  if (value > limit) {
+    return limit;
+  }
+  if (value < -limit) {
+    return -limit;
+  }
+  return value;
+}
+
+}  // namespace
+
+SafetyReport CheckFeedback(const configuration::RuntimeConfig &config,
+                           const protocol::FeedbackSnapshot &feedback,
+                           protocol::TimeUs now_us, bool boot_grace) {
+  SafetyReport report;
+  const std::size_t joint_count = config.joint_count();
+  if (joint_count == 0 || joint_count > protocol::kMaxJoints ||
+      feedback.count != joint_count) {
+    report.fault = true;
+    report.feedback_invalid = true;
+    report.reason = protocol::FaultReason::FeedbackInvalid;
+    return report;
+  }
+
+  protocol::FaultReason reason = protocol::FaultReason::None;
+  bool fault = false;
+
+  // Pass A: signal integrity, freshness, driver status and control frequency.
+  for (std::size_t index = 0; index < joint_count; ++index) {
+    const protocol::JointFeedback &joint = feedback.joints[index];
+    const std::uint32_t joint_index = static_cast<std::uint32_t>(index);
+
+    if (!joint.valid || !joint.connected || !IsJointSampleFinite(joint)) {
+      report.feedback_invalid = true;
+      fault = true;
+      RaiseReason(&reason, protocol::FaultReason::FeedbackInvalid);
+      AppendDetail(&report.details, protocol::FaultReason::FeedbackInvalid,
+                   joint_index, 0, 0.0, 0.0, joint.rx_stamp_us,
+                   "invalid joint feedback sample");
+    }
+    if (IsStale(joint.rx_stamp_us, now_us, config.timeouts.feedback_us)) {
+      report.stale_feedback = true;
+      if (!boot_grace) {
+        fault = true;
+        RaiseReason(&reason, protocol::FaultReason::FeedbackInvalid);
+        AppendDetail(&report.details, protocol::FaultReason::FeedbackInvalid,
+                     joint_index, 0, 0.0, 0.0, joint.rx_stamp_us,
+                     "stale joint feedback sample");
+      }
+    }
+    if (joint.error_code != 0) {
+      report.driver_error = true;
+      fault = true;
+      RaiseReason(&reason, protocol::FaultReason::DriverError);
+      AppendDetail(&report.details, protocol::FaultReason::DriverError,
+                   joint_index, joint.error_code, 0.0, 0.0, joint.rx_stamp_us,
+                   "driver error");
+    }
+    if (joint.freq_hz < config.boot.minimum_frequency_hz) {
+      report.frequency_low = true;
+      if (!boot_grace) {
+        fault = true;
+        RaiseReason(&reason, protocol::FaultReason::FeedbackInvalid);
+      }
+    }
+  }
+
+  // Pass B: position limits.
+  for (std::size_t index = 0; index < joint_count; ++index) {
+    const protocol::JointFeedback &joint = feedback.joints[index];
+    if (joint.q < config.position_min[index] ||
+        joint.q > config.position_max[index]) {
+      report.position_exceeded = true;
+      fault = true;
+      RaiseReason(&reason, protocol::FaultReason::JointPositionExceeded);
+      const double limit = joint.q < config.position_min[index]
+                               ? config.position_min[index]
+                               : config.position_max[index];
+      AppendDetail(&report.details,
+                   protocol::FaultReason::JointPositionExceeded,
+                   static_cast<std::uint32_t>(index), 0, joint.q, limit,
+                   joint.rx_stamp_us, "joint position limit exceeded");
+    }
+  }
+
+  // Pass C: velocity limits. Equality is within limit; invalid or stale
+  // velocities are still compared instead of being treated as zero.
+  for (std::size_t index = 0; index < joint_count; ++index) {
+    const protocol::JointFeedback &joint = feedback.joints[index];
+    const double limit = config.joint_velocity_limits[index];
+    if (!(std::abs(joint.dq) <= limit)) {
+      report.velocity_exceeded = true;
+      fault = true;
+      RaiseReason(&reason, protocol::FaultReason::JointVelocityExceeded);
+      AppendDetail(&report.details,
+                   protocol::FaultReason::JointVelocityExceeded,
+                   static_cast<std::uint32_t>(index), 0, joint.dq, limit,
+                   joint.rx_stamp_us, "joint velocity limit exceeded");
+    }
+  }
+
+  if (config.imu_required) {
+    const protocol::ImuFeedback &imu = feedback.imu;
+    const bool imu_invalid = !imu.valid || !IsImuSampleFinite(imu) ||
+                             (!boot_grace && IsStale(imu.rx_stamp_us, now_us,
+                                                     config.timeouts.imu_us));
+    if (imu_invalid) {
+      report.imu_invalid = true;
+      fault = true;
+      RaiseReason(&reason, protocol::FaultReason::ImuInvalid);
+      AppendDetail(&report.details, protocol::FaultReason::ImuInvalid,
+                   protocol::kNoJointIndex, 0, 0.0, 0.0, imu.rx_stamp_us,
+                   "imu feedback invalid");
+    }
+  }
+
+  report.fault = fault;
+  report.healthy = !fault;
+  report.reason = reason;
+  report.damping_eligible = fault && !report.feedback_invalid &&
+                            !report.stale_feedback && !report.frequency_low &&
+                            !report.driver_error;
+
+  const protocol::OutputAction action =
+      report.damping_eligible ? protocol::OutputAction::Damping
+                              : protocol::OutputAction::ZeroTorque;
+  for (std::uint32_t index = 0; index < report.details.count; ++index) {
+    report.details.details[index].detected_stamp_us = now_us;
+    report.details.details[index].output_action = action;
+  }
+  return report;
+}
+
+ControlOutput ComputeTracking(const configuration::RuntimeConfig &config,
+                              const protocol::JointCommand &command,
+                              const protocol::FeedbackSnapshot &feedback) {
+  ControlOutput result;
+  const std::size_t joint_count = config.joint_count();
+  if (joint_count == 0 || joint_count > protocol::kMaxJoints) {
+    return result;
+  }
+  if (!protocol::ValidateCommandShape(command, joint_count).ok) {
+    return result;
+  }
+  if (command.layout_id.View() != config.layout_id) {
+    return result;
+  }
+
+  hardware::TorqueOutput candidate;
+  candidate.count = static_cast<std::uint32_t>(joint_count);
+  for (std::size_t index = 0; index < joint_count; ++index) {
+    const double target_position = command.joints.q[index];
+    const double target_velocity = command.joints.dq[index];
+    if (target_position < config.position_min[index] ||
+        target_position > config.position_max[index]) {
+      return result;
+    }
+    if (!(std::abs(target_velocity) <= config.target_velocity_limits[index])) {
+      return result;
+    }
+
+    const double position_term =
+        command.joints.kp[index] * (target_position - feedback.joints[index].q);
+    const double velocity_term = command.joints.kd[index] *
+                                 (target_velocity - feedback.joints[index].dq);
+    if (!std::isfinite(position_term) || !std::isfinite(velocity_term)) {
+      return result;
+    }
+    const double raw_torque =
+        position_term + velocity_term + command.joints.tau_ff[index];
+    if (!std::isfinite(raw_torque)) {
+      return result;
+    }
+    candidate.torque[index] =
+        ClampToLimit(raw_torque, config.torque_limits[index]);
+  }
+
+  result.output = candidate;
+  result.valid = true;
+  return result;
+}
+
+ControlOutput ComputeDamping(const configuration::RuntimeConfig &config,
+                             const protocol::FeedbackSnapshot &feedback) {
+  ControlOutput result;
+  const std::size_t joint_count = config.joint_count();
+  if (joint_count == 0 || joint_count > protocol::kMaxJoints ||
+      feedback.count != joint_count) {
+    return result;
+  }
+
+  hardware::TorqueOutput candidate;
+  candidate.count = static_cast<std::uint32_t>(joint_count);
+  for (std::size_t index = 0; index < joint_count; ++index) {
+    const protocol::JointFeedback &joint = feedback.joints[index];
+    if (!joint.valid || !joint.connected || !std::isfinite(joint.dq)) {
+      return result;
+    }
+    const double damping_torque = -config.damping_kd[index] * joint.dq;
+    if (!std::isfinite(damping_torque)) {
+      return result;
+    }
+    candidate.torque[index] =
+        ClampToLimit(damping_torque, config.torque_limits[index]);
+  }
+
+  result.output = candidate;
+  result.valid = true;
+  return result;
+}
+
+}  // namespace irmv::runtime
