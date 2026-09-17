@@ -38,8 +38,9 @@ bool CommandGate::FindGeneration(protocol::Sequence snapshot_seq,
     return false;
   }
   // Entries are stored in insertion order, so sequence numbers increase from
-  // head_ through the ring; the wrapped part is searched as a second, older
-  // sorted segment.
+  // head_ to the end of the array and continue at index 0 once the ring wraps.
+  // Each of those two spans is individually sorted, so both are searched as
+  // independent segments.
   const std::size_t first_length = std::min(size_, capacity_ - head_);
   const std::size_t lengths[2] = {first_length, size_ - first_length};
   const std::size_t offsets[2] = {head_, 0};

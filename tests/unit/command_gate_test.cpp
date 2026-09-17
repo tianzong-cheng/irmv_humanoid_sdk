@@ -67,9 +67,10 @@ int CheckRejectedOwnerFrame(const RuntimeConfig &config, const Id &runtime,
   gate.Authorize(runtime, session, producer, 1);
 
   JointCommand valid = CommandFor(config);
+  valid.command_seq = 3;
   valid.source_state_seq = 10;
   CHECK(gate.Accept({valid, 60'000}, 60'000).accepted());
-  CHECK(gate.current_target().command_seq == 0);
+  CHECK(gate.current_target().command_seq == 3);
   CHECK(gate.current_source_generation_us() == 55'000);
 
   frame.source_state_seq = 10;
@@ -83,7 +84,7 @@ int CheckRejectedOwnerFrame(const RuntimeConfig &config, const Id &runtime,
   // generation time are all unchanged.
   CHECK(gate.last_valid_command_rx_us() == 60'000);
   CHECK(gate.current_source_generation_us() == 55'000);
-  CHECK(gate.current_target().command_seq == 0);
+  CHECK(gate.current_target().command_seq == 3);
   CHECK(gate.ExpireReason(160'000) == StopReason::None);
   CHECK(gate.ExpireReason(160'001) == StopReason::CommandTimeout);
 
@@ -535,6 +536,72 @@ int main() {
     CHECK(gate.current_target().joints.dq[0] ==
           config.target_velocity_limits[0]);
     CHECK(gate.current_target().source_state_seq == 10);
+  }
+
+  // ---- identity, sequence and freshness stages run before payload validation
+  // ----
+  {
+    CommandGate gate(config);
+    gate.RecordState(10, 55'000);
+    gate.Authorize(runtime, session, producer, 1);
+
+    JointCommand accepted = CommandFor(config);
+    accepted.command_seq = 4;
+    accepted.source_state_seq = 10;
+    CHECK(gate.Accept({accepted, 60'000}, 60'000).accepted());
+
+    // A bad payload with an unknown source state is rejected by the freshness
+    // stage, never classified as an owner payload fault.
+    JointCommand bad_unknown_source = CommandFor(config);
+    bad_unknown_source.command_seq = 5;
+    bad_unknown_source.source_state_seq = 999;
+    bad_unknown_source.joints.q[0] = kNaN;
+    const GateResult unknown_source =
+        gate.Accept({bad_unknown_source, 61'000}, 61'000);
+    CHECK(unknown_source.decision == GateDecision::Ignored);
+    CHECK(unknown_source.reason == RejectReason::StaleSource);
+
+    // A bad payload carrying an already accepted sequence is rejected by the
+    // sequence stage.
+    JointCommand bad_duplicate = CommandFor(config);
+    bad_duplicate.command_seq = 4;
+    bad_duplicate.source_state_seq = 10;
+    bad_duplicate.joints.kp[0] = -1.0;
+    const GateResult duplicate = gate.Accept({bad_duplicate, 62'000}, 62'000);
+    CHECK(duplicate.decision == GateDecision::Ignored);
+    CHECK(duplicate.reason == RejectReason::StaleRequest);
+
+    // Neither rejection touched the accepted target or any deadline.
+    CHECK(gate.current_target().command_seq == 4);
+    CHECK(gate.last_valid_command_rx_us() == 60'000);
+    CHECK(gate.current_source_generation_us() == 55'000);
+  }
+
+  // ---- the source index is clamped to the hard 8192-entry cap ----
+  {
+    RuntimeConfig wide = config;
+    wide.state_window_capacity = 9'000;
+    CommandGate gate(wide);
+    constexpr TimeUs kNow = 1'000'000;
+    for (std::uint64_t seq = 1; seq <= 8'242; ++seq) {
+      gate.RecordState(seq, kNow - 1'000);
+    }
+    gate.Authorize(runtime, session, producer, 1);
+
+    JointCommand newest = CommandFor(wide);
+    newest.command_seq = 1;
+    newest.source_state_seq = 8'242;
+    CHECK(gate.Accept({newest, kNow}, kNow).accepted());
+
+    // With the hard cap the retained window is 51..8242, so 50 is gone even
+    // though the configured capacity of 9000 would have kept it.
+    JointCommand evicted = CommandFor(wide);
+    evicted.command_seq = 2;
+    evicted.source_state_seq = 50;
+    const GateResult dropped = gate.Accept({evicted, kNow}, kNow);
+    CHECK(dropped.decision == GateDecision::Ignored);
+    CHECK(dropped.reason == RejectReason::StaleSource);
+    CHECK(gate.current_target().command_seq == 1);
   }
 
   return 0;
