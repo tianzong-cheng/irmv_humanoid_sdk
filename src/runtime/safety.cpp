@@ -234,19 +234,41 @@ SafetyReport CheckFeedback(const configuration::RuntimeConfig &config,
   return report;
 }
 
+protocol::ValidationResult ValidateTrackingCommand(
+    const configuration::RuntimeConfig &config,
+    const protocol::JointCommand &command) {
+  const std::size_t joint_count = config.joint_count();
+  const protocol::ValidationResult shape =
+      protocol::ValidateCommandShape(command, joint_count);
+  if (!shape.ok) {
+    return shape;
+  }
+  if (command.layout_id.View() != config.layout_id) {
+    return {false, protocol::RejectReason::Malformed};
+  }
+  for (std::size_t index = 0; index < joint_count; ++index) {
+    const double target_position = command.joints.q[index];
+    const double target_velocity = command.joints.dq[index];
+    if (target_position < config.position_min[index] ||
+        target_position > config.position_max[index]) {
+      return {false, protocol::RejectReason::InvalidCommand};
+    }
+    if (!(std::abs(target_velocity) <= config.target_velocity_limits[index])) {
+      return {false, protocol::RejectReason::InvalidCommand};
+    }
+  }
+  return {true, protocol::RejectReason::None};
+}
+
 ControlOutput ComputeTracking(const configuration::RuntimeConfig &config,
                               const protocol::JointCommand &command,
                               const protocol::FeedbackSnapshot &feedback) {
   ControlOutput result;
   const std::size_t joint_count = config.joint_count();
-  if (joint_count == 0 || joint_count > protocol::kMaxJoints ||
-      feedback.count != joint_count) {
+  if (feedback.count != joint_count) {
     return result;
   }
-  if (!protocol::ValidateCommandShape(command, joint_count).ok) {
-    return result;
-  }
-  if (command.layout_id.View() != config.layout_id) {
+  if (!ValidateTrackingCommand(config, command).ok) {
     return result;
   }
 
@@ -255,14 +277,6 @@ ControlOutput ComputeTracking(const configuration::RuntimeConfig &config,
   for (std::size_t index = 0; index < joint_count; ++index) {
     const double target_position = command.joints.q[index];
     const double target_velocity = command.joints.dq[index];
-    if (target_position < config.position_min[index] ||
-        target_position > config.position_max[index]) {
-      return result;
-    }
-    if (!(std::abs(target_velocity) <= config.target_velocity_limits[index])) {
-      return result;
-    }
-
     const double position_term =
         command.joints.kp[index] * (target_position - feedback.joints[index].q);
     const double velocity_term = command.joints.kd[index] *

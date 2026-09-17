@@ -3,6 +3,7 @@
 #include "irmv/configuration/config.hpp"
 #include "irmv/hardware/backend.hpp"
 #include "irmv/protocol/types.hpp"
+#include "irmv/protocol/validation.hpp"
 
 namespace irmv::runtime {
 
@@ -25,6 +26,16 @@ struct ControlOutput {
   bool valid{false};
   hardware::TorqueOutput output;
 };
+
+// Validates one tracking command against the protocol shape and the configured
+// limits, without touching the measured state: VersionMismatch for a wrong
+// protocol version, Malformed for a wrong joint count or layout, InvalidCommand
+// for non-finite or negative gains, a non-finite motion target, a target
+// position outside [position_min, position_max] or a target velocity above
+// target_velocity_limits (equality is within limit).
+protocol::ValidationResult ValidateTrackingCommand(
+    const configuration::RuntimeConfig &config,
+    const protocol::JointCommand &command);
 
 // Evaluates one feedback snapshot against the configuration limits and
 // timeouts. Inside the boot grace window stale samples and low control

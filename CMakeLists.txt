@@ -76,7 +76,7 @@ target_link_libraries(fake_backend_test PRIVATE irmv_hardware)
 
 add_test(NAME fake_backend_test COMMAND fake_backend_test)
 
-add_library(irmv_runtime src/runtime/safety.cpp)
+add_library(irmv_runtime src/runtime/safety.cpp src/runtime/command_gate.cpp)
 target_compile_features(irmv_runtime PUBLIC cxx_std_17)
 target_include_directories(
   irmv_runtime
@@ -101,6 +101,21 @@ target_link_libraries(safety_test PRIVATE irmv_runtime)
 
 add_test(NAME safety_test COMMAND safety_test)
 set_tests_properties(safety_test PROPERTIES WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+
+add_executable(command_gate_test tests/unit/command_gate_test.cpp)
+target_compile_features(command_gate_test PRIVATE cxx_std_17)
+target_include_directories(
+  command_gate_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(command_gate_test PRIVATE irmv_runtime)
+
+add_test(NAME command_gate_test COMMAND command_gate_test)
+set_tests_properties(
+  command_gate_test PROPERTIES WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_test(
