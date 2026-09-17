@@ -245,3 +245,37 @@ set_tests_properties(
     TIMEOUT 30
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
+
+# Standalone fake deployment: the only executable entry point of this phase.
+# It owns the control loop no other target needs, so its loop source is compiled
+# into the executable instead of a library of its own.
+add_executable(robot_runtime src/runtime/main.cpp src/runtime/runtime_loop.cpp)
+target_compile_features(robot_runtime PRIVATE cxx_std_17)
+target_include_directories(
+  robot_runtime
+  PRIVATE "${PROJECT_SOURCE_DIR}/include"
+)
+target_link_libraries(
+  robot_runtime
+  PRIVATE
+    irmv_runtime
+    irmv_transport
+    irmv_telemetry
+    nlohmann_json::nlohmann_json
+)
+
+add_test(
+  NAME runtime_cli_test
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/integration/runtime_cli_test.py"
+    "$<TARGET_FILE:robot_runtime>"
+    "${PROJECT_SOURCE_DIR}"
+)
+set_tests_properties(
+  runtime_cli_test
+  PROPERTIES
+    LABELS integration
+    TIMEOUT 180
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)

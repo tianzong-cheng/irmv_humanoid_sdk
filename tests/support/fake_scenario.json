@@ -1,0 +1,68 @@
+{
+  "$comment": [
+    "Fake deployment scenario of the standalone robot_runtime (--fake-scenario).",
+    "An entry applies from its elapsed_us onwards and holds until the next entry.",
+    "elapsed_us is monotonic from process start, mandatory and strictly increasing.",
+    "feedback.count and every joint or IMU field are optional: what an entry leaves",
+    "out keeps the value of the previous entry, ultimately the initial snapshot of",
+    "the configured joints (valid, connected, control frequency, all values zero).",
+    "joints[i] addresses joint i and must stay inside the effective count.",
+    "Every tick refreshes the receive stamp of the injected samples to the current",
+    "monotonic time, which keeps them fresh for timeouts.feedback_us;",
+    "imu.rx_stamp_us is an offset from the current monotonic time for the IMU stamp",
+    "only (0 keeps it fresh, a negative offset ages it). An entry with",
+    "\"paused\": true holds the previous receive stamps, so the samples age and can",
+    "lapse; the next entry without paused refreshes again.",
+    "write_result.accepted drives FakeBackend::SetWriteAccepted and holds until the",
+    "next entry that sets it. write_result.error_code is refused: the fake backend",
+    "reports its own rejection code and exposes no way to set one."
+  ],
+  "entries": [
+    {
+      "elapsed_us": 0,
+      "feedback": {
+        "count": 2,
+        "joints": [
+          {
+            "q": 0.0,
+            "dq": 0.0,
+            "tau_est": 0.0,
+            "valid": true,
+            "connected": true,
+            "freq_hz": 500.0,
+            "error_code": 0
+          },
+          {
+            "q": 0.0,
+            "dq": 0.0,
+            "tau_est": 0.0,
+            "valid": true,
+            "connected": true,
+            "freq_hz": 500.0,
+            "error_code": 0
+          }
+        ],
+        "imu": {
+          "valid": false,
+          "rx_stamp_us": 0
+        }
+      },
+      "write_result": {
+        "accepted": true
+      }
+    },
+    {
+      "elapsed_us": 2000000,
+      "feedback": {
+        "joints": [
+          {
+            "q": 0.05
+          },
+          {
+            "q": 0.05
+          }
+        ]
+      }
+    }
+  ]
+}
