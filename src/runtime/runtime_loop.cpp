@@ -1345,13 +1345,23 @@ class ShutdownPlanner {
     if (now_us < next_attempt_us_) {
       return &inbound;
     }
+    if (inbound.stop_request_count >= kStopRequestBatchCapacity) {
+      // The stop lane of this tick is full: the local request waits for the
+      // next tick instead of replacing one of the received stops, and no copy
+      // of the batch is made for a request that cannot be added.
+      return &inbound;
+    }
     if (!stop_input_) {
       stop_input_ = std::make_unique<TickInput>();
     }
     // The only copy of an inbound batch this loop makes, and only while a stop
     // request is due: at most once every kStopRetryIntervalUs.
     *stop_input_ = inbound;
-    AppendStopRequest(stop_input_.get(), fsm, now_us);
+    if (!AppendRuntimeStopRequest(stop_input_.get(), fsm, now_us)) {
+      // The local request did not fit or no session can carry it: the inbound
+      // lane is untouched and the next retry interval tries again.
+      return &inbound;
+    }
     next_attempt_us_ = now_us + kStopRetryIntervalUs;
     // Requesting the stop and telling the operator that the runtime still waits
     // for the confirmation belong together: the request alone is not a stop.
@@ -1433,29 +1443,10 @@ class ShutdownPlanner {
     }
   }
 
-  // The runtime is not a supervisor: no supervisor identity is involved, and
-  // the request carries the current session and a request id taken from the
-  // tick counter, which is strictly increasing and therefore newer than the
-  // answer the session already recorded. A supervisor that keeps commanding
-  // below that id is answered as stale until it advances past it; the
-  // alternative - guessing a foreign sequence - cannot be made correct here.
-  static void AppendStopRequest(TickInput *input, const ExecutionFsm &fsm,
-                                protocol::TimeUs now_us) {
-    protocol::ExecutionRequest request;
-    request.protocol_version = protocol::kProtocolVersion;
-    request.supervisor_id = protocol::kNoId;
-    request.request_id = fsm.tick() + 1;
-    request.session_id = fsm.session_id();
-    request.runtime_id = fsm.runtime_id();
-    request.expected_epoch = fsm.epoch();
-    request.proposed_epoch = 0;
-    request.producer_id = fsm.producer_id();
-    request.fault_id = fsm.fault_id();
-    request.operation = protocol::Operation::ZeroTorque;
-    input->stop_requests[0] = {request, now_us};
-    input->stop_request_count = 1;
-  }
-
+  // The runtime is not a supervisor: AppendRuntimeStopRequest() builds the
+  // request from the live machine, with no supervisor identity and with an id
+  // strictly greater than everything the session has handled, so the operator's
+  // signal always produces a protocol stop that the state machine accepts.
   Notice pending_{Notice::None};
   Notice last_notice_{Notice::None};
   protocol::TimeUs next_attempt_us_{0};
@@ -1518,9 +1509,11 @@ CommandLine ParseCommandLine(int argc, char **argv) {
         result.error = "--domain must be an integer, got \"" + value + "\"";
         return result;
       }
-      if (consumed != value.size() || domain > kMaxDdsDomain) {
+      if (consumed != value.size() ||
+          domain > configuration::kMaxDdsDomain) {
         result.error = "--domain must be between 0 and " +
-                       std::to_string(kMaxDdsDomain) + ", got \"" + value + "\"";
+                       std::to_string(configuration::kMaxDdsDomain) +
+                       ", got \"" + value + "\"";
         return result;
       }
       result.options.dds_domain = static_cast<std::uint32_t>(domain);
@@ -1540,9 +1533,20 @@ CommandLine ParseCommandLine(int argc, char **argv) {
 }
 
 int RunStandaloneRuntime(const RuntimeOptions &options) {
+  // The scenario timeline is measured from process start, so its base is taken
+  // before anything else of this run happens - including validation, which is
+  // allowed to fail and end the process.
+  const protocol::TimeUs process_start_us = MonotonicUs();
+
+  // A domain override is applied by the configuration layer, so the identity
+  // digest covers the configuration in effect and not the file on disk.
+  configuration::ConfigOverrides overrides;
+  if (options.dds_domain) {
+    overrides.dds_domain = *options.dds_domain;
+  }
   configuration::RuntimeConfig config;
   try {
-    config = configuration::LoadConfig(options.config_path);
+    config = configuration::LoadConfig(options.config_path, overrides);
   } catch (const std::exception &error) {
     std::fprintf(stderr, "robot_runtime: configuration error: %s\n",
                  error.what());
@@ -1557,9 +1561,6 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
                  "fake backend can be started\n",
                  config.backend.c_str());
     return kExitStartupError;
-  }
-  if (options.dds_domain) {
-    config.dds.domain = *options.dds_domain;
   }
 
   std::optional<FakeScenario> scenario;
@@ -1618,10 +1619,11 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
   }
 
   ScenarioApplier applier(scenario.value_or(FakeScenario{}), config);
-  const protocol::TimeUs start_us = MonotonicUs();
-  LogStartup(logger, config, identity.id, fsm.execution_state(), start_us);
+  LogStartup(logger, config, identity.id, fsm.execution_state(),
+             process_start_us);
   if (identity.entropy_fallback) {
-    LogRecord record(configuration::LogLevel::Warning, start_us, 0, "runtime",
+    LogRecord record(configuration::LogLevel::Warning, process_start_us, 0,
+                     "runtime",
                      "system entropy unusable; runtime id is only process "
                      "unique");
     char rendered[33];
@@ -1632,7 +1634,7 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
   const protocol::TimeUs period_us =
       config.control_period_us == 0 ? 1 : config.control_period_us;
   LoopCounters counters;
-  protocol::TimeUs next_status_us = start_us + kStatusIntervalUs;
+  protocol::TimeUs next_status_us = process_start_us + kStatusIntervalUs;
   auto deadline = Clock::now();
   ShutdownPlanner shutdown;
 
@@ -1641,7 +1643,7 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
     // Due scenario entries are applied before the read of this tick, so the
     // snapshot the state machine sees is the one the scenario describes at this
     // instant - including the entry due at process start.
-    applier.ApplyDue(now - start_us, now, backend);
+    applier.ApplyDue(now - process_start_us, now, backend);
 
     const bool stop_requested =
         g_stop_requested.load(std::memory_order_relaxed);

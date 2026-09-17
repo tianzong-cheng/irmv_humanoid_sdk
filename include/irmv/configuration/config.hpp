@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -108,6 +109,22 @@ struct RuntimeConfig {
   std::size_t joint_count() const noexcept { return joint_names.size(); }
 };
 
+// Inclusive range of the DDS domain id this build accepts. The bound is a
+// deployment property, so it has exactly one definition: the parser enforces it
+// for `dds.domain` and every command line that can override the domain uses the
+// same value.
+inline constexpr std::uint32_t kMaxDdsDomain = 230;
+
+// Command line overrides of a configuration file. They are applied to the
+// parsed configuration before its identity digest is computed, so `config_id`
+// always describes the configuration that is actually in effect.
+struct ConfigOverrides {
+  std::optional<std::uint32_t> dds_domain;
+};
+
 RuntimeConfig LoadConfig(const std::filesystem::path &path);
+
+RuntimeConfig LoadConfig(const std::filesystem::path &path,
+                         const ConfigOverrides &overrides);
 
 }  // namespace irmv::configuration

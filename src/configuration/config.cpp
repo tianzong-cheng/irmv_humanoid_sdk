@@ -397,6 +397,11 @@ ConfigError::ConfigError(std::string field_path, std::string message)
       field_path_(std::move(field_path)) {}
 
 RuntimeConfig LoadConfig(const std::filesystem::path &path) {
+  return LoadConfig(path, ConfigOverrides{});
+}
+
+RuntimeConfig LoadConfig(const std::filesystem::path &path,
+                         const ConfigOverrides &overrides) {
   std::ifstream input(path);
   if (!input) {
     Fail("$", "cannot open configuration file " + path.string());
@@ -592,10 +597,19 @@ RuntimeConfig LoadConfig(const std::filesystem::path &path) {
   const Json &dds = ObjectMember(document, "dds", "");
   const Json &domain = Member(dds, "domain", "dds");
   config.dds.domain = static_cast<std::uint32_t>(
-      IntegerInRange(domain, "dds.domain", 0U, 230U));
+      IntegerInRange(domain, "dds.domain", 0U, kMaxDdsDomain));
   config.dds.interface = StringMember(dds, "interface", "dds");
   if (config.dds.interface.empty()) {
     Fail("dds.interface", "must not be empty");
+  }
+  if (overrides.dds_domain) {
+    // An override is held to the same bound as the file, and it is applied here
+    // so that the digest below covers the configuration in effect instead of
+    // the one on disk.
+    if (*overrides.dds_domain > kMaxDdsDomain) {
+      Fail("dds.domain", "is outside the supported range");
+    }
+    config.dds.domain = *overrides.dds_domain;
   }
 
   const Json canonical = CanonicalConfig(config);

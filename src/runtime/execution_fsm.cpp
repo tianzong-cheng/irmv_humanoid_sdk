@@ -980,4 +980,56 @@ double ExecutionFsm::ExpectedCurrentTorque(
   return 0.0;
 }
 
+protocol::Sequence ExecutionFsm::last_handled_request_id() const {
+  return std::max({request_record_.request_id, staged_record_.request_id,
+                   acquire_record_.request_id});
+}
+
+bool AppendRuntimeStopRequest(TickInput *input, const ExecutionFsm &fsm,
+                              protocol::TimeUs now_us) {
+  if (input == nullptr || fsm.session_id() == protocol::kNoId) {
+    return false;
+  }
+  // The lane of this tick is preserved: a stop received in the same tick is
+  // answered even when the runtime adds one of its own, and a full lane defers
+  // the local request instead of overwriting a received one.
+  if (input->stop_request_count >= kStopRequestBatchCapacity) {
+    return false;
+  }
+  // Everything the session has handled, plus every request that travels with
+  // this tick. A request of the same batch is handled around the local one, so
+  // an id that only exceeds the handled ids can collide with it and be answered
+  // as a conflict instead of a stop.
+  protocol::Sequence newest = fsm.last_handled_request_id();
+  const std::size_t stop_count =
+      std::min(input->stop_request_count, kStopRequestBatchCapacity);
+  for (std::size_t index = 0; index < stop_count; ++index) {
+    newest = std::max(newest, input->stop_requests[index].value.request_id);
+  }
+  const std::size_t request_count =
+      std::min(input->request_count, kRequestBatchCapacity);
+  for (std::size_t index = 0; index < request_count; ++index) {
+    newest = std::max(newest, input->requests[index].value.request_id);
+  }
+  if (newest == std::numeric_limits<protocol::Sequence>::max()) {
+    // No greater id exists, so the caller keeps its signal pending instead of
+    // sending a request that the deduplication would answer as a repeated one.
+    return false;
+  }
+  protocol::ExecutionRequest request;
+  request.protocol_version = protocol::kProtocolVersion;
+  request.supervisor_id = protocol::kNoId;
+  request.request_id = newest + 1;
+  request.session_id = fsm.session_id();
+  request.runtime_id = fsm.runtime_id();
+  request.expected_epoch = fsm.epoch();
+  request.proposed_epoch = 0;
+  request.producer_id = fsm.producer_id();
+  request.fault_id = fsm.fault_id();
+  request.operation = protocol::Operation::ZeroTorque;
+  input->stop_requests[input->stop_request_count] = {request, now_us};
+  ++input->stop_request_count;
+  return true;
+}
+
 }  // namespace irmv::runtime

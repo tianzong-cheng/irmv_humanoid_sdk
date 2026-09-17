@@ -58,6 +58,15 @@ class ExecutionFsm {
 
   protocol::Sequence tick() const { return tick_; }
 
+  // Largest request id the machine has handled in the current session: the
+  // confirmed answer, the answer currently being confirmed, or the session
+  // bootstrap, whichever is newest. Zero when the session has handled none, and
+  // reset with the session, so it never reuses an id of a previous session. The
+  // runtime's own requests must carry a strictly greater id: the deduplication
+  // rule compares against exactly this record, and anything at or below it is
+  // answered as a repeated or stale request.
+  protocol::Sequence last_handled_request_id() const;
+
   // Read-only view of the accepted target the command gate holds: the frame the
   // Tracking output is recomputed from on every tick, and the transport receive
   // stamp of that frame. The test-only output trace reads them; nothing in the
@@ -362,5 +371,26 @@ class ExecutionFsm {
   std::uint64_t dropped_results_{0};
   std::uint64_t dropped_events_{0};
 };
+
+// Composes the runtime's own ZeroTorque stop request for the session of `fsm`
+// and appends it to the stop lane of `input`. It is the one place that builds a
+// request for the runtime itself, and it exists so that the standalone loop can
+// ask for a stop without ever writing over a request it just received:
+//
+//  * the inbound lane is preserved, the local request is appended, and the stop
+//    lane of a tick is therefore never truncated by the runtime;
+//  * the request carries no supervisor identity - the runtime is not one - and
+//    an id strictly greater than every id the session has handled and than
+//    every id travelling in the same tick, so it can be answered neither as a
+//    repeated, nor as a stale, nor as a conflicting request;
+//  * every field the state machine validates for a stop is taken from the live
+//    machine, so the request is answered by the session that is in effect.
+//
+// Returns false without touching `input` when there is nothing to append: no
+// session is in effect, the stop lane is already full (the caller defers to its
+// next retry interval instead of dropping a received stop), or no id greater
+// than the session's newest one exists.
+bool AppendRuntimeStopRequest(TickInput *input, const ExecutionFsm &fsm,
+                              protocol::TimeUs now_us);
 
 }  // namespace irmv::runtime

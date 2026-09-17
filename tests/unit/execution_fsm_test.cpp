@@ -1614,6 +1614,198 @@ int CheckTakeoverDoesNotInheritStagedAnswer() {
   return 0;
 }
 
+// ---- the runtime's own stop request ---------------------------------------
+
+// A tick driver that hands the state machine a caller-built input. The runtime
+// fixture owns its own tick loop; these checks have to control the stop lane of
+// one single tick exactly, so they own the input instead.
+class InputDriver {
+ public:
+  InputDriver()
+      : config(RuntimeFixture::LoadFixtureConfig()),
+        backend(config),
+        fsm(config, irmv::test::FixtureRuntimeId()) {
+    backend.Initialize();
+    feedback_.count = static_cast<std::uint32_t>(config.joint_count());
+    for (std::size_t index = 0; index < config.joint_count(); ++index) {
+      irmv::protocol::JointFeedback &joint = feedback_.joints[index];
+      joint.valid = true;
+      joint.connected = true;
+      joint.q = irmv::test::kFixtureQ[index];
+      joint.dq = irmv::test::kFixtureDq[index];
+      joint.freq_hz = irmv::test::kFixtureFrequencyHz;
+    }
+  }
+
+  TimeUs now_us() const { return now_us_; }
+
+  const irmv::protocol::RobotState &state() const { return last_tick_.state; }
+
+  // Runs healthy ticks one control period apart until `duration_us` elapsed.
+  void Advance(TimeUs duration_us) {
+    const TimeUs period =
+        config.control_period_us == 0 ? 1 : config.control_period_us;
+    TimeUs remaining = duration_us;
+    while (remaining > 0) {
+      const TimeUs step = remaining < period ? remaining : period;
+      now_us_ += step;
+      Tick(irmv::runtime::TickInput{});
+      remaining -= step;
+    }
+  }
+
+  // Runs exactly one tick with caller feedback and caller input.
+  const TickResult &Tick(const irmv::runtime::TickInput &input) {
+    ++feedback_.snapshot_seq;
+    feedback_.stamp_us = now_us_;
+    for (std::size_t index = 0; index < config.joint_count(); ++index) {
+      feedback_.joints[index].rx_stamp_us = now_us_;
+    }
+    backend.Inject(feedback_);
+    last_tick_ = fsm.Tick(now_us_, backend.Read(now_us_), input, backend);
+    return last_tick_;
+  }
+
+  RuntimeConfig config;
+  irmv::hardware::FakeBackend backend;
+  irmv::runtime::ExecutionFsm fsm;
+
+ private:
+  irmv::protocol::FeedbackSnapshot feedback_{};
+  TickResult last_tick_{};
+  TimeUs now_us_{irmv::test::kFixtureStartUs};
+};
+
+ExecutionRequest MakeLaneRequest(const irmv::runtime::ExecutionFsm &fsm,
+                                 const irmv::protocol::RobotState &state,
+                                 Operation operation, Sequence request_id) {
+  ExecutionRequest request;
+  request.protocol_version = irmv::protocol::kProtocolVersion;
+  request.supervisor_id = irmv::test::FixtureSupervisorId();
+  request.request_id = request_id;
+  request.session_id = operation == Operation::AcquireSession
+                           ? irmv::protocol::kNoId
+                           : state.session_id;
+  request.runtime_id = fsm.runtime_id();
+  request.expected_epoch = state.epoch;
+  request.proposed_epoch = state.epoch + 1;
+  request.producer_id = irmv::test::FixtureProducerId();
+  request.fault_id = state.fault_id;
+  request.operation = operation;
+  return request;
+}
+
+// The runtime's own stop must not crowd out a stop that arrived in the same
+// tick: the local request is appended to the stop lane, and a full lane defers
+// it instead of overwriting a received stop.
+int CheckRuntimeStopKeepsInboundStop() {
+  InputDriver driver;
+  driver.Advance(200'000);
+  CHECK(driver.state().execution_state == kZeroTorque);
+
+  irmv::runtime::TickInput bootstrap{};
+  bootstrap.requests[0] = {
+      MakeLaneRequest(driver.fsm, driver.state(), Operation::AcquireSession, 10),
+      driver.now_us()};
+  bootstrap.request_count = 1;
+  driver.Tick(bootstrap);
+  CHECK(driver.state().session_id != irmv::protocol::kNoId);
+
+  // The supervisor asks for Damping in the very tick in which the runtime asks
+  // for its own stop.
+  const Sequence inbound_id = 11;
+  irmv::runtime::TickInput input{};
+  input.stop_requests[0] = {MakeLaneRequest(driver.fsm, driver.state(),
+                                            Operation::Damping, inbound_id),
+                            driver.now_us()};
+  input.stop_request_count = 1;
+  CHECK(irmv::runtime::AppendRuntimeStopRequest(&input, driver.fsm,
+                                                driver.now_us()));
+  CHECK(input.stop_request_count == 2);
+  CHECK(input.stop_requests[0].value.request_id == inbound_id);
+  CHECK(input.stop_requests[0].value.operation == Operation::Damping);
+  const Sequence local_id = input.stop_requests[1].value.request_id;
+
+  const TickResult &tick = driver.Tick(input);
+  // Both stops of the tick were answered, the received one first: with the
+  // received request overwritten, the tick produced a single answer.
+  CHECK(tick.result_count == 2);
+  CHECK(RuntimeFixture::ResultFor(tick, inbound_id).request_id == inbound_id);
+  CHECK(RuntimeFixture::ResultFor(tick, local_id).request_id == local_id);
+  CHECK(RuntimeFixture::ResultFor(tick, local_id).applied());
+  CHECK(tick.state.execution_state == kZeroTorque);
+  CHECK(CountEvents(tick, EventCode::StopApplied) == 2);
+
+  // A full stop lane never loses a received stop: the local request is refused
+  // and the eight inbound requests stay where they are.
+  irmv::runtime::TickInput full{};
+  for (std::size_t index = 0; index < irmv::runtime::kStopRequestBatchCapacity;
+       ++index) {
+    full.stop_requests[index] = {
+        MakeLaneRequest(driver.fsm, driver.state(), Operation::ZeroTorque,
+                        100 + index),
+        driver.now_us()};
+  }
+  full.stop_request_count = irmv::runtime::kStopRequestBatchCapacity;
+  CHECK(!irmv::runtime::AppendRuntimeStopRequest(&full, driver.fsm,
+                                                 driver.now_us()));
+  CHECK(full.stop_request_count == irmv::runtime::kStopRequestBatchCapacity);
+  for (std::size_t index = 0; index < irmv::runtime::kStopRequestBatchCapacity;
+       ++index) {
+    CHECK(full.stop_requests[index].value.request_id == 100 + index);
+  }
+  const TickResult &full_tick = driver.Tick(full);
+  CHECK(full_tick.result_count == irmv::runtime::kStopRequestBatchCapacity);
+  return 0;
+}
+
+// The stop the runtime issues for itself must be answered, never classified as
+// stale, even after a supervisor that already used large request ids.
+int CheckRuntimeStopIsNeverStale() {
+  InputDriver driver;
+  driver.Advance(200'000);
+  CHECK(driver.state().execution_state == kZeroTorque);
+
+  constexpr Sequence kLargeRequestId = 1'000'000;
+  irmv::runtime::TickInput bootstrap{};
+  bootstrap.requests[0] = {MakeLaneRequest(driver.fsm, driver.state(),
+                                           Operation::AcquireSession,
+                                           kLargeRequestId),
+                           driver.now_us()};
+  bootstrap.request_count = 1;
+  driver.Tick(bootstrap);
+  CHECK(driver.state().session_id != irmv::protocol::kNoId);
+  CHECK(driver.fsm.last_handled_request_id() == kLargeRequestId);
+
+  // The supervisor parks the machine in Damping with an even larger id.
+  const Sequence damping_id = kLargeRequestId + 1;
+  irmv::runtime::TickInput damping{};
+  damping.stop_requests[0] = {MakeLaneRequest(driver.fsm, driver.state(),
+                                              Operation::Damping, damping_id),
+                              driver.now_us()};
+  damping.stop_request_count = 1;
+  driver.Tick(damping);
+  CHECK(driver.state().execution_state == kDamping);
+  CHECK(driver.fsm.last_handled_request_id() == damping_id);
+
+  // The runtime's own stop carries an id strictly greater than everything the
+  // session handled, so it is applied instead of answered as a stale request.
+  irmv::runtime::TickInput stop{};
+  CHECK(irmv::runtime::AppendRuntimeStopRequest(&stop, driver.fsm,
+                                                driver.now_us()));
+  CHECK(stop.stop_request_count == 1);
+  const Sequence local_id = stop.stop_requests[0].value.request_id;
+  CHECK(stop.stop_requests[0].value.session_id == driver.state().session_id);
+
+  const TickResult &tick = driver.Tick(stop);
+  CHECK(RuntimeFixture::ResultFor(tick, local_id).applied());
+  CHECK(tick.state.execution_state == kZeroTorque);
+  CHECK(CountEvents(tick, EventCode::RequestRejected) == 0);
+  CHECK(FindEvent(tick, EventCode::StopApplied) != nullptr);
+  CHECK(local_id > damping_id);
+  return 0;
+}
+
 }  // namespace
 
 int main() {
@@ -1653,5 +1845,7 @@ int main() {
   CHECK(CheckHeartbeatSupervisorOwnership() == 0);
   CHECK(CheckResetWithFreshSafetyObservation() == 0);
   CHECK(CheckTakeoverDoesNotInheritStagedAnswer() == 0);
+  CHECK(CheckRuntimeStopKeepsInboundStop() == 0);
+  CHECK(CheckRuntimeStopIsNeverStale() == 0);
   return 0;
 }

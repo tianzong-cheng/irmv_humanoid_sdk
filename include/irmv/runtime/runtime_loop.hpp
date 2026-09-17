@@ -21,26 +21,33 @@
 //                 [--output-trace PATH]
 //
 // `--config` is mandatory. `--domain` overrides the configured DDS domain and
-// accepts the same inclusive 0..230 range the configuration parser enforces for
-// `dds.domain`. `--fake-scenario` is only meaningful for the fake backend and
-// injects scripted feedback and write acceptance into the backend; it never
-// adds a protocol topic. `--output-trace` is the test-only per-tick output
-// trace: one JSON-lines record per applied torque write, rendered off the
-// control thread. It belongs to the fake deployment like every other option of
-// this binary and is skipped entirely when it is absent.
+// accepts the same inclusive 0..configuration::kMaxDdsDomain range the
+// configuration parser enforces for `dds.domain`; the override is applied by
+// the configuration layer, so the published `config_id` describes the
+// configuration in effect, domain included. `--fake-scenario` is only
+// meaningful for the fake backend and injects scripted feedback and write
+// acceptance into the backend; it never adds a protocol topic.
+// `--output-trace` is the test-only per-tick output trace: one JSON-lines
+// record per applied torque write, rendered off the control thread. It belongs
+// to the fake deployment like every other option of this binary and is skipped
+// entirely when it is absent.
 //
 // Startup order is fixed: parse the command line, load and validate the
-// configuration, build the runtime identity, initialize the fake backend,
-// construct the state machine and the logger, start the logger, then create and
-// start the transport. Every failure before the loop reports on stderr and
-// exits non-zero without starting DDS.
+// configuration (with the command line overrides), build the runtime identity,
+// initialize the fake backend, construct the state machine and the logger,
+// start the logger, then create and start the transport. Every failure before
+// the loop reports on stderr and exits non-zero without starting DDS.
 //
-// The control loop samples a monotonic clock, drains the transport input, reads
-// one feedback snapshot, ticks the state machine, publishes the tick result and
-// then applies the fake scenario entries that became due. It sleeps against an
-// absolute deadline that advances by the configured control period, so the
-// scheduling phase does not drift, and it counts every tick whose work exceeded
-// the period. The state machine itself reads no clock and never sleeps.
+// The control loop applies the fake scenario entries that became due, drains
+// the transport input (adding its own stop request when a stop was signalled),
+// reads one feedback snapshot, ticks the state machine, publishes the tick
+// result and, when the state may not be left yet, reports why. Applying the
+// entries before the read is what makes an entry due at `elapsed_us` take
+// effect on the tick that observes it, the entry due at process start
+// included. The loop sleeps against an absolute deadline that advances by the
+// configured control period, so the scheduling phase does not drift, and it
+// counts every tick whose work exceeded the period. The state machine itself
+// reads no clock and never sleeps.
 
 namespace irmv::runtime {
 
@@ -50,10 +57,6 @@ inline constexpr int kExitOk = 0;
 inline constexpr int kExitStartupError = 1;
 // Unknown or malformed command line argument.
 inline constexpr int kExitUsageError = 2;
-
-// Inclusive upper bound of the accepted DDS domain, the same range the
-// configuration parser enforces for `dds.domain`.
-inline constexpr std::uint32_t kMaxDdsDomain = 230;
 
 // Host monotonic clock in microseconds. The value only ever moves forward and
 // is the single time base of the control loop and of the fake scenario.
@@ -108,14 +111,16 @@ CommandLine ParseCommandLine(int argc, char **argv);
 //     ]
 //   }
 //
-// `elapsed_us` is monotonic from process start and mandatory; entries must be
-// strictly increasing. An entry applies from its elapsed time onwards and holds
-// until the next entry. `feedback.count` and every joint or IMU field are
-// optional: what an entry leaves out keeps the value of the previous entry,
-// ultimately the initial snapshot (every configured joint valid, connected and
-// reporting the configured control frequency, all values zero, IMU invalid).
-// `joints[i]` addresses joint `i` and must stay inside the effective count, so
-// an entry that cannot be applied is a startup error with a field path.
+// `elapsed_us` is monotonic from process start - the base is taken before the
+// configuration is loaded, so it does not move with the startup work - and
+// mandatory; entries must be strictly increasing. An entry applies from its
+// elapsed time onwards and holds until the next entry. `feedback.count` and
+// every joint or IMU field are optional: what an entry leaves out keeps the
+// value of the previous entry, ultimately the initial snapshot (every
+// configured joint valid, connected and reporting the configured control
+// frequency, all values zero, IMU invalid). `joints[i]` addresses joint `i` and
+// must stay inside the effective count, so an entry that cannot be applied is a
+// startup error with a field path.
 //
 // Every tick refreshes the receive stamp of the injected samples to the current
 // monotonic time, which keeps the snapshot fresh for the configured feedback

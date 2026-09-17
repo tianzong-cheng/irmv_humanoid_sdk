@@ -16,6 +16,8 @@
 namespace {
 
 using irmv::configuration::ConfigError;
+using irmv::configuration::ConfigOverrides;
+using irmv::configuration::kMaxDdsDomain;
 using irmv::configuration::LoadConfig;
 
 class GroupingPunctuation : public std::numpunct<char> {
@@ -118,6 +120,22 @@ bool ThrowsAt(std::string_view contents, std::string_view field_path) {
     return error.field_path() == field_path &&
            std::string_view(error.what()).find(field_path) !=
                std::string_view::npos;
+  }
+  return false;
+}
+
+ConfigOverrides OverrideDomain(std::uint32_t domain) {
+  ConfigOverrides overrides;
+  overrides.dds_domain = domain;
+  return overrides;
+}
+
+bool OverrideThrowsAt(const std::filesystem::path &path, std::uint32_t domain,
+                      std::string_view field_path) {
+  try {
+    static_cast<void>(LoadConfig(path, OverrideDomain(domain)));
+  } catch (const ConfigError &error) {
+    return error.field_path() == field_path;
   }
   return false;
 }
@@ -247,6 +265,24 @@ int main() {
   CHECK(config.layout_id.size() == 64);
   CHECK(fixture.config_id == config.config_id);
   CHECK(fixture.layout_id == config.layout_id);
+
+  // A command line domain override is part of the configuration in effect, so
+  // the identity digest covers it: two runs that differ only in the overridden
+  // domain do not publish the same config_id, and an override of the value the
+  // file already carries changes nothing.
+  const auto overridden = LoadConfig(valid.path(), OverrideDomain(3));
+  const auto other_override = LoadConfig(valid.path(), OverrideDomain(4));
+  CHECK(overridden.dds.domain == 3);
+  CHECK(other_override.dds.domain == 4);
+  CHECK(overridden.config_id != config.config_id);
+  CHECK(other_override.config_id != config.config_id);
+  CHECK(other_override.config_id != overridden.config_id);
+  CHECK(overridden.layout_id == config.layout_id);
+  CHECK(LoadConfig(valid.path(), OverrideDomain(1)).config_id ==
+        config.config_id);
+  CHECK(LoadConfig(valid.path(), OverrideDomain(kMaxDdsDomain)).dds.domain ==
+        kMaxDdsDomain);
+  CHECK(OverrideThrowsAt(valid.path(), kMaxDdsDomain + 1, "dds.domain"));
 
   const std::string reordered = R"({"dds":{"interface":"lo","domain":1},
     "telemetry":{"queue_capacity":1024,"retained_files":3,"rotate_bytes":1048576,

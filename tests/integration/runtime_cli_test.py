@@ -229,9 +229,11 @@ def test_startup_rejections(workspace):
         check(code is not None and code != 0,
               failure_report("domain out of range", runtime,
                              "expected a non-zero exit, got %s" % code))
-        check("domain" in runtime.output(),
+        # The usage line of every argument error contains the word "domain", so
+        # the check names the rejection itself.
+        check("--domain must be between 0 and 230" in runtime.output(),
               failure_report("domain out of range", runtime,
-                             "the message does not name the domain"))
+                             "the message does not name the accepted range"))
 
 
 def test_normal_start_and_shutdown(workspace):
