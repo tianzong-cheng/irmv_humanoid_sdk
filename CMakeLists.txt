@@ -151,3 +151,68 @@ add_test(
     "${PROJECT_SOURCE_DIR}/config/sdk.schema.json"
     "${PROJECT_SOURCE_DIR}/config/sdk.json"
 )
+
+find_package(Threads REQUIRED)
+
+# The DDS dependency is only needed by the transport targets below and is never
+# skipped silently: a missing or mismatched CycloneDDS installation is a
+# configuration error.
+irmv_make_cyclonedds_available()
+idlcxx_generate(
+  TARGET execution_idl
+  FILES "${PROJECT_SOURCE_DIR}/protocol/execution.idl"
+  WARNINGS no-implicit-extensibility
+)
+
+add_library(
+  irmv_transport
+  src/transport/codec.cpp
+  src/transport/dds_transport.cpp
+)
+target_compile_features(irmv_transport PUBLIC cxx_std_17)
+target_include_directories(
+  irmv_transport
+  PUBLIC
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:include>"
+)
+target_link_libraries(
+  irmv_transport
+  PUBLIC
+    irmv_protocol
+    irmv_configuration
+    CycloneDDS-CXX::ddscxx
+    execution_idl
+  PRIVATE Threads::Threads
+)
+
+add_executable(channel_test tests/unit/channel_test.cpp)
+target_compile_features(channel_test PRIVATE cxx_std_17)
+target_include_directories(
+  channel_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(channel_test PRIVATE irmv_transport)
+
+add_test(NAME channel_test COMMAND channel_test)
+
+add_executable(dds_codec_test tests/integration/dds_codec_test.cpp)
+target_compile_features(dds_codec_test PRIVATE cxx_std_17)
+target_include_directories(
+  dds_codec_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(dds_codec_test PRIVATE irmv_transport)
+
+add_test(NAME dds_codec_test COMMAND dds_codec_test)
+set_tests_properties(
+  dds_codec_test
+  PROPERTIES
+    LABELS integration
+    TIMEOUT 30
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
