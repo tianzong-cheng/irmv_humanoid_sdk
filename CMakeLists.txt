@@ -333,6 +333,7 @@ set(
   runtime_restarted
   command_flood
   slow_logger
+  write_refused
 )
 foreach(scenario IN LISTS IRMV_INTEGRATION_SCENARIOS)
   add_test(

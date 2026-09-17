@@ -589,11 +589,25 @@ class OutputTrace {
   void TryRecord(const OutputTraceRecord &record);
   void Stop();
 
-  std::uint64_t recorded() const { return recorded_; }
+  // What the trace did, as one snapshot. Only the joined state may hand it out:
+  // Stop() joins the writer thread first, and that thread is the only producer
+  // of `recorded` and `write_failures`, so a snapshot taken afterwards is final
+  // and no reader can observe a value that is still being written.
+  struct Counters {
+    bool active{false};
+    std::uint64_t recorded{0};
+    std::uint64_t dropped{0};
+    std::uint64_t write_failures{0};
+  };
 
-  std::uint64_t dropped() const { return dropped_; }
-
-  std::uint64_t write_failures() const { return write_failures_; }
+  Counters counters() const {
+    Counters snapshot;
+    snapshot.active = true;
+    snapshot.recorded = recorded_.load(std::memory_order_relaxed);
+    snapshot.dropped = dropped_;
+    snapshot.write_failures = write_failures_.load(std::memory_order_relaxed);
+    return snapshot;
+  }
 
  private:
   void Run();
@@ -605,9 +619,9 @@ class OutputTrace {
   transport::BoundedChannel<OutputTraceRecord, kTraceChannelCapacity> channel_;
   std::thread worker_;
   std::atomic<bool> stop_requested_{false};
-  std::uint64_t recorded_{0};
+  std::atomic<std::uint64_t> recorded_{0};
+  std::atomic<std::uint64_t> write_failures_{0};
   std::uint64_t dropped_{0};
-  std::uint64_t write_failures_{0};
   bool running_{false};
 };
 
@@ -643,9 +657,10 @@ void OutputTrace::Stop() {
   JsonLine line(line_.get(), kTraceLineCapacity);
   line.Begin();
   line.Field("kind", "end");
-  line.Field("recorded", recorded_);
+  line.Field("recorded", recorded_.load(std::memory_order_relaxed));
   line.Field("dropped", dropped_);
-  line.Field("write_failures", write_failures_);
+  line.Field("write_failures",
+             write_failures_.load(std::memory_order_relaxed));
   line.End();
   if (line.ok()) {
     std::string_view text = line.line();
@@ -710,22 +725,22 @@ void OutputTrace::Render(const OutputTraceRecord &record) {
   line.End();
   if (!line.ok()) {
     // Refused instead of truncated: the consumer sees the tick missing.
-    ++write_failures_;
+    write_failures_.fetch_add(1, std::memory_order_relaxed);
     return;
   }
   const std::string_view text = line.line();
   file_.write(text.data(), static_cast<std::streamsize>(text.size()));
   file_.put('\n');
   if (!file_) {
-    if (write_failures_ == 0) {
+    if (write_failures_.load(std::memory_order_relaxed) == 0) {
       std::fprintf(stderr,
                    "robot_runtime: the output trace %s cannot be written\n",
                    path_.c_str());
     }
-    ++write_failures_;
+    write_failures_.fetch_add(1, std::memory_order_relaxed);
     return;
   }
-  ++recorded_;
+  recorded_.fetch_add(1, std::memory_order_relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -856,7 +871,7 @@ void LogSummary(telemetry::Logger &logger, std::string_view message,
 // final. Nothing about a clean stop is claimed before this point.
 void ReportCleanStop(const telemetry::Logger &logger, const LoopCounters &counters,
                      const transport::DdsTransport &transport,
-                     const OutputTrace *trace) {
+                     const OutputTrace::Counters &trace) {
   std::fprintf(stderr,
                "robot_runtime: clean shutdown: state=ZeroTorque ticks=%llu "
                "overruns=%llu worst_overrun_us=%llu written=%llu undrained=%llu "
@@ -876,16 +891,10 @@ void ReportCleanStop(const telemetry::Logger &logger, const LoopCounters &counte
                static_cast<unsigned long long>(transport.dropped_request_count()),
                static_cast<unsigned long long>(transport.dropped_command_count()),
                static_cast<unsigned long long>(transport.dropped_heartbeat_count()),
-               trace == nullptr ? 0 : 1,
-               static_cast<unsigned long long>(trace == nullptr
-                                                   ? 0
-                                                   : trace->recorded()),
-               static_cast<unsigned long long>(trace == nullptr
-                                                   ? 0
-                                                   : trace->dropped()),
-               static_cast<unsigned long long>(trace == nullptr
-                                                   ? 0
-                                                   : trace->write_failures()));
+               trace.active ? 1 : 0,
+               static_cast<unsigned long long>(trace.recorded),
+               static_cast<unsigned long long>(trace.dropped),
+               static_cast<unsigned long long>(trace.write_failures));
 }
 
 // ---------------------------------------------------------------------------
@@ -1680,7 +1689,15 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
                  now);
       transport.Stop();
       logger.Stop();
-      ReportCleanStop(logger, counters, transport, trace.get());
+      // The trace writer owns its counters until it is joined: stop it first,
+      // so every number the shutdown line reports is final. Stop() also writes
+      // the end record, which is what lets the consumer tell a complete trace
+      // from a truncated one.
+      if (trace) {
+        trace->Stop();
+      }
+      ReportCleanStop(logger, counters, transport,
+                      trace ? trace->counters() : OutputTrace::Counters{});
       trace.reset();
       backend.Close();
       return kExitOk;

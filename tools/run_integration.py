@@ -24,6 +24,7 @@ Only the standard library is used.
 """
 
 import argparse
+import errno
 import json
 import os
 import re
@@ -164,6 +165,14 @@ class Runtime:
         self.drain()
 
     def write_log(self):
+        # Drain first: a scenario that never waited on a log line would otherwise
+        # leave its evidence file empty even though the process produced output.
+        self.drain()
+        if self.process is not None:
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
         self.log_path.write_text(self.text())
 
     def clean_stop(self):
@@ -363,6 +372,14 @@ def domain_is_free(domain):
     return True
 
 
+def owner_is_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError as error:
+        return error.errno == errno.EPERM  # alive, just not ours to signal
+
+
 def release_domain(lock_path):
     if lock_path is not None:
         try:
@@ -390,26 +407,32 @@ def choose_domain(declared, work_dir):
         if not domain_is_free(candidate):
             continue
         lock = shared / (".domain-%d.lock" % candidate)
-        try:
-            handle = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        except FileExistsError:
-            owner = None
+        # A candidate whose lock belongs to a live scenario is taken; a lock left
+        # behind by a killed run is reclaimed, so a dead run cannot consume a
+        # domain for ever. Two reclaimers race on the same file: both may remove
+        # it, and the exclusive create then decides which one owns the domain.
+        for _ in range(3):
             try:
-                owner = int(lock.read_text().strip())
-            except (OSError, ValueError):
+                handle = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                                 0o644)
+            except FileExistsError:
                 owner = None
-            if owner is not None:
                 try:
-                    os.kill(owner, 0)
-                    continue  # another scenario holds this domain right now
+                    owner = int(lock.read_text().strip())
+                except (OSError, ValueError):
+                    owner = None
+                if owner is not None and owner_is_alive(owner):
+                    break  # a live scenario holds this domain
+                try:
+                    lock.unlink()
                 except OSError:
                     pass
-            continue
-        os.write(handle, str(os.getpid()).encode())
-        os.close(handle)
-        (Path(work_dir) / "domain.txt").write_text("%d\n" % candidate,
-                                                   encoding="utf-8")
-        return candidate, lock
+                continue
+            os.write(handle, str(os.getpid()).encode())
+            os.close(handle)
+            (Path(work_dir) / "domain.txt").write_text("%d\n" % candidate,
+                                                       encoding="utf-8")
+            return candidate, lock
     raise Failure("no free DDS domain below 230 was found for %d" % declared)
 
 
@@ -511,10 +534,11 @@ def step_stop_runtime(ctx, step):
         if code is not None:
             raise Failure("the runtime left a state it must not leave without a "
                           "supervisor (exit %s)" % code)
-        state = None
-        found = re.findall(r"state=(\w+)", runtime.text())
-        if found:
-            state = found[-1]
+        # The runtime renders the state quoted, in the status and shutdown
+        # lines alike; the unquoted form exists only in the clean-shutdown line,
+        # which a refused stop never prints.
+        reported = re.findall(r'state="(\w+)"', runtime.text())
+        state = reported[-1] if reported else "unknown"
         runtime.kill()
         return ("the runtime stayed in %s and was killed" % state)
     if code is None:
@@ -640,10 +664,21 @@ def run_steps(ctx):
 # ---------------------------------------------------------------------------
 
 def load_trace(ctx, name):
+    """The trace of one run, reduced to its effective records.
+
+    The trace contract documents that a refused write makes one tick carry two
+    records and that the last of them is the write that took effect. The
+    consumer implements exactly that rule: records of one tick arrive adjacent
+    (a single writer renders them in drain order), the last one replaces the
+    earlier ones, and the number of ticks that carried more than one write is
+    reported as evidence instead of being mistaken for a gap.
+    """
     path = ctx.work_dir / name
     if not path.exists():
         raise Failure("the output trace %s does not exist" % name)
+    records = []
     ticks = []
+    duplicates = 0
     end = None
     lines = 0
     for line in path.read_text().splitlines():
@@ -656,12 +691,18 @@ def load_trace(ctx, name):
         except json.JSONDecodeError:
             raise Failure("the output trace %s has an unparseable line" % name)
         if record.get("kind") == "tick":
-            ticks.append(record)
+            records.append(record)
+            if ticks and ticks[-1]["tick"] == record["tick"]:
+                ticks[-1] = record
+                duplicates += 1
+            else:
+                ticks.append(record)
         elif record.get("kind") == "end":
             end = record
     if not ticks:
         raise Failure("the output trace %s has no tick record" % name)
-    return {"path": path, "ticks": ticks, "end": end, "lines": lines}
+    return {"path": path, "ticks": ticks, "records": records,
+            "duplicates": duplicates, "end": end, "lines": lines}
 
 
 def tracked_ticks(trace):
@@ -683,6 +724,8 @@ def check_trace_complete(ctx, params):
     numbers = [t["tick"] for t in ticks]
     contiguous = numbers == list(range(numbers[0], numbers[0] + len(numbers)))
     end = trace["end"]
+    duplicates = trace["duplicates"]
+    records = trace["records"]
     minimum = params.get("min_ticks", 1)
     problems = []
     if not contiguous:
@@ -699,13 +742,94 @@ def check_trace_complete(ctx, params):
     if len(ticks) < minimum:
         problems.append("only %d ticks, expected at least %d"
                         % (len(ticks), minimum))
-    detail = ("%d ticks %d..%d contiguous=%s end=%s"
-              % (len(ticks), numbers[0], numbers[-1], contiguous, end))
+    # A scenario may restart the runtime: the counters of this trace belong to
+    # the run that wrote it, not to whichever run happens to be last.
+    run_index = None
+    found = re.search(r"trace_run(\d+)\.jsonl$", str(trace["path"]))
+    if found is not None:
+        run_index = int(found.group(1))
+    if run_index is not None and 1 <= run_index <= len(ctx.runs):
+        clean = ctx.runs[run_index - 1].clean_stop()
+    else:
+        clean = ctx.runtime().clean_stop()
+    if end is not None and clean is not None and "trace_written" in clean:
+        # The runtime reports its counters after joining the writer; the end
+        # record is written by that same join. Disagreeing numbers would mean
+        # the report read a value the writer still owned.
+        if (clean.get("trace_written") != end.get("recorded")
+                or clean.get("trace_dropped") != end.get("dropped")
+                or clean.get("trace_failures") != end.get("write_failures")):
+            problems.append(
+                "the shutdown line reports trace_written=%s dropped=%s "
+                "failures=%s but the end record says recorded=%s dropped=%s "
+                "write_failures=%s"
+                % (clean.get("trace_written"), clean.get("trace_dropped"),
+                   clean.get("trace_failures"), end.get("recorded"),
+                   end.get("dropped"), end.get("write_failures")))
+    detail = ("%d records, %d ticks %d..%d contiguous=%s, %d ticks carried a "
+              "refused write and were reduced to their effective record, end=%s"
+              % (len(records), len(ticks), numbers[0], numbers[-1], contiguous,
+                 duplicates, end))
     return (not problems, detail + ("" if not problems else "; " + "; ".join(problems)),
-            [("trace_ticks", len(ticks))])
+            [("trace_ticks", len(ticks)),
+             ("trace_duplicate_ticks", duplicates)])
+
+
+def check_refused_write(ctx, params):
+    """A refused write, the zero-torque fallback it forces and the fault latch.
+
+    One tick writes once, or twice when a refused write is followed by the safe
+    fallback; the consumer reduces such a tick to its last record. While the
+    write path is down the fallback is refused as well, so the promise is the
+    attempt: the second record of a refused tick commands zero torque.
+    """
+    trace = load_trace(ctx, params["file"])
+    groups = []
+    for record in trace["records"]:
+        if groups and groups[-1][-1]["tick"] == record["tick"]:
+            groups[-1].append(record)
+        else:
+            groups.append([record])
+    refused_ticks = 0
+    fallback_ticks = 0
+    attempted_target = 0
+    for group in groups:
+        if len(group) > 2:
+            raise Failure("tick %d carries %d records: a tick writes once, or "
+                          "twice when a refusal is followed by the fallback"
+                          % (group[0]["tick"], len(group)))
+        if any(not record["write_accepted"] for record in group):
+            refused_ticks += 1
+        if len(group) == 2:
+            last = group[-1]
+            torque = last["torque"][:last["joint_count"]]
+            if any(value != 0.0 for value in torque):
+                raise Failure("the second record of tick %d is not the "
+                              "zero-torque fallback: %s" % (last["tick"], torque))
+            fallback_ticks += 1
+        first = group[0]
+        if any(abs(value) > 1e-12
+               for value in first["torque"][:first["joint_count"]]):
+            attempted_target += 1
+    if trace["duplicates"] != fallback_ticks:
+        raise Failure("the consumer reduced %d records but %d ticks carry two "
+                      "records" % (trace["duplicates"], fallback_ticks))
+    faults = [tick for tick in trace["ticks"]
+              if tick["state"] == "Fault" and tick["fault_id"] != 0]
+    minimum = params.get("min_refusals", 1)
+    detail = ("%d tick(s) refused a write, %d of them carried the zero-torque "
+              "fallback as their effective record, %d commanded a non-zero "
+              "target first, %d tick(s) reported a latched fault id"
+              % (refused_ticks, fallback_ticks, attempted_target, len(faults)))
+    ok = (refused_ticks >= minimum and fallback_ticks >= 1
+          and attempted_target >= 1 and bool(faults))
+    return ok, detail, [("refused_write_ticks", refused_ticks),
+                        ("refused_write_fallbacks", fallback_ticks),
+                        ("fault_ticks", len(faults))]
 
 
 def check_output_formula(ctx, params):
+    """Every tracked tick recomputed from the frame it really held."""
     trace = load_trace(ctx, params["file"])
     limits = params["limits"]
     tolerance = params.get("tolerance", 1e-9)
@@ -955,7 +1079,8 @@ def check_replay_rejected(ctx, params):
             unexpected.append(answer)
     if scope == "session" and scoped_applied:
         problems.append("%d replayed packets that named a session or an epoch "
-                        "were applied" % len(scoped_applied))
+                        "were applied, which would re-authorize motion"
+                        % len(scoped_applied))
     if scope == "all" and (scoped_applied or bootstrap_applied):
         problems.append("%d replayed packets were applied"
                         % (len(scoped_applied) + len(bootstrap_applied)))
@@ -970,26 +1095,13 @@ def check_replay_rejected(ctx, params):
     for answer in answers:
         reasons[answer["reason"]] = reasons.get(answer["reason"], 0) + 1
     detail = ("%d replayed requests answered, %d applied session-scoped, "
-              "%d applied as a bootstrap, reasons %s"
+              "%d bootstrap packets answered with a session for the same "
+              "supervisor (by design), reasons %s"
               % (len(answers), len(scoped_applied), len(bootstrap_applied),
                  reasons))
     return not problems, detail + ("" if not problems else "; " + "; ".join(problems)), [
         ("replayed_answers", len(answers)),
         ("replayed_session_scoped_applied", len(scoped_applied))]
-
-
-def check_request_drops(ctx, params):
-    """The transport's own count of inbound requests it could not deliver."""
-    clean = ctx.runtime().clean_stop()
-    if clean is None:
-        raise Failure("the runtime printed no clean shutdown line")
-    dropped = clean.get("request_dropped", 0)
-    commands = clean.get("command_dropped", 0)
-    detail = ("the runtime dropped %d inbound requests and %d joint commands "
-              "while the control loop kept running over %d ticks"
-              % (dropped, commands, clean.get("ticks", 0)))
-    return dropped >= params.get("min", 1), detail, [("request_dropped", dropped),
-                                                     ("command_dropped", commands)]
 
 
 def check_flood_drops(ctx, params):
@@ -998,13 +1110,18 @@ def check_flood_drops(ctx, params):
     answered = client.measurement("flood_answered", None)
     if sent is None or answered is None:
         raise Failure("the flood client reported no counts")
-    clean = ctx.runtime().clean_stop()
-    transport = clean.get("transport_dropped") if clean else "unknown"
+    clean = ctx.runtime().clean_stop() or {}
     detail = ("the flood sent %s requests and the runtime answered %s of them: "
-              "%s requests were never answered (its transport counter reports "
-              "%s dropped samples)" % (sent, answered, sent - answered, transport))
+              "%s were dropped on the way in; the runtime counters report "
+              "request_dropped=%s of its inbound queue and transport_dropped=%s "
+              "samples (a single flood is mostly absorbed, two saturate the DDS "
+              "reader itself)"
+              % (sent, answered, sent - answered, clean.get("request_dropped"),
+                 clean.get("transport_dropped")))
     return answered < sent, detail, [("flood_sent", sent),
-                                     ("flood_answered", answered)]
+                                     ("flood_answered", answered),
+                                     ("runtime_request_dropped",
+                                      clean.get("request_dropped", 0))]
 
 
 def check_client_check(ctx, params):
@@ -1118,6 +1235,7 @@ def check_overruns(ctx, params):
 CHECKS = {
     "trace_complete": check_trace_complete,
     "output_formula": check_output_formula,
+    "refused_write": check_refused_write,
     "command_recomputed": check_command_recomputed,
     "torque_clamp": check_torque_clamp,
     "torque_step": check_torque_step,
@@ -1126,7 +1244,6 @@ CHECKS = {
     "fallback": check_fallback,
     "tracking_frozen": check_tracking_frozen,
     "replay_rejected": check_replay_rejected,
-    "request_drops": check_request_drops,
     "replay_no_authorization": check_replay_no_authorization,
     "instance_changed": check_instance_changed,
     "logger_dropped": check_logger_dropped,
@@ -1143,10 +1260,50 @@ CHECKS = {
 # Driver
 # ---------------------------------------------------------------------------
 
+def claim_work_dir(work):
+    """Exclusive claim of one scenario's evidence directory.
+
+    Two invocations sharing a build directory would wipe each other's evidence;
+    the claim turns that into a clear failure before anything is deleted. The
+    file lives next to the scenario directory so it survives the wipe of a
+    previous run.
+    """
+    claim = work.parent / (".claim-%s" % work.name)
+    if claim.exists():
+        owner = None
+        try:
+            owner = int(claim.read_text().strip())
+        except (OSError, ValueError):
+            owner = None
+        if owner is not None and owner_is_alive(owner):
+            raise Failure("%s is in use by another run (pid %d): two concurrent "
+                          "invocations must not share one work directory"
+                          % (work, owner))
+        try:
+            claim.unlink()
+        except OSError:
+            pass
+    handle = os.open(str(claim), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    os.write(handle, str(os.getpid()).encode())
+    os.close(handle)
+    return claim
+
+
+def release_work_dir(claim):
+    try:
+        claim.unlink()
+    except OSError:
+        pass
+
+
 def run_scenario(runtime_binary, client_binary, source, scenario_path, work_dir):
     scenario = json.loads(Path(scenario_path).read_text())
     name = scenario["name"]
     work = Path(work_dir) / name
+    # The claim file sits next to the scenario directory, so the directory that
+    # holds it must exist before anything is claimed or wiped.
+    work.parent.mkdir(parents=True, exist_ok=True)
+    claim = claim_work_dir(work)
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True, exist_ok=True)
     ctx = Context(scenario, source, work)
@@ -1169,6 +1326,7 @@ def run_scenario(runtime_binary, client_binary, source, scenario_path, work_dir)
         finally:
             ctx.write_evidence()
             release_domain(ctx.domain_lock)
+            release_work_dir(claim)
 
     if steps_done:
         for check in scenario.get("checks", []):

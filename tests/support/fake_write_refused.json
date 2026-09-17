@@ -1,0 +1,85 @@
+{
+  "$comment": [
+    "Fake deployment scenario for the refused-write acceptance of Task 10.",
+    "The torque write is accepted at first, refused for 1.2 s, and accepted",
+    "again afterwards. The refusal window is entered while the runtime is",
+    "tracking, so the state machine has to latch the refusal as a fault, write",
+    "zero torque instead in the same tick, and release the fault only through a",
+    "matching Reset after the recovery window saw accepted writes again.",
+    "The measured velocity steps once inside the window so the refused write",
+    "carries a non-zero attempted torque, which is what tells the refused record",
+    "apart from the zero-torque fallback that follows it.",
+    "elapsed_us is monotonic from process start; an entry applies from its time",
+    "onwards and holds until the next one."
+  ],
+  "entries": [
+    {
+      "elapsed_us": 0,
+      "feedback": {
+        "count": 2,
+        "joints": [
+          {
+            "q": 0.05,
+            "dq": 0.0,
+            "tau_est": 0.0,
+            "valid": true,
+            "connected": true,
+            "freq_hz": 500.0,
+            "error_code": 0
+          },
+          {
+            "q": 0.05,
+            "dq": 0.0,
+            "tau_est": 0.0,
+            "valid": true,
+            "connected": true,
+            "freq_hz": 500.0,
+            "error_code": 0
+          }
+        ],
+        "imu": {
+          "valid": false,
+          "rx_stamp_us": 0
+        }
+      },
+      "write_result": {
+        "accepted": true
+      }
+    },
+    {
+      "elapsed_us": 1000000,
+      "feedback": {
+        "joints": [
+          {
+            "dq": 0.15
+          },
+          {
+            "dq": 0.15
+          }
+        ]
+      },
+      "write_result": {
+        "accepted": false
+      }
+    },
+    {
+      "elapsed_us": 1200000,
+      "feedback": {
+        "joints": [
+          {
+            "dq": 0.05
+          },
+          {
+            "dq": 0.05
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_us": 2200000,
+      "write_result": {
+        "accepted": true
+      }
+    }
+  ]
+}

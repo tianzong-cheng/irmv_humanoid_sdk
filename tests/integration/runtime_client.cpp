@@ -43,6 +43,7 @@
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <optional>
+#include <random>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -97,6 +98,37 @@ constexpr int kExitStartup = 3;
 // supervisor request look stale.
 constexpr Sequence kRequestBase = 1ULL << 40;
 constexpr Sequence kFloodRequestBase = 1ULL << 30;
+TimeUs NowUs() {
+  return static_cast<TimeUs>(
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+
+// Bands of request ids the flood clients draw from: 30000 bands of 2^25 ids fit
+// strictly between the flood base and the supervisor base.
+constexpr Sequence kFloodBandWidth = 1ULL << 25;
+constexpr Sequence kFloodBandCount = 30000;
+
+// Random band of this process. Two live floods collide with probability 1/30000,
+// and a collision is caught by the client's own answered/sent cross-check rather
+// than corrupting the drop count.
+Sequence MakeFloodBand() {
+  std::uint64_t seed = 0;
+  try {
+    std::random_device entropy;
+    seed = (static_cast<std::uint64_t>(entropy()) << 32) ^ entropy();
+  } catch (const std::exception &) {
+    // No entropy: the process id and the clock still separate two processes.
+    unsigned long long mixed = static_cast<unsigned long long>(::getpid());
+    mixed *= 0x9e3779b97f4a7c15ULL;
+    mixed ^= static_cast<unsigned long long>(NowUs());
+    mixed *= 0xbf58476d1ce4e5b9ULL;
+    mixed ^= mixed >> 29;
+    seed = static_cast<std::uint64_t>(mixed);
+  }
+  return static_cast<Sequence>(seed % kFloodBandCount);
+}
 
 constexpr TimeUs kHeartbeatIntervalUs = 50'000;
 constexpr TimeUs kRetryIntervalUs = 50'000;
@@ -108,13 +140,6 @@ constexpr TimeUs kResultHoldUs = 200'000;
 // broken runtime fails the scenario instead of hanging the harness.
 constexpr TimeUs kGlobalCapUs = 30'000'000;
 constexpr TimeUs kObserverCapUs = 25'000'000;
-
-TimeUs NowUs() {
-  return static_cast<TimeUs>(
-      std::chrono::duration_cast<std::chrono::microseconds>(
-          std::chrono::steady_clock::now().time_since_epoch())
-          .count());
-}
 
 std::string IdHex(const Id &id) {
   constexpr char kHex[] = "0123456789abcdef";
@@ -780,7 +805,9 @@ class Client {
 
   bool WaitForZeroTorque();
   bool EnsureSession();
-  bool EnsureDamping(bool result_first);
+  // `force` sends the stop request even when the state already reads Damping:
+  // the flood scenarios measure the latency of a request that really travelled.
+  bool EnsureDamping(bool result_first, bool force = false);
   bool EnsureTracking(bool result_first, int drop_results);
   bool RequestZeroTorque(bool result_first);
   // Waits up to `duration_us` for the runtime to leave tracking. A fallback is
@@ -1313,9 +1340,10 @@ bool Client::EnsureSession() {
   return true;
 }
 
-bool Client::EnsureDamping(bool result_first) {
+bool Client::EnsureDamping(bool result_first, bool force) {
   const RobotState *state = latest_state();
-  if (state != nullptr && state->execution_state == ExecutionState::Damping &&
+  if (!force && state != nullptr &&
+      state->execution_state == ExecutionState::Damping &&
       state->session_id == session_id_) {
     return true;
   }
@@ -1660,6 +1688,74 @@ int Client::RunSupervisor() {
     return Finish("supervisor");
   }
 
+  if (scenario == "write_refused") {
+    // The fake scenario refuses the torque write of a tracking tick. The runtime
+    // must latch the refusal as a fault, command zero torque instead, and leave
+    // the fault only for a matching Reset once the write path is healthy again.
+    EnsureSession();
+    EnsureDamping(true);
+    if (!EnsureTracking(true, 0)) {
+      return Finish("supervisor");
+    }
+    bool faulted = false;
+    Sequence fault_id = 0;
+    const TimeUs fault_deadline = now() + 6'000'000;
+    while (now() < fault_deadline && !StopRequested()) {
+      Poll(true);
+      PumpHeartbeat();
+      const RobotState *state = latest_state();
+      if (state != nullptr &&
+          state->execution_state == ExecutionState::Fault &&
+          state->fault_id != 0) {
+        faulted = true;
+        fault_id = state->fault_id;
+        Note("fault " + std::to_string(fault_id) +
+             " latched by the refused write");
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::microseconds(kPollSleepUs));
+    }
+    Check(faulted, "write_failure_latched",
+          "a refused torque write did not latch a fault");
+    measurements_["fault_id"] = fault_id;
+    if (faulted) {
+      // A rejected Reset is answered, not applied, so each attempt repeats with
+      // a new id: the recovery window of the state machine needs a healthy
+      // window with an accepted write path before it releases the fault.
+      bool reset = false;
+      std::uint64_t attempts = 0;
+      const TimeUs reset_deadline = now() + 6'000'000;
+      while (!reset && now() < reset_deadline && !StopRequested()) {
+        ++attempts;
+        const Sequence request_id = NextRequestId();
+        ExecutionRequest request = MakeRequest(Operation::Reset, request_id);
+        request.fault_id = fault_id;
+        ConfirmationExpectations expectations;
+        expectations.execution_state = ExecutionState::ZeroTorque;
+        expectations.output_action = OutputAction::ZeroTorque;
+        expectations.producer_id = irmv::protocol::kNoId;
+        TrackedRequest observed;
+        reset = SendAndConfirm(request, expectations, true, 0, 500'000,
+                               &observed);
+        // The pause keeps the lease alive: the supervisor timeout is 300 ms, so
+        // waiting without a heartbeat would cost the session, not just the
+        // attempt.
+        const TimeUs retry_at = now() + 250'000;
+        while (!reset && now() < retry_at && !StopRequested()) {
+          Poll(true);
+          PumpHeartbeat();
+          std::this_thread::sleep_for(std::chrono::microseconds(kPollSleepUs));
+        }
+      }
+      measurements_["reset_attempts"] = attempts;
+      Check(reset, "reset_applied",
+            "the fault was never cleared by a matching Reset");
+      Check(RequestZeroTorque(true), "zero_torque_applied",
+            "the stop after the reset was not confirmed");
+    }
+    return Finish("supervisor");
+  }
+
   if (scenario == "producer_paused") {
     EnsureSession();
     EnsureDamping(true);
@@ -1708,8 +1804,11 @@ int Client::RunSupervisor() {
                                         : latest_state()->last_applied_command_seq;
     // The stop travels on the dedicated stop lane and must not be starved,
     // whatever the ordinary request lane is carrying.
+    // The state may well have fallen back to Damping already (a starved command
+    // lane expires a target), so the stop is forced: this measures a request
+    // that really travelled on the stop lane while the flood ran.
     const TimeUs stop_send_us = now();
-    const bool damped = EnsureDamping(true);
+    const bool damped = EnsureDamping(true, true);
     measurements_["stop_latency_us"] = now() - stop_send_us;
     Check(damped, "stop_under_flood",
           "the stop was not applied while the flood ran");
@@ -1732,10 +1831,12 @@ int Client::RunFlood() {
   emit_traffic_ = false;
   const TimeUs period_us = static_cast<TimeUs>(1'000'000.0 / options_.rate_hz);
   const TimeUs deadline = now() + 8'000'000;
-  // Distinct per process, so two floods running at once never count each
-  // other's answers, and always below the supervisor's own request ids.
-  const Sequence flood_base = kFloodRequestBase +
-                              (static_cast<Sequence>(::getpid() % 4096) << 20);
+  // Every flood owns a private band of request ids, drawn from the system
+  // entropy: two floods running at once therefore cannot count each other's
+  // answers, and no band reaches the supervisor's own ids. The client also
+  // cross-checks its count against what it sent (a band collision would show up
+  // as more answers than sends instead of a silently wrong drop count).
+  const Sequence flood_base = kFloodRequestBase + MakeFloodBand() * kFloodBandWidth;
   Sequence request_id = flood_base;
   Id observed_session = irmv::protocol::kNoId;
   bool ever_had_session = false;
@@ -1785,7 +1886,12 @@ int Client::RunFlood() {
     }
   }
   measurements_["flood_answered"] = answers;
+  measurements_["flood_band"] = flood_base / kFloodBandWidth;
   Check(flood_sent_ > 0, "flood_sent_requests", "the flood sent nothing");
+  // Only this process's own band is counted: more answers than sends would mean
+  // two bands collided and the drop count cannot be trusted.
+  Check(answers <= flood_sent_, "flood_count_consistent",
+        "more answers than requests: two flood id bands overlap");
   // `flood` must exceed what the runtime can answer one by one, so the requests
   // it drops are the drops the scenario counts; `log_volume` only has to stay
   // inside the inbound capacity while it produces events, which is what the

@@ -595,6 +595,127 @@ int RetryKeepsPendingAndConfirmsWithStoredStamp() {
   return 0;
 }
 
+
+// Every clause of the agreement between an answer and the state it publishes has
+// to be able to refuse a confirmation on its own: a witness that differs in
+// exactly one field is what pins one clause down, and the untouched witness is
+// the control that shows the case fails on that clause alone.
+int WitnessMismatchDoesNotConfirm() {
+  struct WitnessCase {
+    const char *field;
+    void (*mutate)(RobotState &state);
+  };
+  const WitnessCase cases[] = {
+      {"runtime_id", [](RobotState &state) { state.runtime_id = MakeId(0x99); }},
+      {"session_id",
+       [](RobotState &state) { state.session_id = OtherSessionId(); }},
+      {"producer_id", [](RobotState &state) { state.producer_id = MakeId(0x77); }},
+      {"output_action",
+       [](RobotState &state) { state.output_action = OutputAction::Damping; }},
+  };
+  for (const WitnessCase &witness_case : cases) {
+    ConfirmationLog log;
+    const ExecutionRequest request =
+        MakeRequest(kRequestId, Operation::Tracking);
+    ConfirmationExpectations expectations;
+    expectations.execution_state = ExecutionState::Tracking;
+    expectations.output_action = OutputAction::Tracking;
+    expectations.producer_id = ProducerId();
+    expectations.session_id = SessionId();
+    log.Track(request, kSendUs, expectations);
+    const ExecutionResult result = MakeResult(request, kResultStampUs);
+    log.ObserveResult(result, kResultRxUs);
+    CHECK(log.Find(kRequestId)->status == ConfirmationStatus::Pending);
+
+    RobotState witness = MakeState(result, result.stamp_us);
+    witness_case.mutate(witness);
+    log.ObserveState(witness, kStateRxUs);
+
+    const TrackedRequest *entry = log.Find(kRequestId);
+    CHECK(entry != nullptr);
+    if (entry->status != ConfirmationStatus::Superseded) {
+      std::cerr << __FILE__ << ':' << __LINE__
+                << ": a witness with a different " << witness_case.field
+                << " confirmed the request\n";
+      return 1;
+    }
+    CHECK(!log.confirmed(kRequestId));
+    CHECK(entry->order == ConfirmationOrder::None);
+    CHECK(log.states().size() == 1);
+
+    ConfirmationLog agreeing;
+    agreeing.Track(request, kSendUs, expectations);
+    agreeing.ObserveResult(result, kResultRxUs);
+    agreeing.ObserveState(MakeState(result, result.stamp_us), kStateRxUs);
+    CHECK(agreeing.Find(kRequestId)->status == ConfirmationStatus::Confirmed);
+  }
+
+  std::cout << "ok witness_mismatch_does_not_confirm\n";
+  return 0;
+}
+
+// Same for the expectations: each clause has to keep a request pending against an
+// answer that would otherwise confirm it, and the matching answer is the control.
+int ExpectationMismatchDoesNotConfirm() {
+  struct ExpectationCase {
+    const char *field;
+    void (*set)(ConfirmationExpectations &expectations);
+  };
+  const ExpectationCase cases[] = {
+      {"execution_state",
+       [](ConfirmationExpectations &expectations) {
+         expectations.execution_state = ExecutionState::Damping;
+       }},
+      {"output_action",
+       [](ConfirmationExpectations &expectations) {
+         expectations.output_action = OutputAction::Damping;
+       }},
+      {"producer_id",
+       [](ConfirmationExpectations &expectations) {
+         expectations.producer_id = MakeId(0x77);
+       }},
+      {"session_id",
+       [](ConfirmationExpectations &expectations) {
+         expectations.session_id = OtherSessionId();
+       }},
+      {"epoch",
+       [](ConfirmationExpectations &expectations) {
+         expectations.epoch = kEpoch + 1;
+       }},
+  };
+  for (const ExpectationCase &expectation_case : cases) {
+    const ExecutionRequest request =
+        MakeRequest(kRequestId, Operation::Tracking);
+    const ExecutionResult result = MakeResult(request, kResultStampUs);
+
+    ConfirmationExpectations expectations;
+    expectation_case.set(expectations);
+    ConfirmationLog log;
+    log.Track(request, kSendUs, expectations);
+    log.ObserveResult(result, kResultRxUs);
+    log.ObserveState(MakeState(result, result.stamp_us), kStateRxUs);
+    const TrackedRequest *entry = log.Find(kRequestId);
+    CHECK(entry != nullptr);
+    if (entry->status != ConfirmationStatus::Pending) {
+      std::cerr << __FILE__ << ':' << __LINE__ << ": expectation "
+                << expectation_case.field
+                << " did not keep the request pending\n";
+      return 1;
+    }
+    CHECK(!log.confirmed(kRequestId));
+    CHECK(log.answered(kRequestId));
+
+    ConfirmationLog agreeing;
+    agreeing.Track(request, kSendUs);
+    agreeing.ObserveResult(result, kResultRxUs);
+    agreeing.ObserveState(MakeState(result, result.stamp_us), kStateRxUs);
+    CHECK(agreeing.Find(kRequestId)->status == ConfirmationStatus::Confirmed);
+  }
+
+  std::cout << "ok expectation_mismatch_does_not_confirm\n";
+  return 0;
+}
+
 }  // namespace
 
 int main() {
@@ -606,6 +727,8 @@ int main() {
   CHECK(NewEpochSupersedesLateApplied() == 0);
   CHECK(MismatchedIdentityDoesNotConfirm() == 0);
   CHECK(MismatchedExpectationDoesNotConfirm() == 0);
+  CHECK(WitnessMismatchDoesNotConfirm() == 0);
+  CHECK(ExpectationMismatchDoesNotConfirm() == 0);
   CHECK(RetryKeepsPendingAndConfirmsWithStoredStamp() == 0);
   return 0;
 }

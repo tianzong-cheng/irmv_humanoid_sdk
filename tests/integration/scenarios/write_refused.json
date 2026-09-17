@@ -1,0 +1,99 @@
+{
+  "name": "write_refused",
+  "description": "The fake backend refuses the torque write of a tracking tick: the runtime latches the refusal as a fault, commands zero torque instead of the refused target, and only a matching Reset clears the fault once the write path is healthy again. The output trace carries two records for every refused tick, and the consumer reduces them to the effective write.",
+  "domain": 210,
+  "runtime": {
+    "config": "config/sdk.json",
+    "fake_scenario": "tests/support/fake_write_refused.json",
+    "output_trace": "trace_run%d.jsonl"
+  },
+  "steps": [
+    {
+      "action": "start_runtime"
+    },
+    {
+      "action": "sleep_ms",
+      "ms": 400,
+      "note": "the runtime boots and reaches ZeroTorque"
+    },
+    {
+      "action": "client",
+      "name": "observer",
+      "mode": "observer",
+      "scenario": "observe",
+      "background": true
+    },
+    {
+      "action": "client",
+      "name": "supervisor",
+      "mode": "supervisor",
+      "scenario": "write_refused",
+      "timeout_s": 30,
+      "args": [
+        "--producer-id",
+        "0102030405060708090a0b0c0d0e0f33",
+        "--rate",
+        "50"
+      ]
+    },
+    {
+      "action": "stop_runtime",
+      "signal": "SIGTERM",
+      "timeout_s": 10,
+      "expect_clean": true
+    }
+  ],
+  "checks": [
+    {
+      "check": "refused_write",
+      "params": {
+        "file": "trace_run1.jsonl",
+        "min_refusals": 50
+      }
+    },
+    {
+      "check": "trace_complete",
+      "params": {
+        "file": "trace_run1.jsonl",
+        "min_ticks": 1200
+      }
+    },
+    {
+      "check": "client_check",
+      "params": {
+        "client": "supervisor",
+        "names": [
+          "session_acquired",
+          "damping_applied",
+          "tracking_granted",
+          "write_failure_latched",
+          "reset_applied",
+          "zero_torque_applied"
+        ]
+      }
+    },
+    {
+      "check": "client_measurement",
+      "params": {
+        "client": "supervisor",
+        "name": "fault_id",
+        "min": 1
+      }
+    },
+    {
+      "check": "client_measurement",
+      "params": {
+        "client": "supervisor",
+        "name": "reset_attempts",
+        "min": 1,
+        "max": 8
+      }
+    },
+    {
+      "check": "overruns",
+      "params": {
+        "max_worst_overrun_us": 20000
+      }
+    }
+  ]
+}

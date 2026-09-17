@@ -1,6 +1,6 @@
 {
   "name": "stale_context",
-  "description": "A complete cycle is recorded, the supervision lease is left to expire, and every saved packet (old session, old epoch, old commands and heartbeats) is replayed: nothing is re-authorized and nothing is extended.",
+  "description": "A complete cycle is recorded, the supervision lease is left to expire, and every saved packet (old session, old epoch, old commands and heartbeats) is replayed: no replayed packet re-authorizes motion, the target is never refreshed and the runtime never returns to Tracking. A replayed AcquireSession is a bootstrap and is answered with a session for the same recorded supervisor, which is the documented behaviour and not a re-authorization.",
   "domain": 203,
   "runtime": {
     "config": "config/sdk.json",
