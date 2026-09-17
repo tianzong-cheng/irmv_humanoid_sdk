@@ -157,8 +157,13 @@ SafetyReport CheckFeedback(const configuration::RuntimeConfig &config,
     if (joint.freq_hz < config.boot.minimum_frequency_hz) {
       report.frequency_low = true;
       if (!boot_grace) {
+        report.feedback_invalid = true;
         fault = true;
         RaiseReason(&reason, protocol::FaultReason::FeedbackInvalid);
+        AppendDetail(&report.details, protocol::FaultReason::FeedbackInvalid,
+                     joint_index, 0, joint.freq_hz,
+                     config.boot.minimum_frequency_hz, joint.rx_stamp_us,
+                     "control frequency below minimum");
       }
     }
   }
@@ -234,7 +239,8 @@ ControlOutput ComputeTracking(const configuration::RuntimeConfig &config,
                               const protocol::FeedbackSnapshot &feedback) {
   ControlOutput result;
   const std::size_t joint_count = config.joint_count();
-  if (joint_count == 0 || joint_count > protocol::kMaxJoints) {
+  if (joint_count == 0 || joint_count > protocol::kMaxJoints ||
+      feedback.count != joint_count) {
     return result;
   }
   if (!protocol::ValidateCommandShape(command, joint_count).ok) {

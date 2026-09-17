@@ -36,7 +36,9 @@ SafetyReport CheckFeedback(const configuration::RuntimeConfig &config,
 
 // Computes the torque command for tracking. Any malformed, out of range or
 // non-finite input rejects the whole command: no partial output is produced.
-// Freshness of the measured state is not evaluated here.
+// The snapshot must report the configured joint count, otherwise the measured
+// state is incomplete and no torque is produced. Freshness of the measured
+// state is not evaluated here.
 ControlOutput ComputeTracking(const configuration::RuntimeConfig &config,
                               const protocol::JointCommand &command,
                               const protocol::FeedbackSnapshot &feedback);

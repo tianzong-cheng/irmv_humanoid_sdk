@@ -265,9 +265,15 @@ int main() {
   report = CheckFeedback(config, feedback, kNowUs, false);
   CHECK(report.fault);
   CHECK(report.frequency_low);
-  CHECK(!report.feedback_invalid);
+  CHECK(report.feedback_invalid);
   CHECK(report.reason == FaultReason::FeedbackInvalid);
   CHECK(!report.damping_eligible);
+  const FaultDetail *slow =
+      FindDetail(report.details, FaultReason::FeedbackInvalid, 1);
+  CHECK(slow != nullptr);
+  CHECK(slow->observed_value == config.boot.minimum_frequency_hz - 1.0);
+  CHECK(slow->limit == config.boot.minimum_frequency_hz);
+  CHECK(slow->message.View() == "control frequency below minimum");
 
   feedback = HealthyFeedback(config);
   feedback.joints[1].freq_hz = config.boot.minimum_frequency_hz;
@@ -619,6 +625,28 @@ int main() {
   command = CommandFor(config);
   command.protocol_version = kProtocolVersion + 1;
   output = ComputeTracking(config, command, HealthyFeedback(config));
+  CHECK(!output.valid);
+  CHECK(output.output.count == 0);
+
+  // An incomplete snapshot must not be read as a zero measured state.
+  command = CommandFor(config);
+  command.joints.q[0] = 1.0;
+  command.joints.kp[0] = 30.0;
+  feedback = HealthyFeedback(config);
+  feedback.count = 0;
+  output = ComputeTracking(config, command, feedback);
+  CHECK(!output.valid);
+  CHECK(output.output.count == 0);
+
+  feedback = HealthyFeedback(config);
+  feedback.count = 1;
+  output = ComputeTracking(config, command, feedback);
+  CHECK(!output.valid);
+  CHECK(output.output.count == 0);
+
+  feedback = HealthyFeedback(config);
+  feedback.count = 3;
+  output = ComputeTracking(config, command, feedback);
   CHECK(!output.valid);
   CHECK(output.output.count == 0);
 
