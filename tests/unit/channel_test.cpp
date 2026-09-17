@@ -1,5 +1,10 @@
+#include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <iostream>
+#include <thread>
 
 #include "irmv/configuration/config.hpp"
 #include "irmv/protocol/types.hpp"
@@ -33,6 +38,97 @@ Received<ExecutionRequest> MakeRequest(Operation operation, Sequence request_id,
   received.value.request_id = request_id;
   received.rx_us = rx_us;
   return received;
+}
+
+// Payload for the two-thread handoff case. Every word of a sample carries the
+// same tag and its complement, so a sample assembled from two pushes is visible
+// immediately.
+struct TaggedPayload {
+  std::uint64_t tag{0};
+  std::uint64_t complement{0};
+  std::array<std::uint64_t, 64> body{};
+
+  void Set(std::uint64_t value) {
+    tag = value;
+    complement = ~value;
+    body.fill(value);
+  }
+
+  bool Consistent() const {
+    if (complement != ~tag) {
+      return false;
+    }
+    for (const std::uint64_t word : body) {
+      if (word != tag) {
+        return false;
+      }
+    }
+    return true;
+  }
+};
+
+// Pops the handoff case performs by default: enough to interleave the two
+// threads heavily and still finish well inside a second.
+constexpr std::uint64_t kStressPops = 200'000;
+
+// The committed budget is fixed; a larger budget is available for manual
+// reproduction of the pre-fix race through IRMV_CHANNEL_STRESS_POPS.
+std::uint64_t StressBudget() {
+  if (const char *value = std::getenv("IRMV_CHANNEL_STRESS_POPS")) {
+    const unsigned long long parsed = std::strtoull(value, nullptr, 10);
+    if (parsed > 0) {
+      return parsed;
+    }
+  }
+  return kStressPops;
+}
+
+struct StressTally {
+  std::uint64_t budget{0};
+  std::uint64_t pops{0};
+  std::uint64_t torn{0};
+};
+
+// One producer that always succeeds against one consumer, at the capacity where
+// the producer laps the consumer most often. The consumer checks every payload
+// it accepts; a payload that mixes two pushes is a torn handoff.
+StressTally StressHandoff() {
+  StressTally tally;
+  tally.budget = StressBudget();
+
+  BoundedChannel<TaggedPayload, 2> channel;
+  std::atomic<bool> producing{true};
+  std::atomic<std::uint64_t> torn{0};
+
+  std::thread producer([&channel, &producing]() {
+    std::uint64_t sequence = 0;
+    while (producing.load(std::memory_order_relaxed)) {
+      TaggedPayload payload;
+      payload.Set(++sequence);
+      bool evicted = false;
+      channel.TryPushEvictOldest(payload, &evicted);
+    }
+  });
+
+  std::thread consumer([&channel, &torn, &tally]() {
+    TaggedPayload payload;
+    while (tally.pops < tally.budget) {
+      if (!channel.TryPop(payload)) {
+        std::this_thread::yield();
+        continue;
+      }
+      ++tally.pops;
+      if (!payload.Consistent()) {
+        torn.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+  });
+
+  consumer.join();
+  producing.store(false, std::memory_order_relaxed);
+  producer.join();
+  tally.torn = torn.load(std::memory_order_relaxed);
+  return tally;
 }
 
 }  // namespace
@@ -181,6 +277,16 @@ int main() {
       CHECK(popped.rx_us == expected);
     }
     CHECK(commands.empty());
+  }
+
+  // A producer that always succeeds can overwrite the entry a consumer is
+  // copying, so no accepted entry may mix two pushes.
+  {
+    const StressTally stress = StressHandoff();
+    std::cout << "[channel_test] handoff pops=" << stress.pops
+              << " budget=" << stress.budget << " torn=" << stress.torn << '\n';
+    CHECK(stress.pops == stress.budget);
+    CHECK(stress.torn == 0);
   }
 
   // Output pressure is bounded and counted without DDS, and a transport that

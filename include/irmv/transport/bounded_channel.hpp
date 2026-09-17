@@ -82,18 +82,17 @@ class BoundedChannel {
       if (slot_generation_[index].load(std::memory_order_acquire) != generation) {
         continue;
       }
-      if (write - read == Capacity) {
-        // The ring is full, so the producer may recycle this slot while it is
-        // copied: read through a local and confirm the generation afterwards.
-        const T candidate = storage_[index];
-        if (slot_generation_[index].load(std::memory_order_acquire) !=
-            generation) {
-          continue;
-        }
-        out = candidate;
-      } else {
-        out = storage_[index];
+      // The producer may overwrite this slot at any time, whatever the ring
+      // looked like when the indices above were read: it publishes the new write
+      // index only after the payload and both markers, so a producer that laps
+      // the consumer can be writing this slot right now and a check before the
+      // copy cannot rule it out. Copy through a local and accept the entry only
+      // when the slot still holds the same generation.
+      const T candidate = storage_[index];
+      if (slot_generation_[index].load(std::memory_order_acquire) != generation) {
+        continue;
       }
+      out = candidate;
       read_.store(read + 1, std::memory_order_release);
       return true;
     }

@@ -69,6 +69,7 @@ constexpr Sequence kResultRequestId = 0x99AA99AA99ULL;
 constexpr Sequence kInvalidRequestId = 0xDEADBEEFULL;
 constexpr Sequence kStateSeq = 4242;
 constexpr Sequence kFreshStateSeq = 4243;
+constexpr Sequence kFlushStateSeq = 4244;
 
 // Deliberately not a plausible host monotonic value, so a receive stamp copied
 // from the sender would be visible as such.
@@ -1203,10 +1204,13 @@ int main() {
               << restored.request_id << '\n';
   }
 
+  // A state reader that outlives the publishes below: the replay check needs a
+  // peer that has already received the flushed sample.
+  Receiver<wire::RobotState> state_receiver(subscriber, state_topic,
+                                           irmv::protocol::kRobotStateTopic);
+
   // (6) robot_state published by the transport.
   {
-    Receiver<wire::RobotState> receiver(subscriber, state_topic,
-                                       irmv::protocol::kRobotStateTopic);
     const RobotState expected = MakeState(kStateSeq);
     TickResult tick;
     tick.state = expected;
@@ -1214,7 +1218,7 @@ int main() {
     wire::RobotState wire_state;
     const bool delivered = RepeatUntil(
         [&transport, &tick]() { transport.Publish(tick); },
-        [&]() { return receiver.Take(50, &wire_state); }, 3'000'000);
+        [&]() { return state_receiver.Take(50, &wire_state); }, 3'000'000);
     CHECK(delivered);
     RobotState restored;
     CHECK(codec::FromWire(wire_state, restored));
@@ -1225,9 +1229,29 @@ int main() {
               << " text_bytes=" << restored.layout_id.count << '\n';
   }
 
-  // (7) VOLATILE has no replay: the state above was already written by the
-  // transport, so a reader created now must stay silent until a new publish.
+  // (7) VOLATILE has no replay. The outbound path is flushed first: a marker
+  // state is published until the reader that was already matched has it, which
+  // proves the transport has written every sample it took before the marker and
+  // that nothing is left in its state channel. Only a quiet outbound path lets
+  // a silent late reader say anything about durability.
   {
+    TickResult flush_tick;
+    flush_tick.state = MakeState(kFlushStateSeq);
+    wire::RobotState flushed;
+    bool flushed_seen = false;
+    const bool flushed_ok = RepeatUntil(
+        [&transport, &flush_tick]() { transport.Publish(flush_tick); },
+        [&]() {
+          if (!state_receiver.Take(50, &flushed)) {
+            return false;
+          }
+          flushed_seen = flushed.state_seq() == kFlushStateSeq;
+          return flushed_seen;
+        },
+        3'000'000);
+    CHECK(flushed_ok);
+    CHECK(flushed_seen);
+
     Receiver<wire::RobotState> late(subscriber, state_topic,
                                     irmv::protocol::kRobotStateTopic);
     wire::RobotState replayed;
@@ -1247,8 +1271,8 @@ int main() {
         3'000'000);
     CHECK(delivered);
     CHECK(fresh_seen);
-    std::cout << "[dds_codec_test] volatile no-replay: old sample absent, new "
-                 "sample state_seq="
+    std::cout << "[dds_codec_test] volatile no-replay after a flushed publish: "
+                 "old sample absent, new sample state_seq="
               << replayed.state_seq() << " received\n";
   }
 

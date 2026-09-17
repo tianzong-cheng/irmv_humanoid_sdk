@@ -31,8 +31,10 @@ constexpr int kWaitTimeoutMs = 10;
 // the thread from writing pending output or from noticing a stop request.
 constexpr int kReadBatch = 16;
 
-// The transport thread is expected to leave its loop within one wait window;
-// this is the bounded time Stop() gives it before it joins regardless.
+// Bound Stop() gives the transport thread to leave its loop before it joins.
+// The loop only blocks in bounded operations (a ten millisecond WaitSet wait and
+// DDS writes bounded by their max_blocking_time), so the thread leaves well
+// inside this bound and the join that follows returns immediately.
 constexpr int kStopTimeoutMs = 2000;
 
 protocol::TimeUs NowUs() {
@@ -63,6 +65,21 @@ void TryWrite(Writer &writer, const Sample &sample,
     writer.write(sample);
   } catch (const std::exception &) {
     dropped.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+
+// Every read in the transport thread runs behind this guard. The thread entry
+// function must not let an exception escape it, so a failing DDS call ends the
+// transport loop cleanly - the same policy as the guarded WaitSet wait - and is
+// counted as an inbound error.
+template <typename Body>
+bool ReadGuarded(std::atomic<std::uint64_t> &inbound_errors, Body body) {
+  try {
+    body();
+    return true;
+  } catch (const std::exception &) {
+    inbound_errors.fetch_add(1, std::memory_order_relaxed);
+    return false;
   }
 }
 
@@ -124,7 +141,10 @@ struct DdsTransport::Impl {
   void Start() { thread = std::thread(&Impl::Run, this); }
 
   void Run();
-  void ReadInbound();
+  bool ReadInbound();
+  void ReadRequests();
+  void ReadCommands();
+  void ReadHeartbeats();
   void WriteOutbound();
   void Stop();
 
@@ -170,8 +190,8 @@ void DdsTransport::Impl::Run() {
       // and started() turns false.
       break;
     }
-    if (data_available) {
-      ReadInbound();
+    if (data_available && !ReadInbound()) {
+      break;
     }
     WriteOutbound();
   }
@@ -184,7 +204,16 @@ void DdsTransport::Impl::Run() {
   owner.started_.store(false, std::memory_order_release);
 }
 
-void DdsTransport::Impl::ReadInbound() {
+bool DdsTransport::Impl::ReadInbound() {
+  // Each lane is drained behind the same guard: a failing read ends the
+  // transport loop cleanly and is counted, and the lanes that follow are left
+  // untouched.
+  return ReadGuarded(owner.inbound_rejected_, [this]() { ReadRequests(); }) &&
+         ReadGuarded(owner.inbound_rejected_, [this]() { ReadCommands(); }) &&
+         ReadGuarded(owner.inbound_rejected_, [this]() { ReadHeartbeats(); });
+}
+
+void DdsTransport::Impl::ReadRequests() {
   // All samples of one read share the host receive time of that read.
   {
     const protocol::TimeUs rx_us = NowUs();
@@ -213,7 +242,9 @@ void DdsTransport::Impl::ReadInbound() {
       }
     }
   }
+}
 
+void DdsTransport::Impl::ReadCommands() {
   {
     const protocol::TimeUs rx_us = NowUs();
     auto samples = command_reader.select()
@@ -237,7 +268,9 @@ void DdsTransport::Impl::ReadInbound() {
       }
     }
   }
+}
 
+void DdsTransport::Impl::ReadHeartbeats() {
   {
     const protocol::TimeUs rx_us = NowUs();
     auto samples = heartbeat_reader.select()
@@ -265,7 +298,10 @@ void DdsTransport::Impl::ReadInbound() {
 }
 
 void DdsTransport::Impl::WriteOutbound() {
-  {
+  // The state and its wire representation are both large, so nothing is
+  // constructed while the state channel is empty. A stale empty() read only
+  // delays the snapshot by one loop period; the channel keeps the newest value.
+  if (!owner.state_.empty()) {
     protocol::RobotState state;
     if (owner.state_.TryPop(state)) {
       wire::RobotState wire_state;
@@ -285,6 +321,8 @@ void DdsTransport::Impl::WriteOutbound() {
 void DdsTransport::Impl::Stop() {
   stop_requested.store(true, std::memory_order_relaxed);
   {
+    // Bounded wait for the thread to leave its loop; every blocking operation
+    // in that loop is bounded as well, so the join below is immediate.
     std::unique_lock<std::mutex> lock(done_mutex);
     done_cv.wait_for(lock, std::chrono::milliseconds(kStopTimeoutMs),
                      [this] { return finished; });

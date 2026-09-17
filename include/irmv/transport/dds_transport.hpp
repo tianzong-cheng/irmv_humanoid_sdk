@@ -60,7 +60,11 @@ class DdsTransport {
   // cannot be created.
   void Start();
 
-  // Asks the transport thread to stop and joins it with a bounded wait.
+  // Asks the transport thread to stop and joins it. The wait for the thread to
+  // leave its loop is bounded (two seconds, more than a hundred loop periods),
+  // and every blocking operation inside that loop is itself bounded - the
+  // WaitSet wait and each DDS write's max_blocking_time - so the thread always
+  // leaves well inside the bound and the join that follows returns promptly.
   // Idempotent, safe on a transport that was never started, and also called by
   // the destructor.
   void Stop();
@@ -92,7 +96,8 @@ class DdsTransport {
   std::uint64_t dropped_command_count() const;
   // Supervisor heartbeats dropped because the inbound heartbeat queue was full.
   std::uint64_t dropped_heartbeat_count() const;
-  // Inbound samples that failed FromWire validation and were discarded whole.
+  // Inbound samples that failed FromWire validation and were discarded whole,
+  // plus reads that failed and ended the transport loop.
   std::uint64_t inbound_rejected_count() const;
 
  private:
