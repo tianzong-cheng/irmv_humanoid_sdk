@@ -1,0 +1,10 @@
+# Pinned formatter of this repository, installed into a tool environment outside
+# the build tree:
+#
+#   python3 -m venv .tools/format
+#   .tools/format/bin/pip install -r tools/requirements-format.txt
+#   cmake --build build --target format-check
+#
+# tools/format.py resolves .tools/format/bin/clang-format first and refuses to
+# run with any version other than the one pinned here.
+clang-format==18.1.8

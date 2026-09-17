@@ -1,4 +1,7 @@
 /build/
+# Scratch build directory of the documented sanitizer configuration
+# (-DIRMV_SANITIZE=address,undefined), which is never part of the tree.
+/build-sanitize/
 /logs/
 /.tools/
 __pycache__/

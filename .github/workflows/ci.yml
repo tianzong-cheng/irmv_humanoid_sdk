@@ -1,0 +1,123 @@
+name: CI
+
+# Quoted so that the workflow parses identically under YAML 1.1 and 1.2.
+"on":
+  push:
+  pull_request:
+
+# Two configurations of the same commands that are documented in README.md: the
+# Debug build with the full test suite, the format check and the install step,
+# and a sanitizer build of the deterministic core suite. Nothing is skipped
+# silently: the pinned CycloneDDS 0.10.5 and its C++ binding are built during
+# configure (a failed fetch or build fails the step), and the DDS-backed tests
+# are asserted to be registered before they are run.
+
+jobs:
+  build-and-test:
+    name: Debug build, tests, format check and install
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install the build toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake git python3 python3-venv
+
+      - name: Install the pinned clang-format
+        run: |
+          python3 -m venv .tools/format
+          .tools/format/bin/pip install --disable-pip-version-check \
+            -r tools/requirements-format.txt
+          .tools/format/bin/clang-format --version
+
+      # The pinned dependencies are fetched and built here; a failed fetch, a
+      # failed dependency build or a missing DDS install is a configuration
+      # error of this project and fails this step.
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build build -j2
+
+      # A green build that silently dropped the DDS-backed entries would prove
+      # nothing, so the registered test set is asserted before it is run.
+      - name: Verify the test matrix is registered
+        run: |
+          set -euo pipefail
+          ctest --test-dir build -N | tee registered-tests.txt
+          for test in protocol_test config_test fake_backend_test safety_test \
+                      command_gate_test execution_fsm_test logger_test \
+                      channel_test config_schema_contract_test dds_codec_test \
+                      runtime_cli_test confirmation_test integration_normal \
+                      integration_request_retry integration_stale_context \
+                      integration_supervisor_killed integration_supervisor_paused \
+                      integration_producer_paused integration_runtime_restarted \
+                      integration_command_flood integration_slow_logger \
+                      integration_write_refused; do
+            grep -Eq "Test +#[0-9]+: ${test}$" registered-tests.txt
+          done
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Format check
+        run: cmake --build build --target format-check
+
+      - name: Install to a staging prefix
+        run: cmake --install build --prefix "${RUNNER_TEMP}/irmv-sdk-stage"
+
+      - name: Keep the evidence of a failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-and-test-evidence
+          if-no-files-found: ignore
+          path: |
+            registered-tests.txt
+            build/CMakeCache.txt
+            build/Testing/Temporary/LastTest.log
+            build/Testing/Temporary/LastTestsFailed.log
+            build/cyclonedds-build
+
+  sanitizers:
+    name: address+undefined sanitizers on the core suite
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install the build toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake git python3
+
+      - name: Configure with the sanitizers
+        run: |
+          cmake -S . -B build-sanitize -DCMAKE_BUILD_TYPE=Debug \
+            -DIRMV_SANITIZE=address,undefined
+
+      - name: Build
+        run: cmake --build build-sanitize -j2
+
+      # The deterministic core suite only: it needs no peer and no real DDS
+      # traffic. -DIRMV_SANITIZE adds -fno-sanitize-recover=all, so a report is
+      # a test failure and not a line in the log.
+      - name: Test the core suite under the sanitizers
+        run: ctest --test-dir build-sanitize -L core --output-on-failure
+
+      - name: Keep the evidence of a failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitizer-evidence
+          if-no-files-found: ignore
+          path: |
+            build-sanitize/CMakeCache.txt
+            build-sanitize/Testing/Temporary/LastTest.log
+            build-sanitize/Testing/Temporary/LastTestsFailed.log

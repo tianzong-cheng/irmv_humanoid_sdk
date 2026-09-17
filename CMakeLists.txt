@@ -3,7 +3,44 @@ cmake_minimum_required(VERSION 3.22)
 project(irmv_humanoid_sdk LANGUAGES CXX)
 
 include(CTest)
+include(GNUInstallDirs)
 include(cmake/Dependencies.cmake)
+
+# Every installed artifact finds its neighbours through a relative rpath and
+# never through the build or source directory: a library in <prefix>/lib
+# resolves the libraries next to it through $ORIGIN, and the runtime in
+# <prefix>/bin resolves them through $ORIGIN/../lib. A dependency that is found
+# system-wide is left to the system; the ones that are not are installed next to
+# the binary by the installation section at the end of this file.
+set(CMAKE_INSTALL_RPATH "$ORIGIN")
+
+# The bundle stays out of the link path: $ORIGIN is the only install rpath entry
+# any artifact may have.
+set(CMAKE_INSTALL_RPATH_USE_LINK_PATH FALSE)
+
+# Optional sanitizer configuration of the first-party targets, used by the CI
+# sanitizer job and for local debugging:
+#
+#   cmake -S . -B build-sanitize -DCMAKE_BUILD_TYPE=Debug \
+#         -DIRMV_SANITIZE=address,undefined
+#
+# The pinned dependencies are configured by a nested CMake of their own and are
+# never instrumented. -fno-sanitize-recover=all turns a sanitizer report into a
+# test failure instead of a warning, so a sanitizer run cannot pass while the
+# report is only printed.
+set(IRMV_SANITIZE
+    ""
+    CACHE STRING
+    "Comma separated sanitizers of the first-party targets, e.g. address,undefined"
+)
+if(IRMV_SANITIZE)
+  message(STATUS "irmv: sanitizing the first-party targets with ${IRMV_SANITIZE}")
+  add_compile_options(
+    "-fsanitize=${IRMV_SANITIZE}" "-fno-sanitize-recover=all"
+    "-fno-omit-frame-pointer" "-g"
+  )
+  add_link_options("-fsanitize=${IRMV_SANITIZE}")
+endif()
 
 irmv_make_nlohmann_json_available()
 
@@ -27,6 +64,7 @@ target_include_directories(
 target_link_libraries(protocol_test PRIVATE irmv_protocol)
 
 add_test(NAME protocol_test COMMAND protocol_test)
+set_tests_properties(protocol_test PROPERTIES LABELS core)
 
 add_library(
   irmv_configuration
@@ -53,7 +91,10 @@ target_include_directories(
 target_link_libraries(config_test PRIVATE irmv_configuration)
 
 add_test(NAME config_test COMMAND config_test)
-set_tests_properties(config_test PROPERTIES WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+set_tests_properties(
+  config_test PROPERTIES LABELS core
+  WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
 
 add_library(irmv_hardware src/hardware/fake_backend.cpp)
 target_compile_features(irmv_hardware PUBLIC cxx_std_17)
@@ -75,6 +116,7 @@ target_include_directories(
 target_link_libraries(fake_backend_test PRIVATE irmv_hardware)
 
 add_test(NAME fake_backend_test COMMAND fake_backend_test)
+set_tests_properties(fake_backend_test PROPERTIES LABELS core)
 
 add_library(
   irmv_runtime
@@ -110,7 +152,9 @@ target_include_directories(
 target_link_libraries(safety_test PRIVATE irmv_runtime)
 
 add_test(NAME safety_test COMMAND safety_test)
-set_tests_properties(safety_test PROPERTIES WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+set_tests_properties(
+  safety_test PROPERTIES LABELS core WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
 
 add_executable(command_gate_test tests/unit/command_gate_test.cpp)
 target_compile_features(command_gate_test PRIVATE cxx_std_17)
@@ -124,7 +168,8 @@ target_link_libraries(command_gate_test PRIVATE irmv_runtime)
 
 add_test(NAME command_gate_test COMMAND command_gate_test)
 set_tests_properties(
-  command_gate_test PROPERTIES WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+  command_gate_test PROPERTIES LABELS core
+  WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
 add_executable(execution_fsm_test tests/unit/execution_fsm_test.cpp)
@@ -139,7 +184,8 @@ target_link_libraries(execution_fsm_test PRIVATE irmv_runtime)
 
 add_test(NAME execution_fsm_test COMMAND execution_fsm_test)
 set_tests_properties(
-  execution_fsm_test PROPERTIES WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+  execution_fsm_test PROPERTIES LABELS core
+  WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -151,6 +197,7 @@ add_test(
     "${PROJECT_SOURCE_DIR}/config/sdk.schema.json"
     "${PROJECT_SOURCE_DIR}/config/sdk.json"
 )
+set_tests_properties(config_schema_contract_test PROPERTIES LABELS core)
 
 find_package(Threads REQUIRED)
 
@@ -180,7 +227,7 @@ target_link_libraries(logger_test PRIVATE irmv_telemetry)
 
 add_test(NAME logger_test COMMAND logger_test)
 set_tests_properties(
-  logger_test PROPERTIES WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+  logger_test PROPERTIES LABELS core WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
 # The DDS dependency is only needed by the transport targets below and is never
@@ -226,6 +273,9 @@ target_include_directories(
 target_link_libraries(channel_test PRIVATE irmv_transport)
 
 add_test(NAME channel_test COMMAND channel_test)
+# The bounded-channel handoff is deterministic: it never needs a peer, so it is
+# part of the core suite and runs under the sanitizers as well.
+set_tests_properties(channel_test PROPERTIES LABELS core)
 
 add_executable(dds_codec_test tests/integration/dds_codec_test.cpp)
 target_compile_features(dds_codec_test PRIVATE cxx_std_17)
@@ -355,3 +405,127 @@ foreach(scenario IN LISTS IRMV_INTEGRATION_SCENARIOS)
       WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
   )
 endforeach()
+
+# ---------------------------------------------------------------------------
+# Formatting
+# ---------------------------------------------------------------------------
+
+# `format` rewrites every first-party C/C++ file of include/, src/ and tests/ in
+# place; `format-check` is read-only and fails on the first diff, which is what
+# CI runs. Both go through tools/format.py, which owns the file list and refuses
+# to run with any clang-format other than the pinned 18.1.8: it reports the
+# version and the path it found and points at tools/requirements-format.txt. A
+# missing or wrong-versioned tool therefore fails these targets with that
+# message instead of producing an empty pass that proves nothing.
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+add_custom_target(
+  format
+  COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/format.py" --write
+  COMMENT "Formatting the first-party C/C++ tree with clang-format 18.1.8"
+  USES_TERMINAL
+  VERBATIM
+)
+
+add_custom_target(
+  format-check
+  COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/format.py" --check
+  COMMENT "Checking the first-party C/C++ tree with clang-format 18.1.8"
+  USES_TERMINAL
+  VERBATIM
+)
+
+# ---------------------------------------------------------------------------
+# Installation
+# ---------------------------------------------------------------------------
+
+# Installed layout of one runtime:
+#
+#   <prefix>/bin/robot_runtime      the only runnable artifact of this phase
+#   <prefix>/lib/                   the shared libraries it needs and that are
+#                                   not provided system-wide
+#   <prefix>/etc/irmv/sdk.json      the shipped default Fake configuration
+#   <prefix>/etc/irmv/sdk.schema.json
+#
+# The test clients of this phase are never installed.
+install(TARGETS robot_runtime RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+
+# The configuration of the default Fake deployment and the schema that describes
+# it: the schema is part of the configuration contract, not of a test.
+install(
+  FILES "${PROJECT_SOURCE_DIR}/config/sdk.json"
+        "${PROJECT_SOURCE_DIR}/config/sdk.schema.json"
+  DESTINATION "${CMAKE_INSTALL_SYSCONFDIR}/irmv"
+)
+
+# <prefix>/bin/robot_runtime resolves <prefix>/lib through this relative entry.
+# Every other target keeps the plain `$ORIGIN` set at the top of this file, so no
+# installed artifact carries a build or source path in its rpath.
+set_target_properties(
+  robot_runtime
+  PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
+)
+
+# The installed tree has to run after being moved or copied to another machine
+# and must never reference the build or source directory. Every shared library
+# the runtime resolves outside the platform directories - here the pinned
+# CycloneDDS C++ binding and its C runtime, which live in a private prefix - is
+# installed into <prefix>/lib together with its soname symlinks. A dependency
+# found system-wide is left to the system instead of being duplicated. The
+# pinned dependency libraries carry no absolute rpath of their own (the C++
+# binding none, the C runtime a relative $ORIGIN/../lib), and the installation
+# verifies below that the installed runtime carries exactly that one relative
+# entry.
+#
+# The scan runs on the build-tree binary, whose rpath still resolves the private
+# prefix of the dependency; the installed copy of the runtime is only written
+# afterwards. The two DDS libraries are named as search directories as well: the
+# pinned C++ binding carries no rpath of its own, so the C runtime it needs is
+# only found through its directory. This is the Linux layout ($ORIGIN, ELF
+# dependencies), which is the only platform this phase targets.
+install(
+  CODE "
+set(_irmv_libdir \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}\")
+file(
+  GET_RUNTIME_DEPENDENCIES
+  EXECUTABLES \"$<TARGET_FILE:robot_runtime>\"
+  DIRECTORIES \"$<TARGET_FILE_DIR:CycloneDDS-CXX::ddscxx>\"
+            \"$<TARGET_FILE_DIR:CycloneDDS::ddsc>\"
+  RESOLVED_DEPENDENCIES_VAR _irmv_resolved
+  UNRESOLVED_DEPENDENCIES_VAR _irmv_unresolved
+  PRE_EXCLUDE_REGEXES
+    \"^libc[.]so\" \"^libm[.]so\" \"^libdl[.]so\" \"^librt[.]so\"
+    \"^libpthread[.]so\" \"^libgcc_s[.]so\" \"^libstdc[+][+]\" \"^libatomic[.]so\"
+    \"^ld-linux\"
+  POST_EXCLUDE_REGEXES
+    \"^/lib/\" \"^/lib64/\" \"^/usr/lib/\" \"^/usr/lib64/\" \"^/usr/local/lib/\"
+)
+if(_irmv_unresolved)
+  message(
+    FATAL_ERROR
+      \"the installed runtime would miss shared libraries: \${_irmv_unresolved}\"
+  )
+endif()
+foreach(_irmv_library IN LISTS _irmv_resolved)
+  get_filename_component(_irmv_name \"\${_irmv_library}\" NAME)
+  file(
+    INSTALL
+    DESTINATION \"\${_irmv_libdir}\"
+    TYPE SHARED_LIBRARY
+    FILES \"\${_irmv_library}\"
+    FOLLOW_SYMLINK_CHAIN
+  )
+  message(STATUS \"irmv install: bundled \${_irmv_name}\")
+endforeach()
+
+# The installed runtime resolves its libraries through the relative rpath and
+# through nothing else: an installation that leaked a link-path or build-tree
+# directory into that entry fails here instead of producing a tree that only
+# works next to the source it was built from.
+file(
+  RPATH_CHECK
+  FILE \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/robot_runtime\"
+  RPATH \"\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}\"
+)
+"
+)

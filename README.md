@@ -1,0 +1,173 @@
+# IRMV humanoid SDK — runtime foundation
+
+Phase one of the humanoid runtime: a standalone execution runtime for the
+**Fake** deployment only, the frozen protocol it speaks with a supervision
+client over real DDS, and the deterministic and real-DDS test suites that prove
+it. There is no real robot backend in this phase.
+
+## Build
+
+Requirements: a C++17 compiler, CMake ≥ 3.22, Python 3 (test harness and
+tools) and network access on the first configure — the pinned CycloneDDS
+0.10.5 and its C++ binding and the pinned nlohmann/json are fetched and built
+from their pinned commits unless a prebuilt prefix is given.
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build -j2
+ctest --test-dir build --output-on-failure
+```
+
+A prebuilt CycloneDDS prefix (built by the two-stage recipe in
+`cmake/Dependencies.cmake`) shortens configuration:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug \
+      -DIRMV_CYCLONEDDS_PREFIX=/path/to/cyclonedds-prefix
+```
+
+`robot_runtime` is the only executable this phase ships; `runtime_client`,
+`confirmation_test` and the `*_test` binaries are test-only and are never
+installed.
+
+## Run the default Fake deployment
+
+The shipped configuration describes a two-joint fake robot at 500 Hz, DDS
+domain 1 on interface `lo`, and logging into the relative `logs/` directory of
+the process working directory:
+
+```bash
+build/robot_runtime --config config/sdk.json
+```
+
+```text
+usage: robot_runtime --config PATH [--domain N] [--fake-scenario PATH] [--output-trace PATH]
+```
+
+* `--config PATH` is mandatory. The file is validated against
+  `config/sdk.schema.json` and by the loader itself; `backend` must be `fake`,
+  and a configuration that selects `real` is refused before any device, DDS or
+  log directory is touched.
+* `--domain N` overrides `dds.domain` for this run (0..230). The override is
+  applied by the configuration layer, so the published `config_id` describes
+  the configuration actually in effect, domain included.
+* `--fake-scenario PATH` injects scripted feedback and write acceptance into
+  the fake backend (`tests/support/fake_scenario.json` is a documented
+  example). It never adds a protocol topic and is refused for a non-fake
+  backend.
+* `--output-trace PATH` writes one JSON line per applied torque write. It is a
+  test-only option of the fake deployment; without it nothing is written.
+
+Startup is ordered and fails loudly: parse the command line, load and validate
+the configuration, build the runtime identity, initialise the fake backend,
+construct the state machine and the logger, start the logger, then start the
+transport. Every failure before the control loop reports on stderr and exits
+non-zero (exit 1 for configuration, scenario and startup errors, exit 2 for a
+usage error) without starting DDS.
+
+The runtime reports its state on stderr through the structured logger
+(`[runtime] runtime started`, `BootCompleted`, `status`, `shutdown`, …); the
+same records are written into `logs/run_<utcstamp>/humanoid.log`.
+
+### It is one process among independent processes
+
+`robot_runtime` owns the control loop, the safety gates and the DDS endpoints.
+A supervisor is a **separate process** that speaks the frozen protocol on the
+frozen topics — it acquires a session, sends heartbeats and target commands,
+and reads results and robot state. Nothing in the runtime calls into a client
+and no client shares state with it: the phase ties them together only through
+DDS, which is why the integration tests run the real binary against a real
+client process. There is no in-process client library in this phase; the test
+client (`tests/integration/runtime_client.cpp`) is a test artifact, not a
+deliverable API.
+
+### Leaving a behaviour is not shutting the process down
+
+Two different things, deliberately kept apart:
+
+* A **behaviour** is left when a deadline or an operator request takes the
+  machine out of the state it was in - a command timeout falls back from
+  `Tracking` to `Damping` keeping the session, a supervisor timeout revokes the
+  session and damping without authorization, a fault latches. The runtime keeps
+  running in every one of those cases.
+* A **shutdown** is the process ending. `SIGINT`/`SIGTERM` asks for it, and the
+  runtime exits with code 0 only once it is in `ZeroTorque` *and* the torque
+  write of the tick was accepted. From `Boot`, `Tracking` or damping without a
+  session it requests the protocol stop it can request, reports why it is still
+  running, and keeps controlling until the confirmation arrives; under a
+  latched fault it refuses to leave at all (a Reset is required, an exit
+  request never clears a fault and never reports a clean stop). A hard kill is
+  always possible and always reported as such: it is not a clean shutdown.
+
+### No real hardware in this phase
+
+The backend is the fake one; `deployment: fake_only` and `backend: fake` are
+enforced by the configuration contract. There is **no RealBackend, no CAN
+transport and no physical execution confirmation**: `Applied` means the host
+send path accepted the output implementing a request, never that a device
+acknowledged it. Real hardware, real safety limits, firmware-loss behaviour and
+the physical-execution acceptance belong to later phases.
+
+## Install
+
+```bash
+cmake --install build --prefix /tmp/irmv-sdk-stage
+```
+
+The installed tree is self-contained and portable — it can be copied to another
+machine and run from any working directory:
+
+```text
+<prefix>/bin/robot_runtime                      the runtime
+<prefix>/etc/irmv/sdk.json                      the default Fake configuration
+<prefix>/etc/irmv/sdk.schema.json               its schema
+<prefix>/lib/libddscxx.so*, libddsc.so*         the DDS libraries, when they
+                                                are not provided system-wide
+```
+
+`robot_runtime` finds its libraries through the relative rpath
+`$ORIGIN/../lib`; no installed artifact carries a build or source path. The
+installation bundles every shared library the runtime resolves outside the
+platform directories and fails if one cannot be resolved, and it verifies that
+the installed runtime has exactly that one relative rpath entry.
+
+```bash
+mkdir -p /tmp/run && cd /tmp/run
+/tmp/irmv-sdk-stage/bin/robot_runtime \
+    --config /tmp/irmv-sdk-stage/etc/irmv/sdk.json --domain 227
+# ... BootCompleted {from="Boot" to="ZeroTorque"} ...
+# Ctrl-C / SIGTERM:
+# robot_runtime: clean shutdown: state=ZeroTorque ticks=... overruns=...
+```
+
+## Formatting and CI
+
+The whole first-party C/C++ tree is formatted with clang-format 18.1.8 and the
+single `.clang-format` at the repository root (`BasedOnStyle: Google`, two-space
+indentation). Third-party dependencies and generated sources — the generated
+IDL sources of `execution_idl` in particular — are never formatted.
+
+```bash
+python3 -m venv .tools/format
+.tools/format/bin/pip install -r tools/requirements-format.txt
+cmake --build build --target format-check   # read-only, non-zero on any diff
+cmake --build build --target format          # formats in place
+```
+
+Both targets run `tools/format.py`, which refuses any clang-format other than
+the pinned version, reports the version and path it found, and prints a unified
+diff for every file that is not formatted. `.github/workflows/ci.yml` runs
+configure, build, `ctest --output-on-failure`, `format-check` and the install
+step on Ubuntu 24.04, plus a second job that builds with
+`-DIRMV_SANITIZE=address,undefined` and runs the deterministic core suite
+(`ctest -L core`). No stage is skipped silently: a failed dependency fetch, a
+failed build and a failed format check all fail the job, and logs are kept as
+artifacts on failure.
+
+## Documentation
+
+* `docs/runtime-protocol.md` — the frozen topics, message fields, enums, QoS
+  and the identity/session/epoch, timeout and fault semantics.
+* `docs/testing.md` — every deterministic and real-DDS test with what it
+  proves, how to run the suites, the DDS domain policy, and what this phase
+  does not cover.

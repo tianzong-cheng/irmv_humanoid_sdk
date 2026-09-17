@@ -1,0 +1,13 @@
+---
+# The single formatting configuration of this repository. Both
+# `tools/format.py --write` and `tools/format.py --check` (CMake targets
+# `format` and `format-check`) use exactly this file, through the pinned
+# clang-format 18.1.8 of tools/requirements-format.txt. It is based on the
+# Google style with its default two-space indentation and inherits from no
+# other project style.
+Language: Cpp
+BasedOnStyle: Google
+Standard: c++17
+IndentWidth: 2
+ColumnLimit: 80
+...
