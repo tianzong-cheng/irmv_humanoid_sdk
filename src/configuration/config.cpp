@@ -293,34 +293,18 @@ void ReadJointMap(const Json &mapping, const std::string &path,
   }
 }
 
+// The level names live in one place: parsing accepts exactly the tokens
+// LogLevelName() produces.
 LogLevel ParseLogLevel(const std::string &level) {
-  if (level == "DEBUG") {
-    return LogLevel::Debug;
+  for (const LogLevel candidate :
+       {LogLevel::Trace, LogLevel::Debug, LogLevel::Info, LogLevel::Warning,
+        LogLevel::Error, LogLevel::Fatal}) {
+    if (level == LogLevelName(candidate)) {
+      return candidate;
+    }
   }
-  if (level == "INFO") {
-    return LogLevel::Info;
-  }
-  if (level == "WARNING") {
-    return LogLevel::Warning;
-  }
-  if (level == "ERROR") {
-    return LogLevel::Error;
-  }
-  Fail("telemetry.level", "must be DEBUG, INFO, WARNING, or ERROR");
-}
-
-std::string LogLevelName(LogLevel level) {
-  switch (level) {
-    case LogLevel::Debug:
-      return "DEBUG";
-    case LogLevel::Info:
-      return "INFO";
-    case LogLevel::Warning:
-      return "WARNING";
-    case LogLevel::Error:
-      return "ERROR";
-  }
-  return {};
+  Fail("telemetry.level",
+       "must be TRACE, DEBUG, INFO, WARNING, ERROR, or FATAL");
 }
 
 Json JointMap(const std::vector<std::string> &names, const JointArray &values) {
@@ -389,6 +373,24 @@ Json CanonicalConfig(const RuntimeConfig &config) {
 }
 
 }  // namespace
+
+const char *LogLevelName(LogLevel level) noexcept {
+  switch (level) {
+    case LogLevel::Trace:
+      return "TRACE";
+    case LogLevel::Debug:
+      return "DEBUG";
+    case LogLevel::Info:
+      return "INFO";
+    case LogLevel::Warning:
+      return "WARNING";
+    case LogLevel::Error:
+      return "ERROR";
+    case LogLevel::Fatal:
+      return "FATAL";
+  }
+  return "UNKNOWN";
+}
 
 ConfigError::ConfigError(std::string field_path, std::string message)
     : std::runtime_error(field_path + ": " + message),

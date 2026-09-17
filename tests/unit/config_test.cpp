@@ -8,6 +8,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "irmv/configuration/sha256.hpp"
 #include "support/check.hpp"
@@ -215,6 +216,31 @@ int main() {
   CHECK(config.telemetry.rotate_bytes == 1048576);
   CHECK(config.telemetry.retained_files == 3);
   CHECK(config.telemetry.queue_capacity == 1024);
+
+  // The logging level covers the full report range: every level parses, the
+  // level stays part of the configuration identity, and anything unknown is
+  // still rejected.
+  const std::pair<const char *, LogLevel> levels[] = {
+      {"TRACE", LogLevel::Trace}, {"DEBUG", LogLevel::Debug},
+      {"INFO", LogLevel::Info},   {"WARNING", LogLevel::Warning},
+      {"ERROR", LogLevel::Error}, {"FATAL", LogLevel::Fatal},
+  };
+  for (const auto &level : levels) {
+    const TemporaryConfig level_file(
+        ReplaceOnce(ValidConfig(), "\"level\": \"INFO\"",
+                    std::string("\"level\": \"") + level.first + "\""));
+    const auto level_config = LoadConfig(level_file.path());
+    CHECK(level_config.telemetry.level == level.second);
+    CHECK((level_config.config_id == config.config_id) ==
+          (level.second == LogLevel::Info));
+  }
+  CHECK(ThrowsAt(ReplaceOnce(ValidConfig(), "\"level\": \"INFO\"",
+                             "\"level\": \"VERBOSE\""),
+                 "telemetry.level"));
+  CHECK(ThrowsAt(ReplaceOnce(ValidConfig(), "\"level\": \"INFO\"",
+                             "\"level\": \"info\""),
+                 "telemetry.level"));
+
   CHECK(config.dds.domain == 1);
   CHECK(config.dds.interface == "lo");
   CHECK(config.config_id.size() == 64);

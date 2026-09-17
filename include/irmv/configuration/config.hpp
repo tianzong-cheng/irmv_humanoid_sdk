@@ -50,12 +50,20 @@ struct ContinuityConfig {
   JointArray torque_delta{};
 };
 
+// Severity of a log event, declared from the most verbose to the most severe:
+// an event is written when its level is at least the configured one.
 enum class LogLevel {
+  Trace,
   Debug,
   Info,
   Warning,
   Error,
+  Fatal,
 };
+
+// Canonical upper-case token of a level: the spelling the JSON parser accepts
+// and the logger prints. Returns "UNKNOWN" for a value outside the enum.
+const char *LogLevelName(LogLevel level) noexcept;
 
 struct TelemetryConfig {
   LogLevel level{LogLevel::Info};

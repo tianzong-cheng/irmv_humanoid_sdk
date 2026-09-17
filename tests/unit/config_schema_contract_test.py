@@ -43,6 +43,14 @@ def main() -> int:
         "rotate_bytes"
     ]
     assert rotate_bytes == {"$ref": "#/$defs/positiveTimeUs"}
+    # The schema level set must stay in step with the parser: the full report
+    # range, and nothing else.
+    assert schema["properties"]["telemetry"]["properties"]["level"] == {
+        "enum": ["TRACE", "DEBUG", "INFO", "WARNING", "ERROR", "FATAL"]
+    }
+    assert fixture["telemetry"]["level"] in schema["properties"]["telemetry"][
+        "properties"
+    ]["level"]["enum"]
 
     assert accepts_joint_name("a" * 64)
     assert not accepts_joint_name("a" * 65)

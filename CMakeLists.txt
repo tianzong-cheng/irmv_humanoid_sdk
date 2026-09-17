@@ -154,6 +154,35 @@ add_test(
 
 find_package(Threads REQUIRED)
 
+add_library(irmv_telemetry src/telemetry/logger.cpp)
+target_compile_features(irmv_telemetry PUBLIC cxx_std_17)
+target_include_directories(
+  irmv_telemetry
+  PUBLIC
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:include>"
+)
+target_link_libraries(
+  irmv_telemetry
+  PUBLIC irmv_protocol irmv_configuration
+  PRIVATE Threads::Threads
+)
+
+add_executable(logger_test tests/unit/logger_test.cpp)
+target_compile_features(logger_test PRIVATE cxx_std_17)
+target_include_directories(
+  logger_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(logger_test PRIVATE irmv_telemetry)
+
+add_test(NAME logger_test COMMAND logger_test)
+set_tests_properties(
+  logger_test PROPERTIES WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
 # The DDS dependency is only needed by the transport targets below and is never
 # skipped silently: a missing or mismatched CycloneDDS installation is a
 # configuration error.
