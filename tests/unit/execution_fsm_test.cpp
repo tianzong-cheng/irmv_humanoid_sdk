@@ -1555,6 +1555,65 @@ int CheckResetWithFreshSafetyObservation() {
   return 0;
 }
 
+// A session never inherits the staged answer of the session it replaced: a
+// request of the dying session staged in the takeover tick must not become the
+// new session's record.
+int CheckTakeoverDoesNotInheritStagedAnswer() {
+  RuntimeFixture f;
+  f.BootToZeroTorque();
+  const FixtureResult first = f.Acquire(10);
+  CHECK(first.applied());
+  const Id old_session = f.state().session_id;
+  CHECK(old_session != irmv::protocol::kNoId);
+
+  // The lease is left to lapse, but not yet expired by a tick: the takeover
+  // lands in the same tick as the last packet of the dying session.
+  f.SetHeartbeatEnabled(false);
+  f.Advance(150 * f.ControlPeriodUs());
+  CHECK(f.state().session_id == old_session);
+  const Sequence old_watermark = f.state().epoch;
+
+  ExecutionRequest stop = f.MakeRequest(Operation::Damping, 100);
+  stop.session_id = old_session;
+  const ExecutionRequest takeover =
+      f.MakeRequest(Operation::AcquireSession, 11);
+  f.QueueRequest(stop, 0, true);
+  f.QueueRequest(takeover);
+  f.Advance(f.ControlPeriodUs());
+
+  CHECK(RuntimeFixture::ResultFor(f.last_tick(), takeover.request_id).applied());
+  const Id new_session = f.state().session_id;
+  CHECK(new_session != irmv::protocol::kNoId);
+  CHECK(new_session != old_session);
+
+  // The new session's very first request is answered on its own behalf, not as
+  // a stale packet of the session it replaced.
+  const ExecutionRequest fresh = f.MakeRequest(Operation::Damping, 3);
+  const FixtureResult fresh_result = f.Send(fresh, true);
+  CHECK(fresh_result.request_id == fresh.request_id);
+  CHECK(fresh_result.reason != RejectReason::StaleRequest);
+  CHECK(fresh_result.applied());
+  CHECK(f.state().execution_state == kDamping);
+  CHECK(f.state().session_id == new_session);
+
+  // A packet of the dying session stays refused, and an old epoch context is
+  // still refused on the epoch guards.
+  ExecutionRequest stale_session = f.MakeRequest(Operation::Damping, 101);
+  stale_session.session_id = old_session;
+  const FixtureResult stale_session_result = f.Send(stale_session, true);
+  CHECK(stale_session_result.rejected());
+  CHECK(stale_session_result.reason == RejectReason::WrongSession);
+
+  const ExecutionRequest stale_epoch = f.MakeRequest(
+      Operation::Tracking, 102, irmv::test::FixtureProducerId(),
+      irmv::test::FixtureSupervisorId(), old_watermark, old_watermark + 1);
+  const FixtureResult stale_epoch_result = f.Send(stale_epoch);
+  CHECK(stale_epoch_result.rejected());
+  CHECK(stale_epoch_result.reason == RejectReason::EpochMismatch);
+  CHECK(f.state().session_id == new_session);
+  return 0;
+}
+
 }  // namespace
 
 int main() {
@@ -1593,5 +1652,6 @@ int main() {
   CHECK(CheckAcquireRequiresEmptySession() == 0);
   CHECK(CheckHeartbeatSupervisorOwnership() == 0);
   CHECK(CheckResetWithFreshSafetyObservation() == 0);
+  CHECK(CheckTakeoverDoesNotInheritStagedAnswer() == 0);
   return 0;
 }

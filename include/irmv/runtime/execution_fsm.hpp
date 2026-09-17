@@ -152,6 +152,10 @@ class ExecutionFsm {
                                 const protocol::ExecutionRequest &request,
                                 protocol::RejectReason reason);
 
+  // Starts an empty request record for a newly issued session, dropping both
+  // the confirmed record and any answer staged by the previous session.
+  void StartRequestRecord();
+
   void StageRequestAnswer(const protocol::ExecutionRequest &request,
                           const protocol::ExecutionResult &result);
 

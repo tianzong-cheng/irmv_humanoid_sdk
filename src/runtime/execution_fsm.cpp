@@ -565,6 +565,13 @@ void ExecutionFsm::QueueUnrecordedRejection(
   pending_[pending_count_++] = PendingResult{result, false, false};
 }
 
+void ExecutionFsm::StartRequestRecord() {
+  // A session answers only its own requests: both the confirmed record of the
+  // previous session and the answer it staged during this tick are dropped.
+  request_record_ = RequestRecord{};
+  staged_record_ = RequestRecord{};
+}
+
 void ExecutionFsm::StageRequestAnswer(
     const protocol::ExecutionRequest &request,
     const protocol::ExecutionResult &result) {
@@ -881,7 +888,7 @@ void ExecutionFsm::IssueSession(
   last_heartbeat_rx_us_ = scope.now_us;
   last_heartbeat_seq_ = 0;
   heartbeat_seen_ = false;
-  request_record_ = RequestRecord{};
+  StartRequestRecord();
   protocol::ExecutionResult result = MakeResult(request, scope.now_us);
   result.status = protocol::ResultStatus::Applied;
   result.reason = protocol::RejectReason::None;
@@ -910,7 +917,7 @@ void ExecutionFsm::ExpireSession(TickScope &scope) {
   last_heartbeat_seq_ = 0;
   heartbeat_seen_ = false;
   acquire_record_ = AcquireRecord{};
-  request_record_ = RequestRecord{};
+  StartRequestRecord();
   EmitEvent(scope, EventCode::SessionExpired, state_, state_);
   if (!RevokeMotion(scope)) {
     return;
