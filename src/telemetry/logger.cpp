@@ -429,11 +429,27 @@ void Logger::Stop() {
         lock, deadline, [&shared] { return shared->worker_done_; });
     // Whatever is still in flight at the deadline is reported, not assumed
     // written: the queued events plus a producer still inside TryLog(), whose
-    // event the queue measurement cannot see yet. That producer can only refuse
-    // or queue exactly one more event, so the last term is at most as large as
-    // the events it may still add.
+    // event the queue measurement cannot see yet.
+    //
+    // The producer count is read first, and that order is what makes the pair
+    // safe; reading the two in one expression would leave them unsequenced. A
+    // producer increments producers_ before it touches the queue and decrements
+    // it after the push, through sequential-consistent read-modify-writes, so:
+    //   * a count of zero means every producer that entered has already
+    //     published its pending_ increment with release/acquire ordering through
+    //     that decrement, and the queue measurement below cannot miss an event
+    //     it accepted;
+    //   * a non-zero count names the producers that may still accept one event
+    //     each - at most one per producer - which is why they are added. A
+    //     producer that enters after this load cannot accept anything, because
+    //     publishing the refusal precedes this load in the sequential-consistent
+    //     order and its own check follows its increment.
+    // The sum therefore over-reports in the worst case instead of losing an
+    // event.
+    const std::uint64_t producers =
+        shared->producers_.load(std::memory_order_seq_cst);
     shared->undrained_ = shared->pending_.load(std::memory_order_acquire) +
-                         shared->producers_.load(std::memory_order_seq_cst);
+                         producers;
     if (!drained && shared->worker_.joinable()) {
       // A sink blocked inside Write() would make join() wait forever. The
       // worker owns its state through its shared_ptr, so it is left to finish on
