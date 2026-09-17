@@ -379,7 +379,10 @@ class ExecutionFsm {
 //  * the request carries no supervisor identity - the runtime is not one - and
 //    an id strictly greater than every id the session has handled and than
 //    every id travelling in the same tick, so it can be answered neither as a
-//    repeated, nor as a stale, nor as a conflicting request;
+//    repeated, nor as a stale, nor as a conflicting request; the corollary is
+//    that a supervisor request arriving in the same tick carries a smaller id
+//    and is answered StaleRequest (RequestConflict while it catches up), which
+//    is deliberate: the stop wins the tick it was injected in;
 //  * every field the state machine validates for a stop is taken from the live
 //    machine, so the request is answered by the session that is in effect.
 //

@@ -388,6 +388,34 @@ def release_domain(lock_path):
             pass
 
 
+def lock_owner(lock):
+    """The pid recorded in a lock file, or None when it cannot be read."""
+    try:
+        return int(lock.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def lock_is_stale(lock):
+    """Whether a lock file may be reclaimed.
+
+    A live claimant creates the file and writes its pid in the next syscall, so
+    an unreadable file is re-read for a moment and must additionally be older
+    than a second before it counts as abandoned: otherwise a second claimant
+    reading inside that window would mistake a live owner for a dead one and
+    both would claim the same domain or evidence directory.
+    """
+    for _ in range(10):
+        owner = lock_owner(lock)
+        if owner is not None:
+            return not owner_is_alive(owner)
+        time.sleep(0.005)
+    try:
+        return time.time() - lock.stat().st_mtime > 1.0
+    except OSError:
+        return False
+
+
 def choose_domain(declared, work_dir):
     """The declared domain, claimed so that no two scenarios can share one.
 
@@ -416,12 +444,7 @@ def choose_domain(declared, work_dir):
                 handle = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY,
                                  0o644)
             except FileExistsError:
-                owner = None
-                try:
-                    owner = int(lock.read_text().strip())
-                except (OSError, ValueError):
-                    owner = None
-                if owner is not None and owner_is_alive(owner):
+                if not lock_is_stale(lock):
                     break  # a live scenario holds this domain
                 try:
                     lock.unlink()
@@ -1111,17 +1134,27 @@ def check_flood_drops(ctx, params):
     if sent is None or answered is None:
         raise Failure("the flood client reported no counts")
     clean = ctx.runtime().clean_stop() or {}
-    detail = ("the flood sent %s requests and the runtime answered %s of them: "
-              "%s were dropped on the way in; the runtime counters report "
-              "request_dropped=%s of its inbound queue and transport_dropped=%s "
-              "samples (a single flood is mostly absorbed, two saturate the DDS "
-              "reader itself)"
-              % (sent, answered, sent - answered, clean.get("request_dropped"),
-                 clean.get("transport_dropped")))
-    return answered < sent, detail, [("flood_sent", sent),
-                                     ("flood_answered", answered),
-                                     ("runtime_request_dropped",
-                                      clean.get("request_dropped", 0))]
+    request_dropped = clean.get("request_dropped")
+    transport_dropped = clean.get("transport_dropped")
+    if request_dropped is None or transport_dropped is None:
+        raise Failure("the runtime's clean-stop line did not report its inbound "
+                      "and transport drop counters, so the flood cannot be "
+                      "attributed")
+    # The runtime must own the losses it caused: unanswered requests have to be
+    # visible in its own counters, not only in the client's arithmetic.
+    runtime_observed = request_dropped + transport_dropped
+    detail = ("the flood sent %s requests and the runtime answered %s of them; "
+              "the runtime's own counters report request_dropped=%s of its "
+              "inbound queue plus transport_dropped=%s samples, so %s of the "
+              "unanswered requests are not attributed"
+              % (sent, answered, request_dropped, transport_dropped,
+                 (sent - answered) - runtime_observed))
+    return (answered < sent and runtime_observed >= 1,
+            detail,
+            [("flood_sent", sent), ("flood_answered", answered),
+             ("runtime_request_dropped", request_dropped),
+             ("runtime_transport_dropped", transport_dropped),
+             ("flood_unattributed", (sent - answered) - runtime_observed)])
 
 
 def check_client_check(ctx, params):
@@ -1270,15 +1303,11 @@ def claim_work_dir(work):
     """
     claim = work.parent / (".claim-%s" % work.name)
     if claim.exists():
-        owner = None
-        try:
-            owner = int(claim.read_text().strip())
-        except (OSError, ValueError):
-            owner = None
-        if owner is not None and owner_is_alive(owner):
-            raise Failure("%s is in use by another run (pid %d): two concurrent "
+        if not lock_is_stale(claim):
+            owner = lock_owner(claim)
+            raise Failure("%s is in use by another run (pid %s): two concurrent "
                           "invocations must not share one work directory"
-                          % (work, owner))
+                          % (work, owner if owner is not None else "unknown"))
         try:
             claim.unlink()
         except OSError:

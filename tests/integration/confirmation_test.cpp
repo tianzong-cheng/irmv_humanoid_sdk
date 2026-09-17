@@ -613,6 +613,10 @@ int WitnessMismatchDoesNotConfirm() {
        [](RobotState &state) { state.session_id = OtherSessionId(); }},
       {"producer_id",
        [](RobotState &state) { state.producer_id = MakeId(0x77); }},
+      {"execution_state",
+       [](RobotState &state) {
+         state.execution_state = ExecutionState::Damping;
+       }},
       {"output_action",
        [](RobotState &state) { state.output_action = OutputAction::Damping; }},
   };
