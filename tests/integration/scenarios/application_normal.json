@@ -1,0 +1,170 @@
+{
+  "name": "application_normal",
+  "description": "The documented operator path of the two-process deployment: Starting -> Standby -> Damping -> Initializing -> Ready -> Damping -> Standby by keyboard through a PTY, then the ordered exit from Standby that is confirmed by a fresh lower state, and the runtime outliving the application while it keeps damping without a supervisor. A second application process then starts against that left-over damping state and has to take the runtime over: it acquires a session, asks for ZeroTorque while the lower layer is damping, reaches Standby on the confirmed fresh ZeroTorque - never into a behaviour that could move - and leaves through its own confirmed ordered exit. The runtime is then left damping without a supervisor and deliberately refuses to leave on SIGTERM, which the scenario reports.",
+  "domain": 213,
+  "runtime": {
+    "config": "config/sdk.json",
+    "fake_scenario": "tests/support/fake_scenario.json",
+    "output_trace": "trace_run%d.jsonl"
+  },
+  "application": {},
+  "steps": [
+    {
+      "action": "start_runtime"
+    },
+    {
+      "action": "wait_log",
+      "pattern": "state=\"ZeroTorque\"",
+      "timeout_s": 15
+    },
+    {
+      "action": "start_application"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Standby",
+      "timeout_s": 15
+    },
+    {
+      "action": "application_keys",
+      "keys": "d"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Damping",
+      "timeout_s": 10
+    },
+    {
+      "action": "application_keys",
+      "keys": "i"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Initializing",
+      "timeout_s": 10
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Ready",
+      "timeout_s": 15
+    },
+    {
+      "action": "application_keys",
+      "keys": "d"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Damping",
+      "timeout_s": 10
+    },
+    {
+      "action": "application_keys",
+      "keys": "z"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Standby runtime=ZeroTorque",
+      "timeout_s": 10
+    },
+    {
+      "action": "restart_application",
+      "keys": "x",
+      "expect_code": 0,
+      "timeout_s": 10,
+      "note": "the first application leaves through its ordered exit and a second one takes the left-over damping state over"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Standby runtime=ZeroTorque",
+      "timeout_s": 15
+    },
+    {
+      "action": "stop_application",
+      "keys": "x",
+      "timeout_s": 10,
+      "expect_code": 0
+    },
+    {
+      "action": "wait_log",
+      "pattern": "state=\"Damping\"",
+      "count": 2,
+      "after_now": true,
+      "timeout_s": 10
+    },
+    {
+      "action": "stop_runtime",
+      "signal": "SIGTERM",
+      "timeout_s": 3,
+      "expect_clean": false,
+      "expect_exit": false
+    }
+  ],
+  "checks": [
+    {
+      "check": "log_sequence",
+      "params": {
+        "file": "application_run1.log",
+        "sequence": [
+          "behavior=Starting",
+          "behavior=Standby",
+          "behavior=Damping",
+          "behavior=Initializing",
+          "behavior=Ready",
+          "behavior=Damping",
+          "behavior=Standby runtime=ZeroTorque",
+          "application: exit stop=confirmed state=Damping"
+        ],
+        "forbid": [
+          "behavior=Locomotion",
+          "stop=unknown",
+          "behavior=Fault"
+        ]
+      }
+    },
+    {
+      "check": "log_sequence",
+      "params": {
+        "file": "runtime_run1.log",
+        "sequence": [
+          "BootCompleted",
+          "SessionAcquired",
+          "StopApplied {event=8 from=\"ZeroTorque\" to=\"Damping\"",
+          "AuthorizationGranted",
+          "StopApplied {event=8 from=\"Tracking\" to=\"Damping\"",
+          "StopApplied {event=8 from=\"Damping\" to=\"ZeroTorque\"",
+          "StopApplied {event=8 from=\"ZeroTorque\" to=\"Damping\"",
+          "SessionExpired",
+          "SessionAcquired",
+          "StopApplied {event=8 from=\"Damping\" to=\"ZeroTorque\"",
+          "StopApplied {event=8 from=\"ZeroTorque\" to=\"Damping\"",
+          "SessionExpired"
+        ],
+        "forbid": [
+          "FaultLatched",
+          "CommandTimeout",
+          "SourceStateTimeout"
+        ]
+      }
+    },
+    {
+      "check": "log_sequence",
+      "params": {
+        "file": "application_run2.log",
+        "sequence": [
+          "behavior=Standby runtime=ZeroTorque",
+          "application: exit stop=confirmed state=Damping"
+        ],
+        "forbid": [
+          "behavior=Locomotion",
+          "behavior=Ready",
+          "behavior=Initializing",
+          "stop=unknown"
+        ]
+      }
+    },
+    {
+      "check": "application_terminal",
+      "params": {}
+    }
+  ]
+}

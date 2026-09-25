@@ -1,0 +1,50 @@
+{
+  "$comment": [
+    "Fake deployment scenario of the standalone robot_runtime (--fake-scenario).",
+    "Feedback that never moves: the two configured joints stay at zero with valid,",
+    "connected samples and accepted writes, for the whole life of the process.",
+    "tests/support/fake_scenario.json is the same for its first two seconds and",
+    "then steps the measured position to 0.05 rad, which is outside the shipped",
+    "application.initialization.trajectory.position_tolerance; an initialization",
+    "towards the configured target leaves that tolerance satisfied, so a *repeated*",
+    "initialization can complete again here and cannot with the stepping scenario.",
+    "elapsed_us is monotonic from process start and mandatory; an entry applies from",
+    "its time onwards. One entry is enough: nothing has to change.",
+    "imu.valid is false because imu_required is false in the shipped configuration."
+  ],
+  "entries": [
+    {
+      "elapsed_us": 0,
+      "feedback": {
+        "count": 2,
+        "joints": [
+          {
+            "q": 0.0,
+            "dq": 0.0,
+            "tau_est": 0.0,
+            "valid": true,
+            "connected": true,
+            "freq_hz": 500.0,
+            "error_code": 0
+          },
+          {
+            "q": 0.0,
+            "dq": 0.0,
+            "tau_est": 0.0,
+            "valid": true,
+            "connected": true,
+            "freq_hz": 500.0,
+            "error_code": 0
+          }
+        ],
+        "imu": {
+          "valid": false,
+          "rx_stamp_us": 0
+        }
+      },
+      "write_result": {
+        "accepted": true
+      }
+    }
+  ]
+}

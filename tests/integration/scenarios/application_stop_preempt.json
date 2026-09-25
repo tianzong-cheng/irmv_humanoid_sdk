@@ -1,0 +1,118 @@
+{
+  "name": "application_stop_preempt",
+  "description": "A stop preempts a pending request: the application's tracking request is on the wire (pending=Tracking, no confirmation yet) when the ZeroTorque key replaces it with a strictly larger request id. The upper layer then ends in Standby on a confirmed fresh ZeroTorque and never reaches Ready, and the runtime reports the stop it was asked for rather than a target deadline.",
+  "domain": 216,
+  "runtime": {
+    "config": "config/sdk.json",
+    "fake_scenario": "tests/support/fake_static.json",
+    "output_trace": "trace_run%d.jsonl"
+  },
+  "application": {},
+  "steps": [
+    {
+      "action": "start_runtime"
+    },
+    {
+      "action": "wait_log",
+      "pattern": "state=\"ZeroTorque\"",
+      "timeout_s": 15
+    },
+    {
+      "action": "start_application"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Standby runtime=ZeroTorque",
+      "timeout_s": 15
+    },
+    {
+      "action": "application_keys",
+      "keys": "d"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Damping runtime=Damping",
+      "timeout_s": 10
+    },
+    {
+      "action": "application_keys",
+      "keys": "i"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "pending=Tracking",
+      "timeout_s": 10,
+      "note": "the tracking request is on the wire and unanswered"
+    },
+    {
+      "action": "application_keys",
+      "keys": "z"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "pending=ZeroTorque",
+      "timeout_s": 10,
+      "note": "the stop displaced the pending request with a larger id"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Standby runtime=ZeroTorque",
+      "timeout_s": 10
+    },
+    {
+      "action": "stop_application",
+      "keys": "x",
+      "timeout_s": 10,
+      "expect_code": 0
+    },
+    {
+      "action": "wait_log",
+      "pattern": "state=\"Damping\"",
+      "count": 2,
+      "after_now": true,
+      "timeout_s": 10
+    },
+    {
+      "action": "stop_runtime",
+      "signal": "SIGTERM",
+      "timeout_s": 3,
+      "expect_clean": false,
+      "expect_exit": false
+    }
+  ],
+  "checks": [
+    {
+      "check": "log_sequence",
+      "params": {
+        "file": "application_run1.log",
+        "sequence": [
+          "behavior=Damping runtime=Damping",
+          "pending=Tracking",
+          "pending=ZeroTorque",
+          "behavior=Standby runtime=ZeroTorque",
+          "application: exit stop=confirmed state=Damping"
+        ],
+        "forbid": [
+          "behavior=Ready",
+          "behavior=Locomotion",
+          "behavior=Fault"
+        ]
+      }
+    },
+    {
+      "check": "log_sequence",
+      "params": {
+        "file": "runtime_run1.log",
+        "sequence": [
+          "SessionAcquired",
+          "to=\"ZeroTorque\" stop=\"Requested\""
+        ],
+        "forbid": [
+          "FaultLatched",
+          "CommandTimeout",
+          "SourceStateTimeout"
+        ]
+      }
+    }
+  ]
+}

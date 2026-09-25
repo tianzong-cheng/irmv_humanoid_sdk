@@ -1,0 +1,92 @@
+{
+  "name": "application_fault",
+  "description": "The fake backend refuses the torque write, the runtime latches WriteFailed during its startup path and keeps running, and the real application reports behavior=Fault with the lower runtime=Fault - it never sends a target and never claims a stop. The runtime then refuses to leave the latched fault on SIGTERM, and the application, whose ordered exit can no longer be confirmed, reports stop=unknown lower=Fault with exit code 3. The emergency stop on a healthy link (upper Fault with the lower layer keeping its own Damping output) is asserted by application_repeat_and_reset, and the Reset that clears a latched lower fault is deliberately NOT asserted here: the real two-process acceptance found that the application does not reach Standby on the Reset the runtime applies (see the note in docs/testing.md), so this scenario does not encode either behaviour.",
+  "domain": 217,
+  "runtime": {
+    "config": "config/sdk.json",
+    "fake_scenario": "tests/support/fake_write_refused.json",
+    "output_trace": "trace_run%d.jsonl"
+  },
+  "application": {},
+  "steps": [
+    {
+      "action": "start_runtime"
+    },
+    {
+      "action": "wait_log",
+      "pattern": "FaultLatched.*fault=\"WriteFailed\"",
+      "timeout_s": 15
+    },
+    {
+      "action": "start_application"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Fault runtime=Fault",
+      "timeout_s": 15
+    },
+    {
+      "action": "wait_log",
+      "pattern": "RecoveryReady",
+      "after_now": true,
+      "timeout_s": 15,
+      "note": "the runtime's own recovery window opens although the latch stays"
+    },
+    {
+      "action": "stop_application",
+      "keys": "x",
+      "timeout_s": 8,
+      "expect_code": 3
+    },
+    {
+      "action": "stop_runtime",
+      "signal": "SIGTERM",
+      "timeout_s": 3,
+      "expect_clean": false,
+      "expect_exit": false
+    }
+  ],
+  "checks": [
+    {
+      "check": "log_sequence",
+      "params": {
+        "file": "application_run1.log",
+        "sequence": [
+          "behavior=Fault runtime=Fault",
+          "application: exit stop=unknown lower=Fault"
+        ],
+        "forbid": [
+          "stop=confirmed",
+          "behavior=Standby",
+          "behavior=Ready",
+          "behavior=Initializing",
+          "behavior=Locomotion"
+        ]
+      }
+    },
+    {
+      "check": "log_sequence",
+      "params": {
+        "file": "runtime_run1.log",
+        "sequence": [
+          "fault=\"WriteFailed\"",
+          "RecoveryReady"
+        ],
+        "forbid": [
+          "AuthorizationGranted",
+          "CommandTimeout",
+          "SourceStateTimeout"
+        ]
+      }
+    },
+    {
+      "check": "application_reaction",
+      "params": {
+        "after_step": "stop_application",
+        "pattern": "application: exit stop=unknown lower=Fault",
+        "min_ms": 0,
+        "max_ms": 3000
+      }
+    }
+  ]
+}

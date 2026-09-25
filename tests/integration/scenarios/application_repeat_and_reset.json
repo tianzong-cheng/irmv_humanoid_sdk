@@ -1,0 +1,163 @@
+{
+  "name": "application_repeat_and_reset",
+  "description": "The initialization is run twice from Damping against static in-tolerance feedback, so a repeated initialization starts a new trajectory and reaches Ready again instead of being refused; the software emergency stop on a healthy link then latches the upper Fault while the lower layer keeps its own Damping output, and the explicit Reset is the only way back, through a confirmed fresh ZeroTorque into Standby. The ordered exit from Standby is confirmed by a lower state, and the runtime left damping without a supervisor refuses to leave on SIGTERM.",
+  "domain": 215,
+  "runtime": {
+    "config": "config/sdk.json",
+    "fake_scenario": "tests/support/fake_static.json",
+    "output_trace": "trace_run%d.jsonl"
+  },
+  "application": {},
+  "steps": [
+    {
+      "action": "start_runtime"
+    },
+    {
+      "action": "wait_log",
+      "pattern": "state=\"ZeroTorque\"",
+      "timeout_s": 15
+    },
+    {
+      "action": "start_application"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Standby runtime=ZeroTorque",
+      "timeout_s": 15
+    },
+    {
+      "action": "application_keys",
+      "keys": "d"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Damping runtime=Damping",
+      "timeout_s": 10
+    },
+    {
+      "action": "application_keys",
+      "keys": "i"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Initializing runtime=Tracking",
+      "timeout_s": 10
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Ready runtime=Tracking",
+      "timeout_s": 20
+    },
+    {
+      "action": "application_keys",
+      "keys": "d"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Damping runtime=Damping",
+      "timeout_s": 10
+    },
+    {
+      "action": "application_keys",
+      "keys": "i"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Initializing runtime=Tracking",
+      "timeout_s": 10
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Ready runtime=Tracking",
+      "timeout_s": 20
+    },
+    {
+      "action": "application_keys",
+      "keys": " ",
+      "note": "the software emergency stop on a healthy link"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Fault runtime=Damping output=Damping",
+      "timeout_s": 10
+    },
+    {
+      "action": "application_keys",
+      "keys": "r"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Standby runtime=ZeroTorque",
+      "timeout_s": 10
+    },
+    {
+      "action": "stop_application",
+      "keys": "x",
+      "timeout_s": 10,
+      "expect_code": 0
+    },
+    {
+      "action": "wait_log",
+      "pattern": "state=\"Damping\"",
+      "count": 2,
+      "after_now": true,
+      "timeout_s": 10
+    },
+    {
+      "action": "stop_runtime",
+      "signal": "SIGTERM",
+      "timeout_s": 3,
+      "expect_clean": false,
+      "expect_exit": false
+    }
+  ],
+  "checks": [
+    {
+      "check": "log_sequence",
+      "params": {
+        "file": "application_run1.log",
+        "sequence": [
+          "behavior=Standby runtime=ZeroTorque",
+          "behavior=Damping runtime=Damping",
+          "behavior=Initializing runtime=Tracking",
+          "behavior=Ready runtime=Tracking",
+          "behavior=Damping runtime=Damping",
+          "behavior=Initializing runtime=Tracking",
+          "behavior=Ready runtime=Tracking",
+          "behavior=Fault runtime=Damping output=Damping",
+          "behavior=Standby runtime=ZeroTorque",
+          "application: exit stop=confirmed state=Damping"
+        ],
+        "forbid": [
+          "behavior=Locomotion",
+          "stop=unknown",
+          "init=refused"
+        ]
+      }
+    },
+    {
+      "check": "log_sequence",
+      "params": {
+        "file": "runtime_run1.log",
+        "sequence": [
+          "BootCompleted",
+          "SessionAcquired",
+          "StopApplied {event=8 from=\"ZeroTorque\" to=\"Damping\"",
+          "AuthorizationGranted {event=6 from=\"Damping\" to=\"Tracking\"",
+          "StopApplied {event=8 from=\"Tracking\" to=\"Damping\"",
+          "AuthorizationGranted {event=6 from=\"Damping\" to=\"Tracking\"",
+          "StopApplied {event=8 from=\"Tracking\" to=\"Damping\"",
+          "StopApplied {event=8 from=\"Damping\" to=\"ZeroTorque\"",
+          "StopApplied {event=8 from=\"ZeroTorque\" to=\"Damping\"",
+          "SessionExpired"
+        ],
+        "forbid": [
+          "FaultLatched",
+          "CommandTimeout",
+          "SourceStateTimeout",
+          "RequestRejected"
+        ]
+      }
+    }
+  ]
+}

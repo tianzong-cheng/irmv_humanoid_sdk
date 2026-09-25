@@ -566,6 +566,9 @@ target_link_libraries(
 
 # Every scenario file is one independent CTest entry under the `integration`
 # label; the harness isolates the DDS domain of each entry below 230 itself.
+# `--application` is the real upper process: the phase-1 scenarios ignore it,
+# the application_* scenarios drive it through a PTY, and it is never simulated
+# by the test client.
 set(
   IRMV_INTEGRATION_SCENARIOS
   normal
@@ -580,6 +583,12 @@ set(
   stderr_backpressure
   local_stop
   write_refused
+  application_normal
+  application_ready_hold
+  application_repeat_and_reset
+  application_stop_preempt
+  application_fault
+  application_unknown
 )
 foreach(scenario IN LISTS IRMV_INTEGRATION_SCENARIOS)
   add_test(
@@ -590,6 +599,7 @@ foreach(scenario IN LISTS IRMV_INTEGRATION_SCENARIOS)
       --scenario "${PROJECT_SOURCE_DIR}/tests/integration/scenarios/${scenario}.json"
       --runtime "$<TARGET_FILE:robot_runtime>"
       --client "$<TARGET_FILE:runtime_client>"
+      --application "$<TARGET_FILE:application>"
       --source "${PROJECT_SOURCE_DIR}"
       --work-dir "${CMAKE_CURRENT_BINARY_DIR}/integration"
   )
@@ -601,6 +611,29 @@ foreach(scenario IN LISTS IRMV_INTEGRATION_SCENARIOS)
       WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
   )
 endforeach()
+
+# The cross-process phase acceptance: the cases one scenario run cannot express
+# (a runtime replaced under a running application, a SIGSTOPped runtime, a
+# paused and a killed application, the Locomotion boundary and the survivor
+# check). It reuses the harness for the cases a scenario file describes -
+# application_normal is invoked as the subprocess it is - and drives the rest
+# itself over real DDS, always with the real `application` binary.
+add_test(
+  NAME application_flow_test
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/integration/application_flow_test.py"
+    "$<TARGET_FILE:application>"
+    "$<TARGET_FILE:robot_runtime>"
+    "${PROJECT_SOURCE_DIR}"
+)
+set_tests_properties(
+  application_flow_test
+  PROPERTIES
+    LABELS integration
+    TIMEOUT 600
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
 
 # ---------------------------------------------------------------------------
 # Formatting

@@ -1,0 +1,137 @@
+{
+  "name": "application_ready_hold",
+  "description": "The upper layer holds Ready for longer than every runtime deadline it could hide behind: the per-tick trace proves it kept publishing new target frames (advancing applied command sequence over a window far longer than command_us and source_state_us), the runtime never reported a target or source-state timeout, and it then stops cleanly from the ZeroTorque the upper layer asked for while it is still supervising. The application process, whose lower layer is gone by then, is killed: its exit path is application_unknown's subject, not this scenario's.",
+  "domain": 214,
+  "runtime": {
+    "config": "config/sdk.json",
+    "fake_scenario": "tests/support/fake_scenario.json",
+    "output_trace": "trace_run%d.jsonl"
+  },
+  "application": {},
+  "steps": [
+    {
+      "action": "start_runtime"
+    },
+    {
+      "action": "wait_log",
+      "pattern": "state=\"ZeroTorque\"",
+      "timeout_s": 15
+    },
+    {
+      "action": "start_application"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Standby runtime=ZeroTorque",
+      "timeout_s": 15
+    },
+    {
+      "action": "application_keys",
+      "keys": "d"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Damping runtime=Damping",
+      "timeout_s": 10
+    },
+    {
+      "action": "application_keys",
+      "keys": "i"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Ready runtime=Tracking",
+      "timeout_s": 20
+    },
+    {
+      "action": "sleep_ms",
+      "ms": 1500,
+      "note": "hold Ready for 15x command_us and 10x source_state_us"
+    },
+    {
+      "action": "application_keys",
+      "keys": "z"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Standby runtime=ZeroTorque",
+      "timeout_s": 10
+    },
+    {
+      "action": "stop_runtime",
+      "signal": "SIGTERM",
+      "timeout_s": 10,
+      "expect_clean": true
+    },
+    {
+      "action": "kill_application",
+      "signal": "SIGKILL",
+      "timeout_s": 5,
+      "note": "the lower layer is already gone; the upper process is killed"
+    }
+  ],
+  "checks": [
+    {
+      "check": "log_sequence",
+      "params": {
+        "file": "application_run1.log",
+        "sequence": [
+          "behavior=Ready runtime=Tracking",
+          "behavior=Ready runtime=Tracking",
+          "behavior=Standby runtime=ZeroTorque"
+        ],
+        "forbid": [
+          "behavior=Fault runtime=Tracking",
+          "behavior=Locomotion",
+          "stop=confirmed"
+        ]
+      }
+    },
+    {
+      "check": "log_sequence",
+      "params": {
+        "file": "runtime_run1.log",
+        "sequence": [
+          "BootCompleted",
+          "SessionAcquired",
+          "AuthorizationGranted",
+          "StopApplied"
+        ],
+        "forbid": [
+          "CommandTimeout",
+          "SourceStateTimeout",
+          "FaultLatched"
+        ]
+      }
+    },
+    {
+      "check": "command_advancing",
+      "params": {
+        "file": "trace_run1.jsonl",
+        "min_command_seqs": 30,
+        "min_span_us": 1000000
+      }
+    },
+    {
+      "check": "trace_complete",
+      "params": {
+        "file": "trace_run1.jsonl",
+        "min_ticks": 1500
+      }
+    },
+    {
+      "check": "deadlines",
+      "params": {
+        "file": "trace_run1.jsonl",
+        "max_gap_us": 10000,
+        "min_rate_hz": 450
+      }
+    },
+    {
+      "check": "overruns",
+      "params": {
+        "max_worst_overrun_us": 20000
+      }
+    }
+  ]
+}

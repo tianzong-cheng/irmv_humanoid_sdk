@@ -1,0 +1,82 @@
+{
+  "name": "application_unknown",
+  "description": "The lower process is SIGKILLed while the application supervises it: the application reports runtime=Unknown (and fresh=no) inside the state window plus scheduling slack, latches its own Fault instead of presenting the last remembered state as the runtime's present fact, and leaves through the bounded exit that reports stop=unknown - never a stop it could not confirm.",
+  "domain": 218,
+  "runtime": {
+    "config": "config/sdk.json",
+    "fake_scenario": "tests/support/fake_static.json",
+    "output_trace": "trace_run%d.jsonl"
+  },
+  "application": {},
+  "steps": [
+    {
+      "action": "start_runtime"
+    },
+    {
+      "action": "wait_log",
+      "pattern": "state=\"ZeroTorque\"",
+      "timeout_s": 15
+    },
+    {
+      "action": "start_application"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Standby runtime=ZeroTorque",
+      "timeout_s": 15
+    },
+    {
+      "action": "kill_runtime",
+      "signal": "SIGKILL",
+      "timeout_s": 5
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Fault runtime=Unknown output=Unknown",
+      "timeout_s": 5
+    },
+    {
+      "action": "stop_application",
+      "keys": "x",
+      "timeout_s": 8,
+      "expect_code": 3
+    }
+  ],
+  "checks": [
+    {
+      "check": "application_reaction",
+      "params": {
+        "after_step": "kill_runtime",
+        "pattern": "behavior=Fault runtime=Unknown",
+        "min_ms": 100,
+        "max_ms": 600
+      }
+    },
+    {
+      "check": "application_reaction",
+      "params": {
+        "after_step": "stop_application",
+        "pattern": "application: exit stop=unknown",
+        "min_ms": 0,
+        "max_ms": 3000
+      }
+    },
+    {
+      "check": "log_sequence",
+      "params": {
+        "file": "application_run1.log",
+        "sequence": [
+          "behavior=Standby runtime=ZeroTorque",
+          "behavior=Fault runtime=Unknown output=Unknown",
+          "application: exit stop=unknown lower=Unknown"
+        ],
+        "forbid": [
+          "stop=confirmed",
+          "lower=ZeroTorque",
+          "lower=Damping",
+          "behavior=Locomotion"
+        ]
+      }
+    }
+  ]
+}

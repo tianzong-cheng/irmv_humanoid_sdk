@@ -9,16 +9,24 @@ them and returns non-zero unless every check passed, so CTest can register each
 scenario as an independent entry:
 
   run_integration.py --scenario FILE --runtime BIN --client BIN --source DIR \\
-                     --work-dir DIR
+                     --work-dir DIR [--application BIN]
+
+A scenario may also drive the real upper process instead of a test client: with
+`--application BIN`, `scenario["application"]` describes that invocation and the
+steps `start_application`, `stop_application`, `kill_application`,
+`restart_application`, `wait_application_log` and `application_keys` drive it
+through a real PTY. The application and the runtime of one scenario always share
+the generated `config.json` and the chosen domain, so their configuration
+digests agree; the application is never simulated by `runtime_client`.
 
 `--all` runs every scenario of the source tree in one process and prints one
 summary line per scenario; it is meant for manual runs, never for CTest.
 
-Evidence: the runtime log, every client's JSON-lines observations and stderr and
-the per-tick output trace are collected in the work directory, the selected
-domain is recorded in domain.txt, and every check prints what it measured. A
-step that did not run is never reported as a pass: the scenario fails at the
-first step that does not complete.
+Evidence: the runtime log, the application log, every client's JSON-lines
+observations and stderr and the per-tick output trace are collected in the work
+directory, the selected domain is recorded in domain.txt, and every check prints
+what it measured. A step that did not run is never reported as a pass: the
+scenario fails at the first step that does not complete.
 
 Only the standard library is used.
 """
@@ -29,6 +37,7 @@ import errno
 import fcntl
 import json
 import os
+import pty
 import re
 import shutil
 import signal
@@ -59,11 +68,14 @@ class Processes:
 
     def __init__(self):
         self.runtime = None
+        self.application = None
         self.clients = {}
 
     def shutdown(self):
         for client in list(self.clients.values()):
             client.kill()
+        if self.application is not None:
+            self.application.kill()
         if self.runtime is not None:
             self.runtime.kill()
 
@@ -71,15 +83,20 @@ class Processes:
 class StreamDrain(threading.Thread):
     """Reads one pipe into a byte sink without blocking the child."""
 
-    def __init__(self, stream, sink):
+    def __init__(self, stream, sink, stamps=None):
         super().__init__(daemon=True)
         self.stream = stream
         self.sink = sink
+        # An optional second sink taking the arrival instant of every line, for
+        # a caller that has to measure when a process printed what.
+        self.stamps = stamps
 
     def run(self):
         try:
             for line in iter(self.stream.readline, b""):
                 self.sink.append(line)
+                if self.stamps is not None:
+                    self.stamps.append(now_us())
         except (OSError, ValueError):
             pass
 
@@ -140,25 +157,35 @@ class Runtime:
     def text(self):
         return b"".join(self.lines).decode("utf-8", "replace")
 
-    def wait_for(self, pattern, timeout_s):
-        """Waits for a log line while draining, and returns the matching line."""
+    def wait_for(self, pattern, timeout_s, minimum=1, start=0):
+        """Waits for `minimum` log lines while draining, returns the matching line.
+
+        `start` is the index to begin scanning at, so a scenario can require
+        lines that were printed *after* something it did rather than accepting
+        one that was already in the pipe.
+        """
         self.drain()
         deadline = time.monotonic() + timeout_s
         expression = re.compile(pattern)
-        seen = 0
-        while time.monotonic() < deadline:
+        seen = start
+        found = 0
+        while True:
             while seen < len(self.lines):
                 line = self.lines[seen].decode("utf-8", "replace")
                 seen += 1
                 if expression.search(line):
-                    return line
+                    found += 1
+                    if found >= minimum:
+                        return line
             if self.process.poll() is not None and seen >= len(self.lines):
                 raise Failure(
-                    "the runtime exited with %s before matching %r"
-                    % (self.process.returncode, pattern)
+                    "the runtime exited with %s before matching %r %d time(s)"
+                    % (self.process.returncode, pattern, minimum)
                 )
+            if time.monotonic() >= deadline:
+                raise Failure("the runtime matched %r only %d time(s) within "
+                              "%.1f s" % (pattern, found, timeout_s))
             time.sleep(0.02)
-        raise Failure("the runtime did not match %r within %.1f s" % (pattern, timeout_s))
 
     def signal(self, name):
         if self.process is None or self.process.poll() is not None:
@@ -218,6 +245,209 @@ class Runtime:
             except ValueError:
                 values[key] = value
         return values
+
+
+class Application:
+    """One `application` process, driven through a real PTY.
+
+    The application owns a terminal: it puts it into raw mode, reads the
+    keyboard from it and prints its status line to stdout. The harness
+    therefore starts it the way an operator does, on a pty pair, and writes the
+    bytes of `application_keys` to the master - the bytes the application reads
+    are exactly the bytes an operator's keyboard would produce.
+
+    stdout and stderr are merged into that terminal (one stream, like the
+    runtime's merged log): the status lines, the exit line and a startup
+    rejection all appear in the same sink. The slave is closed in the parent
+    right after the spawn, so the master reports end-of-file the moment the
+    application leaves; on Linux the master reports the slave's termios
+    (`termios_attrs()`), so closing it loses nothing.
+
+    Every wait is bounded, and the reader is a daemon thread like the runtime's
+    log consumer: a scenario that never matched a line is failed by the
+    harness instead of stalling it.
+    """
+
+    def __init__(self, binary, work_dir, run_index):
+        self.binary = Path(binary)
+        self.work_dir = Path(work_dir)
+        self.run_index = run_index
+        self.log_path = self.work_dir / ("application_run%d.log" % run_index)
+        self.process = None
+        self.stream = None
+        self.lines = []
+        self.stamps = []
+        self.drainer = None
+        self.arguments = []
+        self.started_us = 0
+        # Index the next wait starts scanning at: the terminal keeps the whole
+        # session, and a pattern the application printed before the keys of this
+        # step is not evidence that it reacted to them.
+        self.watermark = 0
+        self.initial_attributes = None
+        # The terminal the application gave back, read the moment it left. It
+        # is only meaningful on an exit the application took itself; a killed
+        # one never runs its restore.
+        self.final_attributes = None
+
+    def start(self, arguments):
+        self.arguments = list(arguments)
+        self.lines = []
+        self.stamps = []
+        master, slave = pty.openpty()
+        # The termios of a pty belongs to the terminal, not to a descriptor: the
+        # snapshot taken here is exactly the state the application starts from
+        # and has to give back.
+        self.initial_attributes = termios.tcgetattr(slave)
+        self.process = subprocess.Popen(
+            [str(self.binary)] + self.arguments,
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            cwd=str(self.work_dir),
+        )
+        os.close(slave)
+        self.stream = os.fdopen(master, "rb")
+        self.started_us = now_us()
+        # The terminal buffer is small: an unread master would stall the
+        # application instead of the test, so the reader runs from the first
+        # instant.
+        self.drain()
+        return self
+
+    def drain(self):
+        if self.drainer is None and self.process is not None:
+            self.drainer = StreamDrain(self.stream, self.lines, self.stamps)
+            self.drainer.start()
+
+    def finish(self):
+        """Waits for the reader to see the end of the terminal."""
+        if self.drainer is not None:
+            self.drainer.join(2.0)
+
+    def text(self):
+        return b"".join(self.lines).decode("utf-8", "replace")
+
+    def line_stamps(self):
+        """One `(arrival_us, line)` per line the application printed."""
+        return [(stamp, line.decode("utf-8", "replace").rstrip("\r\n"))
+                for stamp, line in zip(self.stamps, self.lines)]
+
+    def wait_for(self, pattern, timeout_s, start=None):
+        """Waits for a printed line while draining, and returns the matching one.
+
+        `start` is the line index to begin scanning at; the default is the
+        position of the last key this harness wrote, so a scenario waits for a
+        line the application produced *after* its input instead of accepting one
+        that was already on the terminal.
+        """
+        self.drain()
+        deadline = time.monotonic() + timeout_s
+        expression = re.compile(pattern)
+        seen = self.watermark if start is None else start
+        while True:
+            while seen < len(self.lines):
+                line = self.lines[seen].decode("utf-8", "replace")
+                seen += 1
+                if expression.search(line):
+                    return line
+            if self.process.poll() is not None:
+                self.finish()
+                while seen < len(self.lines):
+                    line = self.lines[seen].decode("utf-8", "replace")
+                    seen += 1
+                    if expression.search(line):
+                        return line
+                raise Failure("the application exited with %s before matching %r"
+                              % (self.process.returncode, pattern))
+            if time.monotonic() >= deadline:
+                raise Failure("the application did not match %r within %.1f s"
+                              % (pattern, timeout_s))
+            time.sleep(0.02)
+
+    def signal(self, name):
+        if self.process is None or self.process.poll() is not None:
+            raise Failure("the application is not running, cannot send %s" % name)
+        self.process.send_signal(getattr(signal, name))
+
+    def send_keys(self, keys):
+        """Writes the bytes of `keys` to the terminal, exactly as a keyboard."""
+        if self.process is None or self.process.poll() is not None:
+            raise Failure("the application is not running, keys %r were not sent"
+                          % keys)
+        if isinstance(keys, str):
+            keys = keys.encode("utf-8")
+        os.write(self.stream.fileno(), keys)
+        # Everything printed before this instant is the state the keys are about
+        # to change, not the reaction to them.
+        self.watermark = len(self.lines)
+
+    def termios_attrs(self):
+        """The attributes of the terminal the application was given, or None.
+
+        On Linux the master reports the slave's termios (one terminal, one set
+        of attributes), so the snapshot is taken from the master while the
+        application runs and compared against the one taken before the spawn.
+        """
+        if self.stream is None:
+            return None
+        return termios.tcgetattr(self.stream.fileno())
+
+    def wait_exit(self, timeout_s):
+        self.drain()
+        try:
+            code = self.process.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            return None
+        # The application restores the terminal before it returns from main, so
+        # the attributes read here are the ones it handed back.
+        try:
+            self.final_attributes = self.termios_attrs()
+        except (OSError, ValueError, termios.error):
+            self.final_attributes = None
+        self.finish()
+        return code
+
+    def alive(self):
+        return self.process is not None and self.process.poll() is None
+
+    def exit_line(self):
+        """The one `application: exit ...` line, or None when it printed none."""
+        found = re.search(r"^application: exit [^\r\n]*", self.text(),
+                          re.MULTILINE)
+        return found.group(0) if found is not None else None
+
+    def kill(self):
+        if self.process is None:
+            return
+        if self.process.poll() is None:
+            try:
+                self.process.kill()
+            except OSError:
+                pass
+        try:
+            self.process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        self.finish()
+        if self.stream is not None:
+            try:
+                self.stream.close()
+            except OSError:
+                pass
+            self.stream = None
+
+    def write_log(self):
+        # Drain first for the same reason the runtime log does: a scenario that
+        # never waited on a line would otherwise leave its evidence empty.
+        self.drain()
+        if self.process is not None and self.process.poll() is None:
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        self.finish()
+        self.log_path.write_text(self.text())
 
 
 class Client:
@@ -337,6 +567,7 @@ class Context:
         self.steps = []
         self.signals = []
         self.runs = []
+        self.applications = []
         self.traces = []
         self.domain_lock = None
         self.measurements = []
@@ -353,6 +584,18 @@ class Context:
             raise Failure("the runtime was never started")
         return self.processes.runtime
 
+    def application(self):
+        if self.processes.application is None:
+            raise Failure("the application was never started")
+        return self.processes.application
+
+    def step_time(self, action):
+        """When the last step using `action` started, or None when there is none."""
+        for entry in reversed(self.steps):
+            if entry["action"] == action:
+                return entry["t_us"]
+        return None
+
     def signal_time(self, client_name, signal_name):
         for entry in reversed(self.signals):
             if entry["client"] == client_name and entry["signal"] == signal_name:
@@ -361,6 +604,8 @@ class Context:
 
     def write_evidence(self):
         self.processes.runtime and self.processes.runtime.write_log()
+        for application in self.applications:
+            application.write_log()
         for client in self.processes.clients.values():
             client.write_logs()
         (self.work_dir / "domain.txt").write_text(
@@ -487,14 +732,25 @@ def choose_domain(declared, work_dir):
     raise Failure("no free DDS domain below 230 was found for %d" % declared)
 
 
-def build_runtime_arguments(ctx, run_index):
-    settings = ctx.scenario.get("runtime", {})
+def config_document(ctx, settings):
+    """The configuration document of one process, before it is written out.
+
+    Both processes of a scenario are handed this same document: the application
+    drives the runtime through the generated `config.json`, so its
+    configuration digest has to be the one the runtime published.
+    """
     base = ctx.source / settings.get("config", "config/sdk.json")
     config = json.loads(base.read_text())
     for dotted, value in settings.get("config_overrides", {}).items():
         set_dotted(config, dotted, value)
     config["dds"]["domain"] = ctx.domain
     config["telemetry"]["directory"] = str(ctx.work_dir / "logs")
+    return config
+
+
+def build_runtime_arguments(ctx, run_index):
+    settings = ctx.scenario.get("runtime", {})
+    config = config_document(ctx, settings)
     config_path = ctx.work_dir / "config.json"
     config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 
@@ -512,6 +768,39 @@ def build_runtime_arguments(ctx, run_index):
     return arguments
 
 
+def build_application_arguments(ctx):
+    """The arguments of the application of this scenario.
+
+    `scenario["application"]` carries the same `config`, `config_overrides` and
+    `domain` keys as `scenario["runtime"]`, and is resolved the same way - but
+    the application has to run on the configuration the runtime was given, or
+    the two would publish different digests and never bind a session. A
+    scenario whose application section describes another configuration is
+    refused here instead of failing later as an unexplained handshake.
+    """
+    runtime_settings = ctx.scenario.get("runtime", {})
+    settings = ctx.scenario.get("application", {})
+    expected = config_document(ctx, runtime_settings)
+    declared = config_document(ctx, settings)
+    if declared != expected:
+        raise Failure(
+            "the application section of %s describes a configuration the "
+            "runtime does not use; one scenario gives both processes the same "
+            "configuration (and therefore the same config_id)"
+            % ctx.scenario["name"])
+    declared_domain = settings.get("domain", ctx.scenario["domain"])
+    if declared_domain != ctx.scenario["domain"]:
+        raise Failure(
+            "the application section declares domain %s but the scenario runs "
+            "on %s; the two processes of one scenario share one domain"
+            % (declared_domain, ctx.scenario["domain"]))
+    config_path = ctx.work_dir / "config.json"
+    if not config_path.exists():
+        raise Failure("the application needs the configuration the runtime "
+                      "generated; start the runtime first")
+    return ["--config", str(config_path), "--domain", str(ctx.domain)]
+
+
 def start_runtime(ctx):
     run_index = len(ctx.runs) + 1
     runtime = Runtime(ctx.runtime_binary, ctx.work_dir, run_index)
@@ -522,6 +811,29 @@ def start_runtime(ctx):
     if "--output-trace" in arguments:
         ctx.traces.append(runtime.trace_path)
     return runtime
+
+
+def start_application(ctx):
+    """Starts the next application run of this scenario.
+
+    One scenario runs one application at a time: a second one on the same
+    runtime would be a second supervisor on the same session, which is not a
+    state a scenario may create by accident.
+    """
+    if getattr(ctx, "application_binary", None) is None:
+        raise Failure("this scenario starts the application, but no application "
+                      "binary was given to the harness (--application)")
+    running = ctx.processes.application
+    if running is not None and running.alive():
+        raise Failure("an application is already running, run %d; stop it "
+                      "first" % running.run_index)
+    arguments = build_application_arguments(ctx)
+    application = Application(ctx.application_binary, ctx.work_dir,
+                              len(ctx.applications) + 1)
+    application.start(arguments)
+    ctx.processes.application = application
+    ctx.applications.append(application)
+    return application
 
 
 def client_arguments(ctx, step):
@@ -631,9 +943,97 @@ def step_drain_runtime_logs(ctx, step):
     return "runtime log drained (%d lines so far)" % len(ctx.runtime().lines)
 
 
-def step_wait_log(ctx, step):
-    line = ctx.runtime().wait_for(step["pattern"], step.get("timeout_s", 10.0))
+def step_start_application(ctx, step):
+    application = start_application(ctx)
+    return "started %s" % " ".join(application.arguments)
+
+
+def step_stop_application(ctx, step):
+    """Leaves the application through one of its own exit paths.
+
+    `keys` (optional) is written to the terminal first - the ordered exit of the
+    exit key - and `signal` (optional) is delivered after it; without either,
+    the step only waits for an exit the scenario caused elsewhere. The exit line
+    is required: a process that died without one did not take the bounded path
+    this step claims, and `expect_code` pins the code when the scenario knows it.
+    """
+    application = ctx.application()
+    keys = step.get("keys")
+    if keys:
+        application.send_keys(keys)
+    signal_name = step.get("signal")
+    if signal_name:
+        application.signal(signal_name)
+    timeout_s = step.get("timeout_s", 10.0)
+    code = application.wait_exit(timeout_s)
+    if code is None:
+        application.kill()
+        raise Failure("the application did not leave within %.1f s%s"
+                      % (timeout_s,
+                         " of %s" % signal_name if signal_name else ""))
+    line = application.exit_line()
+    if line is None:
+        raise Failure("the application exited with %s without an exit line; "
+                      "the bounded exit never ran" % code)
+    expected = step.get("expect_code")
+    if expected is not None and code != expected:
+        raise Failure("the application exited with %s instead of %s (line %r)"
+                      % (code, expected, line))
+    return "application exit=%s line=%r" % (code, line)
+
+
+def step_kill_application(ctx, step):
+    application = ctx.application()
+    name = step.get("signal", "SIGKILL")
+    application.signal(name)
+    code = application.wait_exit(step.get("timeout_s", 5.0))
+    if code is None:
+        application.kill()
+        raise Failure("the application ignored %s" % name)
+    return "application exited with %s after %s" % (code, name)
+
+
+def step_restart_application(ctx, step):
+    previous = ctx.application()
+    keys = step.get("keys", "x")
+    if keys:
+        previous.send_keys(keys)
+    code = previous.wait_exit(step.get("timeout_s", 10.0))
+    if code is None:
+        previous.kill()
+        raise Failure("the application did not leave its ordered exit, so a "
+                      "restart would leave one runtime two supervision sessions")
+    expected = step.get("expect_code")
+    if expected is not None and code != expected:
+        raise Failure("the previous application exited with %s instead of %s "
+                      "(line %r)" % (code, expected, previous.exit_line()))
+    application = start_application(ctx)
+    return ("restarted the application (previous exit %s, line %r), run %d"
+            % (code, previous.exit_line(), len(ctx.applications)))
+
+
+def step_wait_application_log(ctx, step):
+    line = ctx.application().wait_for(step["pattern"], step.get("timeout_s", 10.0))
     return "matched %r" % line.strip()
+
+
+def step_application_keys(ctx, step):
+    keys = step["keys"]
+    ctx.application().send_keys(keys)
+    return "sent keys %r" % keys
+
+
+def step_wait_log(ctx, step):
+    runtime = ctx.runtime()
+    count = step.get("count", 1)
+    # `after_now` scans from the end of the log as it is when the step starts,
+    # so the step proves lines this scenario caused instead of accepting one
+    # that was already in the pipe.
+    start = len(runtime.lines) if step.get("after_now") else 0
+    line = runtime.wait_for(step["pattern"], step.get("timeout_s", 10.0),
+                            minimum=count, start=start)
+    return "matched %d line(s) matching %r, last %r" % (count, step["pattern"],
+                                                        line.strip())
 
 
 def step_client(ctx, step):
@@ -702,6 +1102,12 @@ STEP_HANDLERS = {
     "stop_runtime": step_stop_runtime,
     "drain_runtime_logs": step_drain_runtime_logs,
     "wait_log": step_wait_log,
+    "start_application": step_start_application,
+    "stop_application": step_stop_application,
+    "kill_application": step_kill_application,
+    "restart_application": step_restart_application,
+    "wait_application_log": step_wait_application_log,
+    "application_keys": step_application_keys,
     "client": step_client,
     "wait_client": step_wait_client,
     "signal_client": step_signal_client,
@@ -1314,6 +1720,145 @@ def check_overruns(ctx, params):
     return ok, detail, [("overruns", overruns), ("worst_overrun_us", worst)]
 
 
+def check_log_sequence(ctx, params):
+    """An ordered list of lines the collected log really produced, and lines it must not.
+
+    The check reads the evidence file a human reads (`application_run1.log`,
+    `runtime_run1.log`, ...). `sequence` is an ordered subsequence: every
+    pattern has to match a line that comes after the line of the pattern before
+    it, so one repeated line cannot satisfy two entries.
+    """
+    path = ctx.work_dir / params["file"]
+    if not path.exists():
+        raise Failure("the log %s does not exist" % params["file"])
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    sequence = params.get("sequence", [])
+    cursor = 0
+    matched = []
+    missing = None
+    for pattern in sequence:
+        found = None
+        while cursor < len(lines):
+            if pattern in lines[cursor]:
+                found = cursor
+                cursor += 1
+                break
+            cursor += 1
+        if found is None:
+            missing = pattern
+            break
+        matched.append(found)
+    forbidden = []
+    for pattern in params.get("forbid", []):
+        for index, line in enumerate(lines):
+            if pattern in line:
+                forbidden.append((pattern, index, line.strip()[:160]))
+                break
+    problems = []
+    if missing is not None:
+        problems.append("no line matches %r after line %d" % (missing, cursor))
+    if forbidden:
+        problems.append("%s" % forbidden[:2])
+    detail = ("%d line(s); %d of %d ordered pattern(s) matched%s%s"
+              % (len(lines), len(matched), len(sequence),
+                 "" if not matched else " at lines %s" % matched,
+                 "" if not problems else "; " + "; ".join(problems)))
+    return not problems, detail, [("log_lines", len(lines)),
+                                  ("log_matched", len(matched))]
+
+
+def check_application_reaction(ctx, params):
+    """How long the application took to print a line after one of its own steps.
+
+    `after_step` names the step whose start is the reference instant - the
+    harness and the application read the same host monotonic clock - and
+    `pattern` the line that reports the reaction. Only lines that arrived after
+    that instant count, so the bound is the reaction to the event and not a line
+    that was already in the terminal. `min_ms` is what makes an upper bound
+    meaningful: an instant answer would be a line that did not wait for the
+    deadline this check is about.
+    """
+    run = params.get("run", 1)
+    if run < 1 or run > len(ctx.applications):
+        raise Failure("the scenario started %d application run(s), not %d"
+                      % (len(ctx.applications), run))
+    application = ctx.applications[run - 1]
+    base_us = ctx.step_time(params["after_step"])
+    if base_us is None:
+        raise Failure("the scenario has no %s step" % params["after_step"])
+    expression = re.compile(params["pattern"])
+    found = [(stamp, line) for stamp, line in application.line_stamps()
+             if stamp >= base_us and expression.search(line)]
+    if not found:
+        raise Failure("the application printed no line matching %r after the "
+                      "%s step" % (params["pattern"], params["after_step"]))
+    latency_ms = (found[0][0] - base_us) / 1000.0
+    problems = []
+    if latency_ms < params.get("min_ms", 0.0):
+        problems.append("it arrived after only %.1f ms" % latency_ms)
+    if latency_ms > params.get("max_ms", 1e9):
+        problems.append("it arrived after %.1f ms" % latency_ms)
+    detail = ("%r arrived %.1f ms after %s: %r"
+              % (params["pattern"], latency_ms, params["after_step"],
+                 found[0][1].strip()[:160]))
+    return not problems, detail + ("" if not problems else "; " + "; ".join(problems)), [
+        ("application_latency_ms", latency_ms)]
+
+
+def check_command_advancing(ctx, params):
+    """The upper layer really kept publishing new targets while it held.
+
+    The trace is the runtime's own per-tick record and
+    `last_applied_command_seq` is the sequence of the newest frame the command
+    gate applied. A hold that let one frame age out shows a plateau and a
+    fallback; an advancing set of sequences over a window longer than every
+    deadline the runtime has is the evidence that the upper process kept
+    generating instead of relying on one frame holding for ever.
+    """
+    trace = load_trace(ctx, params["file"])
+    tracked = tracked_ticks(trace)
+    if not tracked:
+        raise Failure("no tick of %s tracked a target" % params["file"])
+    sequences = [tick["last_applied_command_seq"] for tick in tracked]
+    distinct = sorted(set(sequences))
+    backwards = [(before, after) for before, after in zip(sequences, sequences[1:])
+                 if after < before]
+    span_us = tracked[-1]["stamp_us"] - tracked[0]["stamp_us"]
+    problems = []
+    if len(distinct) < params.get("min_command_seqs", 2):
+        problems.append("only %d distinct command sequence(s)" % len(distinct))
+    if span_us < params.get("min_span_us", 0):
+        problems.append("the tracked window was only %.0f us" % span_us)
+    if backwards:
+        problems.append("the applied sequence went backwards at %s"
+                        % backwards[:2])
+    detail = ("%d tracked tick(s) over %.0f us applied %d distinct command "
+              "sequence(s) %d..%d, %d backwards step(s)"
+              % (len(tracked), span_us, len(distinct), distinct[0],
+                 distinct[-1], len(backwards)))
+    return not problems, detail + ("" if not problems else "; " + "; ".join(problems)), [
+        ("distinct_command_seqs", len(distinct)),
+        ("tracked_window_us", span_us)]
+
+
+def check_application_terminal(ctx, params):
+    """The application handed the terminal back the way it found it."""
+    run = params.get("run", 1)
+    if run < 1 or run > len(ctx.applications):
+        raise Failure("the scenario started %d application run(s), not %d"
+                      % (len(ctx.applications), run))
+    application = ctx.applications[run - 1]
+    if application.final_attributes is None:
+        raise Failure("the terminal of run %d was never read after the exit"
+                      % run)
+    restored = application.final_attributes
+    initial = application.initial_attributes
+    detail = ("the terminal attributes %s the ones the run started from"
+              % ("equal" if restored == initial else
+                 "differ from (%r != %r)" % (restored, initial)))
+    return restored == initial, detail, []
+
+
 CHECKS = {
     "trace_complete": check_trace_complete,
     "output_formula": check_output_formula,
@@ -1335,6 +1880,10 @@ CHECKS = {
     "targets_served": check_targets_served,
     "client_check": check_client_check,
     "client_measurement": check_client_measurement,
+    "log_sequence": check_log_sequence,
+    "application_reaction": check_application_reaction,
+    "command_advancing": check_command_advancing,
+    "application_terminal": check_application_terminal,
 }
 
 
@@ -1374,9 +1923,17 @@ def release_work_dir(claim):
         pass
 
 
-def run_scenario(runtime_binary, client_binary, source, scenario_path, work_dir):
+def run_scenario(runtime_binary, client_binary, source, scenario_path, work_dir,
+                 application_binary=None):
     scenario = json.loads(Path(scenario_path).read_text())
     name = scenario["name"]
+    actions = {step.get("action") for step in scenario.get("steps", [])}
+    if actions & {"start_application", "restart_application"} and not (
+            application_binary and Path(application_binary).is_file()):
+        # Refused before anything is claimed or wiped: a scenario that drives
+        # the real application never silently runs without it.
+        raise Failure("scenario %s starts the application, but no application "
+                      "binary was given (--application)" % name)
     work = Path(work_dir) / name
     # The claim file sits next to the scenario directory, so the directory that
     # holds it must exist before anything is claimed or wiped.
@@ -1387,6 +1944,8 @@ def run_scenario(runtime_binary, client_binary, source, scenario_path, work_dir)
     ctx = Context(scenario, source, work)
     ctx.runtime_binary = Path(runtime_binary).resolve()
     ctx.client_binary = Path(client_binary).resolve()
+    ctx.application_binary = (Path(application_binary).resolve()
+                              if application_binary else None)
     ctx.domain, ctx.domain_lock = choose_domain(scenario["domain"], work)
     print("  scenario %s: domain %d, %s"
           % (name, ctx.domain, scenario.get("description", "")))
@@ -1436,6 +1995,9 @@ def run_scenario(runtime_binary, client_binary, source, scenario_path, work_dir)
                ] + ctx.report + [
         "    domain=%d runtime_arguments=%s" % (
             ctx.domain, " ".join(ctx.runs[0].arguments) if ctx.runs else "-")]
+    if ctx.applications:
+        summary.append("    application_arguments=%s"
+                       % " ".join(ctx.applications[0].arguments))
     if ctx.measurements:
         summary.append("    measurements: %s" % ", ".join(ctx.measurements))
     for failure in failures:
@@ -1459,6 +2021,9 @@ def main():
                         help="run every scenario of the source tree")
     parser.add_argument("--runtime", required=True)
     parser.add_argument("--client", required=True)
+    parser.add_argument("--application",
+                        help="the real upper process; required by a scenario "
+                             "that drives the application")
     parser.add_argument("--source", required=True)
     parser.add_argument("--work-dir", required=True)
     arguments = parser.parse_args()
@@ -1469,7 +2034,8 @@ def main():
         results = []
         for path in scenario_files(arguments.source):
             failures = run_scenario(arguments.runtime, arguments.client,
-                                    arguments.source, path, arguments.work_dir)
+                                    arguments.source, path, arguments.work_dir,
+                                    arguments.application)
             results.append((path.stem, failures))
             # Participants of the previous scenario need a moment to release
             # their ports before the next domain is claimed.
@@ -1482,7 +2048,8 @@ def main():
         return 1 if any(failures for _, failures in results) else 0
 
     failures = run_scenario(arguments.runtime, arguments.client, arguments.source,
-                            arguments.scenario, arguments.work_dir)
+                            arguments.scenario, arguments.work_dir,
+                            arguments.application)
     if failures:
         for failure in failures:
             print("  failure: %s" % failure)

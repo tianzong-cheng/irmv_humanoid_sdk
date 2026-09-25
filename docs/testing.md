@@ -12,22 +12,25 @@ says explicitly what no test here proves.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j2
 
-ctest --test-dir build --output-on-failure          # everything (24 tests)
+ctest --test-dir build --output-on-failure          # everything (38 tests)
 ctest --test-dir build -L core --output-on-failure  # deterministic core suite
 ctest --test-dir build -L integration --output-on-failure
 ctest --test-dir build -R integration_normal --output-on-failure
 ```
 
-The whole matrix takes about a minute on a developer machine and each
-integration entry is bounded by its own CTest timeout (30 s for `dds_codec_test`,
-180 s for `runtime_cli_test`, 300 s per scenario).
+The whole matrix takes about a minute and a half on a developer machine
+(`ctest -N` reports 14 core and 24 integration entries) and each integration
+entry is bounded by its own CTest timeout (30 s for `dds_codec_test`, 180 s for
+`runtime_cli_test` and `application_cli_test`, 300 s for `application_client_test`
+and per scenario, 600 s for `application_flow_test`).
 
 For manual work the harness of the scenario matrix also runs the whole matrix in
 one process, printing one summary line per scenario:
 
 ```bash
 python3 tools/run_integration.py --all \
-    --runtime build/robot_runtime --client build/runtime_client --source .
+    --runtime build/robot_runtime --client build/runtime_client \
+    --application build/application --source .
 ```
 
 The channel handoff is also checked for data races, which no functional test can
@@ -52,25 +55,61 @@ Every integration entry isolates itself on its **own DDS domain**, always below
 the 230 bound the configuration contract enforces:
 
 * The `run_integration.py` harness takes the domain declared by the scenario
-  (201–212 for the shipped twelve), claims it with an exclusive lock file, and
-  refuses to start unless **every RTPS port of that domain** can be bound right
-  now. If the declared domain is taken it walks up to the next free one, so two
-  scenarios – or two developers – never share a domain. A lock left behind by a
-  killed run is reclaimed once its process is gone.
+  (201–212 for the phase-1 failure matrix, 213–218 for the six application
+  scenarios), claims it with an exclusive lock file, and refuses to start unless
+  **every RTPS port of that domain** can be bound right now. If the declared
+  domain is taken it walks up to the next free one, so two scenarios – or two
+  developers – never share a domain. A lock left behind by a killed run is
+  reclaimed once its process is gone.
 * `tests/integration/runtime_cli_test.py` derives its domain from its own
   process id (`20 + pid % 190`), so parallel runs stay apart, and overrides the
   domain of its configuration file on the command line – the startup line proves
-  the override took effect.
+  the override took effect. `application_cli_test` walks inside a band of its own
+  (`1 + pid % 19`), one domain per case, which cannot overlap the band the other
+  two process-level entries share.
+* `application_flow_test.py` claims one domain per case through the same
+  `choose_domain` of the harness (imported as a module), so a case and a
+  scenario entry never take the same domain at the same time; the
+  `application_normal` case it runs as a subprocess claims its own domain the
+  way every scenario entry does.
 * Waits are bounded everywhere. On timeout the harness kills what it started
   (ordered shutdown first, a hard kill as the last resort) and fails the entry
-  with the collected evidence: the runtime log, every client's JSON-lines
-  observations and stderr, the per-tick output trace, and the domain used. A
-  step that did not run is never reported as a pass.
+  with the collected evidence: the runtime log, the application log, every
+  client's JSON-lines observations and stderr, the per-tick output trace, and
+  the domain used. A step that did not run is never reported as a pass.
+
+### The application is driven through a terminal, never through a test client
+
+The real `application` binary owns a terminal: it puts it into raw mode and
+reads the keyboard from it. Every test that drives it therefore starts it the
+way an operator does, on a **pty pair**, and writes the bytes of a key to the
+master – the bytes the application reads are exactly the bytes a keyboard would
+produce. The harness has an `Application` process class for the scenarios
+(`--application BIN`, steps `start_application`, `stop_application`,
+`kill_application`, `restart_application`, `wait_application_log`,
+`application_keys`) and `tests/integration/application_flow_test.py` has its own
+for the cross-process cases.
+
+* stdout and stderr are merged into that terminal (one stream, like the
+  runtime's merged log), so the status lines, the exit line and a startup
+  rejection all appear in the same evidence file (`application_runN.log`).
+* The slave is closed in the parent right after the spawn, so the master
+  reports end-of-file the moment the application leaves; on Linux the master
+  reports the slave's termios, so `termios_attrs()` still reads the live
+  attributes and the harness can prove the terminal was handed back.
+* A wait in a scenario starts scanning at the position of the last key that
+  scenario wrote, so a status line printed minutes earlier can never satisfy a
+  wait that is about the key just sent.
+* The application and the runtime of one scenario always share the generated
+  `config.json` and the chosen domain – a scenario whose `application` section
+  describes another configuration is refused instead of failing later as an
+  unexplained handshake – and `runtime_client` is never a stand-in for the
+  application.
 
 The scenario entry points are also what CI runs; `--all` is a convenience for
 manual runs and is never used by CTest.
 
-## Deterministic core suite (`-L core`, 9 tests)
+## Deterministic core suite (`-L core`, 14 tests)
 
 | Test | What it proves | Design §9 |
 |---|---|---|
@@ -83,12 +122,17 @@ manual runs and is never used by CTest.
 | `logger_test` | The bounded asynchronous logger: queue bound and drop accounting, level filtering, FIFO order, the drain on stop, an event racing with the stop, the 256-byte message bound, rotation of the default sink, the formatted line and the error path - plus the bounded diagnostic writer the sink and the exit path share, against a pipe the test fills itself. | §8 (bounded telemetry) |
 | `channel_test` | The bounded handoff between the control thread and the transport thread: FIFO order, capacity, the untouched state of a refused push, the keep-last-1 handoff of the latest-value channels (a published value is replaced and counted only while no consumer holds it, and a taken one is never counted as a loss), a separate stop lane, and two-thread stress on both shapes whose payloads each carry their own generator, so a torn or overwritten copy fails the test. This is the entry that is also run under ThreadSanitizer; the eviction race it used to hide was found that way. | §2 (thread model), §4 (lane separation) |
 | `config_schema_contract_test` | The shipped `config/sdk.schema.json` against the shipped `config/sdk.json`, the custom `irmv-joint-name` format (non-empty, at most 64 **UTF-8 bytes**), and that standard JSON Schema validity and the loader's own checks agree. | "the configuration is executable and versioned" |
+| `application_config_test` | The upper layer's own configuration: the shipped `application`, `input` and supervision sections load field by field, the trajectory, retry, heartbeat, state-window and intent deadlines are validated as a whole (ordering, non-zero periods, tolerance bounds, the `emergency_stop` binding being the space character), and a document that would make the upper layer unable to supervise is rejected with the offending field path. | phase-2 configuration contract |
+| `robot_client_test` | The official supervisor client as a pure function of the states, results and times it is handed: one request at a time, the retry cadence and the final deadline, a rejection resolving immediately, an `Applied` only confirming against a state published at or after it (both arrival orders, and a terminal refusal after a contradicting state), the independent lease and instance/session loss, target publication gated on a live session, the epoch proposal never repeating a value, and an abandoned request never resuming. | phase-2 client contract |
+| `application_initialization_test` | The initialization trajectory against the runtime's own formula: the first frame stays inside the continuity bounds and the target velocity limits, a plan the runtime would refuse is refused before anything is sent, completion requires the position and velocity tolerances over the whole stability window, the deadline fails the move, and the Ready hold keeps publishing fresh frames or reports the sample unusable without failing. It drives a real `ExecutionFsm` through the runtime fixture, so the generator and the lower layer agree on the same numbers. | phase-2 initialization contract |
+| `application_fsm_test` | The behaviour FSM and the serial supervision order as a pure function over a real `RobotClient` and a recording sink: the full path with its confirmations, the emergency stop latching and preempting, the exit path, `UnexpectedContext` and `RuntimeRestarted` latching, the timeout causes, the Reset clearing the latch only into `Standby` on a fresh `ZeroTorque`, and `StartLocomotion()` refusing without changing `Ready`. | phase-2 behaviour contract |
+| `input_router_test` | The keyboard router: one press is one semantic event, the repeat guard a terminal without key-up needs, the batch priority (emergency stop first, velocity intent last), and the single body-velocity intent with its deadline. | phase-2 input contract |
 
-All nine run without a peer, without a network and without a wall-clock
+All fourteen run without a peer, without a network and without a wall-clock
 deadline: they assert exact tick semantics and counter values, and the only
 wall-clock waits in `logger_test` are hang guards.
 
-## Real-DDS suite (`-L integration`, 15 tests)
+## Real-DDS suite (`-L integration`, 24 tests)
 
 ### Process-level entries
 
@@ -97,6 +141,9 @@ wall-clock waits in `logger_test` are hang guards.
 | `dds_codec_test` | Against a live endpoint: the codec round trip and field-by-field equality of the core types - including the empty, unused first command of a session, stop or reset request and the rejection of an over-long or missing joint vector - codec rejection of malformed samples, that the running transport's readers and writers really carry the frozen QoS (durability, reliability, history depth and kind, resource limits, and `max_blocking_time` on the reliable channels) as read back from the endpoints, and that a peer process sees the published samples. It also proves the transport's own lane policy for heartbeats: a batch that receives a foreign sample after the owner's still hands the owner sample over first, and a lane that is full refuses what does not fit and counts it instead of displacing an older entry. |
 | `runtime_cli_test` | The process contract of `robot_runtime`: every startup rejection (missing/malformed configuration, `backend: real`, a broken scenario, unknown argument, out-of-range domain) exits non-zero with a message and without starting DDS; the normal path reaches `ZeroTorque` and exits 0 with a clean shutdown on `SIGTERM`; an unsupervised runtime keeps running; a latched fault keeps running and refuses to leave, and a hard kill is reported as such. |
 | `confirmation_test` | The test-only confirmation helper: a request is only proven when a later-published `Applied` result and an agreeing `RobotState` identify it, in both arrival orders, and a late `Applied` after a `Fault` never confirms anything. Pure protocol logic, no DDS. |
+| `application_cli_test` | The process contract of `application` against a real runtime: every startup rejection (missing/malformed configuration, unknown argument, out-of-range domain) exits with the usage or configuration code and message before DDS exists; the normal exit and the signalled exit are the same confirmed ordered stop (`stop=confirmed state=Damping`, exit 0); a latched lower fault is reported as Fault and leaves with `stop=unknown lower=Fault`, exit 3, without claiming a stop; an unreachable lower leaves with `stop=unknown lower=Unknown`, exit 3, inside its bound; the terminal is restored on every exit path; and a lost input device is the same bounded exit. |
+| `application_client_test` | The official client against a real standalone runtime, driven by hand: the same transport and request/answer rules the application ships, with the arrival order of an answer and its witness state made deterministic, so a confirmation in both orders, a session takeover, a stop preempting a pending request and the epoch watermark are proven against the real lower layer rather than only against a recording sink. |
+| `application_flow_test` | The cross-process phase acceptance: a runtime replaced under a running application (the upper reports `Fault`, binds the new instance and never returns to a tracking behaviour by itself), a `SIGSTOP`/`SIGCONT` of the runtime (the upper reports `Unknown` inside the state window plus slack, latches its own `Fault` and stays latched while the runtime keeps running), a `SIGSTOP`ped application (the runtime falls back on its own command timeout, measured from its own log) and a `SIGKILL`ed application (the runtime expires the supervisor lease, proven by its own event and by the all-zero session of its per-tick trace), a normal application exit with the runtime surviving (run through the harness on `application_normal`), the phase invariant that no run ever shows `behavior=Locomotion` (recorded as the third-phase boundary, not as a pass), and that every case claimed its own domain and left no process behind. |
 
 ### The scenario matrix
 
@@ -119,6 +166,22 @@ phase.
 | `local_stop` (212) | The runtime's own guarded stop is the only way out: a supervisor holds a granted tracking authorization on a live session and a producer keeps the target fresh, and neither asks for a stop before `SIGTERM`. The machine is proven to be in `Tracking` when the signal arrives, and the run then has to reach `ZeroTorque` by itself, accept that torque write and report a clean shutdown - the operator's signal does not depend on a supervisor being reachable, and the process cannot leave without the stop having happened. | "the runtime stops itself when the process leaves", "`Applied` is a host-path acceptance" |
 | `write_refused` (210) | The fake backend refuses the write of a tracking tick: the refusal latches as a fault, the runtime commands zero torque instead of the refused target, and only a matching `Reset` clears the fault once the write path is healthy again. The trace carries the refused attempt and the effective write of every such tick. | "fault first-tick output", "`Applied` is a host-path acceptance, never a device ack" |
 
+### The application matrix (real upper process over real DDS)
+
+Each entry drives the shipped `application` binary through a PTY against a real
+`robot_runtime` on one claimed domain, with one generated `config.json` shared
+by both processes. The upper layer is never simulated by `runtime_client`, and
+no scenario in this group asserts anything about motor execution.
+
+| Scenario | What it proves |
+|---|---|
+| `application_normal` (213) | The documented operator path of the two-process deployment: `Starting → Standby → Damping → Initializing → Ready → Damping → Standby` by keyboard over DDS, then the ordered exit from `Standby`, confirmed by a fresh lower state (`stop=confirmed state=Damping`, exit 0). The runtime outlives the application and keeps damping without a supervisor, and a **second** application process then takes that left-over damping state over: it acquires a session, asks for `ZeroTorque`, reaches `Standby` on the confirmed fresh state – never into a behaviour that could move – and leaves through its own confirmed ordered exit. The runtime, left damping without a supervisor again, deliberately refuses to leave on `SIGTERM`, which the scenario reports. |
+| `application_ready_hold` (214) | A `Ready` hold of 1.5 s is longer than every runtime deadline the upper layer could hide behind: the per-tick trace proves 1060 tracked ticks with 106 distinct, strictly advancing applied command sequences over 2.1 s, the runtime's log holds no `CommandTimeout` and no `SourceStateTimeout`, its control deadlines hold, and it then stops cleanly from the `ZeroTorque` the upper layer asked for while still supervised. The application process, whose lower layer is gone by then, is killed: the bounded exit is `application_unknown`'s subject, not this scenario's. |
+| `application_repeat_and_reset` (215) | The initialization runs twice from `Damping` (a repeated `i` starts a new trajectory and reaches `Ready` again), the software emergency stop on a healthy link latches the upper `Fault` while the lower layer keeps its own `Damping` output, and the explicit `Reset` is the only way back – through a confirmed fresh `ZeroTorque` into `Standby`, never beyond it. |
+| `application_stop_preempt` (216) | A stop preempts a pending request: with the tracking request on the wire (`pending=Tracking`) the `ZeroTorque` key replaces it with a strictly larger request id (`pending=ZeroTorque`), the upper layer ends in `Standby` on a confirmed fresh `ZeroTorque` and never reaches `Ready`, and the runtime reports the stop it was asked for rather than a target deadline. |
+| `application_fault` (217) | The fake backend refuses the torque write, the runtime latches `WriteFailed` while it keeps running and opens its recovery window, and the real application reports `behavior=Fault` with the lower `runtime=Fault` – it sends no target and never claims a stop – then leaves bounded with `stop=unknown lower=Fault`, exit 3, and the runtime refuses to leave the latched fault on `SIGTERM`. The emergency stop on a healthy link is asserted by `application_repeat_and_reset`; the Reset that clears a latched lower fault is not asserted anywhere in this group (see the finding below). |
+| `application_unknown` (218) | The lower process is `SIGKILL`ed while the application supervises it: the application reports `runtime=Unknown` (and `fresh=no`) 148–150 ms after the kill, i.e. inside the 150 ms state window plus slack, latches its own `Fault` instead of presenting the last remembered state as the runtime's present fact, and leaves with `stop=unknown lower=Unknown`, exit 3, 1.01 s after the exit key – never reporting a stop it could not confirm. |
+
 ## Traceability of the design report §9
 
 | Design §9 acceptance item | Where it is proven |
@@ -138,15 +201,36 @@ phase.
 | The runtime's own stop leaves the machine only at zero torque, from the state it was found in, and the process leaves only then | `local_stop`, `execution_fsm_test`, `runtime_cli_test` |
 | Configuration and versioning executable, installable runtime, format check, CI | `config_test`, `config_schema_contract_test`, `runtime_cli_test`, `format-check` and the CI workflow |
 
+## Traceability of the phase-2 two-process acceptance (§11)
+
+| Acceptance item (§11) | Where it is proven |
+|---|---|
+| `Standby → Damping → Initializing → Ready → Damping → Standby` per tick with the upper state checked | `application_normal` (the behaviour path), `application_initialization_test` (the trajectory and its tolerances) |
+| An emergency stop latches the upper `Fault`, preempts the pending request, and only an explicit `Reset` reaches `Standby`/`ZeroTorque` | `application_fsm_test`, `application_repeat_and_reset` (both keys over real DDS) |
+| A `Locomotion` initialization request is refused and creates no return trajectory | **not accepted in this phase** – see the boundary below |
+| An ordered application exit leaves the runtime damping; an unconfirmable stop is never reported as a stop | `application_normal`, `application_cli_test`, `application_unknown`, `application_fault` |
+| Lower-layer refusal / write failure, lost or late results, same-id retry, older-request refusal, out-of-order states, stop preempting a pending request | `write_refused`, `request_retry`, `stale_context`, `application_client_test`, `application_stop_preempt`, `application_fault` |
+| Killing/pausing the application while the DDS threads stay alive: the runtime still falls back inside the configured deadlines and no old packet feeds the watchdog | `application_flow_test` (`app_paused`, `app_killed`), `supervisor_paused`, `supervisor_killed` |
+| A runtime restart or a one-way state-link interruption: the upper layer does not automatically resume `Tracking`, and `Unknown` is never presented as a stopped machine | `application_flow_test` (`restart`, `state_link`), `application_unknown`, `runtime_restarted`, `stale_context` |
+| Upper `Fault` with the lower layer damping; the lower layer's own fault reported in step | `application_repeat_and_reset`, `application_fault`, `application_cli_test` |
+| The upper layer keeps publishing targets across several lower-layer deadline windows | `application_ready_hold` |
+| No real hardware, no ONNX, no external producer, no `Recorder`, no `Locomotion` entry, no motor acknowledgement | **not covered** – see the list below |
+
 ## Timing claims
 
 The deterministic suite asserts exact tick semantics; the integration suite
 records measured timings and compares them against the configured deadlines with
 an explicit scheduling tolerance (100 ms on the fault and fallback observations,
-bounded final waits of 10 s per scenario). Those tolerances account for ordinary
-operating-system scheduling **on the test host**. They are not a hard
-real-time proof and this phase does not claim one: no test here demonstrates a
-bounded worst-case latency under load, and none is run on the target hardware.
+bounded final waits of 10 s per scenario). The two-process acceptance adds the
+upper layer's own reactions, each measured from the signal that caused it and
+compared against the configured window plus slack: the unknown lower state
+inside `state_timeout_us` (150 ms) plus 450 ms and no earlier than half the
+window, the runtime's command timeout and supervisor lease expiry read from the
+runtime's own log, and the bounded exit inside `request_deadline_us` plus slack.
+Those tolerances account for ordinary operating-system scheduling **on the test
+host**. They are not a hard real-time proof and this phase does not claim one:
+no test here demonstrates a bounded worst-case latency under load, and none is
+run on the target hardware.
 
 ## What is not covered
 
@@ -157,15 +241,93 @@ bounded worst-case latency under load, and none is run on the target hardware.
   motion, torque or brake behaviour, and no safety number here is a validated
   machine limit.
 * **Firmware loss behaviour** and the recovery of a real drive are untested.
-* Later phases stay out of scope and are not simulated as done: the real
-  application's two-layer acceptance, ONNX inference consistency, the lifecycle
-  of an external producer, long-running recorder tests and the hardware
-  acceptance of the overall report are not covered by any test in this phase.
-* The test client `runtime_client`, the confirmation helper and the fake
-  scenario files are test artifacts. They are not a delivered client API, they
-  are not installed, and nothing in the runtime calls into them.
+* **What phase two does not cover.** The two-process acceptance drives the real
+  `application` and the real `robot_runtime`, but the list it does *not* accept
+  is explicit:
+  * **No ONNX policy** and no inference at all: the upper layer ships no policy,
+    no model loader and no observation/action mapping, so nothing here checks
+    inference consistency or model I/O.
+  * **No external producer lifecycle**: a producer that registers, warms up and
+    publishes velocity intents is not part of this phase. The one body-velocity
+    intent the keyboard maintains and expires has no consumer.
+  * **No `Recorder`**: nothing records a long run, and no statistical check of
+    the host receive rate, gaps or latency exists.
+  * **No real backend**: every process runs the fake backend with scripted
+    feedback, so no CAN/EtherCAT transport, no device, no real drive recovery
+    and no bench value is covered.
+  * **`Locomotion` is not accepted.** The enumerator exists and
+    `StartLocomotion()` refuses (`application_fsm_test`), and
+    `application_flow_test` asserts that no run of this acceptance ever shows
+    `behavior=Locomotion`; the phase ships no locomotion target generator, no
+    `Locomotion` entry key and no locomotion acceptance. `application_normal`
+    therefore ends at `Ready`.
+  * **No motor acknowledgement**: `Applied` is the host send path accepting an
+    output, `ZeroTorque` is a torque request and never a power cut, and no test
+    here observes physical execution.
+  * **No real hardware emergency stop**: the `space` key is a software latch on
+    this host and this DDS link.
+* Later phases stay out of scope and are not simulated as done: ONNX inference
+  consistency, the lifecycle of an external producer, long-running recorder
+  tests and the hardware acceptance of the overall report are not covered by any
+  test in this phase.
+* The test client `runtime_client`, the confirmation helper, the flow test's
+  own helpers and the fake scenario files under `tests/support/` are test
+  artifacts. They are not a delivered client API, they are not installed, and
+  nothing in the runtime calls into them. `tests/support/fake_static.json` is
+  the scenario a *repeated* initialization needs: the shipped
+  `tests/support/fake_scenario.json` steps the measured position to 0.05 rad two
+  seconds in, which is outside the shipped completion tolerance, so the second
+  initialization could never complete against it.
 * Telemetry is not part of the protocol: `logger_test`, `slow_logger` and
   `stderr_backpressure` cover the bounded logger's own contract and the bounded
   exit diagnostics, not a wire format. A diagnostic that a jammed pipe destroys
   is dropped by design, so `stderr_backpressure` asserts the exit, the confirmed
   state and the trace rather than the line.
+
+## Findings of the two-process acceptance
+
+Driving the two real processes over DDS surfaced two deviations from the
+documented behaviour of the upper layer. Both were found by the acceptance,
+neither is fixed by it (the fixes belong to `src/application/`), and neither is
+encoded as a passing expectation here – a scenario that asserted the deviation
+would pin it, and one that asserted the documented contract would fail the whole
+suite. They are recorded so they can be fixed and turned into regressions.
+
+1. **The ordered exit from a tracking behaviour latches an upper `Fault`.** With
+   the application in `Ready` and the runtime still `Tracking`, pressing `x`
+   prints
+
+   ```text
+   [application] behavior=Fault runtime=Tracking output=Tracking session=owned pending=Damping reject=- fresh=yes init=-
+   application: exit stop=confirmed state=Damping
+   ```
+
+   `RequestExit` cancels the initialization, which clears the authorized
+   tracking context (`tracking_active_`), and the next iteration's state check
+   then reads the lower layer's still-`Tracking` state as a context nobody
+   authorized (`UnexpectedContext`). The latch cause is not part of the status
+   line, so that mechanism is read from the code rather than observed: it is the
+   only cause `FreshStateAndFaults` can select for a fresh `Tracking` state with
+   a live session and an untracked behaviour. The exit itself stays honest – the
+   line is decided by the damping confirmation, not by the latch – but a latched
+   `Fault` is displayed, and it would require a `Reset` if the process stayed up.
+   Any scenario that wants a clean exit has to press a stop key first and wait
+   for it, which is why `application_normal`, `application_stop_preempt` and
+   `application_repeat_and_reset` exit from `Standby`.
+
+2. **A `Reset` the runtime applies does not bring the upper layer to `Standby`.**
+   With a latched lower fault (`application_fault`'s refused write) and the
+   runtime's recovery window open, the first `r` sends the `Reset` and the
+   runtime answers `ResetApplied {event=15 from="Fault" to="ZeroTorque"}`, but
+   the application stays in `Fault`; a second `r` reaches `Standby` through the
+   explicit `ZeroTorque` stop instead. The documented contract of the key is
+   "the only way out of a latched `Fault`, and only into `Standby`, on a
+   confirmed fresh `ZeroTorque`", and `robot_client_test`/`application_fsm_test`
+   cover both halves in isolation – the two-process run is where they disagree.
+   `application_fault` therefore asserts the refused-write fault, the honest
+   `stop=unknown lower=Fault` exit and the runtime's refusal to leave, and it
+   deliberately does not assert either the one-press or the two-press behaviour.
+
+Both are reproducible with the commands above: the first with
+`integration_application_normal`'s steps shortened to exit from `Ready`, the
+second by pressing `r` once and then again in `application_fault`'s fault state.
