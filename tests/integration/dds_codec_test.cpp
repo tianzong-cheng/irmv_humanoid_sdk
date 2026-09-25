@@ -157,7 +157,11 @@ ExecutionRequest MakeRequest(Operation operation, Sequence request_id) {
   request.producer_id = MakeId(0x33);
   request.fault_id = 0;
   request.operation = operation;
-  request.first_command = MakeCommand();
+  // Tracking is the only operation that consumes the nested frame, so it is the
+  // only one that builds it: the others travel with the command left empty.
+  if (operation == Operation::Tracking) {
+    request.first_command = MakeCommand();
+  }
   return request;
 }
 
@@ -466,6 +470,32 @@ bool RoundTripSamples() {
     }
   }
 
+  // The four operations that consume no target frame round trip with the nested
+  // command left at its default: nothing in the runtime reads it for them, and
+  // an empty frame has to survive both directions unchanged.
+  const Operation unused_frame_operations[] = {
+      Operation::AcquireSession, Operation::Damping, Operation::ZeroTorque,
+      Operation::Reset};
+  for (const Operation operation : unused_frame_operations) {
+    ExecutionRequest expected = MakeRequest(operation, kAcquireRequestId);
+    expected.first_command = JointCommand{};
+    wire::ExecutionRequest wire;
+    codec::ToWire(expected, wire);
+    if (wire.first_command().joints().count() != 0 ||
+        wire.first_command().layout_id().count() != 0) {
+      std::cerr << "codec: operation " << static_cast<std::uint32_t>(operation)
+                << " wrote an unused first command\n";
+      return false;
+    }
+    ExecutionRequest restored;
+    if (!codec::FromWire(wire, restored) || !Same(expected, restored) ||
+        restored.first_command.joints.count != 0) {
+      std::cerr << "codec: operation " << static_cast<std::uint32_t>(operation)
+                << " did not round trip an empty first command\n";
+      return false;
+    }
+  }
+
   const ExecutionState states[] = {
       ExecutionState::Boot, ExecutionState::ZeroTorque, ExecutionState::Damping,
       ExecutionState::Tracking, ExecutionState::Fault};
@@ -594,7 +624,7 @@ bool RoundTripSamples() {
   std::cout << "[dds_codec_test] codec round trips: five messages, 64 joints, "
                "64/256 byte text, high-bit error code 0x"
             << std::hex << kHighBitErrorCode << std::dec
-            << ", every enum value\n";
+            << ", every enum value, empty unused first command\n";
   return true;
 }
 
@@ -653,6 +683,39 @@ bool RejectInvalidSamples() {
     if (codec::FromWire(wire_state, destination) ||
         !Same(before, destination)) {
       std::cerr << "codec: a fault count above kMaxJoints was accepted\n";
+      return false;
+    }
+  }
+
+  // The unused nested frame of a non-Tracking request may be empty, but it is
+  // still bounded: a count above the capacity is rejected there as well.
+  {
+    wire::ExecutionRequest wire_request;
+    codec::ToWire(MakeRequest(Operation::Damping, kAcquireRequestId),
+                  wire_request);
+    wire_request.first_command().joints().count(
+        static_cast<std::uint32_t>(kMaxJoints) + 1);
+    ExecutionRequest destination =
+        MakeRequest(Operation::Tracking, kStopRequestId);
+    const ExecutionRequest before = destination;
+    if (codec::FromWire(wire_request, destination) ||
+        !Same(before, destination)) {
+      std::cerr << "codec: an oversized unused first command was accepted\n";
+      return false;
+    }
+  }
+  // Tracking consumes the nested frame, so an empty one is rejected there.
+  {
+    wire::ExecutionRequest wire_request;
+    codec::ToWire(MakeRequest(Operation::Tracking, kAcquireRequestId),
+                  wire_request);
+    wire_request.first_command().joints().count(0);
+    ExecutionRequest destination = MakeRequest(Operation::Damping, 1);
+    const ExecutionRequest before = destination;
+    if (codec::FromWire(wire_request, destination) ||
+        !Same(before, destination)) {
+      std::cerr << "codec: a Tracking request with an empty first command was "
+                   "accepted\n";
       return false;
     }
   }
@@ -790,7 +853,8 @@ bool RejectInvalidSamples() {
   }
 
   std::cout << "[dds_codec_test] codec rejections: counts above capacity, zero "
-               "joint count, over-long text, unknown enums\n";
+               "joint count, over-long text, unknown enums, an empty Tracking "
+               "frame\n";
   return true;
 }
 
@@ -1052,8 +1116,12 @@ int main() {
   {
     Sender<wire::ExecutionRequest> sender(
         publisher, request_topic, irmv::protocol::kExecutionRequestTopic);
-    const ExecutionRequest expected =
+    ExecutionRequest expected =
         MakeRequest(Operation::AcquireSession, kAcquireRequestId);
+    // A bootstrap carries no target, so its nested frame is empty. Its stamp is
+    // still set to a value no host monotonic read can return, so a receive
+    // stamp copied from the sender would be visible as such.
+    expected.first_command.stamp_us = kSenderStampUs;
     wire::ExecutionRequest wire_request;
     codec::ToWire(expected, wire_request);
 
@@ -1078,6 +1146,8 @@ int main() {
         3'000'000);
     CHECK(delivered);
     CHECK(Same(expected, received));
+    // The unused frame stayed empty all the way through the transport.
+    CHECK(received.first_command.joints.count == 0);
     CHECK(!stop_lane_traffic);
     // The receive stamp is the host monotonic time of the read, not the
     // sender's stamp.

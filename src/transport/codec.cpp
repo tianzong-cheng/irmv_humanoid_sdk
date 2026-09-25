@@ -129,12 +129,14 @@ bool ReadEnum(WireEnum value, CoreEnum &target) {
   return true;
 }
 
+// `require_joints` names the two shapes a joint vector can have: a Tracking
+// request and a sample of the command lane name the joints they target, while
+// the operations that consume no target carry the vector empty. A count above
+// the fixed capacity is rejected either way.
 bool ReadVector(const protocol::wire::JointVector &source,
-                protocol::JointVector &target) {
+                protocol::JointVector &target, bool require_joints) {
   const std::uint32_t count = source.count();
-  // A command has to name its joints: ValidateCommandShape accepts only the
-  // configured, non-zero joint count.
-  if (count < 1 || count > kMaxJoints) {
+  if (count > kMaxJoints || (require_joints && count < 1)) {
     return false;
   }
   target.count = count;
@@ -221,7 +223,7 @@ bool ReadFaults(const protocol::wire::FaultReport &source,
 }
 
 bool ReadCommand(const protocol::wire::JointCommand &source,
-                 protocol::JointCommand &target) {
+                 protocol::JointCommand &target, bool require_joints) {
   target.protocol_version = source.protocol_version();
   target.runtime_id = source.runtime_id();
   target.session_id = source.session_id();
@@ -233,7 +235,7 @@ bool ReadCommand(const protocol::wire::JointCommand &source,
   if (!ReadText(source.layout_id(), target.layout_id)) {
     return false;
   }
-  return ReadVector(source.joints(), target.joints);
+  return ReadVector(source.joints(), target.joints, require_joints);
 }
 
 bool ReadRequest(const protocol::wire::ExecutionRequest &source,
@@ -250,7 +252,16 @@ bool ReadRequest(const protocol::wire::ExecutionRequest &source,
   if (!ReadEnum(source.operation(), target.operation)) {
     return false;
   }
-  return ReadCommand(source.first_command(), target.first_command);
+  // The operation is decoded before the nested frame because it decides how
+  // that frame is read. Nothing in the runtime consumes first_command of a
+  // request that is not Tracking, and the request record comparison ignores it
+  // for those operations: ExecutionFsm::PayloadMatches in
+  // src/runtime/execution_fsm.cpp returns before it looks at the nested frame.
+  // Such a request may therefore carry an empty frame, and only Tracking must
+  // carry a fully shaped one.
+  const bool consumes_frame = target.operation == protocol::Operation::Tracking;
+  return ReadCommand(source.first_command(), target.first_command,
+                     consumes_frame);
 }
 
 bool ReadResult(const protocol::wire::ExecutionResult &source,
@@ -437,7 +448,8 @@ void ToWire(const protocol::RobotState &source,
 bool FromWire(const protocol::wire::JointCommand &source,
               protocol::JointCommand &target) {
   protocol::JointCommand candidate;
-  if (!ReadCommand(source, candidate)) {
+  // A sample of the command lane is a target frame: it names its joints.
+  if (!ReadCommand(source, candidate, true)) {
     return false;
   }
   target = candidate;

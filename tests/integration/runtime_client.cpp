@@ -1192,16 +1192,20 @@ ExecutionRequest Client::MakeRequest(Operation operation, Sequence request_id) {
   request.producer_id = irmv::protocol::kNoId;
   request.fault_id = 0;
   request.operation = operation;
-  // The wire codec validates the embedded command of every request, including
-  // the operations that carry no target, so a request always carries a
-  // well-formed frame; the runtime reads it only for Tracking.
-  request.first_command.protocol_version = irmv::protocol::kProtocolVersion;
-  request.first_command.runtime_id = request.runtime_id;
-  request.first_command.session_id = request.session_id;
-  request.first_command.producer_id = producer_id_;
-  request.first_command.stamp_us = now();
-  static_cast<void>(request.first_command.layout_id.Assign(config_.layout_id));
-  request.first_command.joints.count = joint_count();
+  // Only Tracking consumes the nested frame, so only Tracking builds one; the
+  // codec accepts an empty first_command for every other operation and the
+  // runtime never reads it, so inventing a target for a stop or a bootstrap
+  // would be dead weight the sender has to keep well formed.
+  if (operation == irmv::protocol::Operation::Tracking) {
+    request.first_command.protocol_version = irmv::protocol::kProtocolVersion;
+    request.first_command.runtime_id = request.runtime_id;
+    request.first_command.session_id = request.session_id;
+    request.first_command.producer_id = producer_id_;
+    request.first_command.stamp_us = now();
+    static_cast<void>(
+        request.first_command.layout_id.Assign(config_.layout_id));
+    request.first_command.joints.count = joint_count();
+  }
   return request;
 }
 
@@ -1863,8 +1867,8 @@ int Client::RunFlood() {
     }
     if (now() >= flood_emit_us_ + period_us) {
       flood_emit_us_ = now();
-      // Built through MakeRequest so the frame carries a well-formed command:
-      // the wire codec validates the embedded command of every request.
+      // Built through MakeRequest, which fills the target frame of a Tracking
+      // request: the wire codec rejects Tracking without one.
       ExecutionRequest request = MakeRequest(Operation::Tracking, ++request_id);
       request.session_id = observed_session;
       request.runtime_id = runtime_id_;
