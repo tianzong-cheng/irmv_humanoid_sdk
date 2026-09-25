@@ -309,6 +309,36 @@ int main() {
   CHECK(report.feedback_invalid);
   CHECK(!report.awaiting_feedback);
 
+  // A sample that claims absence while carrying values was observed as
+  // something, so it is judged by those values inside the grace window as well:
+  // only the documented default shape is waiting. The other joint stays healthy
+  // and observed, which is why nothing is waiting for it.
+  feedback = HealthyFeedback(config);
+  feedback.joints[0] = irmv::protocol::JointFeedback{};
+  feedback.joints[0].q = config.position_max[0] + 1.0;
+  report = CheckFeedback(config, feedback, kNowUs, true);
+  CHECK(report.fault);
+  CHECK(report.position_exceeded);
+  CHECK(!report.awaiting_feedback);
+  CHECK(FindDetail(report.details, FaultReason::JointPositionExceeded, 0) !=
+        nullptr);
+
+  feedback = HealthyFeedback(config);
+  feedback.joints[1] = irmv::protocol::JointFeedback{};
+  feedback.joints[1].dq = config.joint_velocity_limits[1] + 1.0;
+  report = CheckFeedback(config, feedback, kNowUs, true);
+  CHECK(report.fault);
+  CHECK(report.velocity_exceeded);
+  CHECK(!report.awaiting_feedback);
+
+  feedback = HealthyFeedback(config);
+  feedback.joints[0] = irmv::protocol::JointFeedback{};
+  feedback.joints[0].freq_hz = config.boot.minimum_frequency_hz;
+  report = CheckFeedback(config, feedback, kNowUs, true);
+  CHECK(report.fault);
+  CHECK(report.feedback_invalid);
+  CHECK(!report.awaiting_feedback);
+
   // A healthy snapshot inside the grace window really is healthy: nothing is
   // waiting anymore.
   feedback = HealthyFeedback(config);
@@ -628,6 +658,16 @@ int main() {
   CHECK(report.imu_invalid);
   CHECK(!report.awaiting_feedback);
   CHECK(report.reason == FaultReason::ImuInvalid);
+
+  // A required IMU that claims absence while carrying a value is judged by that
+  // value inside the grace window too.
+  feedback = HealthyFeedback(imu_config);
+  feedback.imu = {};
+  feedback.imu.orientation_rpy[0] = 0.5;
+  report = CheckFeedback(imu_config, feedback, kNowUs, true);
+  CHECK(report.fault);
+  CHECK(report.imu_invalid);
+  CHECK(!report.awaiting_feedback);
 
   // ---- CheckFeedback: simultaneous offenders and priority ----
   const RuntimeConfig three_joint = ManyJointConfig(3);

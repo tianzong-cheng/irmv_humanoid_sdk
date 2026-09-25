@@ -48,13 +48,18 @@ bool IsJointSampleFinite(const protocol::JointFeedback &joint) {
 }
 
 // A sample carries no observation at all when the backend has never delivered
-// a frame for it: unobserved and unconnected, no receive stamp and no driver
-// status. The values must still be finite so garbage is never read as absence.
-// Zero-valued defaults therefore stay distinguishable from a measurement of
-// zero, which is why absence is neither healthy nor faulty.
+// a frame for it: unobserved and unconnected, no receive stamp, no driver
+// status, and the documented default shape - the zeros an untouched sample
+// holds. Requiring that shape is what keeps a frame that merely *claims*
+// absence while carrying values a measurement: it is judged by those values
+// like any other observation instead of being excused by the grace window, and
+// garbage is never read as absence. Zero-valued defaults therefore stay
+// distinguishable from a measurement of zero, which is why absence is neither
+// healthy nor faulty.
 bool IsJointSampleAbsent(const protocol::JointFeedback &joint) {
   return !joint.valid && !joint.connected && joint.rx_stamp_us == 0 &&
-         joint.error_code == 0 && IsJointSampleFinite(joint);
+         joint.error_code == 0 && joint.q == 0.0 && joint.dq == 0.0 &&
+         joint.tau_est == 0.0 && joint.freq_hz == 0.0;
 }
 
 bool IsImuSampleFinite(const protocol::ImuFeedback &imu) {
@@ -77,9 +82,27 @@ bool IsImuSampleFinite(const protocol::ImuFeedback &imu) {
 }
 
 // The IMU has no connection flag, so absence is the unobserved sample with no
-// receive stamp and finite fields.
+// receive stamp and the same documented default shape as an absent joint.
 bool IsImuSampleAbsent(const protocol::ImuFeedback &imu) {
-  return !imu.valid && imu.rx_stamp_us == 0 && IsImuSampleFinite(imu);
+  if (imu.valid || imu.rx_stamp_us != 0 || !IsImuSampleFinite(imu)) {
+    return false;
+  }
+  for (const double value : imu.orientation_rpy) {
+    if (value != 0.0) {
+      return false;
+    }
+  }
+  for (const double value : imu.angular_velocity) {
+    if (value != 0.0) {
+      return false;
+    }
+  }
+  for (const double value : imu.linear_acceleration) {
+    if (value != 0.0) {
+      return false;
+    }
+  }
+  return true;
 }
 
 // A timestamp from the future is as unusable as one older than the configured
