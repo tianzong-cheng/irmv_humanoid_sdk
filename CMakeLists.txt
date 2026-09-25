@@ -113,7 +113,11 @@ set_tests_properties(
   WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
-add_library(irmv_application src/application/robot_client.cpp)
+add_library(
+  irmv_application
+  src/application/initialization.cpp
+  src/application/robot_client.cpp
+)
 target_compile_features(irmv_application PUBLIC cxx_std_17)
 target_include_directories(
   irmv_application
@@ -139,6 +143,26 @@ target_link_libraries(robot_client_test PRIVATE irmv_application irmv_configurat
 add_test(NAME robot_client_test COMMAND robot_client_test)
 set_tests_properties(
   robot_client_test PROPERTIES LABELS core
+  WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
+add_executable(
+  application_initialization_test tests/unit/application_initialization_test.cpp
+)
+target_compile_features(application_initialization_test PRIVATE cxx_std_17)
+target_include_directories(
+  application_initialization_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(
+  application_initialization_test PRIVATE irmv_application irmv_configuration
+)
+
+add_test(NAME application_initialization_test COMMAND application_initialization_test)
+set_tests_properties(
+  application_initialization_test PROPERTIES LABELS core
   WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
