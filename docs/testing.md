@@ -30,6 +30,22 @@ python3 tools/run_integration.py --all \
     --runtime build/robot_runtime --client build/runtime_client --source .
 ```
 
+The channel handoff is also checked for data races, which no functional test can
+prove: a stress run can only show that a torn payload was observed, never that
+the interleaving which would produce one cannot happen. The entry that owns the
+handoff is run under ThreadSanitizer:
+
+```bash
+cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DIRMV_SANITIZE=thread
+cmake --build build-tsan --target channel_test -j2
+setarch "$(uname -m)" -R ./build-tsan/channel_test
+```
+
+`setarch -R` disables address-space randomisation for that process, which
+ThreadSanitizer needs on hosts where it refuses to start otherwise. This run is
+not part of CI yet; it is the check that found the eviction race, and
+`bounded_channel.hpp` must stay clean under it.
+
 ### DDS domain policy
 
 Every integration entry isolates itself on its **own DDS domain**, always below
