@@ -262,13 +262,13 @@ void DdsTransport::Impl::ReadRequests() {
         continue;
       }
       runtime::Received<protocol::ExecutionRequest> received{value, rx_us};
-      bool evicted = false;
-      if (IsStopLaneOperation(value.operation)) {
-        owner.stop_requests_.TryPushEvictOldest(received, &evicted);
-      } else {
-        owner.requests_.TryPushEvictOldest(received, &evicted);
-      }
-      if (evicted) {
+      // Both request lanes are FIFO, so a refusal costs this newest sample and
+      // the entries already queued keep their order; a full ordinary queue
+      // cannot reach the stop lane, which has its own channel.
+      const bool stored = IsStopLaneOperation(value.operation)
+                              ? owner.stop_requests_.TryPush(received)
+                              : owner.requests_.TryPush(received);
+      if (!stored) {
         owner.dropped_requests_.fetch_add(1, std::memory_order_relaxed);
       }
     }
@@ -291,10 +291,13 @@ void DdsTransport::Impl::ReadCommands() {
         owner.inbound_rejected_.fetch_add(1, std::memory_order_relaxed);
         continue;
       }
+      // The command lane keeps only the newest entry: a sample that supersedes
+      // an unread one, and one that cannot be stored at all, are both losses
+      // the control thread would never see otherwise.
       bool evicted = false;
-      owner.commands_.TryPushEvictOldest(
+      const bool stored = owner.commands_.Publish(
           runtime::Received<protocol::JointCommand>{value, rx_us}, &evicted);
-      if (evicted) {
+      if (!stored || evicted) {
         owner.dropped_commands_.fetch_add(1, std::memory_order_relaxed);
       }
     }
@@ -317,11 +320,13 @@ void DdsTransport::Impl::ReadHeartbeats() {
         owner.inbound_rejected_.fetch_add(1, std::memory_order_relaxed);
         continue;
       }
+      // The heartbeat lane keeps only the newest entry, like the command lane,
+      // because a control tick only needs the freshest supervisor state.
       bool evicted = false;
-      owner.heartbeats_.TryPushEvictOldest(
+      const bool stored = owner.heartbeats_.Publish(
           runtime::Received<protocol::SupervisorHeartbeat>{value, rx_us},
           &evicted);
-      if (evicted) {
+      if (!stored || evicted) {
         owner.dropped_heartbeats_.fetch_add(1, std::memory_order_relaxed);
       }
     }
@@ -329,18 +334,18 @@ void DdsTransport::Impl::ReadHeartbeats() {
 }
 
 void DdsTransport::Impl::WriteOutbound() {
-  // The state and its wire representation are both large, so nothing is
-  // constructed while the state channel is empty. A stale empty() read only
-  // delays the snapshot by one loop period; the channel keeps the newest value.
-  if (!owner.state_.empty()) {
-    protocol::RobotState state;
-    if (owner.state_.TryPop(state)) {
-      wire::RobotState wire_state;
-      codec::ToWire(state, wire_state);
-      TryWrite(state_writer, wire_state, owner.dropped_states_);
-    }
+  // The state channel keeps one snapshot, so a take either hands it over or
+  // reports nothing published; the wire representation is built only in the
+  // first case, which keeps the loop cheap while no snapshot is pending.
+  protocol::RobotState state;
+  if (owner.state_.TryTake(state)) {
+    wire::RobotState wire_state;
+    codec::ToWire(state, wire_state);
+    TryWrite(state_writer, wire_state, owner.dropped_states_);
   }
 
+  // The result queue is FIFO and bounded, so it is drained until it is empty;
+  // TryPop turning false after the last entry is the normal empty signal.
   protocol::ExecutionResult result;
   while (owner.results_.TryPop(result)) {
     wire::ExecutionResult wire_result;
@@ -397,6 +402,10 @@ const runtime::TickInput &DdsTransport::TakeInput() {
   input_.command_count = 0;
   input_.heartbeat_count = 0;
 
+  // The request lanes and the result lane are FIFO, so each is drained until
+  // empty up to the size of its destination. The command and heartbeat lanes
+  // keep one entry each, so a single take drains everything they hold; a
+  // TryTake that reports false right after a take is the normal empty signal.
   while (input_.request_count < runtime::kRequestBatchCapacity &&
          requests_.TryPop(input_.requests[input_.request_count])) {
     ++input_.request_count;
@@ -406,30 +415,31 @@ const runtime::TickInput &DdsTransport::TakeInput() {
       stop_requests_.TryPop(input_.stop_requests[input_.stop_request_count])) {
     ++input_.stop_request_count;
   }
-  while (input_.command_count < runtime::kCommandBatchCapacity &&
-         commands_.TryPop(input_.commands[input_.command_count])) {
+  if (input_.command_count < runtime::kCommandBatchCapacity &&
+      commands_.TryTake(input_.commands[input_.command_count])) {
     ++input_.command_count;
   }
-  while (input_.heartbeat_count < runtime::kHeartbeatBatchCapacity &&
-         heartbeats_.TryPop(input_.heartbeats[input_.heartbeat_count])) {
+  if (input_.heartbeat_count < runtime::kHeartbeatBatchCapacity &&
+      heartbeats_.TryTake(input_.heartbeats[input_.heartbeat_count])) {
     ++input_.heartbeat_count;
   }
   return input_;
 }
 
 void DdsTransport::Publish(const runtime::TickResult &result) {
+  // The state lane keeps the newest snapshot: replacing an unread one is the
+  // loss the counter reports, and so is a snapshot that cannot be stored.
   bool evicted = false;
-  state_.TryPushEvictOldest(result.state, &evicted);
-  if (evicted) {
+  if (!state_.Publish(result.state, &evicted) || evicted) {
     dropped_states_.fetch_add(1, std::memory_order_relaxed);
   }
 
+  // Results are FIFO: a push that does not fit is refused, and only the results
+  // beyond the queue capacity are dropped in addition.
   const auto capacity = static_cast<std::uint32_t>(runtime::kResultCapacity);
   const std::uint32_t count = std::min(result.result_count, capacity);
   for (std::uint32_t index = 0; index < count; ++index) {
-    bool result_evicted = false;
-    results_.TryPushEvictOldest(result.results[index], &result_evicted);
-    if (result_evicted) {
+    if (!results_.TryPush(result.results[index])) {
       dropped_results_.fetch_add(1, std::memory_order_relaxed);
     }
   }

@@ -69,12 +69,15 @@ struct EndpointQos {
 // participant creation fail, because the pinned version marks interfaces listed
 // explicitly in the configuration as required to be present.
 //
-// Dropping: nothing here waits for the peer. Output that does not fit is
-// dropped and counted and the state channel keeps only the newest snapshot. The
-// inbound lanes keep the newest entries as well, so a burst can never hide the
-// latest command or stop request behind older samples. Inbound samples that
-// fail validation are rejected whole and counted. The transport never drops an
-// already received sample silently.
+// Dropping: nothing here waits for the peer, and nothing here blocks on a full
+// channel. The result queue and the two request lanes are FIFO: a push that
+// does not fit is refused and counted, so order is preserved and the refusal
+// costs the newest sample of that lane. The state, command and heartbeat lanes
+// keep only their newest entry: an unread entry that a newer sample replaces is
+// counted as dropped, so a burst can never hide the latest command or stop
+// request behind older samples. Inbound samples that fail validation are
+// rejected whole and counted. The transport never drops an already received
+// sample silently.
 class DdsTransport {
  public:
   // Stores the immutable configuration snapshot; the referenced configuration
@@ -122,9 +125,11 @@ class DdsTransport {
   std::uint64_t dropped_state_count() const;
   // Execution requests dropped, from the ordinary and the stop lane.
   std::uint64_t dropped_request_count() const;
-  // Joint commands dropped because the inbound command queue was full.
+  // Joint commands dropped because a newer command superseded an unread one or
+  // because none could be stored.
   std::uint64_t dropped_command_count() const;
-  // Supervisor heartbeats dropped because the inbound heartbeat queue was full.
+  // Supervisor heartbeats dropped because a newer heartbeat superseded an
+  // unread one or because none could be stored.
   std::uint64_t dropped_heartbeat_count() const;
   // Inbound samples that failed FromWire validation and were discarded whole.
   std::uint64_t inbound_rejected_count() const;
@@ -142,6 +147,10 @@ class DdsTransport {
  private:
   struct Impl;
 
+  // The request and result lanes are FIFO, so their order survives and a full
+  // queue refuses the newest entry instead of displacing an older one; the
+  // state, command and heartbeat lanes keep only the newest entry, so a burst
+  // can never hide the latest sample behind an older one.
   using RequestChannel =
       BoundedChannel<runtime::Received<protocol::ExecutionRequest>,
                      runtime::kRequestBatchCapacity>;
@@ -149,12 +158,10 @@ class DdsTransport {
       BoundedChannel<runtime::Received<protocol::ExecutionRequest>,
                      runtime::kStopRequestBatchCapacity>;
   using CommandChannel =
-      BoundedChannel<runtime::Received<protocol::JointCommand>,
-                     runtime::kCommandBatchCapacity>;
+      LatestValueChannel<runtime::Received<protocol::JointCommand>>;
   using HeartbeatChannel =
-      BoundedChannel<runtime::Received<protocol::SupervisorHeartbeat>,
-                     runtime::kHeartbeatBatchCapacity>;
-  using StateChannel = BoundedChannel<protocol::RobotState, 1>;
+      LatestValueChannel<runtime::Received<protocol::SupervisorHeartbeat>>;
+  using StateChannel = LatestValueChannel<protocol::RobotState>;
   using ResultChannel =
       BoundedChannel<protocol::ExecutionResult, runtime::kResultCapacity>;
 
