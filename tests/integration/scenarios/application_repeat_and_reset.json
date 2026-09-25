@@ -78,7 +78,7 @@
     },
     {
       "action": "wait_application_log",
-      "pattern": "behavior=Fault runtime=Damping output=Damping",
+      "pattern": "behavior=Fault runtime=Damping output=Damping.*cause=OperatorEmergencyStop",
       "timeout_s": 10
     },
     {

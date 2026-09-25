@@ -43,7 +43,17 @@ struct SupervisionConfig {
   protocol::TimeUs heartbeat_period_us{0};  // lease refresh period
   protocol::TimeUs request_retry_us{0};     // identical-payload resend interval
   protocol::TimeUs request_deadline_us{0};  // final deadline of one request
-  protocol::TimeUs state_timeout_us{0};     // no fresh RobotState => lost
+  // No fresh RobotState within this age (the *host* receive age of the
+  // snapshot) means the session is lost.
+  //
+  // LoadApplicationConfig refuses a value above
+  // runtime.safety.timeouts.source_state_us. The two ages are measured against
+  // different clocks - the client's freshness against this host's receive
+  // stamp, the initializer's usability rule against the runtime's own
+  // publication stamp - so a larger value here would let the upper layer call a
+  // snapshot fresh that its target generator must refuse, latching
+  // InitializationFailed instead of skipping that frame.
+  protocol::TimeUs state_timeout_us{0};
 };
 
 // One byte of terminal input, mapped to the application event it raises.

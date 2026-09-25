@@ -1,0 +1,36 @@
+{
+  "$comment": [
+    "Fake deployment scenario for the over-speed acceptance of the two-process",
+    "application: the joint velocity limit is exceeded before the runtime has",
+    "even finished booting, so the execution state machine latches",
+    "JointVelocityExceeded instead of entering ZeroTorque, and the upper",
+    "application reports the lower fault in step. Mirrors the runtime CLI",
+    "test's own fault.json (dq 15.0 against the configured",
+    "runtime.safety.joint_velocity_limits of 10.0) as a shipped scenario, so the",
+    "unit-limit path is covered at the process level too.",
+    "The write path stays accepted: the fault is the measured velocity, never a",
+    "refused torque, which is what distinguishes this case from",
+    "fake_write_refused.json.",
+    "elapsed_us is monotonic from process start; an entry applies from its time",
+    "onwards. One entry is enough: the latch is checked on the first tick."
+  ],
+  "entries": [
+    {
+      "elapsed_us": 0,
+      "feedback": {
+        "count": 2,
+        "joints": [
+          {
+            "dq": 15.0
+          },
+          {
+            "dq": 15.0
+          }
+        ]
+      },
+      "write_result": {
+        "accepted": true
+      }
+    }
+  ]
+}

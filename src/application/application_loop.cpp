@@ -105,6 +105,49 @@ const char *OperationName(protocol::Operation operation) {
   return "-";
 }
 
+// The upper layer's own latch. "-" while it holds none, so the display never
+// reports a cause for a behaviour that is not Faulted.
+const char *FaultCauseName(FaultCause cause) {
+  switch (cause) {
+    case FaultCause::None:
+      return "-";
+    case FaultCause::OperatorEmergencyStop:
+      return "OperatorEmergencyStop";
+    case FaultCause::RuntimeFault:
+      return "RuntimeFault";
+    case FaultCause::RuntimeUnreachable:
+      return "RuntimeUnreachable";
+    case FaultCause::RuntimeRestarted:
+      return "RuntimeRestarted";
+    case FaultCause::InitializationFailed:
+      return "InitializationFailed";
+    case FaultCause::RequestTimeout:
+      return "RequestTimeout";
+    case FaultCause::UnexpectedContext:
+      return "UnexpectedContext";
+  }
+  return "-";
+}
+
+// The lower layer's own reason for leaving tracking, as the last trustworthy
+// state reported it. "-" means it reported none (or is not known), never that a
+// stop happened.
+const char *StopReasonName(protocol::StopReason reason) {
+  switch (reason) {
+    case protocol::StopReason::None:
+      return "-";
+    case protocol::StopReason::Requested:
+      return "Requested";
+    case protocol::StopReason::CommandTimeout:
+      return "CommandTimeout";
+    case protocol::StopReason::SourceStateTimeout:
+      return "SourceStateTimeout";
+    case protocol::StopReason::SupervisorTimeout:
+      return "SupervisorTimeout";
+  }
+  return "-";
+}
+
 const char *RejectName(protocol::RejectReason reason) {
   switch (reason) {
     case protocol::RejectReason::None:
@@ -277,6 +320,11 @@ struct StatusFields {
   const char *reject{"-"};
   const char *fresh{"no"};
   const char *init{"-"};
+  // The upper layer's latched cause and the lower layer's own stop reason:
+  // without them an operator cannot tell an operator emergency stop from an
+  // unreachable runtime, or a lower command timeout from a supervisor timeout.
+  const char *cause{"-"};
+  const char *stop{"-"};
 };
 
 bool SameFields(const StatusFields &left, const StatusFields &right) {
@@ -287,17 +335,23 @@ bool SameFields(const StatusFields &left, const StatusFields &right) {
          std::strcmp(left.pending, right.pending) == 0 &&
          std::strcmp(left.reject, right.reject) == 0 &&
          std::strcmp(left.fresh, right.fresh) == 0 &&
-         std::strcmp(left.init, right.init) == 0;
+         std::strcmp(left.init, right.init) == 0 &&
+         std::strcmp(left.cause, right.cause) == 0 &&
+         std::strcmp(left.stop, right.stop) == 0;
 }
 
 void PrintStatus(const StatusFields &fields) {
-  std::array<char, 256> line{};
+  // Sized for the longest names of every field with room to spare; a line that
+  // did not fit would be truncated, which the length clamp below turns into a
+  // shorter line rather than an unterminated one.
+  std::array<char, 320> line{};
   const int written = std::snprintf(
       line.data(), line.size(),
       "[application] behavior=%s runtime=%s output=%s session=%s pending=%s "
-      "reject=%s fresh=%s init=%s\n",
+      "reject=%s fresh=%s init=%s cause=%s stop=%s\n",
       fields.behavior, fields.runtime, fields.output, fields.session,
-      fields.pending, fields.reject, fields.fresh, fields.init);
+      fields.pending, fields.reject, fields.fresh, fields.init, fields.cause,
+      fields.stop);
   if (written <= 0) {
     return;
   }
@@ -465,6 +519,13 @@ int RunApplication(const ApplicationOptions &options,
                behavior.state == BehaviorState::Ready) {
       fields.init = "ok";
     }
+    // The latched cause is the upper layer's own statement and stays visible
+    // while it holds; the lower stop reason is a present fact of the state, so
+    // it is shown only while a current state is known.
+    fields.cause = FaultCauseName(behavior.fault_cause);
+    fields.stop = behavior.runtime_state_known
+                      ? StopReasonName(behavior.runtime_stop_reason)
+                      : "-";
     if (!have_status || !SameFields(fields, last) || now >= next_status_us) {
       PrintStatus(fields);
       last = fields;

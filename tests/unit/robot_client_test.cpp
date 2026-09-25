@@ -748,6 +748,46 @@ int main() {
     CHECK(client.session_id() == irmv::protocol::kNoId);
   }
 
+  // ---- a sample that lands after the clock read is fresh, not a loss -------
+  {
+    // The application loop reads its clock *before* it drains the transport
+    // lane, so a sample that arrives in those microseconds carries a receive
+    // stamp at or after the instant the iteration started. Its age is 0, not an
+    // underflowed nearly-infinite one: the sample is fresh and the session
+    // survives, otherwise every such race lost the session at random.
+    RecordingSink sink;
+    RobotClient client(sink, config, supervisor_id);
+    observe_state(client, 80'000);
+    CHECK(acquire(sink, client, 80'100, nullptr) == 0);
+    // The state that witnessed the answer was received at 80'300; a newer one
+    // lands at 80'500.
+    const TimeUs late_rx_us = 80'500;
+    client.ObserveState(
+        MakeState(runtime_id, session_id, 0, 101, late_rx_us - 10,
+                  ExecutionState::ZeroTorque, OutputAction::ZeroTorque),
+        late_rx_us);
+
+    // A poll whose clock is *earlier* than that receive stamp.
+    const ClientView view = client.Poll(80'400);
+    CHECK(view.outcome == RequestOutcome::None);
+    CHECK(view.state_known);
+    CHECK(view.state_fresh);
+    CHECK(view.session_owned && !view.session_lost);
+    CHECK(client.session_owned());
+    CHECK(client.session_id() == session_id);
+
+    // The same clamping governs the pending request: a resend stamp at or after
+    // the poll instant is age 0, so no timeout and no extra resend.
+    JointCommand first_frame = MakeCommand(config);
+    const std::size_t sends = sink.requests.size();
+    CHECK(client.BeginRequest(Operation::Tracking, 80'600, producer_id,
+                              &first_frame));
+    const ClientView pending = client.Poll(80'600);
+    CHECK(pending.outcome == RequestOutcome::Pending);
+    CHECK(sink.requests.size() == sends + 1);
+    CHECK(client.request_pending());
+  }
+
   // ---- a silent state link loses the session, once ------------------------
   {
     RecordingSink sink;

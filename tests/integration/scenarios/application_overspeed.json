@@ -1,0 +1,86 @@
+{
+  "name": "application_overspeed",
+  "description": "The fake feedback exceeds runtime.safety.joint_velocity_limits before the runtime leaves Boot, so the lower execution state machine latches JointVelocityExceeded; the real application reports that lower fault in step (behavior=Fault with the lower runtime=Fault, its own cause=RuntimeFault and no target), never claims a stop, and exits bounded and honest - stop=unknown, naming the lower fault, exit 3 - without touching the latched fault. The other half of the lower-fault acceptance, a refused torque write and the single Reset that clears it, is application_fault.",
+  "domain": 219,
+  "runtime": {
+    "config": "config/sdk.json",
+    "fake_scenario": "tests/support/fake_overspeed.json",
+    "output_trace": "trace_run%d.jsonl"
+  },
+  "application": {},
+  "steps": [
+    {
+      "action": "start_runtime"
+    },
+    {
+      "action": "wait_log",
+      "pattern": "FaultLatched.*fault=\"JointVelocityExceeded\"",
+      "timeout_s": 15,
+      "note": "the lower layer latches the measured-velocity fault on its own"
+    },
+    {
+      "action": "start_application"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Fault runtime=Fault.*cause=RuntimeFault",
+      "timeout_s": 15,
+      "note": "the upper reports the lower fault in step, with its own cause and no target"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Fault runtime=Fault.*init=-",
+      "timeout_s": 10,
+      "note": "the upper never started a move it would have to take back"
+    },
+    {
+      "action": "stop_runtime",
+      "signal": "SIGKILL",
+      "timeout_s": 10,
+      "expect_clean": false,
+      "note": "a latched fault is never cleared, and the application must not be the one to end it"
+    },
+    {
+      "action": "stop_application",
+      "keys": "x",
+      "timeout_s": 8,
+      "expect_code": 3
+    }
+  ],
+  "checks": [
+    {
+      "check": "log_sequence",
+      "params": {
+        "file": "application_run1.log",
+        "sequence": [
+          "behavior=Starting",
+          "behavior=Fault runtime=Fault",
+          "cause=RuntimeFault",
+          "application: exit stop=unknown lower=Fault"
+        ],
+        "forbid": [
+          "behavior=Ready",
+          "behavior=Initializing",
+          "behavior=Locomotion",
+          "stop=confirmed",
+          "cause=OperatorEmergencyStop",
+          "cause=RuntimeUnreachable"
+        ]
+      }
+    },
+    {
+      "check": "log_sequence",
+      "params": {
+        "file": "runtime_run1.log",
+        "sequence": [
+          "FaultLatched {event=12 from=\"Boot\" to=\"Fault\" fault=\"JointVelocityExceeded\""
+        ],
+        "forbid": [
+          "WriteFailed",
+          "ResetApplied",
+          "clean shutdown"
+        ]
+      }
+    }
+  ]
+}

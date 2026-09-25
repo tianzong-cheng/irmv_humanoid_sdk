@@ -1201,10 +1201,16 @@ int EmergencyStopLatches() {
   // the lower layer's real output is what is displayed.
   h.lower.state = ExecutionState::Damping;
   h.lower.output = OutputAction::Damping;
+  // The runtime applies the Damping stop we asked for, so its own state names
+  // that reason.
+  h.lower.stop_reason = StopReason::Requested;
   CHECK(h.Answer());
   step = h.Step();
   CHECK(step.state == BehaviorState::Fault);
+  // The two display facts of the status line at once: the latched upper cause
+  // (`cause=`) and the lower layer's own reason for its stop (`stop=`).
   CHECK(step.fault_cause == FaultCause::OperatorEmergencyStop);
+  CHECK(step.runtime_stop_reason == StopReason::Requested);
   CHECK(step.runtime_state == ExecutionState::Damping);
   CHECK(step.runtime_output == OutputAction::Damping);
   CHECK(!step.send_command);
@@ -1408,6 +1414,79 @@ int LowerFellBackToDamping() {
   step = h.Step(InputEvent::Damping);
   CHECK(step.state == BehaviorState::Damping);
   CHECK(h.sink().requests.size() == requests);
+  return 0;
+}
+
+// The lower layer falling back to ZeroTorque is the other half of the same
+// rule, and it is *not* folded into Damping: the runtime refuses Tracking from
+// a lower ZeroTorque, so an upper Damping there would make the operator's next
+// Initialize build a request that is guaranteed to be rejected. The upper
+// follows the lower stop state - ZeroTorque maps to Standby - and only the
+// documented Standby -> Damping -> Initializing path starts a move.
+int LowerFellBackToZeroTorque() {
+  Harness h;
+  CHECK(ToStandby(h) == 0);
+  CHECK(ToDamping(h) == 0);
+  CHECK(ToInitializing(h) == 0);
+
+  h.lower.state = ExecutionState::ZeroTorque;
+  h.lower.output = OutputAction::ZeroTorque;
+  h.lower.producer = kNoId;
+  h.lower.epoch = 0;
+  h.lower.stop_reason = StopReason::SupervisorTimeout;
+  BehaviorStep step = h.Step();
+  CHECK(step.state == BehaviorState::Standby);
+  CHECK(step.fault_cause == FaultCause::None);
+  // The lower stop reason is surfaced for the display, not hidden behind the
+  // upper behaviour.
+  CHECK(step.runtime_stop_reason == StopReason::SupervisorTimeout);
+  CHECK(step.runtime_state == ExecutionState::ZeroTorque);
+  CHECK(!step.send_command);
+  CHECK(!h.client().request_pending());
+  CHECK(h.client().session_owned());
+
+  // No automatic restart and no automatic Ready.
+  const std::size_t requests = h.sink().requests.size();
+  for (int index = 0; index < 5; ++index) {
+    step = h.Step(InputEvent::None, h.config().supervision.target_period_us);
+    CHECK(step.state == BehaviorState::Standby);
+    CHECK(!step.send_command);
+  }
+  CHECK(h.sink().requests.size() == requests);
+
+  // `i` in Standby is a local no-op: nothing may ask for Tracking from a lower
+  // ZeroTorque, and no request leaves for it.
+  step = h.Step(InputEvent::Initialize);
+  CHECK(step.state == BehaviorState::Standby);
+  CHECK(!step.initialization_refused);
+  CHECK(h.sink().requests.size() == requests);
+  CHECK(!h.client().request_pending());
+
+  // The documented path still works: `d` first, then `i`.
+  step = h.Step(InputEvent::Damping);
+  CHECK(step.state == BehaviorState::Standby);
+  const ExecutionRequest *damping = h.last_request();
+  CHECK(damping != nullptr);
+  if (damping == nullptr) {
+    return 1;
+  }
+  CHECK(damping->operation == Operation::Damping);
+  h.lower.state = ExecutionState::Damping;
+  h.lower.output = OutputAction::Damping;
+  CHECK(h.Answer());
+  step = h.Step();
+  CHECK(step.state == BehaviorState::Damping);
+  CHECK(step.runtime_state == ExecutionState::Damping);
+
+  step = h.Step(InputEvent::Initialize);
+  CHECK(step.state == BehaviorState::Damping);  // only a confirmation moves it
+  const ExecutionRequest *tracking = h.last_request();
+  CHECK(tracking != nullptr);
+  if (tracking == nullptr) {
+    return 1;
+  }
+  CHECK(tracking->operation == Operation::Tracking);
+  CHECK(tracking->proposed_epoch > tracking->expected_epoch);
   return 0;
 }
 
@@ -1915,6 +1994,7 @@ int main() {
   failures += EmergencyStopInRuntimeFault();
   failures += SessionLossLatches();
   failures += LowerFellBackToDamping();
+  failures += LowerFellBackToZeroTorque();
   failures += RuntimeRestartedLatches();
   failures += InitializationDeadlineFaults();
   failures += StateTimeoutFaults();

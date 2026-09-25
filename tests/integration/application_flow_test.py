@@ -252,9 +252,17 @@ class Case:
         per case; the claim (exclusive lock file plus the RTPS port probe) is
         what makes the isolation real even when two cases, or a case and a
         scenario entry, run at the same time.
+
+        The lock has to be claimed where the other entries claim theirs - the
+        shared `integration` directory, one level above this entry's own
+        `application_flow` root - because a lock in a private namespace excludes
+        nobody: this entry's declared band (190..229) is the same band the
+        scenario files declare, so without a shared lock two ctest entries can
+        still pick the same domain and share a DDS participant.
         """
         declared = 190 + ((os.getpid() * 7 + sum(self.name.encode())) % 40)
-        self.domain, self.lock = RUN_INTEGRATION.choose_domain(declared, self.work)
+        self.domain, self.lock = RUN_INTEGRATION.choose_domain(
+            declared, self.work, lock_dir=self.work.parent.parent)
         return self.domain
 
     def configuration(self, fake_scenario="tests/support/fake_static.json"):
@@ -505,6 +513,12 @@ def case_app_paused(root):
         FALLBACK_WAIT_S, start=resume_marker)
     check(bool(settled), "the application did not show the lower layer's own "
           "fallback after it was resumed: %s" % application.output()[-600:])
+    # The fallback is not just a behaviour change: the lower layer's own stop
+    # reason has to reach the display, or an operator cannot tell its command
+    # timeout from any other stop.
+    check(bool(settled) and "stop=CommandTimeout" in settled[0],
+          "the application did not surface the lower layer's stop reason: %s"
+          % (settled[0] if settled else application.output()[-600:]))
     again = [line for line in application.stamped(resume_marker)
              if any(("behavior=%s" % state) in line
                     for state in ("Initializing", "Ready", "Locomotion"))]

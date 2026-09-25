@@ -89,6 +89,20 @@ bool Agrees(const protocol::RobotState &state,
          state.epoch == result.epoch && state.producer_id == result.producer_id;
 }
 
+// The age of a host receive/send stamp at the caller's instant, clamped at
+// zero: a stamp at or after `now_us` means "just now" (age 0), never a negative
+// age that the unsigned subtraction would turn into a nearly infinite one.
+//
+// The application loop reads its clock before it drains the transport lane, so
+// a sample that lands in those microseconds carries a receive stamp at or after
+// the instant the iteration started. An unclamped age would call that perfectly
+// good sample stale and turn it into a lost session; the same underflow would
+// make a pending request expire or resend on the spot.
+protocol::TimeUs ClampedAge(protocol::TimeUs now_us,
+                            protocol::TimeUs stamp_us) {
+  return now_us >= stamp_us ? now_us - stamp_us : 0;
+}
+
 }  // namespace
 
 protocol::Id MakeSupervisorId() {
@@ -153,9 +167,12 @@ bool RobotClient::SameInstance(const protocol::RobotState &state) const {
 bool RobotClient::StateFresh(protocol::TimeUs now_us) const {
   // The age is judged on the host monotonic clock that stamped the arrival, not
   // on the runtime's publication stamp: a silent link is exactly the case the
-  // runtime cannot report about itself.
-  return state_known_ && now_us >= latest_state_rx_us_ &&
-         now_us - latest_state_rx_us_ <= config_.supervision.state_timeout_us;
+  // runtime cannot report about itself. The age is clamped, so a sample whose
+  // receive stamp is at or after `now_us` (the loop read its clock before it
+  // drained the lane) is fresh with age 0 instead of underflowing into a
+  // stale one and losing the session.
+  return state_known_ && ClampedAge(now_us, latest_state_rx_us_) <=
+                             config_.supervision.state_timeout_us;
 }
 
 const RobotClient::StateObservation &RobotClient::HistoryAt(
@@ -166,13 +183,12 @@ const RobotClient::StateObservation &RobotClient::HistoryAt(
   return history_[(oldest + offset) % kStateHistoryCapacity];
 }
 
-void RobotClient::RecordHistory(const protocol::RobotState &state,
-                                protocol::TimeUs rx_us) {
-  // Assigned field by field: building the observation first would copy the
-  // whole state twice for every received sample.
+void RobotClient::RecordHistory(const protocol::RobotState &state) {
+  // Assigned directly into the ring slot: building the observation first would
+  // copy the whole state twice for every received sample. Arrival order is the
+  // order of the ring itself, so nothing else has to be recorded with it.
   StateObservation &slot = history_[history_next_];
   slot.state = state;
-  slot.rx_us = rx_us;
   history_next_ = (history_next_ + 1) % kStateHistoryCapacity;
   if (history_count_ < kStateHistoryCapacity) {
     ++history_count_;
@@ -275,7 +291,7 @@ void RobotClient::ObserveState(const protocol::RobotState &state,
 
   instance_known_ = true;
   runtime_id_ = state.runtime_id;
-  RecordHistory(state, rx_us);
+  RecordHistory(state);
   latest_state_ = state;
   latest_state_rx_us_ = rx_us;
   state_known_ = true;
@@ -491,13 +507,12 @@ ClientView RobotClient::Poll(protocol::TimeUs now_us) {
   }
 
   if (pending_ && report_outcome_ == RequestOutcome::None) {
-    // The ages are guarded exactly like the state age: a caller-supplied clock
-    // that is not monotonic must not underflow into an immediate timeout or an
-    // immediate resend.
-    const protocol::TimeUs age =
-        now_us >= pending_first_send_us_ ? now_us - pending_first_send_us_ : 0;
+    // The ages share the one clamped helper: a caller-supplied clock that is
+    // not monotonic, or a send stamp at or after `now_us`, must not underflow
+    // into an immediate timeout or an immediate resend.
+    const protocol::TimeUs age = ClampedAge(now_us, pending_first_send_us_);
     const protocol::TimeUs since_send =
-        now_us >= pending_last_send_us_ ? now_us - pending_last_send_us_ : 0;
+        ClampedAge(now_us, pending_last_send_us_);
     if (age >= config_.supervision.request_deadline_us) {
       Resolve(RequestOutcome::TimedOut, protocol::RejectReason::None);
     } else if (since_send >= config_.supervision.request_retry_us) {

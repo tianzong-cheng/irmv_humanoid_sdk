@@ -89,6 +89,11 @@ class ClientTransport {
   void Stop();
 
   // True from a successful Start() until the transport thread has ended.
+  //
+  // The shipped application process has no consumer for this: it constructs the
+  // transport, Starts it once and lets the destructor Stop() it, and a start
+  // failure is already an exception. It exists for a caller that supervises the
+  // transport's own lifetime (a restart policy, a test).
   bool started() const;
 
   // Hands one request to the transport thread. A stop request (Damping,
@@ -119,6 +124,11 @@ class ClientTransport {
   // Called only by the supervision thread.
   const ClientEvents &TakeEvents();
 
+  // The counters below are the transport's own evidence for a test or a future
+  // health line: nothing in the shipped application process reads them today
+  // (its status line reports the behaviour and the session, not the transport's
+  // drop counts), and no counter is decremented or reset.
+  //
   // Execution results dropped because the inbound result queue was full.
   std::uint64_t dropped_result_count() const;
   // Robot states dropped because a newer sample superseded them: the state lane

@@ -114,6 +114,12 @@ class InputRouter {
 
   // True once OnInputLost() was called. An empty read, an unbound byte and a
   // suppressed repeat are not an input loss and never set this.
+  //
+  // The shipped loop does not read this back: it acts on the loss the moment
+  // ReadTerminal reports it (it stops polling the descriptor and turns the
+  // event the router raised into the ordered exit), so the latch is for a
+  // caller that owns the device lifecycle instead - a future gamepad adapter,
+  // or a test.
   bool input_lost() const { return input_lost_; }
 
  private:

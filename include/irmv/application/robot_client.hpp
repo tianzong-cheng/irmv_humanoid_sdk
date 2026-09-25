@@ -141,6 +141,11 @@ class RobotClient {
   // live session or without a matching instance observed, when any other
   // operation is asked for without a live session, when a Tracking request
   // carries no usable first frame, and when the request id would overflow.
+  //
+  // The routing identity of a Tracking request (protocol version, runtime id,
+  // session id, request id, stamp) is completed in the client's own stored copy
+  // of `first_command`, which is what every resend repeats; the caller's frame
+  // is only read. SendCommand below is the one that mutates the caller's frame.
   bool BeginRequest(protocol::Operation operation, protocol::TimeUs now_us,
                     protocol::Id producer_id = protocol::kNoId,
                     const protocol::JointCommand *first_command = nullptr);
@@ -154,10 +159,13 @@ class RobotClient {
   ClientView Poll(protocol::TimeUs now_us);
 
   // Completes the routing identity of a generator-built frame (protocol
-  // version, runtime id, session id, send stamp) and publishes it. Refused
-  // without a live session and when the frame's joint count or layout does not
-  // match the configuration. The producer id, the epoch, the command sequence,
-  // the source state sequence and the joint values stay the generator's.
+  // version, runtime id, session id, send stamp) and publishes it. It writes
+  // those fields into the frame the caller passed in - unlike BeginRequest,
+  // which only reads its first frame and completes the client's own copy - so
+  // the caller's frame is the one that went on the wire. Refused without a live
+  // session and when the frame's joint count or layout does not match the
+  // configuration. The producer id, the epoch, the command sequence, the source
+  // state sequence and the joint values stay the generator's.
   bool SendCommand(protocol::JointCommand *command, protocol::TimeUs now_us);
 
   // Publishes one heartbeat with the next strictly increasing sequence.
@@ -201,7 +209,6 @@ class RobotClient {
 
   struct StateObservation {
     protocol::RobotState state{};
-    protocol::TimeUs rx_us{0};
   };
 
   bool Begin(protocol::Operation operation, protocol::TimeUs now_us,
@@ -213,7 +220,7 @@ class RobotClient {
   bool SameInstance(const protocol::RobotState &state) const;
   bool StateFresh(protocol::TimeUs now_us) const;
   const StateObservation &HistoryAt(std::size_t offset) const;
-  void RecordHistory(const protocol::RobotState &state, protocol::TimeUs rx_us);
+  void RecordHistory(const protocol::RobotState &state);
   bool MatchesPending(const protocol::ExecutionResult &result,
                       protocol::TimeUs rx_us) const;
   void EvaluatePending();

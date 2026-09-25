@@ -233,7 +233,7 @@ const DigestMutation kDigestMutations[] = {
     {"\"request_retry_us\": 50000", "\"request_retry_us\": 60000", false},
     {"\"request_deadline_us\": 1000000", "\"request_deadline_us\": 1200000",
      false},
-    {"\"state_timeout_us\": 150000", "\"state_timeout_us\": 160000", false},
+    {"\"state_timeout_us\": 150000", "\"state_timeout_us\": 140000", false},
     {"\"intent_timeout_us\": 500000", "\"intent_timeout_us\": 600000", true},
     {"\"repeat_guard_us\": 250000", "\"repeat_guard_us\": 300000", true},
     {"\"velocity_left\": \"a\"", "\"velocity_left\": \"g\"", true},
@@ -548,6 +548,23 @@ int main() {
   CHECK(ThrowsAt(ValidApplicationAfter("\"state_timeout_us\": 150000",
                                        "\"state_timeout_us\": 0"),
                  supervision + ".state_timeout_us"));
+  // The supervisor's "fresh" (host receive age <= state_timeout_us) and the
+  // initializer's usability rule (runtime publication age <= source_state_us)
+  // are two independent thresholds, so the window the upper layer trusts must
+  // stay inside the window its own generator can use. One microsecond above the
+  // priority's source-state deadline is refused; equality is the boundary and
+  // is accepted (the template's own values are exactly equal, below).
+  CHECK(ThrowsWithMessage(ValidApplicationAfter("\"state_timeout_us\": 150000",
+                                                "\"state_timeout_us\": 150001"),
+                          supervision + ".state_timeout_us",
+                          "source_state_us"));
+  const TemporaryConfig boundary(ValidApplicationAfter(
+      "\"state_timeout_us\": 150000", "\"state_timeout_us\": 150000"));
+  const ApplicationConfig boundary_config =
+      LoadApplicationConfig(boundary.path());
+  CHECK(boundary_config.supervision.state_timeout_us ==
+        boundary_config.runtime.timeouts.source_state_us);
+  CHECK(boundary_config.supervision.state_timeout_us == 150000);
 
   // Input: the space/emergency-stop reservation, one byte per action, and the
   // required mode actions.

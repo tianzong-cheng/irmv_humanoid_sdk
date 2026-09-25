@@ -150,6 +150,17 @@ void ReadSupervision(const Json &object, const std::string &path,
     Fail(path + ".heartbeat_period_us",
          "must be less than runtime.safety.timeouts.supervisor_us");
   }
+  if (supervision.state_timeout_us > runtime.timeouts.source_state_us) {
+    // The client's "fresh" is the host receive age against state_timeout_us
+    // while the initialization generator refuses a snapshot whose *runtime*
+    // publication age exceeds source_state_us. A larger state_timeout_us would
+    // therefore let the upper layer call a snapshot fresh that its own
+    // generator must reject, which latches InitializationFailed instead of
+    // skipping a frame.
+    Fail(path + ".state_timeout_us",
+         "must not exceed runtime.safety.timeouts.source_state_us (" +
+             std::to_string(runtime.timeouts.source_state_us) + " us)");
+  }
   const protocol::TimeUs command_deadline =
       std::min(runtime.timeouts.command_us, runtime.timeouts.source_state_us);
   if (supervision.target_period_us >= command_deadline) {

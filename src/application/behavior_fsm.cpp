@@ -206,10 +206,19 @@ void BehaviorFsm::FreshStateAndFaults(protocol::TimeUs now_us,
     // tracking behaviour, and the states a move can actually fall back to are
     // the two stops - a lower Boot is not one of them and is never displayed as
     // Damping.
+    //
+    // The behaviour follows the lower stop state, because the two are not
+    // interchangeable: the runtime refuses Tracking from a lower ZeroTorque
+    // (InvalidTransition), so a fallback folded into Damping would make the
+    // operator's next Initialize build a request that is guaranteed to be
+    // rejected. Standby is the upper state whose lower mapping is ZeroTorque,
+    // and Damping the one whose lower mapping is Damping.
     CancelInitialization();
     client_.AbandonRequest();
     pending_ = Pending::None;
-    state_ = BehaviorState::Damping;
+    state_ = view.state.execution_state == protocol::ExecutionState::ZeroTorque
+                 ? BehaviorState::Standby
+                 : BehaviorState::Damping;
   }
 }
 
@@ -680,6 +689,14 @@ void BehaviorFsm::TryStartInitialization(protocol::TimeUs now_us,
   if (!(view.state_known && view.state_fresh)) {
     // The guard wants a fresh, usable state; what an unusable one means has
     // already been decided by the state deadline's own rule.
+    return;
+  }
+  if (view.state.execution_state != protocol::ExecutionState::Damping) {
+    // The mandated path into a move is Standby -> Damping -> Initializing, and
+    // the runtime refuses Tracking from a lower ZeroTorque (InvalidTransition):
+    // asking from any other lower state would build a request the runtime is
+    // guaranteed to reject. The fallback above maps a lower ZeroTorque to
+    // Standby, so this is the structural guard behind that mapping.
     return;
   }
   // Neither a rejected request nor a cancelled move is restarted: the generator

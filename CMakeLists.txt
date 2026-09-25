@@ -589,6 +589,7 @@ set(
   application_stop_preempt
   application_fault
   application_unknown
+  application_overspeed
 )
 foreach(scenario IN LISTS IRMV_INTEGRATION_SCENARIOS)
   add_test(

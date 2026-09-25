@@ -272,7 +272,7 @@
               "$ref": "#/$defs/positiveTimeUs"
             }
           },
-          "$comment": "All times are microseconds. LoadApplicationConfig requires request_deadline_us > request_retry_us, heartbeat_period_us < runtime.safety.timeouts.supervisor_us and target_period_us < min(command_us, source_state_us)."
+          "$comment": "All times are microseconds. LoadApplicationConfig requires request_deadline_us > request_retry_us, heartbeat_period_us < runtime.safety.timeouts.supervisor_us, target_period_us < min(command_us, source_state_us) and state_timeout_us <= runtime.safety.timeouts.source_state_us (the client's host-age freshness and the initializer's runtime-age usability rule must agree, or a snapshot can be fresh to the supervisor and unusable to the generator)."
         }
       }
     },

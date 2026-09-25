@@ -158,18 +158,29 @@ generator, so no intent ever becomes a joint target.
 ### Status line
 
 ```text
-[application] behavior=<X> runtime=<Y> output=<Z> session=<owned|lost|none> pending=<operation|-> reject=<reason|-> fresh=<yes|no> init=<ok|refused|->
+[application] behavior=<X> runtime=<Y> output=<Z> session=<owned|lost|none> pending=<operation|-> reject=<reason|-> fresh=<yes|no> init=<ok|refused|-> cause=<fault cause|-> stop=<lower stop reason|->
 ```
 
 `behavior` is the upper behaviour (`Starting`, `Standby`, `Damping`,
-`Initializing`, `Ready`, `Fault`), `runtime`/`output` the lower layer's own
-`execution_state`/`output_action` (`Unknown` while no current state is known),
-`pending` the operation of the request the application waits on, `reject` the
-reason of the last refused request, `fresh` whether a `RobotState` arrived inside
-`application.supervision.state_timeout_us`, and `init` reports the
+`Initializing`, `Ready`, `Locomotion`, `Fault`; `Locomotion` has an enumerator
+and an entry guard but this phase never enters it), `runtime`/`output` the lower
+layer's own `execution_state`/`output_action` (`Unknown` while no current state
+is known), `pending` the operation of the request the application waits on,
+`reject` the reason of the last refused request, `fresh` whether a `RobotState`
+arrived inside `application.supervision.state_timeout_us`, and `init` reports the
 initialization: `ok` while it runs or holds, `refused` for the iteration that
-refused an un-runnable plan. The line is printed whenever a field changes and at
-most every 500 ms otherwise.
+refused an un-runnable plan.
+
+`cause` is the application's own latched fault cause (`-` while it holds none,
+otherwise `OperatorEmergencyStop`, `RuntimeFault`, `RuntimeUnreachable`,
+`RuntimeRestarted`, `InitializationFailed`, `RequestTimeout` or
+`UnexpectedContext`), and `stop` is the lower layer's own reason for the last
+stop it made, as its current state reports it (`-` when it reports none or is
+not known, otherwise `Requested`, `CommandTimeout`, `SourceStateTimeout` or
+`SupervisorTimeout`). The two together are what tells an operator emergency stop
+from an unreachable runtime, and a lower command timeout from a supervisor
+timeout; without them a `behavior=Fault` line names no cause at all. The line is
+printed whenever a field changes and at most every 500 ms otherwise.
 
 ### Exit
 

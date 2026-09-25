@@ -13,10 +13,14 @@ namespace {
 constexpr double kPi = 3.14159265358979323846;
 
 // The peak rate of the raised-cosine profile: the supremum of
-// |delta * ((pi / (2 * D)) * sin(pi * u))| over the ramp. It is associated
-// exactly like `FillRamp`'s expression - `|delta| * (pi / (2 * D))` - so a
-// rounding step can never make the bound smaller than an emitted sample, and
-// |sin| <= 1 makes it a true upper bound.
+// |delta * ((pi / (2 * D)) * sin(pi * u))| over the ramp, which is
+// |delta| * (pi / (2 * D)) because |sin| <= 1.
+//
+// This is the bound of the profile, not a bit-exact replay of a sample:
+// `FillRamp` emits `delta * ((pi / (2 * D)) * sin(phase))`, whose association
+// differs from this expression, so the two can differ by a rounding step. The
+// bound still holds (the supremum is what admission compares against the
+// runtime's target velocity limit, and the runtime checks every frame itself).
 double PeakRate(double delta, double duration_seconds) {
   return std::fabs(delta) * (kPi / (2.0 * duration_seconds));
 }

@@ -689,7 +689,7 @@ def lock_is_stale(lock):
         return False
 
 
-def choose_domain(declared, work_dir):
+def choose_domain(declared, work_dir, lock_dir=None):
     """The declared domain, claimed so that no two scenarios can share one.
 
     Below 230 because the default RTPS port mapping overflows above it. Free
@@ -699,8 +699,15 @@ def choose_domain(declared, work_dir):
     domain even when the declared one is already taken. The lock records the
     process id, so a lock left behind by a killed run does not block a domain
     for ever.
+
+    `lock_dir` is the directory the exclusive lock is claimed in, and it
+    defaults to the parent of `work_dir` — one directory per entry, which is
+    what makes concurrent entries exclude each other. A caller whose own work
+    directory is deeper than one level must pass the shared parent explicitly,
+    or its locks would live in a namespace no other entry looks at.
     """
-    shared = Path(work_dir).resolve().parent
+    shared = (Path(lock_dir).resolve() if lock_dir is not None
+              else Path(work_dir).resolve().parent)
     for offset in range(0, 40):
         candidate = 190 + ((declared - 190 + offset) % 40)
         if candidate >= 230:
