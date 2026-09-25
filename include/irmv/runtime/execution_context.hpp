@@ -38,6 +38,15 @@ struct TickInput {
   std::array<Received<protocol::SupervisorHeartbeat>, kHeartbeatBatchCapacity>
       heartbeats{};
   std::size_t heartbeat_count{0};
+
+  // Set by the standalone runtime entry when it wants the machine to stop
+  // because the process is leaving. It is the runtime's own stop, never a
+  // supervisor request: it carries no supervisor identity, answers nobody, is
+  // handled after the received lanes so the state it commits is the state the
+  // process leaves in, and can never be forged by a packet. No received stop is
+  // displaced by it and a latched fault is never cleared by it. The transport
+  // never sets this field.
+  bool local_stop_requested{false};
 };
 
 // Structural event of one tick: transitions, latches, timeouts, rejections and

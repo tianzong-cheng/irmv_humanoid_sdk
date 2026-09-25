@@ -1419,8 +1419,10 @@ int CheckContinuityOldContextTorque() {
   return 0;
 }
 
-// G1: the payload key includes the supervisor identity.
-int CheckPayloadKeyIncludesSupervisor() {
+// G1: an identical request from another supervisor is not the owner's replay:
+// the session binding refuses it before the request record is consulted, so the
+// owner's stored answer stays untouched.
+int CheckForeignSupervisorIsNotTheOwnersReplay() {
   RuntimeFixture f;
   f.BootToZeroTorque();
   f.Acquire();
@@ -1430,12 +1432,13 @@ int CheckPayloadKeyIncludesSupervisor() {
   CHECK(owned_result.applied());
   const Sequence watermark = f.state().epoch;
 
-  // The same id and payload from another supervisor is not the owner's replay.
+  // The same id and payload from another supervisor is refused as a foreign
+  // request of the owner's session, and nothing is applied a second time.
   ExecutionRequest foreign = owned;
   foreign.supervisor_id = irmv::test::FixtureOtherSupervisorId();
   const FixtureResult foreign_result = f.Send(foreign, true);
   CHECK(foreign_result.rejected());
-  CHECK(foreign_result.reason == RejectReason::RequestConflict);
+  CHECK(foreign_result.reason == RejectReason::WrongSession);
   CHECK(f.state().epoch == watermark);
 
   // The owning supervisor still reads its own answer back.
@@ -1629,195 +1632,222 @@ int CheckTakeoverDoesNotInheritStagedAnswer() {
   return 0;
 }
 
-// ---- the runtime's own stop request ---------------------------------------
+// ---- the runtime's own stop ------------------------------------------------
 
-// A tick driver that hands the state machine a caller-built input. The runtime
-// fixture owns its own tick loop; these checks have to control the stop lane of
-// one single tick exactly, so they own the input instead.
-class InputDriver {
- public:
-  InputDriver()
-      : config(RuntimeFixture::LoadFixtureConfig()),
-        backend(config),
-        fsm(config, irmv::test::FixtureRuntimeId()) {
-    backend.Initialize();
-    feedback_.count = static_cast<std::uint32_t>(config.joint_count());
-    for (std::size_t index = 0; index < config.joint_count(); ++index) {
-      irmv::protocol::JointFeedback &joint = feedback_.joints[index];
-      joint.valid = true;
-      joint.connected = true;
-      joint.q = irmv::test::kFixtureQ[index];
-      joint.dq = irmv::test::kFixtureDq[index];
-      joint.freq_hz = irmv::test::kFixtureFrequencyHz;
-    }
+// A local stop is the trusted signal of the leaving process, not a request: it
+// needs no supervisor identity and no session, answers nobody, never advances
+// the session's request record and never displaces a received stop.
+int CheckLocalStopIsNotARequest() {
+  RuntimeFixture f;
+  f.BootToZeroTorque();
+  f.Acquire();
+  const ExecutionRequest stop = f.MakeRequest(Operation::Damping, 100);
+  CHECK(f.Send(stop, true).applied());
+  CHECK(f.state().execution_state == kDamping);
+  const Sequence damped_epoch = f.state().epoch;
+
+  // It reaches zero torque from Damping, revokes the watermark and leaves the
+  // request record exactly where it was.
+  f.RequestLocalStop();
+  f.Step();
+  const TickResult &local = f.last_tick();
+  CHECK(local.state.execution_state == kZeroTorque);
+  CHECK(local.state.epoch == damped_epoch + 1);
+  CHECK(local.state.output_action == kActionZeroTorque);
+  CHECK(IsZeroTorque(local.output));
+  CHECK(local.state.stop_reason == StopReason::Requested);
+  CHECK(local.state.producer_id == irmv::protocol::kNoId);
+  CHECK(local.result_count == 0);
+  CHECK(CountEvents(local, EventCode::StopApplied) == 1);
+  CHECK(CountEvents(local, EventCode::RequestRejected) == 0);
+
+  // The record is untouched: the supervisor's next id is a new request, not one
+  // the runtime's own stop consumed. ZeroTorque holds, so the idempotent stop
+  // is still allowed.
+  const FixtureResult next =
+      f.Send(f.MakeRequest(Operation::ZeroTorque, 101), true);
+  CHECK(next.applied());
+  CHECK(next.reason == RejectReason::None);
+  CHECK(f.state().execution_state == kZeroTorque);
+
+  // Zero torque already holds, so repeating the runtime's own stop changes
+  // nothing: no watermark, no event and no result.
+  const Sequence zero_epoch = f.state().epoch;
+  f.RequestLocalStop();
+  f.Step();
+  CHECK(f.state().execution_state == kZeroTorque);
+  CHECK(f.state().epoch == zero_epoch);
+  CHECK(CountEvents(f.last_tick(), EventCode::StopApplied) == 0);
+
+  // Boot and Fault are never left by the runtime itself: the startup path and a
+  // latched fault decide their own output.
+  {
+    RuntimeFixture boot;
+    boot.RequestLocalStop();
+    boot.Step();
+    CHECK(boot.state().execution_state == kBoot);
+    CHECK(boot.last_tick().result_count == 0);
+    CHECK(CountEvents(boot.last_tick(), EventCode::StopApplied) == 0);
+    CHECK(boot.BootToZeroTorque() > 0);
+    CHECK(boot.state().execution_state == kZeroTorque);
   }
-
-  TimeUs now_us() const { return now_us_; }
-
-  const irmv::protocol::RobotState &state() const { return last_tick_.state; }
-
-  // Runs healthy ticks one control period apart until `duration_us` elapsed.
-  void Advance(TimeUs duration_us) {
-    const TimeUs period =
-        config.control_period_us == 0 ? 1 : config.control_period_us;
-    TimeUs remaining = duration_us;
-    while (remaining > 0) {
-      const TimeUs step = remaining < period ? remaining : period;
-      now_us_ += step;
-      Tick(irmv::runtime::TickInput{});
-      remaining -= step;
-    }
+  {
+    RuntimeFixture fault;
+    fault.BootToZeroTorque();
+    fault.Acquire();
+    fault.SetJointVelocity(15.0);
+    fault.Advance(fault.ControlPeriodUs());
+    CHECK(fault.state().execution_state == kFault);
+    const Sequence fault_id = fault.state().fault_id;
+    const OutputAction action = fault.state().output_action;
+    fault.RequestLocalStop();
+    fault.Step();
+    CHECK(fault.state().execution_state == kFault);
+    CHECK(fault.state().fault_id == fault_id);
+    CHECK(fault.state().output_action == action);
+    CHECK(CountEvents(fault.last_tick(), EventCode::StopApplied) == 0);
   }
-
-  // Runs exactly one tick with caller feedback and caller input.
-  const TickResult &Tick(const irmv::runtime::TickInput &input) {
-    ++feedback_.snapshot_seq;
-    feedback_.stamp_us = now_us_;
-    for (std::size_t index = 0; index < config.joint_count(); ++index) {
-      feedback_.joints[index].rx_stamp_us = now_us_;
-    }
-    backend.Inject(feedback_);
-    last_tick_ = fsm.Tick(now_us_, backend.Read(now_us_), input, backend);
-    return last_tick_;
-  }
-
-  RuntimeConfig config;
-  irmv::hardware::FakeBackend backend;
-  irmv::runtime::ExecutionFsm fsm;
-
- private:
-  irmv::protocol::FeedbackSnapshot feedback_{};
-  TickResult last_tick_{};
-  TimeUs now_us_{irmv::test::kFixtureStartUs};
-};
-
-ExecutionRequest MakeLaneRequest(const irmv::runtime::ExecutionFsm &fsm,
-                                 const irmv::protocol::RobotState &state,
-                                 Operation operation, Sequence request_id) {
-  ExecutionRequest request;
-  request.protocol_version = irmv::protocol::kProtocolVersion;
-  request.supervisor_id = irmv::test::FixtureSupervisorId();
-  request.request_id = request_id;
-  request.session_id = operation == Operation::AcquireSession
-                           ? irmv::protocol::kNoId
-                           : state.session_id;
-  request.runtime_id = fsm.runtime_id();
-  request.expected_epoch = state.epoch;
-  request.proposed_epoch = state.epoch + 1;
-  request.producer_id = irmv::test::FixtureProducerId();
-  request.fault_id = state.fault_id;
-  request.operation = operation;
-  return request;
-}
-
-// The runtime's own stop must not crowd out a stop that arrived in the same
-// tick: the local request is appended to the stop lane, and a full lane defers
-// it instead of overwriting a received stop.
-int CheckRuntimeStopKeepsInboundStop() {
-  InputDriver driver;
-  driver.Advance(200'000);
-  CHECK(driver.state().execution_state == kZeroTorque);
-
-  irmv::runtime::TickInput bootstrap{};
-  bootstrap.requests[0] = {MakeLaneRequest(driver.fsm, driver.state(),
-                                           Operation::AcquireSession, 10),
-                           driver.now_us()};
-  bootstrap.request_count = 1;
-  driver.Tick(bootstrap);
-  CHECK(driver.state().session_id != irmv::protocol::kNoId);
-
-  // The supervisor asks for Damping in the very tick in which the runtime asks
-  // for its own stop.
-  const Sequence inbound_id = 11;
-  irmv::runtime::TickInput input{};
-  input.stop_requests[0] = {MakeLaneRequest(driver.fsm, driver.state(),
-                                            Operation::Damping, inbound_id),
-                            driver.now_us()};
-  input.stop_request_count = 1;
-  CHECK(irmv::runtime::AppendRuntimeStopRequest(&input, driver.fsm,
-                                                driver.now_us()));
-  CHECK(input.stop_request_count == 2);
-  CHECK(input.stop_requests[0].value.request_id == inbound_id);
-  CHECK(input.stop_requests[0].value.operation == Operation::Damping);
-  const Sequence local_id = input.stop_requests[1].value.request_id;
-
-  const TickResult &tick = driver.Tick(input);
-  // Both stops of the tick were answered, the received one first: with the
-  // received request overwritten, the tick produced a single answer.
-  CHECK(tick.result_count == 2);
-  CHECK(RuntimeFixture::ResultFor(tick, inbound_id).request_id == inbound_id);
-  CHECK(RuntimeFixture::ResultFor(tick, local_id).request_id == local_id);
-  CHECK(RuntimeFixture::ResultFor(tick, local_id).applied());
-  CHECK(tick.state.execution_state == kZeroTorque);
-  CHECK(CountEvents(tick, EventCode::StopApplied) == 2);
-
-  // A full stop lane never loses a received stop: the local request is refused
-  // and the eight inbound requests stay where they are.
-  irmv::runtime::TickInput full{};
-  for (std::size_t index = 0; index < irmv::runtime::kStopRequestBatchCapacity;
-       ++index) {
-    full.stop_requests[index] = {
-        MakeLaneRequest(driver.fsm, driver.state(), Operation::ZeroTorque,
-                        100 + index),
-        driver.now_us()};
-  }
-  full.stop_request_count = irmv::runtime::kStopRequestBatchCapacity;
-  CHECK(!irmv::runtime::AppendRuntimeStopRequest(&full, driver.fsm,
-                                                 driver.now_us()));
-  CHECK(full.stop_request_count == irmv::runtime::kStopRequestBatchCapacity);
-  for (std::size_t index = 0; index < irmv::runtime::kStopRequestBatchCapacity;
-       ++index) {
-    CHECK(full.stop_requests[index].value.request_id == 100 + index);
-  }
-  const TickResult &full_tick = driver.Tick(full);
-  CHECK(full_tick.result_count == irmv::runtime::kStopRequestBatchCapacity);
   return 0;
 }
 
-// The stop the runtime issues for itself must be answered, never classified as
-// stale, even after a supervisor that already used large request ids.
-int CheckRuntimeStopIsNeverStale() {
-  InputDriver driver;
-  driver.Advance(200'000);
-  CHECK(driver.state().execution_state == kZeroTorque);
+// A stop received in the tick of the local stop is still answered and still
+// applied; the local stop then decides the state the tick commits, so the
+// received answer is confirmed against that state like every other answer.
+int CheckLocalStopKeepsInboundStop() {
+  RuntimeFixture f;
+  f.BootToZeroTorque();
+  f.Acquire();
+  CHECK(f.Request(Operation::Damping).applied());
+  CHECK(f.StartTracking().applied());
+  const Sequence epoch = f.state().epoch;
 
-  constexpr Sequence kLargeRequestId = 1'000'000;
-  irmv::runtime::TickInput bootstrap{};
-  bootstrap.requests[0] = {
-      MakeLaneRequest(driver.fsm, driver.state(), Operation::AcquireSession,
-                      kLargeRequestId),
-      driver.now_us()};
-  bootstrap.request_count = 1;
-  driver.Tick(bootstrap);
-  CHECK(driver.state().session_id != irmv::protocol::kNoId);
-  CHECK(driver.fsm.last_handled_request_id() == kLargeRequestId);
+  const ExecutionRequest received = f.MakeRequest(Operation::Damping, 200);
+  f.QueueRequest(received, 0, true);
+  f.RequestLocalStop();
+  f.Step();
 
-  // The supervisor parks the machine in Damping with an even larger id.
-  const Sequence damping_id = kLargeRequestId + 1;
-  irmv::runtime::TickInput damping{};
-  damping.stop_requests[0] = {MakeLaneRequest(driver.fsm, driver.state(),
-                                              Operation::Damping, damping_id),
-                              driver.now_us()};
-  damping.stop_request_count = 1;
-  driver.Tick(damping);
-  CHECK(driver.state().execution_state == kDamping);
-  CHECK(driver.fsm.last_handled_request_id() == damping_id);
-
-  // The runtime's own stop carries an id strictly greater than everything the
-  // session handled, so it is applied instead of answered as a stale request.
-  irmv::runtime::TickInput stop{};
-  CHECK(irmv::runtime::AppendRuntimeStopRequest(&stop, driver.fsm,
-                                                driver.now_us()));
-  CHECK(stop.stop_request_count == 1);
-  const Sequence local_id = stop.stop_requests[0].value.request_id;
-  CHECK(stop.stop_requests[0].value.session_id == driver.state().session_id);
-
-  const TickResult &tick = driver.Tick(stop);
-  CHECK(RuntimeFixture::ResultFor(tick, local_id).applied());
+  const TickResult &tick = f.last_tick();
+  const FixtureResult received_result = RuntimeFixture::ResultFor(tick, 200);
+  CHECK(received_result.request_id == received.request_id);
+  CHECK(tick.result_count == 1);
+  CHECK(received_result.rejected());
+  CHECK(received_result.reason == RejectReason::InvalidTransition);
   CHECK(tick.state.execution_state == kZeroTorque);
+  CHECK(tick.state.epoch == epoch + 2);
+  CHECK(tick.state.producer_id == irmv::protocol::kNoId);
+  CHECK(tick.state.output_action == kActionZeroTorque);
+  CHECK(IsZeroTorque(tick.output));
+  CHECK(CountEvents(tick, EventCode::StopApplied) == 2);
+  CHECK(CountEvents(tick, EventCode::AuthorizationRevoked) == 1);
   CHECK(CountEvents(tick, EventCode::RequestRejected) == 0);
-  CHECK(FindEvent(tick, EventCode::StopApplied) != nullptr);
-  CHECK(local_id > damping_id);
+  return 0;
+}
+
+// H1: the session is bound to the supervisor it was issued to, so a request
+// that only names the published session is refused whatever it asks for, and
+// without touching the owner's request record.
+int CheckForeignSupervisorCannotUseSession() {
+  RuntimeFixture f;
+  f.BootToZeroTorque();
+  f.Acquire();
+  const Id owner = irmv::test::FixtureSupervisorId();
+  const Id intruder = irmv::test::FixtureOtherSupervisorId();
+  const Id producer = irmv::test::FixtureProducerId();
+
+  const ExecutionRequest owned =
+      f.MakeRequest(Operation::Damping, 100, producer, owner);
+  const FixtureResult owned_result = f.Send(owned, true);
+  CHECK(owned_result.applied());
+  CHECK(f.state().execution_state == kDamping);
+  const Sequence stop_watermark = f.state().epoch;
+
+  // A start that echoes the owner's session and carries a valid first frame is
+  // still refused: the authorization does not change, no tracking torque is
+  // executed, and the epoch is not burned.
+  const ExecutionRequest tracking =
+      f.MakeRequest(Operation::Tracking, 1'000, producer, intruder);
+  FixtureResult result = f.Send(tracking);
+  CHECK(result.rejected());
+  CHECK(result.reason == RejectReason::WrongSession);
+  CHECK(f.state().execution_state == kDamping);
+  CHECK(f.state().epoch == stop_watermark);
+  CHECK(f.state().producer_id == irmv::protocol::kNoId);
+  CHECK(f.last_tick().output.torque[0] == kDampingTorque0);
+  CHECK(CountEvents(f.last_tick(), EventCode::AuthorizationGranted) == 0);
+
+  // A stop from the intruder changes nothing either.
+  const ExecutionRequest zero =
+      f.MakeRequest(Operation::ZeroTorque, 1'001, producer, intruder);
+  result = f.Send(zero, true);
+  CHECK(result.rejected());
+  CHECK(result.reason == RejectReason::WrongSession);
+  CHECK(f.state().execution_state == kDamping);
+  CHECK(f.state().epoch == stop_watermark);
+
+  // An id below the owner's newest one is refused as a foreign request, not as
+  // a stale request of the owner: identity is checked before the record.
+  const ExecutionRequest lower =
+      f.MakeRequest(Operation::Damping, 50, producer, intruder);
+  const FixtureResult lower_result = f.Send(lower, true);
+  CHECK(lower_result.rejected());
+  CHECK(lower_result.reason == RejectReason::WrongSession);
+  CHECK(f.state().epoch == stop_watermark);
+
+  // The owner's record is untouched, so its answer is still replayable.
+  const FixtureResult replay = f.Send(owned, true);
+  CHECK(replay.applied());
+  CHECK(replay.stamp_us == owned_result.stamp_us);
+
+  // The owner is served normally afterwards, and with the very id the intruder
+  // used: a refused request never entered the session's record.
+  const ExecutionRequest owned_start =
+      f.MakeRequest(Operation::Tracking, 1'000, producer, owner);
+  result = f.Send(owned_start);
+  CHECK(result.applied());
+  CHECK(f.state().execution_state == kTracking);
+  CHECK(f.state().producer_id == producer);
+  const Sequence tracking_watermark = f.state().epoch;
+  const double tracking_torque0 = f.last_tick().output.torque[0];
+
+  // A foreign stop while the owner tracks: refused, and the executed output is
+  // still the owner's target.
+  const ExecutionRequest foreign_stop =
+      f.MakeRequest(Operation::Damping, 1'002, producer, intruder);
+  result = f.Send(foreign_stop, true);
+  CHECK(result.rejected());
+  CHECK(result.reason == RejectReason::WrongSession);
+  CHECK(f.state().execution_state == kTracking);
+  CHECK(f.state().epoch == tracking_watermark);
+  CHECK(f.state().producer_id == producer);
+  CHECK(f.last_tick().output.torque[0] == tracking_torque0);
+
+  const ExecutionRequest owned_stop =
+      f.MakeRequest(Operation::Damping, 1'004, producer, owner);
+  result = f.Send(owned_stop, true);
+  CHECK(result.applied());
+  CHECK(f.state().execution_state == kDamping);
+
+  // A latched fault is not cleared by a foreign Reset, and the owner's request
+  // that follows is answered by the state machine - which proves the refused
+  // Reset did not become the session's newest handled request.
+  f.SetJointVelocity(15.0);
+  f.Advance(f.ControlPeriodUs());
+  CHECK(f.state().execution_state == kFault);
+  const Sequence fault_id = f.state().fault_id;
+  ExecutionRequest foreign_reset =
+      f.MakeRequest(Operation::Reset, 1'003, producer, intruder);
+  foreign_reset.fault_id = fault_id;
+  result = f.Send(foreign_reset, true);
+  CHECK(result.rejected());
+  CHECK(result.reason == RejectReason::WrongSession);
+  CHECK(f.state().execution_state == kFault);
+  CHECK(f.state().fault_id == fault_id);
+
+  const ExecutionRequest owned_after =
+      f.MakeRequest(Operation::Damping, 1'005, producer, owner);
+  result = f.Send(owned_after, true);
+  CHECK(result.reason == RejectReason::InvalidTransition);
+  CHECK(f.state().execution_state == kFault);
   return 0;
 }
 
@@ -1855,12 +1885,13 @@ int main() {
   CHECK(CheckTrackingSupersededBySupervisorTimeout() == 0);
   CHECK(CheckConfirmedStopStaysApplied() == 0);
   CHECK(CheckContinuityOldContextTorque() == 0);
-  CHECK(CheckPayloadKeyIncludesSupervisor() == 0);
+  CHECK(CheckForeignSupervisorIsNotTheOwnersReplay() == 0);
   CHECK(CheckAcquireRequiresEmptySession() == 0);
   CHECK(CheckHeartbeatSupervisorOwnership() == 0);
   CHECK(CheckResetWithFreshSafetyObservation() == 0);
   CHECK(CheckTakeoverDoesNotInheritStagedAnswer() == 0);
-  CHECK(CheckRuntimeStopKeepsInboundStop() == 0);
-  CHECK(CheckRuntimeStopIsNeverStale() == 0);
+  CHECK(CheckLocalStopIsNotARequest() == 0);
+  CHECK(CheckLocalStopKeepsInboundStop() == 0);
+  CHECK(CheckForeignSupervisorCannotUseSession() == 0);
   return 0;
 }

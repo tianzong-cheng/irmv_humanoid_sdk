@@ -36,10 +36,6 @@ using Clock = std::chrono::steady_clock;
 // overrun accounting, so no tick ever logs at control frequency.
 constexpr protocol::TimeUs kStatusIntervalUs = 1'000'000;
 
-// Bounded retry cadence of the self-issued ZeroTorque stop request: a rejected
-// request is retried with a newer request id, never at control frequency.
-constexpr protocol::TimeUs kStopRetryIntervalUs = 100'000;
-
 // Largest IMU stamp offset a scenario may declare: one hour either way.
 constexpr std::int64_t kMaxStampOffsetUs = 3'600'000'000LL;
 
@@ -1339,10 +1335,12 @@ class ShutdownPlanner {
   };
 
   // Returns the input of this tick. A stop signal while motion may still be
-  // authorized adds the runtime's own ZeroTorque stop request to the stop lane
-  // of this tick; every other tick passes the transport input through.
-  const TickInput *PlanStop(const TickInput &inbound, const ExecutionFsm &fsm,
-                            protocol::TimeUs now_us) {
+  // authorized asks the state machine for the runtime's own ZeroTorque stop
+  // (TickInput::local_stop_requested); every other tick passes the transport
+  // input through. No supervisor identity, session or request id is fabricated,
+  // every received stop of the tick is still answered, and no received stop can
+  // be displaced because the local stop is not part of a lane.
+  const TickInput *PlanStop(const TickInput &inbound, const ExecutionFsm &fsm) {
     const protocol::ExecutionState state = fsm.execution_state();
     if (state != protocol::ExecutionState::Damping &&
         state != protocol::ExecutionState::Tracking) {
@@ -1351,34 +1349,21 @@ class ShutdownPlanner {
     if (fsm.session_id() == protocol::kNoId) {
       // Damping holds without a session only when a supervisor stopped
       // tracking and its lease expired, or when it stopped from Tracking. The
-      // state machine answers every non-bootstrap request of a session-less
-      // machine with WrongSession, so no local request can leave this state:
-      // the runtime reports it and keeps commanding damping torque, which is
+      // local stop is only taken while a session can still be answered, so the
+      // runtime reports this and keeps commanding damping torque, which is
       // exactly what "never report a stop that did not happen" requires.
       Record(Notice::MotionWithoutSession);
-      return &inbound;
-    }
-    if (now_us < next_attempt_us_) {
-      return &inbound;
-    }
-    if (inbound.stop_request_count >= kStopRequestBatchCapacity) {
-      // The stop lane of this tick is full: the local request waits for the
-      // next tick instead of replacing one of the received stops, and no copy
-      // of the batch is made for a request that cannot be added.
       return &inbound;
     }
     if (!stop_input_) {
       stop_input_ = std::make_unique<TickInput>();
     }
-    // The only copy of an inbound batch this loop makes, and only while a stop
-    // request is due: at most once every kStopRetryIntervalUs.
+    // The only copy of an inbound batch this loop makes, and only while motion
+    // may still be authorized. The state machine applies the local stop in the
+    // same tick, so this is not a retry loop: the next tick sees ZeroTorque and
+    // passes the batch through again.
     *stop_input_ = inbound;
-    if (!AppendRuntimeStopRequest(stop_input_.get(), fsm, now_us)) {
-      // The local request did not fit or no session can carry it: the inbound
-      // lane is untouched and the next retry interval tries again.
-      return &inbound;
-    }
-    next_attempt_us_ = now_us + kStopRetryIntervalUs;
+    stop_input_->local_stop_requested = true;
     // Requesting the stop and telling the operator that the runtime still waits
     // for the confirmation belong together: the request alone is not a stop.
     Record(Notice::Motion);
@@ -1459,13 +1444,11 @@ class ShutdownPlanner {
     }
   }
 
-  // The runtime is not a supervisor: AppendRuntimeStopRequest() builds the
-  // request from the live machine, with no supervisor identity and with an id
-  // strictly greater than everything the session has handled, so the operator's
-  // signal always produces a protocol stop that the state machine accepts.
+  // The runtime asks for its own stop through TickInput::local_stop_requested:
+  // the machine is the only source of that flag, so the operator's signal is a
+  // trusted local stop and never a fabricated protocol request.
   Notice pending_{Notice::None};
   Notice last_notice_{Notice::None};
-  protocol::TimeUs next_attempt_us_{0};
   std::unique_ptr<TickInput> stop_input_;
 };
 
@@ -1664,7 +1647,7 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
         g_stop_requested.load(std::memory_order_relaxed);
     const TickInput *input = &transport.TakeInput();
     if (stop_requested) {
-      input = shutdown.PlanStop(*input, fsm, now);
+      input = shutdown.PlanStop(*input, fsm);
     }
     const protocol::FeedbackSnapshot feedback = backend.Read(now);
     const TickResult result = fsm.Tick(now, feedback, *input, backend);

@@ -129,6 +129,7 @@ class RuntimeFixture {
   // and the queued inputs.
   const TickResult &Step() {
     TickInput input{};
+    input.local_stop_requested = std::exchange(local_stop_pending_, false);
     AppendQueuedHeartbeats(input);
     AppendQueuedRequests(input);
     AppendAutoCommand(input);
@@ -139,6 +140,11 @@ class RuntimeFixture {
     last_tick_ = fsm_.Tick(now_us_, snapshot, input, backend);
     return last_tick_;
   }
+
+  // Asks the state machine for the runtime's own ZeroTorque stop in the next
+  // tick: the trusted local stop of the leaving process, not a supervisor
+  // request. Every received request of that tick is still answered.
+  void RequestLocalStop() { local_stop_pending_ = true; }
 
   // Steps Tick in control_period_us increments until the requested duration has
   // elapsed. The simulated clock never moves backwards.
@@ -554,6 +560,7 @@ class RuntimeFixture {
   bool heartbeat_sequence_fixed_{false};
   bool command_enabled_{true};
   bool imu_fresh_{true};
+  bool local_stop_pending_{false};
   std::uint32_t feedback_count_override_{0};
 
   std::array<Received<ExecutionRequest>, kRequestBatchCapacity>

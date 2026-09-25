@@ -134,6 +134,14 @@ void ExecutionFsm::ProcessRequests(TickScope &scope, const TickInput &input) {
   for (std::size_t index = 0; index < count; ++index) {
     HandleRequest(scope, input.requests[index]);
   }
+  // The runtime's own stop is applied after both received lanes, so the state
+  // this tick commits is the state the leaving process commands: a start of the
+  // same tick cannot keep commanding torque past it, and its answer is
+  // downgraded by the write confirmation like every other answer the committed
+  // state does not implement.
+  if (input.local_stop_requested) {
+    HandleLocalStop(scope);
+  }
 }
 
 void ExecutionFsm::ProcessCommands(TickScope &scope, const TickInput &input) {
@@ -290,6 +298,18 @@ void ExecutionFsm::HandleRequest(
                              protocol::RejectReason::WrongSession);
     return;
   }
+  // The session is bound to the supervisor it was issued to: echoing the
+  // published session id is not enough to act on it. The identity is checked
+  // before the request record, the staged record and every operation guard, so
+  // a foreign request can neither consume a request id of the owner nor touch
+  // the authorization. The runtime's own stop is not a request at all (see
+  // TickInput::local_stop_requested), which is why no identity value can act as
+  // a bypass here.
+  if (request.supervisor_id != session_supervisor_id_) {
+    QueueUnrecordedRejection(scope, request,
+                             protocol::RejectReason::WrongSession);
+    return;
+  }
 
   // Exactly-once handling: the answers confirmed by earlier ticks, then the
   // answer this tick staged but has not confirmed yet.
@@ -399,6 +419,33 @@ void ExecutionFsm::HandleStop(
             protocol::RejectReason::None, protocol::FaultReason::None,
             protocol::StopReason::Requested, request.request_id);
   QueueApplied(scope, request);
+}
+
+void ExecutionFsm::HandleLocalStop(TickScope &scope) {
+  if (state_ == protocol::ExecutionState::ZeroTorque) {
+    // The runtime's own stop only ever steps towards zero torque. Asking again
+    // with nothing left to revoke and nothing left to change would burn a
+    // watermark for no safety gain, and it would supersede the answer of a
+    // received stop of this tick that the committed state still implements.
+    return;
+  }
+  const protocol::RejectReason allowed =
+      CheckStateAllows(state_, protocol::Operation::ZeroTorque);
+  if (allowed != protocol::RejectReason::None) {
+    // Boot is decided by its self-check and Fault by its latch: the runtime
+    // never clears a latched fault by leaving, and it never skips the startup
+    // path.
+    return;
+  }
+  if (!RevokeMotion(scope)) {
+    return;
+  }
+  const protocol::ExecutionState previous = state_;
+  SetState(protocol::ExecutionState::ZeroTorque, scope, EventCode::None);
+  stop_reason_ = protocol::StopReason::Requested;
+  EmitEvent(scope, EventCode::StopApplied, previous,
+            protocol::ExecutionState::ZeroTorque, protocol::RejectReason::None,
+            protocol::FaultReason::None, protocol::StopReason::Requested);
 }
 
 void ExecutionFsm::HandleReset(
@@ -973,58 +1020,6 @@ double ExecutionFsm::ExpectedCurrentTorque(
     return -config_.damping_kd[index] * feedback.joints[index].dq;
   }
   return 0.0;
-}
-
-protocol::Sequence ExecutionFsm::last_handled_request_id() const {
-  return std::max({request_record_.request_id, staged_record_.request_id,
-                   acquire_record_.request_id});
-}
-
-bool AppendRuntimeStopRequest(TickInput *input, const ExecutionFsm &fsm,
-                              protocol::TimeUs now_us) {
-  if (input == nullptr || fsm.session_id() == protocol::kNoId) {
-    return false;
-  }
-  // The lane of this tick is preserved: a stop received in the same tick is
-  // answered even when the runtime adds one of its own, and a full lane defers
-  // the local request instead of overwriting a received one.
-  if (input->stop_request_count >= kStopRequestBatchCapacity) {
-    return false;
-  }
-  // Everything the session has handled, plus every request that travels with
-  // this tick. A request of the same batch is handled around the local one, so
-  // an id that only exceeds the handled ids can collide with it and be answered
-  // as a conflict instead of a stop.
-  protocol::Sequence newest = fsm.last_handled_request_id();
-  const std::size_t stop_count =
-      std::min(input->stop_request_count, kStopRequestBatchCapacity);
-  for (std::size_t index = 0; index < stop_count; ++index) {
-    newest = std::max(newest, input->stop_requests[index].value.request_id);
-  }
-  const std::size_t request_count =
-      std::min(input->request_count, kRequestBatchCapacity);
-  for (std::size_t index = 0; index < request_count; ++index) {
-    newest = std::max(newest, input->requests[index].value.request_id);
-  }
-  if (newest == std::numeric_limits<protocol::Sequence>::max()) {
-    // No greater id exists, so the caller keeps its signal pending instead of
-    // sending a request that the deduplication would answer as a repeated one.
-    return false;
-  }
-  protocol::ExecutionRequest request;
-  request.protocol_version = protocol::kProtocolVersion;
-  request.supervisor_id = protocol::kNoId;
-  request.request_id = newest + 1;
-  request.session_id = fsm.session_id();
-  request.runtime_id = fsm.runtime_id();
-  request.expected_epoch = fsm.epoch();
-  request.proposed_epoch = 0;
-  request.producer_id = fsm.producer_id();
-  request.fault_id = fsm.fault_id();
-  request.operation = protocol::Operation::ZeroTorque;
-  input->stop_requests[input->stop_request_count] = {request, now_us};
-  ++input->stop_request_count;
-  return true;
 }
 
 }  // namespace irmv::runtime
