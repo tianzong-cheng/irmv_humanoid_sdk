@@ -77,10 +77,14 @@ BehaviorStep BehaviorFsm::Step(protocol::TimeUs now_us, InputEvent event,
   // The outcome of a view is edge triggered and the loop may hand one poll to
   // several Steps (one per input event, then a final one): only the first Step
   // to see a given poll may act on its outcome, or a Step would apply an answer
-  // to the request the previous Step had just begun.
+  // to the request the previous Step had just begun. The watermark is
+  // monotonic, so a view that is presented again after a newer poll was seen
+  // counts as consumed instead of re-enabling an old outcome. The sharp edge:
+  // a hand-built ClientView keeps the default poll_seq of 0 and is therefore
+  // treated as already consumed.
   const RequestOutcome outcome =
-      view.poll_seq != consumed_poll_seq_ ? view.outcome : RequestOutcome::None;
-  consumed_poll_seq_ = view.poll_seq;
+      view.poll_seq > consumed_poll_seq_ ? view.outcome : RequestOutcome::None;
+  consumed_poll_seq_ = std::max(consumed_poll_seq_, view.poll_seq);
 
   // Phase 1 - the fresh lower state and every fault it proves. It runs first
   // because nothing may be decided against a state that is already wrong, and
@@ -105,13 +109,12 @@ BehaviorStep BehaviorFsm::Step(protocol::TimeUs now_us, InputEvent event,
   // nothing is generated and nothing new is asked for.
   if (!exit_requested_) {
     ConsumeOutcome(now_us, view, outcome);
-    const bool stop_begun = OrdinaryRequests(now_us, event, view, &out);
-    if (!stop_begun) {
-      // The iteration that begins a stop owns it: the target frame that would
-      // have left in the same Step belongs to the authorization the stop is
-      // withdrawing.
-      EmitTarget(now_us, view, &out);
-    }
+    OrdinaryRequests(now_us, event, view, &out);
+    // EmitTarget itself refuses while a stop of ours is in flight: the stop may
+    // have been begun by an earlier Step of this very iteration, and the target
+    // frame that would leave now belongs to the authorization the stop is
+    // withdrawing.
+    EmitTarget(now_us, view, &out);
   }
 
   // Phase 4 - the supervision heartbeat, and only after every check above:
@@ -317,6 +320,14 @@ bool BehaviorFsm::StopPending() const {
          pending_ == Pending::Reset;
 }
 
+bool BehaviorFsm::StopInFlight() const {
+  // Both halves are durable across the Steps of one iteration: the client still
+  // holds the request, and the operation the FSM began last is a stop. Only a
+  // stop uses the transport's stop lane, and only while the client has not
+  // resolved it may the FSM think a stop is under way.
+  return client_.request_pending() && IsStopOperation(pending_operation_);
+}
+
 bool BehaviorFsm::ExpectedTracking(const protocol::RobotState &state) const {
   if (TrackingBehavior(state_) && tracking_active_ &&
       state.producer_id == tracking_producer_ &&
@@ -402,8 +413,11 @@ void BehaviorFsm::ExitStep(protocol::TimeUs now_us, const ClientView &view,
     return;
   }
   // The damping stop is asked for once, and never before the lower layer is
-  // known not to be in a fault of its own.
-  if (pending_ == Pending::None && !client_.request_pending()) {
+  // known not to be in a fault of its own. The `!exit_ready_` gate matters
+  // because the loop may step the same view again after the exit resolved: a
+  // terminal resolution is terminal, and re-asking there would publish a fresh
+  // request with a new id for a stop the exit no longer waits for.
+  if (!exit_ready_ && pending_ == Pending::None && !client_.request_pending()) {
     BeginDampingStop(now_us);
   }
   if (now_us >= exit_deadline_us_) {
@@ -502,10 +516,9 @@ void BehaviorFsm::ConsumeOutcome(protocol::TimeUs now_us,
   }
 }
 
-bool BehaviorFsm::OrdinaryRequests(protocol::TimeUs now_us, InputEvent event,
+void BehaviorFsm::OrdinaryRequests(protocol::TimeUs now_us, InputEvent event,
                                    const ClientView &view, BehaviorStep *out) {
   const bool fresh = view.state_known && view.state_fresh;
-  bool stop_begun = false;
   switch (state_) {
     case BehaviorState::Starting: {
       const bool ours =
@@ -526,7 +539,7 @@ bool BehaviorFsm::OrdinaryRequests(protocol::TimeUs now_us, InputEvent event,
         // takes it over, and a fresh ZeroTorque is the only state that promotes
         // the behaviour - a left-over tracking state is never shown as Ready or
         // Locomotion, and the stop is asked for once, not once per iteration.
-        stop_begun = BeginZeroTorqueStop(now_us);
+        BeginZeroTorqueStop(now_us);
         break;
       }
       // A lower Boot, or a session not ours yet, keeps waiting: Starting sends
@@ -538,7 +551,7 @@ bool BehaviorFsm::OrdinaryRequests(protocol::TimeUs now_us, InputEvent event,
     }
     case BehaviorState::Standby:
       if (event == InputEvent::Damping) {
-        stop_begun = BeginDampingStop(now_us);
+        BeginDampingStop(now_us);
       }
       // A ZeroTorque key here is a repeated key of the current behaviour.
       break;
@@ -546,7 +559,7 @@ bool BehaviorFsm::OrdinaryRequests(protocol::TimeUs now_us, InputEvent event,
       if (event == InputEvent::Initialize) {
         TryStartInitialization(now_us, view, out);
       } else if (event == InputEvent::ZeroTorque) {
-        stop_begun = BeginZeroTorqueStop(now_us);
+        BeginZeroTorqueStop(now_us);
       }
       break;
     case BehaviorState::Initializing:
@@ -555,9 +568,9 @@ bool BehaviorFsm::OrdinaryRequests(protocol::TimeUs now_us, InputEvent event,
       // Locomotion is unreachable in this phase, but its stop rules are the
       // rules of every behaviour that holds an authorization.
       if (event == InputEvent::Damping) {
-        stop_begun = BeginDampingStop(now_us);
+        BeginDampingStop(now_us);
       } else if (event == InputEvent::ZeroTorque) {
-        stop_begun = BeginZeroTorqueStop(now_us);
+        BeginZeroTorqueStop(now_us);
       }
       // An Initialize key is refused here: nothing returns to the
       // initialization pose from a move, and a repeated key must not restart
@@ -574,7 +587,6 @@ bool BehaviorFsm::OrdinaryRequests(protocol::TimeUs now_us, InputEvent event,
       }
       break;
   }
-  return stop_begun;
 }
 
 void BehaviorFsm::TryStartInitialization(protocol::TimeUs now_us,
@@ -678,6 +690,16 @@ void BehaviorFsm::TryReset(protocol::TimeUs now_us, const ClientView &view) {
 void BehaviorFsm::EmitTarget(protocol::TimeUs now_us, const ClientView &view,
                              BehaviorStep *out) {
   if (state_ != BehaviorState::Initializing && state_ != BehaviorState::Ready) {
+    return;
+  }
+  if (StopInFlight()) {
+    // A stop of ours is on the wire and still unanswered (or still waiting for
+    // the fresh state that confirms it). That is the durable fact, and it holds
+    // for every Step of the pending window: a target frame published now would
+    // be part of the authorization the stop is withdrawing, and - because the
+    // loop hands one poll to several Steps - gating on this iteration's local
+    // "a stop was just begun" flag would leave the final Step of the same
+    // iteration free to publish exactly that frame.
     return;
   }
   if (!initialization_ || !(view.state_known && view.state_fresh)) {

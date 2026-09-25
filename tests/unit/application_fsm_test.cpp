@@ -756,6 +756,45 @@ int OneViewManySteps() {
   return 0;
 }
 
+// The loop shape the suppression exists for: one poll, the operator's Damping
+// event Step, and then the final None Step of the very same iteration. A stop
+// of ours is in flight in both, so neither may publish a target frame - the
+// frame the final Step would otherwise emit belongs to the authorization the
+// stop is withdrawing. Gating on "this Step began a stop" left exactly that
+// hole.
+int StopInFlightSuppressesTarget() {
+  Harness h;
+  CHECK(ToStandby(h) == 0);
+  CHECK(ToReady(h) == 0);
+  const TimeUs period = h.config().supervision.target_period_us;
+
+  // The poll advances a full target period, so a hold frame is due.
+  const ClientView view = h.PollOnce(period);
+  const std::size_t commands = h.sink().commands.size();
+
+  BehaviorStep step = h.StepView(view, InputEvent::Damping);
+  CHECK(step.state == BehaviorState::Ready);  // only a confirmation moves it
+  CHECK(!step.send_command);
+  const ExecutionRequest *stop = h.last_request();
+  CHECK(stop != nullptr);
+  if (stop == nullptr) {
+    return 1;
+  }
+  CHECK(stop->operation == Operation::Damping);
+  CHECK(h.client().request_pending());
+  CHECK(h.client().pending_request_id() == stop->request_id);
+
+  // The same view, the same instant, the final Step of the iteration: the
+  // target is due but the stop is still unresolved, so nothing is published.
+  step = h.StepView(view);
+  CHECK(step.state == BehaviorState::Ready);
+  CHECK(!step.send_command);
+  CHECK(h.sink().commands.size() == commands);
+  CHECK(h.client().request_pending());
+  CHECK(h.client().pending_request_id() == stop->request_id);
+  return 0;
+}
+
 // A repeated identical stop key never re-asks: the request on the wire owns the
 // decision and the client owns its bounded resend, so the deadline of an
 // unanswered stop is never restarted by the key.
@@ -1056,7 +1095,8 @@ int OrdinaryStopsFromMotion() {
     CHECK(step.state ==
           BehaviorState::Initializing);  // only a confirmation moves it
     // The iteration that begins the stop emits no target frame, even though a
-    // period has passed: a stop in flight owns the iteration.
+    // full period has passed: a stop of ours is in flight until the client
+    // resolves it, and that durable fact is what suppresses the target.
     CHECK(!step.send_command);
     const ExecutionRequest *request = h.last_request();
     CHECK(request != nullptr);
@@ -1480,7 +1520,11 @@ int EmergencyStopInRuntimeFault() {
 }
 
 // The session the runtime withdrew is a lost link, not a new normal: the upper
-// latches it and asks for nothing it cannot address.
+// latches it and asks for nothing it cannot address. The case deliberately
+// re-establishes a known state after the loss (the client drops its snapshot
+// when it loses the session, and re-observing the revoked state makes it
+// current again), so the FSM takes the `view.session_lost` branch and not the
+// stale-state one, which would latch the same cause for another reason.
 int SessionLossLatches() {
   Harness h;
   CHECK(ToStandby(h) == 0);
@@ -1489,14 +1533,31 @@ int SessionLossLatches() {
   RobotState revoked = h.State(h.now_us());
   revoked.session_id = MakeId(0x50);
   h.client().ObserveState(revoked, h.now_us());
+  CHECK(!h.client().session_owned());
+  // A second observation of the same instance: it is a known, fresh state that
+  // carries the loss, exactly the combination the branch under test wants.
+  revoked = h.State(h.now_us() + 1);
+  revoked.session_id = MakeId(0x50);
+  h.client().ObserveState(revoked, h.now_us());
+
+  // The loss reports its own Unknown outcome exactly once. A first poll
+  // consumes that outcome, so the view the Step below acts on can reach the
+  // latch only through view.session_lost - the branch this case is named for.
+  const ClientView loss = h.Poll();
+  CHECK(loss.outcome == RequestOutcome::Unknown);
+  const ClientView view = h.Poll();
+  CHECK(view.outcome != RequestOutcome::Unknown);
+  CHECK(view.state_known);
+  CHECK(view.state_fresh);
+  CHECK(view.session_lost);
+  CHECK(!view.session_owned);
 
   const std::size_t requests = h.sink().requests.size();
-  const BehaviorStep step = h.Step();
+  const BehaviorStep step = h.StepView(view);
   CHECK(step.state == BehaviorState::Fault);
   CHECK(step.fault_cause == FaultCause::RuntimeUnreachable);
   CHECK(!step.send_command);
   CHECK(!step.send_heartbeat);
-  CHECK(!h.client().session_owned());
   // Nothing can leave without a session, so no stop is claimed either.
   CHECK(h.sink().requests.size() == requests);
   return 0;
@@ -1548,9 +1609,18 @@ int ExitSequence() {
     h.lower.state = ExecutionState::Damping;
     h.lower.output = OutputAction::Damping;
     CHECK(h.Answer());
-    step = h.Step();
+    const ClientView view = h.PollOnce();
+    const std::size_t settled = h.sink().requests.size();
+    step = h.StepView(view);
     CHECK(step.exit_ready);
     CHECK(step.exit_stop_confirmed);
+    // A second Step on the same view, after the exit resolved terminally: the
+    // resolution is terminal, and no fresh Damping request may leave.
+    step = h.StepView(view);
+    CHECK(step.exit_ready);
+    CHECK(step.exit_stop_confirmed);
+    CHECK(h.sink().requests.size() == settled);
+    CHECK(!h.client().request_pending());
   }
 
   // (b) A silent link is bounded by the deadline and proves nothing.
@@ -1641,6 +1711,7 @@ int main() {
   failures += StopConfirmations();
   failures += ConfirmationOvertakenByTheState();
   failures += OneViewManySteps();
+  failures += StopInFlightSuppressesTarget();
   failures += RepeatedStopKeyDoesNotReask();
   failures += RejectedRequestKeepsBehaviour();
   failures += RequestTimeoutFaults();

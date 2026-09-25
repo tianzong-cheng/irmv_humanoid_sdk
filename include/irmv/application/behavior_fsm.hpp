@@ -115,6 +115,13 @@ class BehaviorFsm {
   // One iteration: `now_us` is the host monotonic instant, `event` the semantic
   // input event of this iteration (None when there is none) and `view` the
   // ClientView of the Poll this iteration already made. Step never polls.
+  //
+  // The loop hands one Poll view to several Steps of the same iteration - one
+  // per input event, then a final one with None - and Step is idempotent: the
+  // edge-triggered outcome of the view is consumed once per new `poll_seq` (the
+  // first Step that sees that serial acts on it, every later Step on the same
+  // view sees None), and a stop an earlier Step of the iteration began is
+  // visible to the later ones.
   BehaviorStep Step(protocol::TimeUs now_us, InputEvent event,
                     const ClientView &view);
 
@@ -154,9 +161,11 @@ class BehaviorFsm {
                 RequestOutcome outcome);
   void ConsumeOutcome(protocol::TimeUs now_us, const ClientView &view,
                       RequestOutcome outcome);
-  // True when this iteration began a stop; such an iteration does not also
-  // emit a target frame.
-  bool OrdinaryRequests(protocol::TimeUs now_us, InputEvent event,
+  // Handles the ordinary requests and the initialization targets of this
+  // event. Whether a stop was begun here is not reported: the target generator
+  // is gated on StopInFlight(), the durable fact that survives the whole
+  // pending window and the later Steps of this same iteration.
+  void OrdinaryRequests(protocol::TimeUs now_us, InputEvent event,
                         const ClientView &view, BehaviorStep *out);
   void TryStartInitialization(protocol::TimeUs now_us, const ClientView &view,
                               BehaviorStep *out);
@@ -175,6 +184,11 @@ class BehaviorFsm {
   bool AcquireNeeded(protocol::TimeUs now_us, const ClientView &view) const;
   void CancelInitialization();
   bool StopPending() const;
+  // True while a stop this FSM began is still unresolved: the client holds it
+  // and the operation last begun is one of the transport's stop-lane
+  // operations. Only a durable stop suppresses target generation, not the fact
+  // that a stop was begun in this very Step.
+  bool StopInFlight() const;
   // Whether a Tracking state is the context this FSM authorized: the confirmed
   // initialization/hold context, or the context the pending Tracking request
   // proposes.
@@ -214,10 +228,13 @@ class BehaviorFsm {
   // A state has been observed at least once; before that, Starting waits
   // instead of calling an absent link unreachable.
   bool saw_state_{false};
-  // The serial of the poll whose outcome this FSM already consumed. The loop
-  // hands one view to several Steps (one per input event), and the outcome is
-  // edge triggered: without this a second Step would apply the same answer to a
-  // request it began in the first one.
+  // The highest serial of a poll whose outcome this FSM already consumed. The
+  // loop hands one view to several Steps (one per input event) and the outcome
+  // is edge triggered: without this a second Step would apply the same answer
+  // to a request it began in the first one. It is a monotonic watermark, so
+  // re-presenting an older view after a newer poll was seen does not re-enable
+  // that older outcome - and a hand-built ClientView with the default
+  // poll_seq of 0 is treated as already consumed.
   protocol::Sequence consumed_poll_seq_{0};
   // The operation of the request the FSM began last, so a repeated key can tell
   // "the same stop is already on the wire" from "a different stop preempts".
