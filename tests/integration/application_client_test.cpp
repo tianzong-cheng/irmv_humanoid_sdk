@@ -1025,7 +1025,9 @@ int main(int argc, char **argv) {
 
   // The identity is never the reserved empty id, it differs between two calls
   // of one process, and the request-id band it carries leaves room below the
-  // reserved last sequence value.
+  // reserved last sequence value. These are properties of the identity, not
+  // proof of the entropy-fallback path: the entropy source normally works, so
+  // the same three checks pass on an implementation whose fallback is constant.
   const Id first_identity = irmv::application::MakeSupervisorId();
   const Id second_identity = irmv::application::MakeSupervisorId();
   Check(fx,

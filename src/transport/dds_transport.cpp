@@ -318,10 +318,23 @@ void DdsTransport::Start() {
   if (impl_) {
     return;
   }
+  // One invariant, the same one the application transport keeps: started() is
+  // true only while an owned implementation has a launched thread that has not
+  // left its loop. The implementation is owned and the flag is published before
+  // the launch, so a loop that ends immediately cannot be reported as running
+  // just because the store had not happened yet, and a launch that throws
+  // restores both. The transport thread clears the flag on its way out
+  // (Impl::Run), which is what turns started() false when the loop ends.
   std::unique_ptr<Impl> impl = std::make_unique<Impl>(config_, *this);
-  impl->Start();
   impl_ = std::move(impl);
   started_.store(true, std::memory_order_release);
+  try {
+    impl_->Start();
+  } catch (...) {
+    started_.store(false, std::memory_order_release);
+    impl_.reset();
+    throw;
+  }
 }
 
 void DdsTransport::Stop() {

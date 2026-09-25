@@ -14,6 +14,12 @@ namespace irmv::application {
 // band of request ids a RobotClient uses (its first eight bytes, big-endian),
 // and a band that started inside the upper half of the sequence space would
 // hardly ever have room for the requests of a session.
+//
+// When the system entropy source is unusable the identity falls back to a value
+// mixed from the process id, the host clocks and a process-local counter: it is
+// not random then, but it is still unique per process and never empty, the way
+// the runtime's own identity falls back. That fallback is also why this library
+// depends on POSIX (getpid) like the rest of this phase.
 protocol::Id MakeSupervisorId();
 
 // What a RobotClient needs from a transport. The client never sees a DDS type,
@@ -73,7 +79,10 @@ struct ClientView {
 };
 
 // The official supervisor client: the frozen request/answer and target rules of
-// docs/runtime-protocol.md, without a single DDS type.
+// docs/runtime-protocol.md, without a single DDS type. It is DDS-free and links
+// only the protocol and the configuration; its one platform dependency is the
+// POSIX process id MakeSupervisorId() falls back to when entropy is
+// unavailable.
 //
 // The client is a pure function of what it is told and of the times it is
 // given: it reads no clock, allocates nothing, never blocks on the transport

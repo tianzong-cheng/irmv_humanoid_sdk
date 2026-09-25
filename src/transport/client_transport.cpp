@@ -249,15 +249,25 @@ void ClientTransport::Start() {
   if (impl_) {
     return;
   }
-  // Creating the endpoints may throw, and a transport that failed to start must
-  // not report itself as running, so the flag is published only once they exist
-  // - but before the thread is launched: the thread clears it when it leaves
-  // its loop, and a loop that ends immediately must not be reported as running
-  // just because the store had not happened yet.
+  // One invariant, the same one DdsTransport keeps: started() is true only
+  // while an owned implementation has a launched thread that has not left its
+  // loop. The implementation is owned and the flag is published before the
+  // launch, so a loop that ends immediately cannot be reported as running just
+  // because the store had not happened yet, and a launch that throws restores
+  // both - otherwise started() would stay true over a null implementation, Stop
+  // would return early and the publish gate below would accept samples nobody
+  // could write. The transport thread clears the flag on its way out
+  // (Impl::Run).
   std::unique_ptr<Impl> impl = std::make_unique<Impl>(config_, *this);
-  started_.store(true, std::memory_order_release);
-  impl->Start();
   impl_ = std::move(impl);
+  started_.store(true, std::memory_order_release);
+  try {
+    impl_->Start();
+  } catch (...) {
+    started_.store(false, std::memory_order_release);
+    impl_.reset();
+    throw;
+  }
 }
 
 void ClientTransport::Stop() {

@@ -836,10 +836,15 @@ int main() {
     CHECK(client.BeginRequest(Operation::AcquireSession, 80'100));
     const Sequence id = sink.requests.back().request_id;
     CHECK(client.Poll(80'100).outcome == RequestOutcome::Pending);
+    // The seven later states deliberately contradict the answer (they carry the
+    // next watermark), so the scan can only confirm while the real witness at
+    // 80'120 is still retained: with a history one shorter than the promised
+    // eight the oldest entry would be one of these and the request would be
+    // refused instead of confirmed.
     for (Sequence index = 1; index <= 7; ++index) {
       const TimeUs stamp = 80'120 + index * 10;
       client.ObserveState(
-          MakeState(runtime_id, session_id, 0, 901 + index, stamp,
+          MakeState(runtime_id, session_id, 1, 901 + index, stamp,
                     ExecutionState::ZeroTorque, OutputAction::ZeroTorque),
           stamp + 20);
     }

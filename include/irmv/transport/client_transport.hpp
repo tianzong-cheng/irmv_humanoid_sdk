@@ -35,6 +35,9 @@ struct ClientEvents {
   // call. The state lane keeps one entry, so an unread state that a newer
   // sample replaced was counted as dropped instead of being delivered late.
   bool has_state{false};
+  // `state` and `state_rx_us` are meaningful only while `has_state` is true:
+  // they keep the previous take's values otherwise, which is what lets an empty
+  // take cost nothing.
   protocol::RobotState state{};
   // Host monotonic receive stamp of `state`.
   protocol::TimeUs state_rx_us{0};

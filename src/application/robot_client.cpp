@@ -30,12 +30,12 @@ std::uint64_t MixBits(std::uint64_t value) {
   return value ^ (value >> 31);
 }
 
-// The identity used when the system entropy source is unusable, mixed the way
-// the runtime mixes its own fallback: the host monotonic clock, the wall clock,
-// the process id, a process-local counter and a stack address. It is not
-// random, but no two processes share it - a constant would make two such
-// processes indistinguishable to the runtime, which identifies the session
-// owner by supervisor id alone - and it is never the all-zero id.
+// The identity used when the system entropy source is unusable: the runtime's
+// own mixing (host monotonic clock, wall clock, process id and a stack address)
+// plus a process-local counter here. It is not random, but no two processes
+// share it - a constant would make two such processes indistinguishable to the
+// runtime, which identifies the session owner by supervisor id alone - and it
+// is never the all-zero id.
 protocol::Id FallbackSupervisorId() {
   static std::atomic<std::uint64_t> counter{0};
   const std::uint64_t salt = counter.fetch_add(1, std::memory_order_relaxed);
@@ -108,7 +108,7 @@ protocol::Id MakeSupervisorId() {
     }
     filled = true;
   } catch (const std::exception &) {
-    filled = false;
+    // `filled` stays false: the fallback below has to take over.
   }
   if (!filled || id == protocol::kNoId) {
     // An unusable entropy source is not worth failing startup over, but it must
