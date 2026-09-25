@@ -126,11 +126,13 @@ int StartRefused(Initialization &initialization, const RobotState &fresh,
 constexpr TimeUs kSlowDurationUs = 4'000'000;
 
 // Sets the move length together with a deadline that keeps the loader's rule
-// (deadline > duration) satisfied, so every mutated fixture is one the real
+// (deadline_us >= duration_us + stable_window_us) satisfied whatever window the
+// case chooses afterwards, so every mutated fixture is one the real
 // configuration would accept.
 void SetDuration(ApplicationConfig &config, TimeUs duration) {
   config.initialization.trajectory.duration_us = duration;
-  config.initialization.trajectory.deadline_us = duration * 4;
+  config.initialization.trajectory.deadline_us =
+      duration * 4 + config.initialization.trajectory.stable_window_us;
 }
 
 // The first frame of a move is judged by the runtime against the damped
@@ -980,9 +982,10 @@ int AdmissionRefusals() {
   return 0;
 }
 
-// Completion is decided before the deadline: the ramp must be finished, every
-// joint inside its tolerances, and the tolerance must hold for the whole stable
-// window. A window broken by one out-of-tolerance sample restarts.
+// The deadline bounds the completion judgement: past it the move fails, but the
+// ramp must still be finished, every joint inside its tolerances, and the
+// tolerance must hold for the whole stable window. A window broken by one
+// out-of-tolerance sample restarts.
 int StableWindowAndCompletion() {
   ApplicationConfig config = FakeConfig();
   // The ramp rate (0.5 rad over 2 s) stays inside the runtime's velocity
@@ -1116,17 +1119,17 @@ int StableWindowAndCompletion() {
   return 0;
 }
 
-// Completion is judged before the deadline: a move whose stable window opens at
-// the ramp end and completes after the deadline is Ready, not Failed.
+// The deadline is the final bound of the move and is judged before the
+// completion block: the instant itself is still inside the bound, so a stable
+// window that completed exactly on the deadline is Ready, while the same
+// satisfied move one microsecond later has failed and emits nothing.
 int CompletionBeforeDeadline() {
   ApplicationConfig config = FakeConfig();
   const TimeUs duration = 1'000'000;
   const TimeUs window = 100'000;
-  const TimeUs deadline = 1'050'000;
-  // The deadline is deliberately shorter than duration + stable_window, so the
-  // completion block can only answer Ready if it runs before the deadline
-  // check.
-  CHECK(deadline < duration + window);
+  // The latest deadline a move of this length can still complete on: the stable
+  // window ends exactly on it.
+  const TimeUs deadline = duration + window;
   config.initialization.trajectory.duration_us = duration;
   config.initialization.trajectory.deadline_us = deadline;
   config.initialization.trajectory.stable_window_us = window;
@@ -1135,26 +1138,26 @@ int CompletionBeforeDeadline() {
   const JointPair still{0.0, 0.0};
   const TimeUs start_us = 50'000'000;
 
-  Initialization initialization(config);
-  const RobotState origin =
-      FreshState(config, start_q, still, start_us - 1'000, 90);
-  CHECK(StartOk(initialization, origin, kEpoch, start_us, Producer()) == 0);
+  // Exactly on the deadline, with the window complete: still Ready.
+  {
+    Initialization initialization(config);
+    const RobotState origin =
+        FreshState(config, start_q, still, start_us - 1'000, 90);
+    CHECK(StartOk(initialization, origin, kEpoch, start_us, Producer()) == 0);
 
-  // The ramp ends here and the window opens; the deadline has not passed yet.
-  {
-    const TimeUs now = start_us + duration;
-    CHECK(now - start_us <= deadline);
-    JointCommand frame{};
-    CHECK(initialization.Step(
-              FreshState(config, at_target, still, now - 1'000, 91), now,
-              &frame) == InitializationStatus::Running);
-    CHECK(!initialization.ready());
-  }
-  // The window has been held for its whole length, so the move is Ready even
-  // though the run is past its deadline.
-  {
-    const TimeUs now = start_us + duration + window;
-    CHECK(now - start_us > deadline);
+    // The ramp ends here and opens the window; the deadline is not reached yet.
+    {
+      const TimeUs now = start_us + duration;
+      CHECK(now - start_us < deadline);
+      JointCommand frame{};
+      CHECK(initialization.Step(
+                FreshState(config, at_target, still, now - 1'000, 91), now,
+                &frame) == InitializationStatus::Running);
+      CHECK(!initialization.ready());
+    }
+    // The window has been held for its whole length, exactly on the deadline.
+    const TimeUs now = start_us + deadline;
+    CHECK(now - start_us == deadline);
     JointCommand frame{};
     CHECK(initialization.Step(
               FreshState(config, at_target, still, now - 1'000, 92), now,
@@ -1167,6 +1170,34 @@ int CompletionBeforeDeadline() {
       CHECK(frame.joints.dq[index] == 0.0);
       CHECK(frame.joints.tau_ff[index] == 0.0);
     }
+  }
+
+  // One microsecond past the deadline the same satisfied position, velocity and
+  // window are not enough: the move has failed, is unlatched from Ready, and
+  // the output command is left exactly as it was found.
+  {
+    Initialization initialization(config);
+    const RobotState origin =
+        FreshState(config, start_q, still, start_us - 1'000, 93);
+    CHECK(StartOk(initialization, origin, kEpoch, start_us, Producer()) == 0);
+    // The ramp end opens the window, which would complete one microsecond after
+    // the deadline.
+    const TimeUs ramp_end = start_us + duration;
+    JointCommand frame{};
+    CHECK(initialization.Step(
+              FreshState(config, at_target, still, ramp_end - 1'000, 94),
+              ramp_end, &frame) == InitializationStatus::Running);
+    CHECK(!initialization.ready());
+
+    const TimeUs now = start_us + deadline + 1;
+    JointCommand untouched = Sentinel();
+    CHECK(initialization.Step(
+              FreshState(config, at_target, still, now - 1'000, 95), now,
+              &untouched) == InitializationStatus::Failed);
+    CHECK(CheckUntouched(untouched) == 0);
+    CHECK(!initialization.ready());
+    CHECK(initialization.failed());
+    CHECK(!initialization.active());
   }
   return 0;
 }

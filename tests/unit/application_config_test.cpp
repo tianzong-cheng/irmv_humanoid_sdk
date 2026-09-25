@@ -530,6 +530,25 @@ int main() {
   CHECK(ThrowsAt(ValidApplicationAfter("\"deadline_us\": 2000000",
                                        "\"deadline_us\": 500000"),
                  trajectory + ".deadline_us"));
+  // The deadline must also leave room for the whole stable window after the
+  // ramp, or the move would load already unable to complete. Here
+  // duration_us = 500000 and stable_window_us = 100000, so one microsecond
+  // short of their sum (599999) is refused with the deadline's own field path
+  // and a message naming both the window and the duration, and the exact sum
+  // loads.
+  CHECK(ThrowsWithMessage(ValidApplicationAfter("\"deadline_us\": 2000000",
+                                                "\"deadline_us\": 599999"),
+                          trajectory + ".deadline_us", "stable_window_us"));
+  CHECK(ThrowsWithMessage(ValidApplicationAfter("\"deadline_us\": 2000000",
+                                                "\"deadline_us\": 599999"),
+                          trajectory + ".deadline_us", "duration_us"));
+  const TemporaryConfig deadline_at_the_window_end(ValidApplicationAfter(
+      "\"deadline_us\": 2000000", "\"deadline_us\": 600000"));
+  const ApplicationConfig deadline_at_the_window_end_config =
+      LoadApplicationConfig(deadline_at_the_window_end.path());
+  CHECK(
+      deadline_at_the_window_end_config.initialization.trajectory.deadline_us ==
+      600000);
 
   // Supervision periods and deadlines must be positive and ordered against the
   // runtime timeouts they supervise.

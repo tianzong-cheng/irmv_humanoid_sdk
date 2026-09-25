@@ -283,9 +283,21 @@ InitializationStatus Initialization::Step(const protocol::RobotState &fresh,
   // selection can never disagree about where the ramp is.
   const bool ramp_done = elapsed >= trajectory.duration_us;
 
-  // Completion is judged before the deadline: a move that reached its target
-  // and held it for the whole stable window is ready even at the last moment
-  // before the deadline. Before the ramp finished the window is never opened.
+  // The deadline is the final bound of the move and is judged before the
+  // completion block: a run that arrives at this instant without having already
+  // completed its stable judgement fails here, whatever the tolerance and
+  // window state say, so a move that only becomes stable after its deadline is
+  // never Ready. The instant itself is still inside the bound - a window that
+  // completed exactly on `deadline_us` is ready below.
+  if (elapsed > trajectory.deadline_us) {
+    // The command stays untouched: a call the caller may not send must never
+    // hand it a frame.
+    Fail();
+    return InitializationStatus::Failed;
+  }
+
+  // Completion: a move that reached its target and held it for the whole stable
+  // window is ready. Before the ramp finished the window is never opened.
   if (ramp_done && WithinCompletionTolerance(fresh)) {
     if (!stable_open_) {
       stable_open_ = true;
@@ -309,13 +321,6 @@ InitializationStatus Initialization::Step(const protocol::RobotState &fresh,
     // sample.
     stable_open_ = false;
     stable_since_ = 0;
-  }
-
-  if (elapsed > trajectory.deadline_us) {
-    // The command stays untouched: a call the caller may not send must never
-    // hand it a frame.
-    Fail();
-    return InitializationStatus::Failed;
   }
 
   if (!BeginFrame(command, fresh)) {

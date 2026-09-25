@@ -60,6 +60,14 @@ enum class InitializationStatus { Running, Ready, Failed };
 // `trajectory.stable_window_us`; the final frame, and every later Ready hold,
 // sits exactly on the target with no feed-forward torque.
 //
+// `trajectory.deadline_us` is the final bound of that judgement: a call at an
+// instant later than the deadline fails and latches before the completion block
+// is even consulted, so a move that only becomes stable after its deadline is
+// never Ready. The deadline instant itself is still inside the bound, so a
+// window that completed exactly on `deadline_us` is ready. The loader refuses a
+// deadline that leaves no room for the window
+// (`deadline_us < duration_us + stable_window_us`).
+//
 // The frames carry what a target generator owns: the joints, the layout, the
 // protocol version, the producer, the epoch, `command_seq` and
 // `source_state_seq`. RobotClient completes the routing identity (runtime id,
@@ -96,8 +104,8 @@ class Initialization {
   // Emits the frame of this instant of the move, or reports why it cannot:
   // `Running` with the frame the caller sends this period, `Ready` with the
   // final hold frame, `Failed` with `command` untouched. A mid-move failure
-  // (unusable state, a null output, the deadline) latches `failed()`; a call
-  // with no move in flight does not.
+  // (unusable state, a null output, an instant past `trajectory.deadline_us`)
+  // latches `failed()`; a call with no move in flight does not.
   InitializationStatus Step(const protocol::RobotState &fresh,
                             protocol::TimeUs now_us,
                             protocol::JointCommand *command);

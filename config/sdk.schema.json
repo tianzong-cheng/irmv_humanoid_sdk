@@ -242,7 +242,7 @@
                   "$ref": "#/$defs/positiveTimeUs"
                 }
               },
-              "$comment": "All times are microseconds. LoadApplicationConfig requires deadline_us > duration_us."
+              "$comment": "All times are microseconds. LoadApplicationConfig requires deadline_us > duration_us and deadline_us >= duration_us + stable_window_us, so the stable window can complete inside the deadline."
             }
           }
         },
