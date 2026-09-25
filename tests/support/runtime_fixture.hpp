@@ -428,6 +428,18 @@ class RuntimeFixture {
   // was, which makes the IMU sample stale without touching the joints.
   void SetImuFresh(bool fresh) { imu_fresh_ = fresh; }
 
+  // Reports the snapshot a backend that has never delivered a frame reports:
+  // every sample at its all-default value, unobserved and unconnected, so the
+  // tick that consumes it sees no observation at all. The stamps of an absent
+  // snapshot are deliberately not refreshed. Clearing the flag is the first
+  // frame arriving: the healthy template and its stamps come back with it.
+  void SetFeedbackAbsent(bool absent) {
+    feedback_absent_ = absent;
+    if (!absent) {
+      ResetFeedback();
+    }
+  }
+
   // Overrides the joint count of the injected snapshot, which lets a test feed
   // an incomplete measured state. Zero restores the configured joint count.
   void SetFeedbackCount(std::uint32_t count) {
@@ -463,6 +475,15 @@ class RuntimeFixture {
                           : static_cast<std::uint32_t>(config.joint_count());
     feedback_.stamp_us = now_us_;
     feedback_.snapshot_seq = ++feedback_seq_;
+    if (feedback_absent_) {
+      for (std::size_t index = 0;
+           index < config.joint_count() && index < protocol::kMaxJoints;
+           ++index) {
+        feedback_.joints[index] = protocol::JointFeedback{};
+      }
+      feedback_.imu = protocol::ImuFeedback{};
+      return;
+    }
     for (std::size_t index = 0;
          index < config.joint_count() && index < protocol::kMaxJoints;
          ++index) {
@@ -560,6 +581,7 @@ class RuntimeFixture {
   bool heartbeat_sequence_fixed_{false};
   bool command_enabled_{true};
   bool imu_fresh_{true};
+  bool feedback_absent_{false};
   bool local_stop_pending_{false};
   std::uint32_t feedback_count_override_{0};
 

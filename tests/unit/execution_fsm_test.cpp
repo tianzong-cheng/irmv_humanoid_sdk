@@ -2131,6 +2131,49 @@ int CheckSameProducerNewEpoch() {
   return 0;
 }
 
+// ---- boot: waiting for the first frame ------------------------------------
+
+// A backend that has not delivered a frame yet must not latch a fault: the boot
+// grace window waits, commands zero torque and reports neither health nor a
+// fault, and the first frame that does arrive completes the self-check.
+int CheckBootWaitsForFirstFrame() {
+  RuntimeFixture f;
+  f.SetFeedbackAbsent(true);
+  for (int tick = 0; tick < 5; ++tick) {
+    f.Advance(f.ControlPeriodUs());
+    CHECK(f.state().execution_state == kBoot);
+    CHECK(f.state().fault_id == 0);
+    CHECK(!f.state().healthy);
+    CHECK(f.state().output_action == kActionZeroTorque);
+    CHECK(IsZeroTorque(f.last_tick().output));
+  }
+  CHECK(CountEvents(f.last_tick(), EventCode::FaultLatched) == 0);
+  CHECK(CountEvents(f.last_tick(), EventCode::BootFailed) == 0);
+
+  // The first frame arrives inside the grace window: nothing was latched, so
+  // the ordinary self-check completes and the machine reaches ZeroTorque.
+  f.SetFeedbackAbsent(false);
+  CHECK(f.BootToZeroTorque() > 0);
+  CHECK(f.state().execution_state == kZeroTorque);
+  CHECK(f.state().healthy);
+  CHECK(f.state().fault_id == 0);
+  return 0;
+}
+
+// A machine that never receives a frame faults when the grace window expires,
+// with the safety reason and not a fabricated measurement.
+int CheckBootWithoutFirstFrameFaults() {
+  RuntimeFixture f;
+  f.SetFeedbackAbsent(true);
+  f.Advance(f.config.boot.frequency_grace_us + 2 * f.ControlPeriodUs());
+  CHECK(f.state().execution_state == kFault);
+  CHECK(f.state().fault_id != 0);
+  CHECK(CountEvents(f.last_tick(), EventCode::FaultLatched) == 1);
+  CHECK(f.state().output_action == kActionZeroTorque);
+  CHECK(!f.state().healthy);
+  return 0;
+}
+
 }  // namespace
 
 int main() {
@@ -2176,5 +2219,7 @@ int main() {
   CHECK(CheckSameTickStopBeatsStart() == 0);
   CHECK(CheckRefusedStopDoesNotOwnTheTick() == 0);
   CHECK(CheckSameProducerNewEpoch() == 0);
+  CHECK(CheckBootWaitsForFirstFrame() == 0);
+  CHECK(CheckBootWithoutFirstFrameFaults() == 0);
   return 0;
 }
