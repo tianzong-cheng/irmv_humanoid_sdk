@@ -51,6 +51,7 @@ TickResult ExecutionFsm::Tick(protocol::TimeUs now_us,
   // 1. Tick identity; the initial state is entered on the first tick, which is
   //    also the only moment the boot start can be stamped.
   ++tick_;
+  stop_applied_this_tick_ = false;
   const protocol::Sequence published_seq = ++state_seq_;
   if (!entered_) {
     entered_ = true;
@@ -416,6 +417,7 @@ void ExecutionFsm::HandleStop(
           ? protocol::ExecutionState::Damping
           : protocol::ExecutionState::ZeroTorque;
   SetState(next, scope, EventCode::None);
+  stop_applied_this_tick_ = true;
   stop_reason_ = protocol::StopReason::Requested;
   EmitEvent(scope, EventCode::StopApplied, previous, next,
             protocol::RejectReason::None, protocol::FaultReason::None,
@@ -482,6 +484,7 @@ void ExecutionFsm::HandleReset(
   recovery_ready_ = false;
   stop_reason_ = protocol::StopReason::None;
   SetState(protocol::ExecutionState::ZeroTorque, scope, EventCode::None);
+  stop_applied_this_tick_ = true;
   EmitEvent(scope, EventCode::ResetApplied, previous,
             protocol::ExecutionState::ZeroTorque, protocol::RejectReason::None,
             protocol::FaultReason::None, protocol::StopReason::None,
@@ -512,6 +515,14 @@ void ExecutionFsm::HandleTracking(
   }
   if (request.expected_epoch != epoch_ || request.proposed_epoch <= epoch_) {
     QueueRejected(scope, request, protocol::RejectReason::EpochMismatch);
+    return;
+  }
+  if (stop_applied_this_tick_) {
+    // A stop accepted in this tick owns it. The stale-context diagnoses above
+    // are more specific and are answered first; this is the one case only this
+    // rule can refuse: a start carrying the watermark a stop just produced. The
+    // next tick authorizes the same frame.
+    QueueRejected(scope, request, protocol::RejectReason::InvalidTransition);
     return;
   }
 

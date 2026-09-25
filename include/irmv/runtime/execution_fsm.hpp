@@ -315,6 +315,12 @@ class ExecutionFsm {
   protocol::Sequence tick_{0};
   protocol::Sequence state_seq_{0};
   bool entered_{false};
+  // A stop or Reset accepted in this tick. A motion request may not undo it
+  // while the same tick is still being processed, so the priority the
+  // processing order gives a stop survives the ordinary request lane that
+  // follows it. The flag belongs to one tick: the next tick authorizes the same
+  // frame again.
+  bool stop_applied_this_tick_{false};
 
   protocol::ExecutionState state_{protocol::ExecutionState::Boot};
   protocol::OutputAction output_action_{protocol::OutputAction::ZeroTorque};

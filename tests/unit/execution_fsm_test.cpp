@@ -1851,6 +1851,192 @@ int CheckForeignSupervisorCannotUseSession() {
   return 0;
 }
 
+// One stop and one start forced into the same control tick. The start carries
+// the epoch the accepted stop of that tick produces and proposes the next one,
+// with a fresh continuous frame, so only same-tick stop priority can refuse it.
+struct StopStartTick {
+  const TickResult *tick{nullptr};
+  FixtureResult stop{};
+  FixtureResult start{};
+  Sequence start_id{0};
+};
+
+StopStartTick SendStopAndStart(RuntimeFixture &f, Operation stop_operation,
+                              Sequence stop_id, Sequence start_id,
+                              Id start_producer) {
+  const Sequence epoch = f.state().epoch;
+  const ExecutionRequest stop = f.MakeRequest(stop_operation, stop_id);
+  const ExecutionRequest start = f.MakeRequest(
+      Operation::Tracking, start_id, start_producer,
+      irmv::test::FixtureSupervisorId(), epoch + 1, epoch + 2);
+  f.QueueRequest(start);
+  f.QueueRequest(stop, 0, true);
+  f.Step();
+  StopStartTick result;
+  result.tick = &f.last_tick();
+  result.stop = RuntimeFixture::ResultFor(*result.tick, stop_id);
+  result.start = RuntimeFixture::ResultFor(*result.tick, start_id);
+  result.start_id = start_id;
+  return result;
+}
+
+// I1: a stop accepted in a tick owns that tick; a start that arrives with the
+// epoch the stop produced cannot authorize motion in the same tick.
+int CheckSameTickStopBeatsStart() {
+  RuntimeFixture f;
+  f.BootToZeroTorque();
+  f.Acquire();
+  CHECK(f.Request(Operation::Damping).applied());
+  CHECK(f.StartTracking().applied());
+  const Sequence epoch = f.state().epoch;
+
+  const StopStartTick damping_stop =
+      SendStopAndStart(f, Operation::Damping, 200, 201,
+                       irmv::test::FixtureSecondProducerId());
+  CHECK(damping_stop.stop.applied());
+  CHECK(damping_stop.stop.execution_state == kDamping);
+  CHECK(damping_stop.start.rejected());
+  CHECK(damping_stop.start.reason == RejectReason::InvalidTransition);
+  CHECK(damping_stop.tick->state.execution_state == kDamping);
+  CHECK(damping_stop.tick->state.epoch == epoch + 1);
+  CHECK(damping_stop.tick->state.producer_id == irmv::protocol::kNoId);
+  CHECK(damping_stop.tick->state.output_action == kActionDamping);
+  CHECK(damping_stop.tick->output.torque[0] == kDampingTorque0);
+  CHECK(CountEvents(*damping_stop.tick, EventCode::AuthorizationGranted) == 0);
+
+  // The rule owns one tick only: the same frame with a newer request id is
+  // authorized on the next tick, without an extra Damping excursion.
+  ExecutionRequest retry = f.MakeRequest(
+      Operation::Tracking, damping_stop.start_id + 1,
+      irmv::test::FixtureSecondProducerId());
+  const FixtureResult retry_result = f.Send(retry);
+  CHECK(retry_result.applied());
+  CHECK(f.state().execution_state == kTracking);
+  CHECK(f.state().producer_id == irmv::test::FixtureSecondProducerId());
+
+  // A ZeroTorque stop of the same tick wins in the same way and leaves the
+  // machine at zero torque.
+  const StopStartTick zero_stop =
+      SendStopAndStart(f, Operation::ZeroTorque, 210, 211,
+                       irmv::test::FixtureProducerId());
+  CHECK(zero_stop.stop.applied());
+  CHECK(zero_stop.start.rejected());
+  CHECK(zero_stop.start.reason == RejectReason::InvalidTransition);
+  CHECK(zero_stop.tick->state.execution_state == kZeroTorque);
+  CHECK(zero_stop.tick->state.output_action == kActionZeroTorque);
+  CHECK(IsZeroTorque(zero_stop.tick->output));
+  CHECK(zero_stop.tick->state.producer_id == irmv::protocol::kNoId);
+
+  // Repeated stops all apply and the start still loses.
+  CHECK(f.Request(Operation::Damping).applied());
+  CHECK(f.StartTracking().applied());
+  const Sequence repeated_epoch = f.state().epoch;
+  {
+    const Sequence stop_id = 220;
+    const Sequence start_id = 222;
+    const ExecutionRequest first = f.MakeRequest(Operation::Damping, stop_id);
+    const ExecutionRequest second =
+        f.MakeRequest(Operation::ZeroTorque, stop_id + 1);
+    const ExecutionRequest start = f.MakeRequest(
+        Operation::Tracking, start_id, irmv::test::FixtureSecondProducerId(),
+        irmv::test::FixtureSupervisorId(), repeated_epoch + 2,
+        repeated_epoch + 3);
+    f.QueueRequest(start);
+    f.QueueRequest(first, 0, true);
+    f.QueueRequest(second, 0, true);
+    f.Step();
+    const TickResult &tick = f.last_tick();
+    // Both stops of the tick are answered. The tick commits zero torque, so the
+    // newer stop is Applied and the older one is answered as not implemented by
+    // the committed state - the write-confirmation rule every answer obeys,
+    // exactly as a start superseded by a later request of its own tick is.
+    CHECK(RuntimeFixture::ResultFor(tick, stop_id).request_id == stop_id);
+    CHECK(RuntimeFixture::ResultFor(tick, stop_id).rejected());
+    CHECK(RuntimeFixture::ResultFor(tick, stop_id).reason ==
+          RejectReason::InvalidTransition);
+    CHECK(RuntimeFixture::ResultFor(tick, stop_id + 1).applied());
+    const FixtureResult start_result =
+        RuntimeFixture::ResultFor(tick, start_id);
+    CHECK(start_result.rejected());
+    CHECK(start_result.reason == RejectReason::InvalidTransition);
+    CHECK(tick.state.execution_state == kZeroTorque);
+    CHECK(tick.state.epoch == repeated_epoch + 2);
+    CHECK(tick.state.producer_id == irmv::protocol::kNoId);
+    CHECK(IsZeroTorque(tick.output));
+    CHECK(CountEvents(tick, EventCode::AuthorizationGranted) == 0);
+  }
+
+  return 0;
+}
+
+// I2: only a stop that was accepted owns the tick. Refused traffic must not
+// steal a legitimate start of the same tick.
+int CheckRefusedStopDoesNotOwnTheTick() {
+  RuntimeFixture f;
+  f.BootToZeroTorque();
+  f.Acquire();
+  CHECK(f.Request(Operation::Damping).applied());
+  CHECK(f.StartTracking().applied());
+  const Sequence epoch = f.state().epoch;
+
+  // A foreign supervisor's stop in the stop lane is refused; the owner's start
+  // in the ordinary lane of the same tick is authorized.
+  {
+    ExecutionRequest foreign = f.MakeRequest(
+        Operation::Damping, 300, irmv::test::FixtureProducerId(),
+        irmv::test::FixtureOtherSupervisorId());
+    const ExecutionRequest start = f.MakeRequest(
+        Operation::Tracking, 301, irmv::test::FixtureSecondProducerId(),
+        irmv::test::FixtureSupervisorId(), epoch, epoch + 1);
+    f.QueueRequest(start);
+    f.QueueRequest(foreign, 0, true);
+    f.Step();
+    const TickResult &tick = f.last_tick();
+    const FixtureResult foreign_result =
+        RuntimeFixture::ResultFor(tick, foreign.request_id);
+    CHECK(foreign_result.rejected());
+    CHECK(foreign_result.reason == RejectReason::WrongSession);
+    const FixtureResult start_result =
+        RuntimeFixture::ResultFor(tick, start.request_id);
+    CHECK(start_result.applied());
+    CHECK(tick.state.execution_state == kTracking);
+    CHECK(tick.state.producer_id == irmv::test::FixtureSecondProducerId());
+    CHECK(tick.state.epoch == epoch + 1);
+    CHECK(CountEvents(tick, EventCode::StopApplied) == 0);
+  }
+
+  // A stop that was already applied in an earlier tick is answered from the
+  // record when it is replayed, so it does not own the replaying tick either.
+  {
+    const ExecutionRequest stop = f.MakeRequest(
+        Operation::Damping, 310, irmv::test::FixtureProducerId(),
+        irmv::test::FixtureSupervisorId());
+    const FixtureResult applied = f.Send(stop, true);
+    CHECK(applied.applied());
+    CHECK(f.state().execution_state == kDamping);
+    const Sequence damped_epoch = f.state().epoch;
+    const TimeUs applied_stamp = applied.stamp_us;
+
+    const ExecutionRequest start = f.MakeRequest(
+        Operation::Tracking, 312, irmv::test::FixtureProducerId(),
+        irmv::test::FixtureSupervisorId(), damped_epoch, damped_epoch + 1);
+    f.QueueRequest(start);
+    f.QueueRequest(stop, 0, true);
+    f.Step();
+    const TickResult &tick = f.last_tick();
+    const FixtureResult replay = RuntimeFixture::ResultFor(tick, stop.request_id);
+    CHECK(replay.applied());
+    CHECK(replay.stamp_us == applied_stamp);
+    const FixtureResult start_result =
+        RuntimeFixture::ResultFor(tick, start.request_id);
+    CHECK(start_result.applied());
+    CHECK(tick.state.execution_state == kTracking);
+    CHECK(tick.state.epoch == damped_epoch + 1);
+    CHECK(CountEvents(tick, EventCode::StopApplied) == 0);
+  }
+  return 0;
+}
+
 }  // namespace
 
 int main() {
@@ -1893,5 +2079,7 @@ int main() {
   CHECK(CheckLocalStopIsNotARequest() == 0);
   CHECK(CheckLocalStopKeepsInboundStop() == 0);
   CHECK(CheckForeignSupervisorCannotUseSession() == 0);
+  CHECK(CheckSameTickStopBeatsStart() == 0);
+  CHECK(CheckRefusedStopDoesNotOwnTheTick() == 0);
   return 0;
 }
