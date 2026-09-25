@@ -3,13 +3,15 @@
   "$id": "https://irmv.example/schema/runtime-sdk-v1.json",
   "title": "IRMV fake-only runtime configuration",
   "type": "object",
-  "$comment": "Conforming validation MUST evaluate the irmv-joint-name format as a nonempty string whose UTF-8 encoding is at most 64 bytes; validators that ignore format annotations do not implement this contract. LoadConfig additionally enforces cross-field joint-name completeness, unique names, position_min < position_max, boot deadline ordering, minimum frequency versus control_hz, and state-window coverage.",
+  "$comment": "Conforming validation MUST evaluate the irmv-joint-name format as a nonempty string whose UTF-8 encoding is at most 64 bytes; validators that ignore format annotations do not implement this contract. LoadConfig additionally enforces cross-field joint-name completeness, unique names, position_min < position_max, boot deadline ordering, minimum frequency versus control_hz, and state-window coverage. LoadApplicationConfig enforces joint-map completeness for the application sections, position limits, gain sign rules, trajectory and supervision ordering, and the input binding reservation; the $comments below state the units and the rules the schema cannot express.",
   "required": [
     "schema_version",
     "deployment",
     "backend",
     "robot",
     "runtime",
+    "application",
+    "input",
     "telemetry",
     "dds"
   ],
@@ -198,6 +200,148 @@
         }
       }
     },
+    "application": {
+      "type": "object",
+      "required": ["initialization", "supervision"],
+      "properties": {
+        "initialization": {
+          "type": "object",
+          "required": ["target_position", "gains", "trajectory"],
+          "properties": {
+            "target_position": {
+              "$ref": "#/$defs/positionJointMap"
+            },
+            "gains": {
+              "$ref": "#/$defs/initializationGainMap"
+            },
+            "trajectory": {
+              "type": "object",
+              "required": [
+                "duration_us",
+                "position_tolerance",
+                "velocity_tolerance",
+                "stable_window_us",
+                "deadline_us"
+              ],
+              "properties": {
+                "duration_us": {
+                  "$ref": "#/$defs/positiveTimeUs"
+                },
+                "position_tolerance": {
+                  "$ref": "#/$defs/positiveNumber",
+                  "$comment": "rad"
+                },
+                "velocity_tolerance": {
+                  "$ref": "#/$defs/positiveNumber",
+                  "$comment": "rad/s"
+                },
+                "stable_window_us": {
+                  "$ref": "#/$defs/positiveTimeUs"
+                },
+                "deadline_us": {
+                  "$ref": "#/$defs/positiveTimeUs"
+                }
+              },
+              "$comment": "All times are microseconds. LoadApplicationConfig requires deadline_us > duration_us."
+            }
+          }
+        },
+        "supervision": {
+          "type": "object",
+          "required": [
+            "target_period_us",
+            "heartbeat_period_us",
+            "request_retry_us",
+            "request_deadline_us",
+            "state_timeout_us"
+          ],
+          "properties": {
+            "target_period_us": {
+              "$ref": "#/$defs/positiveTimeUs"
+            },
+            "heartbeat_period_us": {
+              "$ref": "#/$defs/positiveTimeUs"
+            },
+            "request_retry_us": {
+              "$ref": "#/$defs/positiveTimeUs"
+            },
+            "request_deadline_us": {
+              "$ref": "#/$defs/positiveTimeUs"
+            },
+            "state_timeout_us": {
+              "$ref": "#/$defs/positiveTimeUs"
+            }
+          },
+          "$comment": "All times are microseconds. LoadApplicationConfig requires request_deadline_us > request_retry_us, heartbeat_period_us < runtime.safety.timeouts.supervisor_us and target_period_us < min(command_us, source_state_us)."
+        }
+      }
+    },
+    "input": {
+      "type": "object",
+      "required": ["intent_timeout_us", "repeat_guard_us", "bindings"],
+      "properties": {
+        "intent_timeout_us": {
+          "$ref": "#/$defs/positiveTimeUs",
+          "$comment": "microseconds; body-velocity intent expiry"
+        },
+        "repeat_guard_us": {
+          "$ref": "#/$defs/positiveTimeUs",
+          "$comment": "microseconds; one-shot key repeat suppression"
+        },
+        "bindings": {
+          "type": "object",
+          "required": [
+            "emergency_stop",
+            "damping",
+            "initialize",
+            "zero_torque",
+            "reset",
+            "exit"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "emergency_stop": {
+              "const": " ",
+              "$comment": "The reserved emergency-stop byte is the space character."
+            },
+            "damping": {
+              "$ref": "#/$defs/keyByte"
+            },
+            "initialize": {
+              "$ref": "#/$defs/keyByte"
+            },
+            "zero_torque": {
+              "$ref": "#/$defs/keyByte"
+            },
+            "reset": {
+              "$ref": "#/$defs/keyByte"
+            },
+            "exit": {
+              "$ref": "#/$defs/keyByte"
+            },
+            "velocity_forward": {
+              "$ref": "#/$defs/keyByte"
+            },
+            "velocity_backward": {
+              "$ref": "#/$defs/keyByte"
+            },
+            "velocity_left": {
+              "$ref": "#/$defs/keyByte"
+            },
+            "velocity_right": {
+              "$ref": "#/$defs/keyByte"
+            },
+            "velocity_yaw_left": {
+              "$ref": "#/$defs/keyByte"
+            },
+            "velocity_yaw_right": {
+              "$ref": "#/$defs/keyByte"
+            }
+          },
+          "$comment": "Action name -> one UTF-8 byte. LoadApplicationConfig rejects a byte bound to two actions and rejects the space byte on any action other than emergency_stop."
+        }
+      }
+    },
     "telemetry": {
       "type": "object",
       "required": [
@@ -279,6 +423,43 @@
         "type": "number",
         "minimum": 0
       }
+    },
+    "positionJointMap": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 64,
+      "additionalProperties": {
+        "type": "number"
+      },
+      "$comment": "rad; LoadApplicationConfig requires the keys to cover robot.joints exactly and every value to lie within that joint's [position_min, position_max]."
+    },
+    "initializationGainMap": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 64,
+      "additionalProperties": {
+        "type": "object",
+        "required": ["kp", "kd"],
+        "properties": {
+          "kp": {
+            "$ref": "#/$defs/positiveNumber",
+            "$comment": "N*m/rad; an initialization joint must hold its target position, so kp > 0."
+          },
+          "kd": {
+            "type": "number",
+            "minimum": 0,
+            "$comment": "N*m*s/rad"
+          }
+        }
+      },
+      "$comment": "LoadApplicationConfig requires the keys to cover robot.joints exactly."
+    },
+    "keyByte": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1,
+      "pattern": "^[^ ]$",
+      "$comment": "One character, never the reserved space byte. maxLength counts code points; LoadApplicationConfig additionally requires exactly one UTF-8 byte."
     }
   }
 }

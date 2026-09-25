@@ -68,6 +68,7 @@ set_tests_properties(protocol_test PROPERTIES LABELS core)
 
 add_library(
   irmv_configuration
+  src/configuration/application_config.cpp
   src/configuration/config.cpp
   src/configuration/sha256.cpp
 )
@@ -93,6 +94,22 @@ target_link_libraries(config_test PRIVATE irmv_configuration)
 add_test(NAME config_test COMMAND config_test)
 set_tests_properties(
   config_test PROPERTIES LABELS core
+  WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
+add_executable(application_config_test tests/unit/application_config_test.cpp)
+target_compile_features(application_config_test PRIVATE cxx_std_17)
+target_include_directories(
+  application_config_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(application_config_test PRIVATE irmv_configuration)
+
+add_test(NAME application_config_test COMMAND application_config_test)
+set_tests_properties(
+  application_config_test PROPERTIES LABELS core
   WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 

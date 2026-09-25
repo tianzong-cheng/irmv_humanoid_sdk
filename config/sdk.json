@@ -77,6 +77,50 @@
     },
     "state_window_capacity": 1024
   },
+  "application": {
+    "initialization": {
+      "target_position": {
+        "test_left": 0.0,
+        "test_right": 0.0
+      },
+      "gains": {
+        "test_left": { "kp": 10.0, "kd": 1.0 },
+        "test_right": { "kp": 10.0, "kd": 1.0 }
+      },
+      "trajectory": {
+        "duration_us": 500000,
+        "position_tolerance": 0.02,
+        "velocity_tolerance": 0.05,
+        "stable_window_us": 100000,
+        "deadline_us": 2000000
+      }
+    },
+    "supervision": {
+      "target_period_us": 20000,
+      "heartbeat_period_us": 50000,
+      "request_retry_us": 50000,
+      "request_deadline_us": 1000000,
+      "state_timeout_us": 150000
+    }
+  },
+  "input": {
+    "intent_timeout_us": 500000,
+    "repeat_guard_us": 250000,
+    "bindings": {
+      "emergency_stop": " ",
+      "damping": "d",
+      "initialize": "i",
+      "zero_torque": "z",
+      "reset": "r",
+      "exit": "x",
+      "velocity_forward": "w",
+      "velocity_backward": "s",
+      "velocity_left": "a",
+      "velocity_right": "f",
+      "velocity_yaw_left": "q",
+      "velocity_yaw_right": "e"
+    }
+  },
   "telemetry": {
     "level": "INFO",
     "directory": "logs",
