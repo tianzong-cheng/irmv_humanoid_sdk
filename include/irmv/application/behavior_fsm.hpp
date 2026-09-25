@@ -3,29 +3,12 @@
 #include <optional>
 
 #include "irmv/application/initialization.hpp"
+#include "irmv/application/input_router.hpp"
 #include "irmv/application/robot_client.hpp"
 #include "irmv/configuration/application_config.hpp"
 #include "irmv/protocol/types.hpp"
 
 namespace irmv::application {
-
-// One semantic event of the supervision loop. The input router raises them
-// (a bound byte of the keyboard table, an expiring velocity intent, a lost
-// input device); this phase has no locomotion target generator, so
-// `VelocityIntent` is delivered but the behaviour FSM has nothing to do for it.
-//
-// The definition lives in this header because the behaviour FSM is its only
-// consumer in this phase: the input router includes this header for the type.
-enum class InputEvent {
-  None = 0,
-  Damping,
-  Initialize,
-  ZeroTorque,
-  EmergencyStop,
-  Reset,
-  Exit,
-  VelocityIntent,
-};
 
 // The seven behaviours of the upper layer. `Ready` exists on its own so
 // "still interpolating" and "a behaviour may be started" are observable, and it

@@ -117,6 +117,7 @@ add_library(
   irmv_application
   src/application/behavior_fsm.cpp
   src/application/initialization.cpp
+  src/application/input_router.cpp
   src/application/robot_client.cpp
 )
 target_compile_features(irmv_application PUBLIC cxx_std_17)
@@ -187,6 +188,25 @@ target_link_libraries(
 add_test(NAME application_fsm_test COMMAND application_fsm_test)
 set_tests_properties(
   application_fsm_test PROPERTIES LABELS core
+  WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
+add_executable(input_router_test tests/unit/input_router_test.cpp)
+target_compile_features(input_router_test PRIVATE cxx_std_17)
+target_include_directories(
+  input_router_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+# The router is the keyboard half of the loop: it links the application library
+# for the event type and the configuration for the shipped bindings, and it
+# performs no terminal I/O of its own.
+target_link_libraries(input_router_test PRIVATE irmv_application irmv_configuration)
+
+add_test(NAME input_router_test COMMAND input_router_test)
+set_tests_properties(
+  input_router_test PROPERTIES LABELS core
   WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
