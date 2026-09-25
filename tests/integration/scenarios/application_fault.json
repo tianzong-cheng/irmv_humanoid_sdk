@@ -1,6 +1,6 @@
 {
   "name": "application_fault",
-  "description": "The fake backend refuses the torque write, the runtime latches WriteFailed during its startup path and keeps running, and the real application reports behavior=Fault with the lower runtime=Fault - it never sends a target and never claims a stop. The runtime then refuses to leave the latched fault on SIGTERM, and the application, whose ordered exit can no longer be confirmed, reports stop=unknown lower=Fault with exit code 3. The emergency stop on a healthy link (upper Fault with the lower layer keeping its own Damping output) is asserted by application_repeat_and_reset, and the Reset that clears a latched lower fault is deliberately NOT asserted here: the real two-process acceptance found that the application does not reach Standby on the Reset the runtime applies (see the note in docs/testing.md), so this scenario does not encode either behaviour.",
+  "description": "The fake backend refuses the torque write, the runtime latches WriteFailed and the application reports behavior=Fault with the lower runtime=Fault - it never sends a target and never claims a stop. Once the write path has healed and the runtime's recovery window has opened, a single Reset clears the latch through a confirmed fresh ZeroTorque into Standby, which is the contract the key documents. The software emergency stop then latches the upper Fault while the healthy lower layer keeps its own Damping output, and a second Reset is the only way back. The runtime stops cleanly from ZeroTorque, and the application, left without a lower layer, exits bounded with stop=unknown.",
   "domain": 217,
   "runtime": {
     "config": "config/sdk.json",
@@ -33,17 +33,50 @@
       "note": "the runtime's own recovery window opens although the latch stays"
     },
     {
-      "action": "stop_application",
-      "keys": "x",
-      "timeout_s": 8,
-      "expect_code": 3
+      "action": "application_keys",
+      "keys": "r"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Standby runtime=ZeroTorque",
+      "timeout_s": 15,
+      "note": "one Reset is enough: the confirmed fresh ZeroTorque clears the latch"
+    },
+    {
+      "action": "sleep_ms",
+      "ms": 400,
+      "note": "the Reset key has a 250 ms behavioural repeat guard"
+    },
+    {
+      "action": "application_keys",
+      "keys": " ",
+      "note": "the software emergency stop on a healthy link"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Fault runtime=Damping output=Damping",
+      "timeout_s": 10
+    },
+    {
+      "action": "application_keys",
+      "keys": "r"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Standby runtime=ZeroTorque",
+      "timeout_s": 10
     },
     {
       "action": "stop_runtime",
       "signal": "SIGTERM",
-      "timeout_s": 3,
-      "expect_clean": false,
-      "expect_exit": false
+      "timeout_s": 10,
+      "expect_clean": true
+    },
+    {
+      "action": "stop_application",
+      "keys": "x",
+      "timeout_s": 8,
+      "expect_code": 3
     }
   ],
   "checks": [
@@ -53,14 +86,15 @@
         "file": "application_run1.log",
         "sequence": [
           "behavior=Fault runtime=Fault",
-          "application: exit stop=unknown lower=Fault"
+          "behavior=Standby runtime=ZeroTorque",
+          "behavior=Fault runtime=Damping output=Damping",
+          "behavior=Standby runtime=ZeroTorque",
+          "application: exit stop=unknown lower=Unknown"
         ],
         "forbid": [
-          "stop=confirmed",
-          "behavior=Standby",
           "behavior=Ready",
-          "behavior=Initializing",
-          "behavior=Locomotion"
+          "behavior=Locomotion",
+          "stop=confirmed"
         ]
       }
     },
@@ -70,22 +104,36 @@
         "file": "runtime_run1.log",
         "sequence": [
           "fault=\"WriteFailed\"",
-          "RecoveryReady"
+          "RecoveryReady",
+          "ResetApplied",
+          "StopApplied {event=8 from=\"ZeroTorque\" to=\"Damping\"",
+          "StopApplied {event=8 from=\"Damping\" to=\"ZeroTorque\""
         ],
         "forbid": [
-          "AuthorizationGranted",
           "CommandTimeout",
           "SourceStateTimeout"
         ]
       }
     },
     {
-      "check": "application_reaction",
+      "check": "trace_complete",
       "params": {
-        "after_step": "stop_application",
-        "pattern": "application: exit stop=unknown lower=Fault",
-        "min_ms": 0,
-        "max_ms": 3000
+        "file": "trace_run1.jsonl",
+        "min_ticks": 1200
+      }
+    },
+    {
+      "check": "deadlines",
+      "params": {
+        "file": "trace_run1.jsonl",
+        "max_gap_us": 10000,
+        "min_rate_hz": 450
+      }
+    },
+    {
+      "check": "overruns",
+      "params": {
+        "max_worst_overrun_us": 20000
       }
     }
   ]

@@ -284,50 +284,59 @@ run on the target hardware.
   is dropped by design, so `stderr_backpressure` asserts the exit, the confirmed
   state and the trace rather than the line.
 
-## Findings of the two-process acceptance
+## Defects found and fixed by the two-process acceptance
 
 Driving the two real processes over DDS surfaced two deviations from the
-documented behaviour of the upper layer. Both were found by the acceptance,
-neither is fixed by it (the fixes belong to `src/application/`), and neither is
-encoded as a passing expectation here – a scenario that asserted the deviation
-would pin it, and one that asserted the documented contract would fail the whole
-suite. They are recorded so they can be fixed and turned into regressions.
+documented behaviour of the upper layer. Both were found by this acceptance,
+fixed in `src/application/behavior_fsm.{hpp,cpp}` (the first also needed the
+repeated latch to stop abandoning the request the latched behaviour itself
+made), and are now pinned by deterministic unit tests in
+`tests/unit/application_fsm_test.cpp`; no scenario records them as an accepted
+deviation any more.
 
-1. **The ordered exit from a tracking behaviour latches an upper `Fault`.** With
+1. **The ordered exit from a tracking behaviour latched an upper `Fault`.** With
    the application in `Ready` and the runtime still `Tracking`, pressing `x`
-   prints
+   printed `[application] behavior=Fault runtime=Tracking ...` before the honest
+   `application: exit stop=confirmed state=Damping`. `RequestExit` cleared the
+   tracking context, so the next iteration read the lower layer's still-`Tracking`
+   state - our own authorization, with our own Damping stop on the wire - as a
+   context nobody authorized (`UnexpectedContext`). The exit now stops generating
+   without clearing that context (the exit owns the iteration and skips the
+   target phase), and the context is only dropped when the lower layer really
+   leaves `Tracking` or the stop resolves.
+   * `ExitFromTrackingKeepsTheContext` - a `Ready` + `Exit` sequence with the
+     lower layer reporting `Tracking` for eight further Steps never latches, and
+     the exit completes with `exit_stop_confirmed` once a fresh state shows
+     `Damping`. It fails without the fix (`CHECK failed: step.state ==
+     BehaviorState::Ready`).
+   * `StopFromMotionKeepsTheContext` - the same for an ordinary Damping stop
+     from `Ready` (a guard: this path was already correct).
+   * `application_normal` now exits **from `Ready` while the runtime is still
+     `Tracking`** and asserts that no `behavior=Fault` appears before the exit
+     line.
 
-   ```text
-   [application] behavior=Fault runtime=Tracking output=Tracking session=owned pending=Damping reject=- fresh=yes init=-
-   application: exit stop=confirmed state=Damping
-   ```
-
-   `RequestExit` cancels the initialization, which clears the authorized
-   tracking context (`tracking_active_`), and the next iteration's state check
-   then reads the lower layer's still-`Tracking` state as a context nobody
-   authorized (`UnexpectedContext`). The latch cause is not part of the status
-   line, so that mechanism is read from the code rather than observed: it is the
-   only cause `FreshStateAndFaults` can select for a fresh `Tracking` state with
-   a live session and an untracked behaviour. The exit itself stays honest – the
-   line is decided by the damping confirmation, not by the latch – but a latched
-   `Fault` is displayed, and it would require a `Reset` if the process stayed up.
-   Any scenario that wants a clean exit has to press a stop key first and wait
-   for it, which is why `application_normal`, `application_stop_preempt` and
-   `application_repeat_and_reset` exit from `Standby`.
-
-2. **A `Reset` the runtime applies does not bring the upper layer to `Standby`.**
-   With a latched lower fault (`application_fault`'s refused write) and the
-   runtime's recovery window open, the first `r` sends the `Reset` and the
-   runtime answers `ResetApplied {event=15 from="Fault" to="ZeroTorque"}`, but
-   the application stays in `Fault`; a second `r` reaches `Standby` through the
-   explicit `ZeroTorque` stop instead. The documented contract of the key is
-   "the only way out of a latched `Fault`, and only into `Standby`, on a
-   confirmed fresh `ZeroTorque`", and `robot_client_test`/`application_fsm_test`
-   cover both halves in isolation – the two-process run is where they disagree.
-   `application_fault` therefore asserts the refused-write fault, the honest
-   `stop=unknown lower=Fault` exit and the runtime's refusal to leave, and it
-   deliberately does not assert either the one-press or the two-press behaviour.
-
-Both are reproducible with the commands above: the first with
-`integration_application_normal`'s steps shortened to exit from `Ready`, the
-second by pressing `r` once and then again in `application_fault`'s fault state.
+2. **A `Reset` the runtime applied did not bring the application to `Standby`
+   on the first attempt.** With a latched lower fault and the recovery window
+   open, one `r` sent the `Reset`, the runtime answered
+   `ResetApplied {event=15 from="Fault" to="ZeroTorque"}`, and the application
+   stayed in `Fault`; a second `r` reached `Standby` through the explicit
+   `ZeroTorque` stop. The confirmation was read in an iteration whose state came
+   from before the transition - and every iteration that still observed the
+   runtime's fault state re-ran the latch, which abandoned the pending `Reset`
+   before its outcome was consumed. The latch now only clears what was in flight
+   for a *new* latch (the Reset that leaves it and the handover that reconnects
+   it are the latched behaviour's own requests), and a confirmed transition the
+   state has not witnessed yet is held until a fresh state shows it - bounded by
+   `supervision.request_deadline_us`, and dropped by a latch, an emergency stop
+   and a new request.
+   * `ResetConfirmationWaitsForTheState` - a `Reset` whose `Applied` confirmation
+     is read while the state still carries the pre-reset facts reaches `Standby`
+     on that first `Reset` once the fresh `ZeroTorque` state arrives. It fails
+     without the fix (`CHECK failed: step.state == BehaviorState::Standby`).
+   * `HeldConfirmationIsDropped` - the held confirmation is dropped by an
+     emergency stop and by a session loss: a later fresh `ZeroTorque` state must
+     not promote the behaviour behind the latch (a guard for the fix's bound).
+   * `application_fault` presses `r` **once** from the latched lower fault and
+     asserts `behavior=Standby runtime=ZeroTorque` plus the runtime's own
+     `ResetApplied`, then exercises the emergency stop on the healthy link and a
+     second Reset.

@@ -1,10 +1,10 @@
 {
   "name": "application_normal",
-  "description": "The documented operator path of the two-process deployment: Starting -> Standby -> Damping -> Initializing -> Ready -> Damping -> Standby by keyboard through a PTY, then the ordered exit from Standby that is confirmed by a fresh lower state, and the runtime outliving the application while it keeps damping without a supervisor. A second application process then starts against that left-over damping state and has to take the runtime over: it acquires a session, asks for ZeroTorque while the lower layer is damping, reaches Standby on the confirmed fresh ZeroTorque - never into a behaviour that could move - and leaves through its own confirmed ordered exit. The runtime is then left damping without a supervisor and deliberately refuses to leave on SIGTERM, which the scenario reports.",
+  "description": "The documented operator path of the two-process deployment (against static feedback, so the path can be walked twice): Starting -> Standby -> Damping -> Initializing -> Ready -> Damping -> Standby by keyboard through a PTY, then the ordered exit **from Ready while the runtime is still Tracking**, confirmed by a fresh lower state and without latching any Fault on the way out, and the runtime outliving the application while it keeps damping without a supervisor. A second application process then starts against that left-over damping state and has to take the runtime over: it acquires a session, asks for ZeroTorque while the lower layer is damping, reaches Standby on the confirmed fresh ZeroTorque - never into a behaviour that could move - and leaves through its own confirmed ordered exit. The runtime is then left damping without a supervisor and deliberately refuses to leave on SIGTERM, which the scenario reports.",
   "domain": 213,
   "runtime": {
     "config": "config/sdk.json",
-    "fake_scenario": "tests/support/fake_scenario.json",
+    "fake_scenario": "tests/support/fake_static.json",
     "output_trace": "trace_run%d.jsonl"
   },
   "application": {},
@@ -67,6 +67,31 @@
       "timeout_s": 10
     },
     {
+      "action": "sleep_ms",
+      "ms": 400,
+      "note": "a repeated key has a 250 ms behavioural repeat guard"
+    },
+    {
+      "action": "application_keys",
+      "keys": "d",
+      "note": "an initialization key is inert outside Damping"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Damping runtime=Damping",
+      "timeout_s": 10
+    },
+    {
+      "action": "application_keys",
+      "keys": "i"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Ready runtime=Tracking",
+      "timeout_s": 20,
+      "note": "the ordered exit then happens while the runtime is still Tracking"
+    },
+    {
       "action": "restart_application",
       "keys": "x",
       "expect_code": 0,
@@ -112,6 +137,9 @@
           "behavior=Ready",
           "behavior=Damping",
           "behavior=Standby runtime=ZeroTorque",
+          "behavior=Damping",
+          "behavior=Initializing",
+          "behavior=Ready runtime=Tracking",
           "application: exit stop=confirmed state=Damping"
         ],
         "forbid": [

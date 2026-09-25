@@ -1703,6 +1703,197 @@ int StartLocomotionUnavailable() {
   return 0;
 }
 
+// The ordered exit from a tracking behaviour while the lower layer still
+// reports our own Tracking: the context is one this FSM authorized and the
+// Damping stop it asked for is still on the wire, so the state is expected and
+// never a fault. The exit is only confirmed once a fresh state shows Damping.
+int ExitFromTrackingKeepsTheContext() {
+  Harness h;
+  CHECK(ToStandby(h) == 0);
+  CHECK(ToReady(h) == 0);
+
+  BehaviorStep step = h.Step(InputEvent::Exit);
+  CHECK(step.state == BehaviorState::Ready);
+  CHECK(step.fault_cause == FaultCause::None);
+  CHECK(!step.exit_ready);
+  CHECK(!step.send_command);  // target generation stopped
+  const ExecutionRequest *request = h.last_request();
+  CHECK(request != nullptr);
+  if (request == nullptr) {
+    return 1;
+  }
+  CHECK(request->operation == Operation::Damping);
+
+  // Several iterations still read the lower layer as Tracking: it is our own
+  // producer and epoch, the stop has not landed yet, and none of these Steps
+  // may latch anything.
+  for (int index = 0; index < 8; ++index) {
+    step = h.Step();
+    CHECK(step.state == BehaviorState::Ready);
+    CHECK(step.fault_cause == FaultCause::None);
+    CHECK(step.runtime_state == ExecutionState::Tracking);
+    CHECK(!step.exit_ready);
+  }
+
+  // The stop lands: the exit completes and is confirmed by the fresh state.
+  h.lower.state = ExecutionState::Damping;
+  h.lower.output = OutputAction::Damping;
+  CHECK(h.Answer());
+  step = h.Step();
+  CHECK(step.exit_ready);
+  CHECK(step.exit_stop_confirmed);
+  CHECK(step.fault_cause == FaultCause::None);
+  CHECK(step.runtime_state == ExecutionState::Damping);
+  return 0;
+}
+
+// The same context while an ordinary stop is on the wire: a Damping key from
+// Ready is not a fault either, and the Damping the runtime confirms is what
+// moves the behaviour.
+int StopFromMotionKeepsTheContext() {
+  Harness h;
+  CHECK(ToStandby(h) == 0);
+  CHECK(ToReady(h) == 0);
+
+  BehaviorStep step = h.Step(InputEvent::Damping);
+  CHECK(step.state == BehaviorState::Ready);
+  CHECK(step.fault_cause == FaultCause::None);
+  const ExecutionRequest *request = h.last_request();
+  CHECK(request != nullptr);
+  if (request == nullptr) {
+    return 1;
+  }
+  CHECK(request->operation == Operation::Damping);
+  for (int index = 0; index < 8; ++index) {
+    step = h.Step();
+    CHECK(step.state == BehaviorState::Ready);
+    CHECK(step.fault_cause == FaultCause::None);
+    CHECK(step.runtime_state == ExecutionState::Tracking);
+  }
+  h.lower.state = ExecutionState::Damping;
+  h.lower.output = OutputAction::Damping;
+  CHECK(h.Answer());
+  step = h.Step();
+  CHECK(step.state == BehaviorState::Damping);
+  CHECK(step.fault_cause == FaultCause::None);
+  return 0;
+}
+
+// A confirmed Reset whose fresh ZeroTorque state is only read in a later poll:
+// the transition is held until the state witnesses it instead of being dropped
+// by the Step that happened to poll first. One Reset is enough.
+int ResetConfirmationWaitsForTheState() {
+  Harness h;
+  CHECK(ToStandby(h) == 0);
+
+  h.lower.state = ExecutionState::Fault;
+  h.lower.output = OutputAction::Damping;  // the runtime's own fault output
+  h.lower.fault_id = 42;
+  h.lower.fault_reason = FaultReason::DriverError;
+  BehaviorStep step = h.Step();
+  CHECK(step.state == BehaviorState::Fault);
+  CHECK(step.fault_cause == FaultCause::RuntimeFault);
+
+  step = h.Step(InputEvent::Reset);
+  const ExecutionRequest *reset = h.last_request();
+  CHECK(reset != nullptr);
+  if (reset == nullptr) {
+    return 1;
+  }
+  CHECK(reset->operation == Operation::Reset);
+  CHECK(reset->fault_id == 42);
+  CHECK(step.state == BehaviorState::Fault);
+
+  // The confirmation is read against the facts published before the runtime
+  // applied the Reset: the transition cannot be taken yet and must not be lost.
+  CHECK(h.Answer());
+  step = h.Step();
+  CHECK(step.state == BehaviorState::Fault);
+  CHECK(step.fault_cause == FaultCause::RuntimeFault);
+
+  // The runtime now reports the ZeroTorque the Reset reached.
+  h.lower.state = ExecutionState::ZeroTorque;
+  h.lower.output = OutputAction::ZeroTorque;
+  h.lower.fault_id = 0;
+  h.lower.fault_reason = FaultReason::None;
+  step = h.Step();
+  CHECK(step.state == BehaviorState::Standby);
+  CHECK(step.fault_cause == FaultCause::None);
+  CHECK(step.runtime_state == ExecutionState::ZeroTorque);
+  return 0;
+}
+
+// The held confirmation is not a queue: the emergency stop and a session loss
+// own the behaviour, and a later fresh state must not promote it behind them.
+int HeldConfirmationIsDropped() {
+  // (a) The emergency stop.
+  {
+    Harness h;
+    CHECK(ToStandby(h) == 0);
+    h.lower.state = ExecutionState::Fault;
+    h.lower.output = OutputAction::Damping;
+    h.lower.fault_id = 42;
+    h.lower.fault_reason = FaultReason::DriverError;
+    CHECK(h.Step().state == BehaviorState::Fault);
+    CHECK(h.Step(InputEvent::Reset).state == BehaviorState::Fault);
+    CHECK(h.Answer());
+    CHECK(h.Step().state == BehaviorState::Fault);  // the confirmation is held
+
+    BehaviorStep step = h.Step(InputEvent::EmergencyStop);
+    CHECK(step.state == BehaviorState::Fault);
+    // The first cause was the runtime's own fault; the emergency stop latches
+    // the behaviour without replacing it.
+    CHECK(step.fault_cause == FaultCause::RuntimeFault);
+    h.lower.state = ExecutionState::ZeroTorque;
+    h.lower.output = OutputAction::ZeroTorque;
+    h.lower.fault_id = 0;
+    h.lower.fault_reason = FaultReason::None;
+    step = h.Step(InputEvent::None, h.config().supervision.heartbeat_period_us);
+    CHECK(step.state == BehaviorState::Fault);
+    CHECK(step.fault_cause == FaultCause::RuntimeFault);
+  }
+
+  // (b) The session loss: the runtime reports a state of its own that no longer
+  // names our session, which withdraws the lease and latches the upper layer.
+  {
+    Harness h;
+    CHECK(ToStandby(h) == 0);
+    h.lower.state = ExecutionState::Fault;
+    h.lower.output = OutputAction::Damping;
+    h.lower.fault_id = 42;
+    h.lower.fault_reason = FaultReason::DriverError;
+    CHECK(h.Step().state == BehaviorState::Fault);
+    CHECK(h.Step(InputEvent::Reset).state == BehaviorState::Fault);
+    CHECK(h.Answer());
+    CHECK(h.Step().state == BehaviorState::Fault);  // the confirmation is held
+
+    h.publish = false;
+    RobotState revoked = h.State(h.now_us());
+    revoked.session_id = MakeId(0x50);
+    h.client().ObserveState(revoked, h.now_us());
+    revoked = h.State(h.now_us() + 1);
+    revoked.session_id = MakeId(0x50);
+    h.client().ObserveState(revoked, h.now_us());
+    CHECK(h.Poll().outcome == RequestOutcome::Unknown);
+    const ClientView view = h.Poll();
+    BehaviorStep step = h.StepView(view);
+    CHECK(step.state == BehaviorState::Fault);
+    // The first cause was the runtime's fault: the loss latches the behaviour
+    // without replacing the identity of what went wrong first.
+    CHECK(step.fault_cause == FaultCause::RuntimeFault);
+
+    // A fresh state of the runtime's own ZeroTorque must not unlock Standby.
+    h.publish = true;
+    h.lower.state = ExecutionState::ZeroTorque;
+    h.lower.output = OutputAction::ZeroTorque;
+    h.lower.fault_id = 0;
+    h.lower.fault_reason = FaultReason::None;
+    step = h.Step();
+    CHECK(step.state == BehaviorState::Fault);
+  }
+  return 0;
+}
+
 }  // namespace
 
 int main() {
@@ -1728,6 +1919,10 @@ int main() {
   failures += InitializationDeadlineFaults();
   failures += StateTimeoutFaults();
   failures += ExitSequence();
+  failures += ExitFromTrackingKeepsTheContext();
+  failures += StopFromMotionKeepsTheContext();
+  failures += ResetConfirmationWaitsForTheState();
+  failures += HeldConfirmationIsDropped();
   failures += StartLocomotionUnavailable();
   if (failures == 0) {
     return 0;

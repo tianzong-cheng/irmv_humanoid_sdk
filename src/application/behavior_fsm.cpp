@@ -109,6 +109,10 @@ BehaviorStep BehaviorFsm::Step(protocol::TimeUs now_us, InputEvent event,
   // nothing is generated and nothing new is asked for.
   if (!exit_requested_) {
     ConsumeOutcome(now_us, view, outcome);
+    // A confirmation whose behaviour the state had not witnessed waits here,
+    // before anything new is asked for: the request phase of this iteration is
+    // the first one that can see the state that shows it.
+    ApplyHeldConfirmation(now_us, view);
     OrdinaryRequests(now_us, event, view, &out);
     // EmitTarget itself refuses while a stop of ours is in flight: the stop may
     // have been begun by an earlier Step of this very iteration, and the target
@@ -211,19 +215,31 @@ void BehaviorFsm::FreshStateAndFaults(protocol::TimeUs now_us,
 
 void BehaviorFsm::LatchFault(FaultCause cause, protocol::TimeUs now_us,
                              bool request_stop) {
-  // Nothing in flight survives a latch: the move is cancelled, and a late
-  // answer to a withdrawn request can never revive a behaviour.
-  CancelInitialization();
-  if (fault_cause_ == FaultCause::None) {
-    // The first cause wins: a latch is reported once, and a later observation
-    // never replaces the identity of what went wrong first.
+  // The first cause wins: a latch is reported once, and a later observation
+  // never replaces the identity of what went wrong first.
+  const bool first = fault_cause_ == FaultCause::None;
+  if (first) {
+    // Nothing in flight survives a *new* latch: the move is cancelled and a
+    // late answer to a withdrawn request can never revive a behaviour. A latch
+    // already in place leaves the requests the latched behaviour itself makes
+    // alone: the Reset that leaves it and the handover that reconnects it are
+    // this FSM's own decisions, and abandoning them on every iteration a fresh
+    // fault state is observed would drop their confirmations - the runtime
+    // keeps reporting the same fault until it is reset, so that branch is
+    // observed again and again.
+    CancelInitialization();
     fault_cause_ = cause;
   }
+  // Every latch, new or repeated, invalidates a confirmation that was waiting
+  // for a state: the behaviour it would take is not the latched one.
+  DropHeldConfirmation();
   state_ = BehaviorState::Fault;
 
   if (!request_stop) {
-    client_.AbandonRequest();
-    pending_ = Pending::None;
+    if (first) {
+      client_.AbandonRequest();
+      pending_ = Pending::None;
+    }
     return;
   }
   if (pending_ == Pending::Acquire) {
@@ -353,6 +369,7 @@ void BehaviorFsm::EmergencyStop(protocol::TimeUs now_us,
   // the stop carries the larger request id that displaces it.
   client_.AbandonRequest();
   pending_ = Pending::None;
+  DropHeldConfirmation();
   const bool lower_faulted =
       view.state_known && view.state_fresh &&
       view.state.execution_state == protocol::ExecutionState::Fault;
@@ -370,11 +387,16 @@ void BehaviorFsm::RequestExit(protocol::TimeUs now_us) {
   }
   exit_requested_ = true;
   exit_deadline_us_ = now_us + config_.supervision.request_deadline_us;
-  // The exit stops generating and gives up on whatever was pending: nothing
-  // needs the answer of a request the process is leaving behind.
-  CancelInitialization();
+  // The exit gives up on whatever was pending: nothing needs the answer of a
+  // request the process is leaving behind. It does not clear the tracking
+  // context: the lower layer may still report Tracking while the Damping stop
+  // this exit asks for is on the wire, and that context is one this FSM
+  // authorized - dropping it here would read our own authorization as an
+  // unexplained one on the next iteration. Generation is already over: the
+  // exit owns the iteration and skips the target phase.
   client_.AbandonRequest();
   pending_ = Pending::None;
+  DropHeldConfirmation();
 }
 
 void BehaviorFsm::ExitStep(protocol::TimeUs now_us, const ClientView &view,
@@ -465,55 +487,113 @@ void BehaviorFsm::ConsumeOutcome(protocol::TimeUs now_us,
   const Pending pending = pending_;
   pending_ = Pending::None;
   if (!(view.state_known && view.state_fresh)) {
-    // The client confirms only against a state, so a confirmation without a
-    // current one is a caller that did not poll. Nothing is applied.
+    // The request is answered and the client confirmed it; only this Step has
+    // no current state to witness the behaviour it authorizes. Dropping it here
+    // would lose a transition the runtime really applied, so it waits for the
+    // state that shows it - inside the request's own bound.
+    HoldConfirmation(pending, now_us);
     return;
   }
-  const protocol::RobotState &state = view.state;
+  if (ApplyConfirmation(pending, view.state) == Confirmation::Deferred) {
+    HoldConfirmation(pending, now_us);
+  }
+}
+
+BehaviorFsm::Confirmation BehaviorFsm::ApplyConfirmation(
+    Pending pending, const protocol::RobotState &state) {
   switch (pending) {
     case Pending::None:
-      return;
+      return Confirmation::NotApplicable;
     case Pending::Acquire:
       // The handover is confirmed by the Starting guard, which also wants the
       // fresh ZeroTorque the runtime reaches on its own.
-      return;
+      return Confirmation::NotApplicable;
     case Pending::Damping:
-      if (fault_cause_ == FaultCause::None &&
-          state.execution_state == protocol::ExecutionState::Damping) {
-        CancelInitialization();
-        state_ = BehaviorState::Damping;
+      if (fault_cause_ != FaultCause::None) {
+        // A latch owns the behaviour: the stop it owes the machine is already
+        // on its way, and a confirmation cannot unlock anything.
+        return Confirmation::Applied;
       }
-      return;
+      if (state.execution_state != protocol::ExecutionState::Damping) {
+        return Confirmation::Deferred;
+      }
+      CancelInitialization();
+      state_ = BehaviorState::Damping;
+      return Confirmation::Applied;
     case Pending::ZeroTorque:
-      if (fault_cause_ == FaultCause::None &&
-          state.execution_state == protocol::ExecutionState::ZeroTorque) {
-        CancelInitialization();
-        state_ = BehaviorState::Standby;
+      if (fault_cause_ != FaultCause::None) {
+        return Confirmation::Applied;
       }
-      return;
+      if (state.execution_state != protocol::ExecutionState::ZeroTorque) {
+        return Confirmation::Deferred;
+      }
+      CancelInitialization();
+      state_ = BehaviorState::Standby;
+      return Confirmation::Applied;
     case Pending::Tracking:
-      if (fault_cause_ == FaultCause::None &&
-          state.execution_state == protocol::ExecutionState::Tracking &&
-          state.producer_id == tracking_producer_ &&
-          state.epoch == tracking_epoch_) {
-        state_ = BehaviorState::Initializing;
-      } else {
+      if (fault_cause_ != FaultCause::None) {
+        return Confirmation::Applied;
+      }
+      if (state.execution_state != protocol::ExecutionState::Tracking) {
+        return Confirmation::Deferred;
+      }
+      if (state.producer_id != tracking_producer_ ||
+          state.epoch != tracking_epoch_) {
         // The context the answer authorized is already gone: nothing was
         // started, and no frame may follow it.
         CancelInitialization();
+        return Confirmation::Applied;
       }
-      return;
+      state_ = BehaviorState::Initializing;
+      return Confirmation::Applied;
     case Pending::Reset:
-      if (state.execution_state == protocol::ExecutionState::ZeroTorque) {
-        // The only way out of the latch, and only into Standby: the old
-        // trajectory, epoch and policy state are not restarted.
-        CancelInitialization();
-        fault_cause_ = FaultCause::None;
-        lower_fault_id_ = 0;
-        state_ = BehaviorState::Standby;
+      if (state.execution_state != protocol::ExecutionState::ZeroTorque) {
+        return Confirmation::Deferred;
       }
-      return;
+      // The only way out of the latch, and only into Standby: the old
+      // trajectory, epoch and policy state are not restarted.
+      CancelInitialization();
+      fault_cause_ = FaultCause::None;
+      lower_fault_id_ = 0;
+      state_ = BehaviorState::Standby;
+      return Confirmation::Applied;
   }
+  return Confirmation::NotApplicable;
+}
+
+void BehaviorFsm::HoldConfirmation(Pending pending, protocol::TimeUs now_us) {
+  if (pending == Pending::None) {
+    return;
+  }
+  // The bound is the request's own final deadline: a transition the state never
+  // witnessed must not survive longer than the request that proposed it.
+  held_ = pending;
+  held_deadline_us_ = now_us + config_.supervision.request_deadline_us;
+}
+
+void BehaviorFsm::ApplyHeldConfirmation(protocol::TimeUs now_us,
+                                        const ClientView &view) {
+  if (held_ == Pending::None) {
+    return;
+  }
+  if (now_us >= held_deadline_us_ || client_.request_pending()) {
+    // The bound lapsed, or a newer request now owns the decision this held
+    // confirmation would take.
+    DropHeldConfirmation();
+    return;
+  }
+  if (!(view.state_known && view.state_fresh)) {
+    // Nothing current to judge it against: it keeps waiting for its deadline.
+    return;
+  }
+  if (ApplyConfirmation(held_, view.state) != Confirmation::Deferred) {
+    held_ = Pending::None;
+  }
+}
+
+void BehaviorFsm::DropHeldConfirmation() {
+  held_ = Pending::None;
+  held_deadline_us_ = 0;
 }
 
 void BehaviorFsm::OrdinaryRequests(protocol::TimeUs now_us, InputEvent event,

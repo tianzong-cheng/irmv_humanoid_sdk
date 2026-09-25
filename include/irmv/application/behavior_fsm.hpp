@@ -153,6 +153,17 @@ class BehaviorFsm {
     Reset,
   };
 
+  // What one confirmed request did to the behaviour.
+  enum class Confirmation {
+    // The kind has no state requirement of its own.
+    NotApplicable,
+    // The transition was taken, or the state contradicts it for good.
+    Applied,
+    // The state has not witnessed the behaviour yet: the confirmation waits for
+    // one instead of being dropped by a Step that happened to poll first.
+    Deferred,
+  };
+
   void FreshStateAndFaults(protocol::TimeUs now_us, const ClientView &view);
   void EmergencyStop(protocol::TimeUs now_us, const ClientView &view);
   // `outcome` is the request outcome this Step may act on: the view's own
@@ -161,6 +172,16 @@ class BehaviorFsm {
                 RequestOutcome outcome);
   void ConsumeOutcome(protocol::TimeUs now_us, const ClientView &view,
                       RequestOutcome outcome);
+  // What one confirmed request does to the behaviour. It is one decision for
+  // every kind, so a confirmation can be taken now and, when the state has not
+  // witnessed it yet, held instead of dropped.
+  Confirmation ApplyConfirmation(Pending pending,
+                                 const protocol::RobotState &state);
+  void HoldConfirmation(Pending pending, protocol::TimeUs now_us);
+  // Applies a held confirmation as soon as a fresh state witnesses it, and
+  // drops it on its own deadline, on a new request, on a latch and on the exit.
+  void ApplyHeldConfirmation(protocol::TimeUs now_us, const ClientView &view);
+  void DropHeldConfirmation();
   // Handles the ordinary requests and the initialization targets of this
   // event. Whether a stop was begun here is not reported: the target generator
   // is gated on StopInFlight(), the durable fact that survives the whole
@@ -219,6 +240,10 @@ class BehaviorFsm {
   Pending pending_{Pending::None};
   protocol::Id pending_producer_{};
   protocol::Sequence pending_epoch_{0};
+  // A confirmation whose behaviour the state had not witnessed yet when it was
+  // read, and the instant it stops waiting for one.
+  Pending held_{Pending::None};
+  protocol::TimeUs held_deadline_us_{0};
 
   // The confirmed Tracking context the upper behaviour relies on.
   bool tracking_active_{false};
