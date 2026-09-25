@@ -1,0 +1,1349 @@
+// The behaviour FSM and the serial supervision order.
+//
+// Every case runs on explicit simulated times: the harness drives a real
+// RobotClient over a recording ClientSink, the runtime's answers and states are
+// injected by hand exactly where the lower layer would produce them, and the
+// FSM is stepped with the view a Poll produced. No clock is read, nothing
+// sleeps, no thread and no DDS takes part.
+//
+// The assertions are as explicit about the latch and about the absence of a
+// change as they are about the positive transitions: a behaviour only moves on
+// a matching confirmation, and a latched fault is never unlocked by a stop, a
+// timeout, a heartbeat or a damping observation.
+
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
+#include <string_view>
+#include <vector>
+
+#include "irmv/application/behavior_fsm.hpp"
+#include "irmv/application/initialization.hpp"
+#include "irmv/application/robot_client.hpp"
+#include "irmv/configuration/application_config.hpp"
+#include "irmv/protocol/types.hpp"
+#include "support/check.hpp"
+
+namespace {
+
+using irmv::application::BehaviorFsm;
+using irmv::application::BehaviorState;
+using irmv::application::BehaviorStep;
+using irmv::application::ClientSink;
+using irmv::application::ClientView;
+using irmv::application::FaultCause;
+using irmv::application::InputEvent;
+using irmv::application::RequestOutcome;
+using irmv::application::RobotClient;
+using irmv::configuration::ApplicationConfig;
+using irmv::configuration::LoadApplicationConfig;
+using irmv::protocol::ExecutionRequest;
+using irmv::protocol::ExecutionResult;
+using irmv::protocol::ExecutionState;
+using irmv::protocol::FaultReason;
+using irmv::protocol::Id;
+using irmv::protocol::JointCommand;
+using irmv::protocol::kNoId;
+using irmv::protocol::kProtocolVersion;
+using irmv::protocol::Operation;
+using irmv::protocol::OutputAction;
+using irmv::protocol::RejectReason;
+using irmv::protocol::ResultStatus;
+using irmv::protocol::RobotState;
+using irmv::protocol::Sequence;
+using irmv::protocol::StopReason;
+using irmv::protocol::TimeUs;
+
+// Simulated instants. The harness never reads a clock: everything below is
+// derived from these and from the configuration's periods.
+constexpr TimeUs kStartUs = 1'000'000;
+constexpr TimeUs kTickUs = 1'000;    // one supervision iteration
+constexpr TimeUs kAnswerUs = 2'000;  // an answer lands this long after a Step
+constexpr TimeUs kStateAgeUs = 500;  // the runtime's own publication age
+
+Id MakeId(std::uint8_t seed) {
+  Id id{};
+  for (std::size_t index = 0; index < id.size(); ++index) {
+    id[index] = static_cast<std::uint8_t>(seed + index);
+  }
+  return id;
+}
+
+const Id kRuntimeId = MakeId(0x20);
+const Id kGrantedSession = MakeId(0x40);
+
+// The position the runtime reports while the cases do not move it: away from
+// the configured target, inside its position limits and inside the continuity
+// and velocity bounds of the first frame.
+constexpr double kMeasuredPosition = -0.5;
+
+// Records every payload that leaves the loop: the requests the FSM decided on,
+// the frames and the heartbeats the client published with them.
+class RecordingSink : public ClientSink {
+ public:
+  bool PublishRequest(const ExecutionRequest &request) override {
+    requests.push_back(request);
+    return true;
+  }
+
+  bool PublishCommand(const JointCommand &command) override {
+    commands.push_back(command);
+    return true;
+  }
+
+  bool PublishHeartbeat(
+      const irmv::protocol::SupervisorHeartbeat &heartbeat) override {
+    heartbeats.push_back(heartbeat);
+    return true;
+  }
+
+  std::vector<ExecutionRequest> requests;
+  std::vector<JointCommand> commands;
+  std::vector<irmv::protocol::SupervisorHeartbeat> heartbeats;
+};
+
+// The runtime's present facts, as the harness reports them. A case mutates this
+// to move the runtime the way the lower layer would.
+struct LowerState {
+  ExecutionState state{ExecutionState::ZeroTorque};
+  OutputAction output{OutputAction::ZeroTorque};
+  Sequence epoch{0};
+  Id producer{};
+  Sequence fault_id{0};
+  FaultReason fault_reason{FaultReason::None};
+  bool healthy{true};
+  double q{kMeasuredPosition};
+  double dq{0.0};
+  StopReason stop_reason{StopReason::None};
+};
+
+// A whole application: the configuration, the recording sink, a real client
+// over it, the FSM, and the runtime the cases drive.
+class Harness {
+ public:
+  Harness()
+      : config_(LoadApplicationConfig("config/sdk.json")),
+        client_(sink_, config_, MakeId(0x10)),
+        fsm_(config_, client_) {}
+
+  const ApplicationConfig &config() const { return config_; }
+  RobotClient &client() { return client_; }
+  BehaviorFsm &fsm() { return fsm_; }
+  RecordingSink &sink() { return sink_; }
+  TimeUs now_us() const { return now_; }
+  // The state the runtime published last, as the FSM saw it.
+  const RobotState &published() const { return published_; }
+  const Id &granted_session() const { return session_id_; }
+  const ExecutionRequest *last_request() const {
+    return sink_.requests.empty() ? nullptr : &sink_.requests.back();
+  }
+  const ExecutionRequest *last_request_of(Operation operation) const {
+    for (std::size_t index = sink_.requests.size(); index > 0; --index) {
+      if (sink_.requests[index - 1].operation == operation) {
+        return &sink_.requests[index - 1];
+      }
+    }
+    return nullptr;
+  }
+
+  // The runtime's present state and whether the next iterations observe it. A
+  // silent link is exactly the case a Stop is not published in.
+  LowerState lower;
+  bool publish{true};
+
+  // One supervision iteration, plus the four lines the application loop owns:
+  // advance the clock, hand the client what the transport received, poll once,
+  // step, and send exactly what the step asked for.
+  BehaviorStep Step(InputEvent event = InputEvent::None,
+                    TimeUs advance = kTickUs) {
+    now_ += advance;
+    if (publish) {
+      published_ = State(now_ - kStateAgeUs);
+      client_.ObserveState(published_, now_);
+    }
+    const ClientView view = client_.Poll(now_);
+    BehaviorStep step = fsm_.Step(now_, event, view);
+    if (step.send_command) {
+      client_.SendCommand(&step.command, now_);
+    }
+    if (step.send_heartbeat) {
+      client_.SendHeartbeat(now_);
+    }
+    return step;
+  }
+
+  ClientView Poll() { return client_.Poll(now_); }
+
+  // One state of the runtime's present facts, stamped by the runtime itself.
+  RobotState State(TimeUs stamp_us) {
+    RobotState state{};
+    state.protocol_version = kProtocolVersion;
+    state.runtime_id = kRuntimeId;
+    state.session_id = session_id_;
+    state.producer_id = lower.producer;
+    state.epoch = lower.epoch;
+    state.state_seq = ++state_seq_;
+    state.stamp_us = stamp_us;
+    state.execution_state = lower.state;
+    state.output_action = lower.output;
+    state.stop_reason = lower.stop_reason;
+    state.fault_id = lower.fault_id;
+    state.healthy = lower.healthy;
+    state.damping_eligible = lower.output == OutputAction::Damping;
+    state.config_id.Assign(config_.runtime_config_id());
+    state.layout_id.Assign(config_.layout_id());
+    // Deliberately not the state sequence: a target must carry the sequence the
+    // runtime records for the state, never the feedback snapshot's.
+    state.feedback.snapshot_seq = state.state_seq + 5'000;
+    state.feedback.stamp_us = stamp_us;
+    state.feedback.count = static_cast<std::uint32_t>(config_.joint_count());
+    for (std::size_t index = 0; index < config_.joint_count(); ++index) {
+      irmv::protocol::JointFeedback &joint = state.feedback.joints[index];
+      joint.valid = true;
+      joint.connected = true;
+      joint.q = lower.q;
+      joint.dq = lower.dq;
+      joint.rx_stamp_us = stamp_us;
+      joint.freq_hz = 500.0;
+    }
+    if (lower.fault_reason != FaultReason::None) {
+      state.faults.count = 1;
+      state.faults.details[0].reason = lower.fault_reason;
+      state.faults.details[0].output_action = lower.output;
+      state.faults.details[0].detected_stamp_us = stamp_us;
+    }
+    return state;
+  }
+
+  // Puts the runtime into the tracking context the last request proposed, the
+  // way a runtime that applied a Tracking request reports it.
+  void EnterTracking() {
+    const ExecutionRequest &request = sink_.requests.back();
+    tracking_producer_value = request.producer_id;
+    tracking_epoch_value = request.proposed_epoch;
+    lower.state = ExecutionState::Tracking;
+    lower.output = OutputAction::Tracking;
+    lower.producer = request.producer_id;
+    lower.epoch = request.proposed_epoch;
+  }
+
+  const Id &tracking_producer() const { return tracking_producer_value; }
+  Sequence tracking_epoch() const { return tracking_epoch_value; }
+
+  // The result the runtime would answer the last request with, built from the
+  // runtime's present state.
+  ExecutionResult Answered(const ExecutionRequest &request, ResultStatus status,
+                           RejectReason reason) {
+    ExecutionResult result{};
+    result.protocol_version = kProtocolVersion;
+    result.supervisor_id = request.supervisor_id;
+    result.request_id = request.request_id;
+    result.session_id =
+        request.session_id == kNoId ? session_id_ : request.session_id;
+    result.runtime_id = request.runtime_id;
+    result.execution_state = lower.state;
+    result.output_action = lower.output;
+    result.producer_id = lower.producer;
+    result.epoch = lower.epoch;
+    result.fault_id = lower.fault_id;
+    result.stamp_us = now_ + kAnswerUs;
+    result.status = status;
+    result.reason = reason;
+    return result;
+  }
+
+  // Feeds only the Applied result of the last request: the confirmation still
+  // needs a state published after it.
+  bool AnswerResultOnly() {
+    if (sink_.requests.empty()) {
+      return false;
+    }
+    const ExecutionRequest request = sink_.requests.back();
+    if (request.operation == Operation::AcquireSession) {
+      session_id_ = kGrantedSession;
+    }
+    const ExecutionResult result =
+        Answered(request, ResultStatus::Applied, RejectReason::None);
+    client_.ObserveResult(result, result.stamp_us + 1);
+    now_ = result.stamp_us + kTickUs;
+    return true;
+  }
+
+  // Answers the last request with its Applied result and a state published
+  // after it that agrees with it, so the client's next Poll confirms it.
+  bool Answer() {
+    if (!AnswerResultOnly()) {
+      return false;
+    }
+    published_ = State(now_ - kStateAgeUs);
+    client_.ObserveState(published_, now_);
+    return true;
+  }
+
+  // Answers the last request with a rejection: no state witnesses it.
+  bool Reject(RejectReason reason) {
+    if (sink_.requests.empty()) {
+      return false;
+    }
+    const ExecutionRequest request = sink_.requests.back();
+    const ExecutionResult result =
+        Answered(request, ResultStatus::Rejected, reason);
+    client_.ObserveResult(result, result.stamp_us + 1);
+    now_ = result.stamp_us + kTickUs;
+    return true;
+  }
+
+ private:
+  ApplicationConfig config_;
+  RecordingSink sink_;
+  RobotClient client_;
+  BehaviorFsm fsm_;
+  TimeUs now_{kStartUs};
+  Id session_id_{kNoId};
+  Sequence state_seq_{0};
+  RobotState published_{};
+  Id tracking_producer_value{};
+  Sequence tracking_epoch_value{0};
+};
+
+// Power-on to Standby: nothing is requested before an instance this client can
+// talk to has been observed, the session handover is confirmed, and only a
+// fresh ZeroTorque promotes the behaviour.
+int ToStandby(Harness &h) {
+  h.publish = false;
+  BehaviorStep step = h.Step();
+  CHECK(step.state == BehaviorState::Starting);
+  CHECK(h.sink().requests.empty());
+  CHECK(!step.send_command);
+  CHECK(!step.send_heartbeat);
+  CHECK(!step.runtime_state_known);
+
+  // The matching instance appears: the FSM asks for the session handover, and
+  // the handover alone does not promote it.
+  h.publish = true;
+  step = h.Step();
+  CHECK(step.state == BehaviorState::Starting);
+  const ExecutionRequest *request = h.last_request();
+  CHECK(request != nullptr);
+  if (request == nullptr) {
+    return 1;
+  }
+  CHECK(request->operation == Operation::AcquireSession);
+  CHECK(request->session_id == kNoId);
+  CHECK(request->runtime_id == kRuntimeId);
+  CHECK(request->producer_id == kNoId);
+  CHECK(request->expected_epoch == 0);
+  step = h.Step();
+  CHECK(step.state == BehaviorState::Starting);
+  CHECK(h.sink().requests.size() ==
+        1);  // the client retries, the FSM re-asks no
+
+  CHECK(h.Answer());
+  step = h.Step();
+  CHECK(step.state == BehaviorState::Standby);
+  CHECK(step.runtime_state == ExecutionState::ZeroTorque);
+  CHECK(step.runtime_state_known);
+  CHECK(step.fault_cause == FaultCause::None);
+  CHECK(!step.send_command);
+  // A live session now refreshes the lease.
+  CHECK(step.send_heartbeat);
+  CHECK(h.sink().heartbeats.size() == 1);
+  return 0;
+}
+
+// Standby to Damping, only through the matching confirmation.
+int ToDamping(Harness &h) {
+  BehaviorStep step = h.Step(InputEvent::Damping);
+  CHECK(step.state == BehaviorState::Standby);
+  const ExecutionRequest *request = h.last_request();
+  CHECK(request != nullptr);
+  if (request == nullptr) {
+    return 1;
+  }
+  CHECK(request->operation == Operation::Damping);
+  CHECK(request->session_id == h.granted_session());
+  CHECK(request->producer_id == kNoId);
+  CHECK(!step.send_command);
+  h.lower.state = ExecutionState::Damping;
+  h.lower.output = OutputAction::Damping;
+  CHECK(h.Answer());
+  step = h.Step();
+  CHECK(step.state == BehaviorState::Damping);
+  CHECK(step.runtime_state == ExecutionState::Damping);
+  return 0;
+}
+
+// Damping to Initializing, only through the matching confirmation, and with the
+// admitted first frame travelling inside the request.
+int ToInitializing(Harness &h) {
+  BehaviorStep step = h.Step(InputEvent::Initialize);
+  CHECK(step.state == BehaviorState::Damping);
+  CHECK(!step.initialization_refused);
+  const ExecutionRequest *request = h.last_request();
+  CHECK(request != nullptr);
+  if (request == nullptr) {
+    return 1;
+  }
+  CHECK(request->operation == Operation::Tracking);
+  CHECK(request->producer_id != kNoId);
+  CHECK(request->proposed_epoch > request->expected_epoch);
+  const JointCommand &frame = request->first_command;
+  CHECK(frame.joints.count ==
+        static_cast<std::uint32_t>(h.config().joint_count()));
+  CHECK(frame.layout_id.View() == h.config().layout_id());
+  CHECK(frame.producer_id == request->producer_id);
+  CHECK(frame.epoch == request->proposed_epoch);
+  CHECK(frame.source_state_seq == h.published().state_seq);
+  for (std::size_t index = 0; index < h.config().joint_count(); ++index) {
+    CHECK(frame.joints.q[index] == h.lower.q);
+    CHECK(frame.joints.dq[index] == 0.0);
+    CHECK(frame.joints.tau_ff[index] == 0.0);
+    CHECK(frame.joints.kp[index] == h.config().initialization.gains.kp[index]);
+    CHECK(frame.joints.kd[index] == h.config().initialization.gains.kd[index]);
+  }
+  h.EnterTracking();
+  CHECK(h.Answer());
+  step = h.Step();
+  CHECK(step.state == BehaviorState::Initializing);
+  CHECK(step.runtime_state == ExecutionState::Tracking);
+  return 0;
+}
+
+// Standby's Damping and Initializing to a completed move: the ramp runs, the
+// joints reach the target and hold it for the stable window.
+int ToReady(Harness &h) {
+  CHECK(ToDamping(h) == 0);
+  CHECK(ToInitializing(h) == 0);
+  const TimeUs period = h.config().supervision.target_period_us;
+  const TimeUs duration = h.config().initialization.trajectory.duration_us;
+  const TimeUs window = h.config().initialization.trajectory.stable_window_us;
+  const int limit = static_cast<int>(duration / period + window / period) + 8;
+  for (int index = 0; index < limit; ++index) {
+    if (static_cast<TimeUs>(index) * period >= duration) {
+      // The joints arrive and hold the target.
+      h.lower.q = h.config().initialization.target_q[0];
+    }
+    const BehaviorStep step = h.Step(InputEvent::None, period);
+    if (step.state == BehaviorState::Ready) {
+      return 0;
+    }
+    CHECK(step.state == BehaviorState::Initializing);
+  }
+  CHECK(false);
+  return 1;
+}
+
+// The power-on handover, the promotion guard and a foreign instance.
+int StartingHandover() {
+  Harness h;
+  CHECK(ToStandby(h) == 0);
+
+  // The handover is the only request a Starting FSM makes: no motion request is
+  // sent before it is confirmed.
+  CHECK(h.sink().requests.size() == 1);
+
+  // A session is not enough: the promotion also wants the lower layer at zero
+  // torque, and a runtime that is already damping is not promoted.
+  {
+    Harness booting;
+    booting.lower.state = ExecutionState::Damping;
+    booting.lower.output = OutputAction::Damping;
+    BehaviorStep step = booting.Step();
+    CHECK(step.state == BehaviorState::Starting);
+    const ExecutionRequest *request = booting.last_request();
+    CHECK(request != nullptr);
+    if (request == nullptr) {
+      return 1;
+    }
+    CHECK(request->operation == Operation::AcquireSession);
+    CHECK(booting.Answer());
+    step = booting.Step();
+    CHECK(step.state == BehaviorState::Starting);
+    CHECK(step.runtime_state == ExecutionState::Damping);
+    CHECK(step.runtime_state_known);
+    CHECK(!step.send_command);
+  }
+
+  // A state whose configuration is not ours is never this client's target, so
+  // the handover cannot even begin.
+  {
+    Harness foreign;
+    foreign.publish = false;
+    RobotState other = foreign.State(foreign.now_us() - kStateAgeUs);
+    CHECK(other.config_id.Assign("someone-elses-config"));
+    foreign.client().ObserveState(other, foreign.now_us());
+    BehaviorStep step = foreign.Step();
+    CHECK(step.state == BehaviorState::Starting);
+    CHECK(!step.runtime_state_known);
+    CHECK(foreign.sink().requests.empty());
+    CHECK(!step.send_command);
+  }
+
+  // A link that goes silent is unreachable, in Starting exactly as anywhere
+  // else: the state deadline is the rule.
+  {
+    Harness silent;
+    CHECK(ToStandby(silent) == 0);
+    silent.publish = false;
+    const BehaviorStep step = silent.Step(
+        InputEvent::None, silent.config().supervision.state_timeout_us + 1);
+    CHECK(step.state == BehaviorState::Fault);
+    CHECK(step.fault_cause == FaultCause::RuntimeUnreachable);
+  }
+  return 0;
+}
+
+// Standby and Damping only move on a matching confirmation, and the global
+// ZeroTorque stop leaves through Standby.
+int StopConfirmations() {
+  Harness h;
+  CHECK(ToStandby(h) == 0);
+
+  BehaviorStep step = h.Step(InputEvent::Damping);
+  CHECK(step.state == BehaviorState::Standby);
+  const ExecutionRequest *damping = h.last_request();
+  CHECK(damping != nullptr);
+  if (damping == nullptr) {
+    return 1;
+  }
+  CHECK(damping->operation == Operation::Damping);
+  CHECK(damping->session_id == h.granted_session());
+  CHECK(damping->runtime_id == kRuntimeId);
+  CHECK(!step.send_command);
+
+  // The Applied result alone is not a confirmation: the behaviour waits for the
+  // state the runtime publishes after it.
+  h.lower.state = ExecutionState::Damping;
+  h.lower.output = OutputAction::Damping;
+  CHECK(h.AnswerResultOnly());
+  CHECK(h.Poll().outcome == RequestOutcome::Pending);
+  CHECK(h.fsm().state() == BehaviorState::Standby);
+  step = h.Step();
+  CHECK(step.state == BehaviorState::Damping);
+  CHECK(step.runtime_state == ExecutionState::Damping);
+  CHECK(step.runtime_output == OutputAction::Damping);
+  CHECK(step.fault_cause == FaultCause::None);
+
+  // A repeated Damping key in Damping is a no-op.
+  const std::size_t requests = h.sink().requests.size();
+  step = h.Step(InputEvent::Damping);
+  CHECK(step.state == BehaviorState::Damping);
+  CHECK(h.sink().requests.size() == requests);
+
+  // The global explicit ZeroTorque stop leaves from any non-fault behaviour and
+  // lands in Standby, never in Damping.
+  step = h.Step(InputEvent::ZeroTorque);
+  CHECK(step.state == BehaviorState::Damping);  // not before the confirmation
+  const ExecutionRequest *zero = h.last_request();
+  CHECK(zero != nullptr);
+  if (zero == nullptr) {
+    return 1;
+  }
+  CHECK(zero->operation == Operation::ZeroTorque);
+  h.lower.state = ExecutionState::ZeroTorque;
+  h.lower.output = OutputAction::ZeroTorque;
+  CHECK(h.Answer());
+  step = h.Step();
+  CHECK(step.state == BehaviorState::Standby);
+  CHECK(step.runtime_state == ExecutionState::ZeroTorque);
+  CHECK(step.fault_cause == FaultCause::None);
+
+  // A repeated ZeroTorque key in Standby is a no-op.
+  const std::size_t after = h.sink().requests.size();
+  step = h.Step(InputEvent::ZeroTorque);
+  CHECK(step.state == BehaviorState::Standby);
+  CHECK(h.sink().requests.size() == after);
+  CHECK(!step.initialization_refused);
+  return 0;
+}
+
+// The confirmation the client accepted can be older than the newest state: the
+// FSM re-checks that the state it is about to act on shows the behaviour it
+// asked for, so an answer the runtime has already overtaken leaves the
+// behaviour where it was.
+int ConfirmationOvertakenByTheState() {
+  Harness h;
+  CHECK(ToStandby(h) == 0);
+  BehaviorStep step = h.Step(InputEvent::Damping);
+  CHECK(step.state == BehaviorState::Standby);
+
+  // The runtime applies the damping and publishes the witness...
+  h.lower.state = ExecutionState::Damping;
+  h.lower.output = OutputAction::Damping;
+  CHECK(h.Answer());
+  // ... and it is somewhere else again before the loop reads the answer.
+  h.lower.state = ExecutionState::ZeroTorque;
+  h.lower.output = OutputAction::ZeroTorque;
+  const RobotState moved = h.State(h.now_us() + kTickUs);
+  h.client().ObserveState(moved, h.now_us() + kTickUs);
+
+  step = h.Step(InputEvent::None, 2 * kTickUs);
+  // The request was answered and resolved; what the FSM refuses to do is act on
+  // a state that does not show the behaviour.
+  CHECK(!h.client().request_pending());
+  CHECK(step.state == BehaviorState::Standby);
+  CHECK(step.fault_cause == FaultCause::None);
+  CHECK(step.runtime_state == ExecutionState::ZeroTorque);
+  CHECK(step.runtime_state_known);
+  return 0;
+}
+
+// A rejected request keeps the behaviour whose lower invariant still holds, and
+// records the reason for the display.
+int RejectedRequestKeepsBehaviour() {
+  Harness h;
+  CHECK(ToStandby(h) == 0);
+  CHECK(ToDamping(h) == 0);
+
+  const BehaviorStep start = h.Step(InputEvent::Initialize);
+  CHECK(start.state == BehaviorState::Damping);
+  const ExecutionRequest *request = h.last_request();
+  CHECK(request != nullptr);
+  if (request == nullptr) {
+    return 1;
+  }
+  CHECK(request->operation == Operation::Tracking);
+
+  CHECK(h.Reject(RejectReason::Discontinuity));
+  const BehaviorStep step = h.Step();
+  CHECK(step.state == BehaviorState::Damping);
+  CHECK(step.fault_cause == FaultCause::None);
+  CHECK(step.last_reject_reason == RejectReason::Discontinuity);
+  CHECK(!step.send_command);
+  // A refused authorization leaves no frames behind.
+  CHECK(h.sink().commands.empty());
+  // ... and does not block the next explicit attempt.
+  const std::size_t requests = h.sink().requests.size();
+  const BehaviorStep again = h.Step(InputEvent::Initialize);
+  CHECK(again.state == BehaviorState::Damping);
+  CHECK(h.sink().requests.size() == requests + 1);
+  CHECK(h.last_request() != nullptr &&
+        h.last_request()->operation == Operation::Tracking);
+  return 0;
+}
+
+// A request that is never answered is not "never applied": at its final
+// deadline the upper behaviour faults and asks for a stop with a larger id.
+int RequestTimeoutFaults() {
+  Harness h;
+  CHECK(ToStandby(h) == 0);
+  const BehaviorStep begun = h.Step(InputEvent::Damping);
+  CHECK(begun.state == BehaviorState::Standby);
+  const ExecutionRequest *pending = h.last_request();
+  CHECK(pending != nullptr);
+  if (pending == nullptr) {
+    return 1;
+  }
+  CHECK(pending->operation == Operation::Damping);
+
+  const BehaviorStep step =
+      h.Step(InputEvent::None, h.config().supervision.request_deadline_us);
+  CHECK(step.state == BehaviorState::Fault);
+  CHECK(step.fault_cause == FaultCause::RequestTimeout);
+  const ExecutionRequest *stop = h.last_request();
+  CHECK(stop != nullptr);
+  if (stop == nullptr) {
+    return 1;
+  }
+  CHECK(stop->operation == Operation::Damping);
+  CHECK(stop->request_id > pending->request_id);
+  CHECK(!step.send_command);
+  return 0;
+}
+
+// The admission of an initialization plan: a plan the runtime would refuse is
+// refused here, with no request, no latch and the refusal displayed.
+int InitializationAdmission() {
+  Harness h;
+  CHECK(ToStandby(h) == 0);
+
+  // The initialization is only ever started from Damping.
+  const std::size_t requests = h.sink().requests.size();
+  BehaviorStep step = h.Step(InputEvent::Initialize);
+  CHECK(step.state == BehaviorState::Standby);
+  CHECK(h.sink().requests.size() == requests);
+  CHECK(!step.initialization_refused);
+
+  CHECK(ToDamping(h) == 0);
+
+  // A measured origin outside the configured position limits is a plan the
+  // runtime would refuse: the FSM stays in Damping, asks for nothing and
+  // latches nothing.
+  h.lower.q = 2.5;
+  const std::size_t before = h.sink().requests.size();
+  step = h.Step(InputEvent::Initialize);
+  CHECK(step.initialization_refused);
+  CHECK(step.state == BehaviorState::Damping);
+  CHECK(step.fault_cause == FaultCause::None);
+  CHECK(h.sink().requests.size() == before);
+  CHECK(!step.send_command);
+  CHECK(h.sink().commands.empty());
+  // The refusal is that step only.
+  h.lower.q = kMeasuredPosition;
+  step = h.Step();
+  CHECK(!step.initialization_refused);
+  CHECK(step.state == BehaviorState::Damping);
+
+  // The runnable plan is admitted, and the request carries the frame the guard
+  // approved.
+  CHECK(ToInitializing(h) == 0);
+  return 0;
+}
+
+// The completion condition, the Ready hold period, and a repeated Initialize
+// during the move.
+int CompletionAndReadyHold() {
+  Harness h;
+  CHECK(ToStandby(h) == 0);
+  CHECK(ToDamping(h) == 0);
+  CHECK(ToInitializing(h) == 0);
+
+  const ApplicationConfig &config = h.config();
+  const TimeUs period = config.supervision.target_period_us;
+  const TimeUs duration = config.initialization.trajectory.duration_us;
+  const TimeUs window = config.initialization.trajectory.stable_window_us;
+  const Sequence epoch = h.tracking_epoch();
+  const Id producer = h.tracking_producer();
+
+  // A repeated Initialize while the move runs is a no-op: no new request, and
+  // the frame sequence continues instead of restarting.
+  const std::size_t requests = h.sink().requests.size();
+  const ExecutionRequest *tracking = h.last_request_of(Operation::Tracking);
+  CHECK(tracking != nullptr);
+  if (tracking == nullptr) {
+    return 1;
+  }
+  const Sequence last_seq = tracking->first_command.command_seq;
+  BehaviorStep step = h.Step(InputEvent::Initialize, period);
+  CHECK(step.state == BehaviorState::Initializing);
+  CHECK(h.sink().requests.size() == requests);
+  CHECK(step.send_command);
+  CHECK(step.command.command_seq == last_seq + 1);
+  CHECK(h.sink().commands.size() == 1);
+
+  // The ramp keeps running: the FSM is Initializing and emits one frame per
+  // target period, each with the fresh state's sequence and the confirmed
+  // context.
+  const std::size_t ramp_start = h.sink().commands.size();
+  for (int index = 0; index < 24; ++index) {
+    step = h.Step(InputEvent::None, period);
+    CHECK(step.state == BehaviorState::Initializing);
+    CHECK(step.send_command);
+    CHECK(step.command.epoch == epoch);
+    CHECK(step.command.producer_id == producer);
+    CHECK(step.command.source_state_seq == h.published().state_seq);
+  }
+  CHECK(h.sink().commands.size() == ramp_start + 24);
+  // The ramp interpolates: a frame in the middle of the move is strictly
+  // between the measured origin and the target, and the last one has arrived.
+  const double mid = h.sink().commands[ramp_start + 5].joints.q[0];
+  CHECK(mid > kMeasuredPosition);
+  CHECK(mid < config.initialization.target_q[0]);
+  CHECK(h.sink().commands.back().joints.q[0] ==
+        config.initialization.target_q[0]);
+  CHECK(h.sink().commands.back().joints.dq[0] == 0.0);
+
+  // The end of the ramp is not the completion condition: with the joints still
+  // away from the target the move keeps running.
+  step = h.Step(InputEvent::None, period);
+  CHECK(step.state == BehaviorState::Initializing);
+
+  // The joints arrive and hold the target: the stable window is what completes
+  // the move.
+  h.lower.q = config.initialization.target_q[0];
+  const int window_calls = static_cast<int>(window / period);
+  for (int index = 0; index < window_calls; ++index) {
+    step = h.Step(InputEvent::None, period);
+    CHECK(step.state == BehaviorState::Initializing);
+  }
+  step = h.Step(InputEvent::None, period);
+  CHECK(step.state == BehaviorState::Ready);
+
+  // Ready holds the target at the configured period: a new frame with a new
+  // sequence and the fresh state's sequence, and nothing inside the period.
+  const Sequence ready_seq = step.command.command_seq;
+  step = h.Step(InputEvent::None, period / 2);
+  CHECK(step.state == BehaviorState::Ready);
+  CHECK(!step.send_command);
+  const std::size_t held = h.sink().commands.size();
+  step = h.Step(InputEvent::None, period);
+  CHECK(step.state == BehaviorState::Ready);
+  CHECK(step.send_command);
+  CHECK(h.sink().commands.size() == held + 1);
+  CHECK(step.command.command_seq > ready_seq);
+  CHECK(step.command.source_state_seq == h.published().state_seq);
+  CHECK(step.command.epoch == epoch);
+  CHECK(step.command.producer_id == producer);
+  for (std::size_t index = 0; index < config.joint_count(); ++index) {
+    CHECK(step.command.joints.q[index] ==
+          config.initialization.target_q[index]);
+    CHECK(step.command.joints.dq[index] == 0.0);
+    CHECK(step.command.joints.tau_ff[index] == 0.0);
+    CHECK(step.command.joints.kp[index] ==
+          config.initialization.gains.kp[index]);
+    CHECK(step.command.joints.kd[index] ==
+          config.initialization.gains.kd[index]);
+  }
+  // A sample the generator cannot use latches nothing: Ready holds again as
+  // soon as a usable one arrives, without a fault and without a frame.
+  {
+    h.publish = false;
+    const TimeUs stale_stamp =
+        h.now_us() - h.config().runtime.timeouts.source_state_us - kTickUs;
+    const RobotState stale = h.State(stale_stamp);
+    h.client().ObserveState(stale, h.now_us());
+    step = h.Step(InputEvent::None, period);
+    CHECK(step.state == BehaviorState::Ready);
+    CHECK(step.fault_cause == FaultCause::None);
+    CHECK(!step.send_command);
+    CHECK(step.runtime_state_known);  // the link itself is current
+    h.publish = true;
+    step = h.Step(InputEvent::None, period);
+    CHECK(step.state == BehaviorState::Ready);
+    CHECK(step.send_command);
+    CHECK(step.command.command_seq > ready_seq);
+  }
+
+  // The ramp duration really had to elapse, not merely be configured.
+  CHECK(duration > 0);
+  return 0;
+}
+
+// Ordinary stops out of a motion behaviour: an ordinary Damping stop lands in
+// Damping and cancels the move, the global ZeroTorque stop lands in Standby,
+// and neither restarts the old trajectory.
+int OrdinaryStopsFromMotion() {
+  // (a) A stop from Initializing confirms to Damping and cancels the move.
+  {
+    Harness h;
+    CHECK(ToStandby(h) == 0);
+    CHECK(ToDamping(h) == 0);
+    CHECK(ToInitializing(h) == 0);
+    const Sequence old_epoch = h.tracking_epoch();
+
+    BehaviorStep step = h.Step(InputEvent::Damping);
+    CHECK(step.state ==
+          BehaviorState::Initializing);  // only a confirmation moves it
+    const ExecutionRequest *request = h.last_request();
+    CHECK(request != nullptr);
+    if (request == nullptr) {
+      return 1;
+    }
+    CHECK(request->operation == Operation::Damping);
+    h.lower.state = ExecutionState::Damping;
+    h.lower.output = OutputAction::Damping;
+    CHECK(h.Answer());
+    step = h.Step();
+    CHECK(step.state == BehaviorState::Damping);
+    CHECK(!step.send_command);
+
+    // The cancelled move is not restarted, and a new move is a new
+    // authorization, not the old epoch.
+    const std::size_t commands = h.sink().commands.size();
+    step = h.Step(InputEvent::None, h.config().supervision.target_period_us);
+    CHECK(step.state == BehaviorState::Damping);
+    CHECK(!step.send_command);
+    CHECK(h.sink().commands.size() == commands);
+    step = h.Step(InputEvent::Initialize);
+    CHECK(step.state == BehaviorState::Damping);
+    const ExecutionRequest *fresh = h.last_request();
+    CHECK(fresh != nullptr);
+    if (fresh == nullptr) {
+      return 1;
+    }
+    CHECK(fresh->operation == Operation::Tracking);
+    CHECK(fresh->proposed_epoch > old_epoch);
+  }
+
+  // (b) The global ZeroTorque stop from Ready goes to Standby and cancels the
+  // move as well.
+  {
+    Harness h;
+    CHECK(ToStandby(h) == 0);
+    CHECK(ToReady(h) == 0);
+    BehaviorStep step = h.Step(InputEvent::ZeroTorque);
+    CHECK(step.state == BehaviorState::Ready);
+    const ExecutionRequest *request = h.last_request();
+    CHECK(request != nullptr);
+    if (request == nullptr) {
+      return 1;
+    }
+    CHECK(request->operation == Operation::ZeroTorque);
+    h.lower.state = ExecutionState::ZeroTorque;
+    h.lower.output = OutputAction::ZeroTorque;
+    CHECK(h.Answer());
+    step = h.Step();
+    CHECK(step.state == BehaviorState::Standby);
+    CHECK(step.runtime_state == ExecutionState::ZeroTorque);
+    CHECK(!step.send_command);
+    // No hold frame survives the cancel.
+    const std::size_t commands = h.sink().commands.size();
+    step = h.Step(InputEvent::None, h.config().supervision.target_period_us);
+    CHECK(step.state == BehaviorState::Standby);
+    CHECK(h.sink().commands.size() == commands);
+  }
+  return 0;
+}
+
+// The emergency stop: it preempts what is on the wire, latches the operator
+// cause, and nothing short of a confirmed Reset unlocks it.
+int EmergencyStopLatches() {
+  Harness h;
+  CHECK(ToStandby(h) == 0);
+  CHECK(ToDamping(h) == 0);
+
+  // An initialization request is on the wire when the operator hits space.
+  BehaviorStep step = h.Step(InputEvent::Initialize);
+  CHECK(step.state == BehaviorState::Damping);
+  const ExecutionRequest *tracking_request = h.last_request();
+  CHECK(tracking_request != nullptr);
+  if (tracking_request == nullptr) {
+    return 1;
+  }
+  const ExecutionRequest tracking = *tracking_request;
+  CHECK(tracking.operation == Operation::Tracking);
+
+  step = h.Step(InputEvent::EmergencyStop);
+  CHECK(step.state == BehaviorState::Fault);
+  CHECK(step.fault_cause == FaultCause::OperatorEmergencyStop);
+  CHECK(!step.send_command);
+  const ExecutionRequest *stop = h.last_request();
+  CHECK(stop != nullptr);
+  if (stop == nullptr) {
+    return 1;
+  }
+  CHECK(stop->operation == Operation::Damping);
+  // It displaces the pending request instead of queueing behind it.
+  CHECK(stop->request_id > tracking.request_id);
+  CHECK(stop->runtime_id == kRuntimeId);
+  CHECK(stop->session_id == h.granted_session());
+
+  // Releasing the key is a no-op.
+  step = h.Step(InputEvent::None);
+  CHECK(step.state == BehaviorState::Fault);
+  CHECK(step.fault_cause == FaultCause::OperatorEmergencyStop);
+
+  // A damping that arrives (and is confirmed) does not unlock the latch, and
+  // the lower layer's real output is what is displayed.
+  h.lower.state = ExecutionState::Damping;
+  h.lower.output = OutputAction::Damping;
+  CHECK(h.Answer());
+  step = h.Step();
+  CHECK(step.state == BehaviorState::Fault);
+  CHECK(step.fault_cause == FaultCause::OperatorEmergencyStop);
+  CHECK(step.runtime_state == ExecutionState::Damping);
+  CHECK(step.runtime_output == OutputAction::Damping);
+  CHECK(!step.send_command);
+
+  // The runtime is not in Fault, so the explicit Reset asks for ZeroTorque and
+  // only a confirmation returns to Standby. A link that reports unhealthy ticks
+  // is not a cleared local error: the Reset sends nothing.
+  h.lower.healthy = false;
+  const std::size_t before_reset = h.sink().requests.size();
+  step = h.Step(InputEvent::Reset);
+  CHECK(step.state == BehaviorState::Fault);
+  CHECK(step.fault_cause == FaultCause::OperatorEmergencyStop);
+  CHECK(h.sink().requests.size() == before_reset);
+  h.lower.healthy = true;
+  step = h.Step(InputEvent::Reset);
+  const ExecutionRequest *zero = h.last_request();
+  CHECK(zero != nullptr);
+  if (zero == nullptr) {
+    return 1;
+  }
+  CHECK(zero->operation == Operation::ZeroTorque);
+  CHECK(step.state == BehaviorState::Fault);
+  h.lower.state = ExecutionState::ZeroTorque;
+  h.lower.output = OutputAction::ZeroTorque;
+  CHECK(h.Answer());
+  step = h.Step();
+  CHECK(step.state == BehaviorState::Standby);
+  CHECK(step.fault_cause == FaultCause::None);
+  CHECK(step.runtime_state == ExecutionState::ZeroTorque);
+
+  // Nothing restarts the old trajectory: Standby does not act on Initialize,
+  // and the next move is a new epoch.
+  const std::size_t requests = h.sink().requests.size();
+  step = h.Step(InputEvent::Initialize);
+  CHECK(step.state == BehaviorState::Standby);
+  CHECK(!step.initialization_refused);
+  CHECK(h.sink().requests.size() == requests);
+  CHECK(!step.send_command);
+  CHECK(h.sink().commands.empty());
+
+  CHECK(ToDamping(h) == 0);
+  step = h.Step(InputEvent::Initialize);
+  CHECK(step.state == BehaviorState::Damping);
+  const ExecutionRequest *moved = h.last_request();
+  CHECK(moved != nullptr);
+  if (moved == nullptr) {
+    return 1;
+  }
+  CHECK(moved->operation == Operation::Tracking);
+  CHECK(moved->proposed_epoch > tracking.proposed_epoch);
+  return 0;
+}
+
+// The lower layer's own fault: the upper latches the cause, keeps displaying
+// the runtime's real output rule, and leaves only through an explicit Reset
+// that the runtime's recovery window accepts.
+int RuntimeFaultRecovery() {
+  Harness h;
+  CHECK(ToStandby(h) == 0);
+
+  h.lower.state = ExecutionState::Fault;
+  h.lower.output = OutputAction::Damping;  // its own fault output rule
+  h.lower.fault_id = 42;
+  h.lower.fault_reason = FaultReason::DriverError;
+  h.lower.healthy = false;
+  const std::size_t requests = h.sink().requests.size();
+  BehaviorStep step = h.Step();
+  CHECK(step.state == BehaviorState::Fault);
+  CHECK(step.fault_cause == FaultCause::RuntimeFault);
+  CHECK(step.runtime_state == ExecutionState::Fault);
+  CHECK(step.runtime_output == OutputAction::Damping);
+  CHECK(step.runtime_fault_reason == FaultReason::DriverError);
+  CHECK(step.runtime_state_known);
+  CHECK(!step.send_command);
+  // A latched lower fault is left through Reset alone: the upper asks for
+  // nothing that the runtime would only refuse.
+  CHECK(h.sink().requests.size() == requests);
+
+  // The latch survives a heartbeat period, a stop key and a Reset that the
+  // recovery window is not ready for.
+  step = h.Step(InputEvent::None, h.config().supervision.heartbeat_period_us);
+  CHECK(step.state == BehaviorState::Fault);
+  step = h.Step(InputEvent::Damping);
+  CHECK(step.state == BehaviorState::Fault);
+  CHECK(h.sink().requests.size() == requests);
+  step = h.Step(InputEvent::ZeroTorque);
+  CHECK(step.state == BehaviorState::Fault);
+  CHECK(h.sink().requests.size() == requests);
+  step = h.Step(InputEvent::Reset);
+  CHECK(step.state == BehaviorState::Fault);
+  CHECK(h.sink().requests.size() == requests);
+
+  // The runtime reports a healthy tick: the Reset now carries the latched fault
+  // id, and only its confirmation leaves Fault.
+  h.lower.healthy = true;
+  step = h.Step(InputEvent::Reset);
+  const ExecutionRequest *reset = h.last_request();
+  CHECK(reset != nullptr);
+  if (reset == nullptr) {
+    return 1;
+  }
+  CHECK(reset->operation == Operation::Reset);
+  CHECK(reset->fault_id == 42);
+  CHECK(reset->session_id == h.granted_session());
+  CHECK(step.state == BehaviorState::Fault);
+
+  h.lower.state = ExecutionState::ZeroTorque;
+  h.lower.output = OutputAction::ZeroTorque;
+  h.lower.fault_id = 0;
+  h.lower.fault_reason = FaultReason::None;
+  CHECK(h.Answer());
+  step = h.Step();
+  CHECK(step.state == BehaviorState::Standby);
+  CHECK(step.fault_cause == FaultCause::None);
+  CHECK(step.runtime_state == ExecutionState::ZeroTorque);
+  CHECK(step.runtime_fault_reason == FaultReason::None);
+  CHECK(!step.send_command);
+  // Ready is not restored by the reset either.
+  CHECK(!h.fsm().StartLocomotion());
+  CHECK(h.fsm().state() == BehaviorState::Standby);
+  return 0;
+}
+
+// A tracking context nobody here authorized is a fault, not a state to compare
+// enumerators on.
+int UnexpectedTracking() {
+  Harness h;
+  CHECK(ToStandby(h) == 0);
+  CHECK(ToDamping(h) == 0);
+
+  h.lower.state = ExecutionState::Tracking;
+  h.lower.output = OutputAction::Tracking;
+  h.lower.producer = MakeId(0x77);
+  h.lower.epoch = 9;
+  const BehaviorStep step = h.Step();
+  CHECK(step.state == BehaviorState::Fault);
+  CHECK(step.fault_cause == FaultCause::UnexpectedContext);
+  CHECK(step.runtime_state == ExecutionState::Tracking);
+  CHECK(!step.send_command);
+  // The stop it owes the machine, on the live session.
+  const ExecutionRequest *request = h.last_request();
+  CHECK(request != nullptr);
+  if (request == nullptr) {
+    return 1;
+  }
+  CHECK(request->operation == Operation::Damping);
+  CHECK(request->session_id == h.granted_session());
+  return 0;
+}
+
+// The lower layer leaving tracking on its own is a legal, unlatched
+// combination: the upper revokes the movement without faulting and without
+// restarting it.
+int LowerFellBackToDamping() {
+  Harness h;
+  CHECK(ToStandby(h) == 0);
+  CHECK(ToDamping(h) == 0);
+  CHECK(ToInitializing(h) == 0);
+
+  h.lower.state = ExecutionState::Damping;
+  h.lower.output = OutputAction::Damping;
+  h.lower.producer = kNoId;
+  h.lower.epoch = 0;
+  h.lower.stop_reason = StopReason::CommandTimeout;
+  BehaviorStep step = h.Step();
+  CHECK(step.state == BehaviorState::Damping);
+  CHECK(step.fault_cause == FaultCause::None);
+  CHECK(step.runtime_stop_reason == StopReason::CommandTimeout);
+  CHECK(!step.send_command);
+  // The move and any answer it was waiting for are gone with it; the session
+  // itself is untouched, because the link never broke.
+  CHECK(!h.client().request_pending());
+  CHECK(h.client().session_owned());
+
+  // No automatic restart and no automatic Ready.
+  const std::size_t requests = h.sink().requests.size();
+  for (int index = 0; index < 5; ++index) {
+    step = h.Step(InputEvent::None, h.config().supervision.target_period_us);
+    CHECK(step.state == BehaviorState::Damping);
+    CHECK(!step.send_command);
+  }
+  CHECK(h.sink().requests.size() == requests);
+  // A stop key in Damping is still a no-op, and no initialization runs.
+  step = h.Step(InputEvent::Damping);
+  CHECK(step.state == BehaviorState::Damping);
+  CHECK(h.sink().requests.size() == requests);
+  return 0;
+}
+
+// Another runtime instance is a restart: the session, the epoch and the pending
+// request are worthless, and the upper latches the cause.
+int RuntimeRestartedLatches() {
+  Harness h;
+  CHECK(ToStandby(h) == 0);
+  CHECK(ToDamping(h) == 0);
+
+  const Id replaced_runtime = MakeId(0x60);
+  h.publish = false;
+  RobotState replaced = h.State(h.now_us());
+  replaced.runtime_id = replaced_runtime;
+  replaced.session_id = kNoId;
+  h.client().ObserveState(replaced, h.now_us());
+  BehaviorStep step = h.Step();
+  CHECK(step.state == BehaviorState::Fault);
+  CHECK(step.fault_cause == FaultCause::RuntimeRestarted);
+  CHECK(!step.send_command);
+  CHECK(h.fsm().state() == BehaviorState::Fault);
+
+  // A message may stay on the wire only after a new session is taken over on
+  // the new instance: what the FSM asks for is the handover, never a motion
+  // context.
+  step = h.Step(InputEvent::None, h.config().supervision.request_retry_us + 1);
+  CHECK(step.state == BehaviorState::Fault);
+  CHECK(step.fault_cause == FaultCause::RuntimeRestarted);
+  const ExecutionRequest *request = h.last_request();
+  CHECK(request != nullptr);
+  if (request == nullptr) {
+    return 1;
+  }
+  CHECK(request->operation == Operation::AcquireSession);
+  CHECK(request->runtime_id == replaced_runtime);
+  CHECK(request->session_id == kNoId);
+  return 0;
+}
+
+// A move that never reaches its target is never Ready: at its deadline the
+// upper faults and asks for damping.
+int InitializationDeadlineFaults() {
+  Harness h;
+  CHECK(ToStandby(h) == 0);
+  CHECK(ToDamping(h) == 0);
+  CHECK(ToInitializing(h) == 0);
+
+  const TimeUs period = h.config().supervision.target_period_us;
+  const TimeUs deadline = h.config().initialization.trajectory.deadline_us;
+  const int limit = static_cast<int>(deadline / period) + 4;
+  BehaviorStep step{};
+  for (int index = 0; index < limit; ++index) {
+    step = h.Step(InputEvent::None, period);
+    if (step.state == BehaviorState::Fault) {
+      break;
+    }
+  }
+  CHECK(step.state == BehaviorState::Fault);
+  CHECK(step.fault_cause == FaultCause::InitializationFailed);
+  CHECK(!step.send_command);
+  // The fault owes the machine the stop it can still ask for.
+  const ExecutionRequest *request = h.last_request();
+  CHECK(request != nullptr);
+  if (request == nullptr) {
+    return 1;
+  }
+  CHECK(request->operation == Operation::Damping);
+  return 0;
+}
+
+// The state deadline: the upper layer faults, displays Unknown, and never
+// claims a stop it cannot confirm.
+int StateTimeoutFaults() {
+  Harness h;
+  CHECK(ToStandby(h) == 0);
+
+  const TimeUs timeout = h.config().supervision.state_timeout_us;
+  h.publish = false;
+  BehaviorStep step = h.Step(InputEvent::None, timeout + 1);
+  CHECK(step.state == BehaviorState::Fault);
+  CHECK(step.fault_cause == FaultCause::RuntimeUnreachable);
+  CHECK(!step.runtime_state_known);
+  CHECK(!step.send_command);
+  CHECK(!step.exit_stop_confirmed);
+  CHECK(!step.send_heartbeat);  // the lease is gone with the session
+
+  // Nothing can leave without a session, so no stop is claimed either.
+  const std::size_t requests = h.sink().requests.size();
+  step = h.Step(InputEvent::None, 10 * kTickUs);
+  CHECK(step.state == BehaviorState::Fault);
+  CHECK(!step.runtime_state_known);
+  CHECK(h.sink().requests.size() == requests);
+  CHECK(!step.send_command);
+  return 0;
+}
+
+// Orderly exit: a confirmed damping stop proves it; a silent link or a runtime
+// already in Fault is bounded and proves nothing.
+int ExitSequence() {
+  // (a) The damping stop is confirmed by a fresh state.
+  {
+    Harness h;
+    CHECK(ToStandby(h) == 0);
+    CHECK(ToReady(h) == 0);
+    h.fsm().RequestExit(h.now_us());
+    BehaviorStep step = h.Step();
+    CHECK(!step.exit_ready);
+    const ExecutionRequest *request = h.last_request();
+    CHECK(request != nullptr);
+    if (request == nullptr) {
+      return 1;
+    }
+    CHECK(request->operation == Operation::Damping);
+    CHECK(!step.send_command);  // target generation stopped
+    h.lower.state = ExecutionState::Damping;
+    h.lower.output = OutputAction::Damping;
+    CHECK(h.Answer());
+    step = h.Step();
+    CHECK(step.exit_ready);
+    CHECK(step.exit_stop_confirmed);
+  }
+
+  // (b) A silent link is bounded by the deadline and proves nothing.
+  {
+    Harness h;
+    CHECK(ToStandby(h) == 0);
+    CHECK(ToReady(h) == 0);
+    h.publish = false;
+    h.fsm().RequestExit(h.now_us());
+    const BehaviorStep step = h.Step(
+        InputEvent::None, h.config().supervision.request_deadline_us + 1);
+    CHECK(step.exit_ready);
+    CHECK(!step.exit_stop_confirmed);
+    CHECK(!step.runtime_state_known);  // the loop prints Unknown
+    CHECK(!step.send_command);
+  }
+
+  // (c) A runtime already in Fault keeps its own output rule: nothing is turned
+  // into damping and the exit proves nothing.
+  {
+    Harness h;
+    CHECK(ToStandby(h) == 0);
+    CHECK(ToReady(h) == 0);
+    h.lower.state = ExecutionState::Fault;
+    h.lower.output = OutputAction::ZeroTorque;
+    h.lower.fault_id = 5;
+    h.lower.healthy = false;
+    CHECK(h.Step().state == BehaviorState::Fault);
+    const std::size_t requests = h.sink().requests.size();
+    h.fsm().RequestExit(h.now_us());
+    const BehaviorStep step = h.Step();
+    CHECK(step.exit_ready);
+    CHECK(!step.exit_stop_confirmed);
+    CHECK(step.runtime_state == ExecutionState::Fault);
+    CHECK(!step.send_command);
+    CHECK(h.sink().requests.size() == requests);
+  }
+
+  // (d) An exit before any session can be taken over asks for nothing, so the
+  // deadline is the only thing that can end it - and it ends unproven.
+  {
+    Harness h;
+    BehaviorStep step = h.Step();
+    CHECK(step.state == BehaviorState::Starting);
+    CHECK(h.sink().requests.size() == 1);  // the handover, still unanswered
+    h.fsm().RequestExit(h.now_us());
+    step = h.Step(InputEvent::None,
+                  h.config().supervision.request_deadline_us - 1);
+    CHECK(!step.exit_ready);
+    step = h.Step(InputEvent::None, 2);
+    CHECK(step.exit_ready);
+    CHECK(!step.exit_stop_confirmed);
+    CHECK(step.runtime_state_known);  // a live link is not a confirmed stop
+    CHECK(!step.send_command);
+  }
+  return 0;
+}
+
+// This phase ships no locomotion target generator, so entering Locomotion is
+// unavailable and Ready is left exactly as it was.
+int StartLocomotionUnavailable() {
+  Harness h;
+  CHECK(ToStandby(h) == 0);
+  CHECK(ToReady(h) == 0);
+
+  const std::size_t requests = h.sink().requests.size();
+  CHECK(!h.fsm().StartLocomotion());
+  BehaviorStep step = h.Step();
+  CHECK(step.state == BehaviorState::Ready);
+  CHECK(h.fsm().state() == BehaviorState::Ready);
+  CHECK(h.sink().requests.size() == requests);
+  CHECK(!step.send_command);
+
+  // An initialization request in Ready returns to no pose: it is refused.
+  step = h.Step(InputEvent::Initialize);
+  CHECK(step.state == BehaviorState::Ready);
+  CHECK(h.sink().requests.size() == requests);
+  CHECK(!step.initialization_refused);
+  CHECK(!h.fsm().StartLocomotion());
+  CHECK(h.fsm().state() == BehaviorState::Ready);
+  return 0;
+}
+
+}  // namespace
+
+int main() {
+  int failures = 0;
+  failures += StartingHandover();
+  failures += StopConfirmations();
+  failures += ConfirmationOvertakenByTheState();
+  failures += RejectedRequestKeepsBehaviour();
+  failures += RequestTimeoutFaults();
+  failures += InitializationAdmission();
+  failures += CompletionAndReadyHold();
+  failures += OrdinaryStopsFromMotion();
+  failures += EmergencyStopLatches();
+  failures += RuntimeFaultRecovery();
+  failures += UnexpectedTracking();
+  failures += LowerFellBackToDamping();
+  failures += RuntimeRestartedLatches();
+  failures += InitializationDeadlineFaults();
+  failures += StateTimeoutFaults();
+  failures += ExitSequence();
+  failures += StartLocomotionUnavailable();
+  if (failures == 0) {
+    return 0;
+  }
+  std::cerr << failures << " section(s) failed\n";
+  return 1;
+}

@@ -115,6 +115,7 @@ set_tests_properties(
 
 add_library(
   irmv_application
+  src/application/behavior_fsm.cpp
   src/application/initialization.cpp
   src/application/robot_client.cpp
 )
@@ -166,6 +167,26 @@ target_link_libraries(
 add_test(NAME application_initialization_test COMMAND application_initialization_test)
 set_tests_properties(
   application_initialization_test PROPERTIES LABELS core
+  WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
+add_executable(application_fsm_test tests/unit/application_fsm_test.cpp)
+target_compile_features(application_fsm_test PRIVATE cxx_std_17)
+target_include_directories(
+  application_fsm_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+# The behaviour FSM is driven through the official client over a recording sink:
+# no DDS, no clock and no thread takes part.
+target_link_libraries(
+  application_fsm_test PRIVATE irmv_application irmv_configuration
+)
+
+add_test(NAME application_fsm_test COMMAND application_fsm_test)
+set_tests_properties(
+  application_fsm_test PROPERTIES LABELS core
   WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
