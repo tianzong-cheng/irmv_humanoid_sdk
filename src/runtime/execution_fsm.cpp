@@ -505,14 +505,13 @@ void ExecutionFsm::HandleTracking(
     QueueRejected(scope, request, protocol::RejectReason::Malformed);
     return;
   }
-  // The producer that already owns this epoch must stop before it can hand the
-  // motion authorization to a new epoch; the identical replay was answered
-  // above from the stored record.
-  if (state_ == protocol::ExecutionState::Tracking &&
-      request.producer_id == producer_id_ && request.expected_epoch == epoch_) {
-    QueueRejected(scope, request, protocol::RejectReason::RequestConflict);
-    return;
-  }
+  // The producer that already owns the motion authorization is not a mode: the
+  // same component may enter a new behavior execution stage by proposing a
+  // newer epoch here, exactly like a different one may take the authorization
+  // over. The session, the monotonic watermark, the first frame and the
+  // continuity bounds decide; a true replay is answered from the stored record
+  // above, and a request that only repeats the current epoch is refused by the
+  // watermark guard.
   if (request.expected_epoch != epoch_ || request.proposed_epoch <= epoch_) {
     QueueRejected(scope, request, protocol::RejectReason::EpochMismatch);
     return;

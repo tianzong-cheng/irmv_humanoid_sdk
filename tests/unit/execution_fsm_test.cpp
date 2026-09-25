@@ -2037,6 +2037,100 @@ int CheckRefusedStopDoesNotOwnTheTick() {
   return 0;
 }
 
+// J1: the producer that already owns the motion authorization may move to a new
+// behavior epoch through the ordinary guards, without a Damping stop in
+// between. The old epoch is invalid the moment the switch is committed.
+int CheckSameProducerNewEpoch() {
+  RuntimeFixture f;
+  f.BootToZeroTorque();
+  f.Acquire();
+  CHECK(f.Request(Operation::Damping).applied());
+  const Id producer = irmv::test::FixtureProducerId();
+  CHECK(f.StartTracking(irmv::test::kAutoSequence, producer).applied());
+  const Sequence epoch = f.state().epoch;
+  CHECK(f.state().execution_state == kTracking);
+  // kd * (0 - dq) on the frame that sits on the measured state.
+  CHECK(f.last_tick().output.torque[0] == -0.1);
+  // The automatic command feed would keep publishing the frame the fixture
+  // built, which is not the frame under test here.
+  f.SetCommandEnabled(false);
+
+  // The same component enters a new execution stage: fresh, continuous frame,
+  // expected watermark E and proposed epoch E + 2. The moved target is a dyadic
+  // fraction, so the expected torque is exact.
+  constexpr double kMovedDelta = 0.0625;
+  const double expected_torque = 1.0 * kMovedDelta + 0.5 * (0.0 - irmv::test::kFixtureDq[0]);
+  ExecutionRequest next = f.MakeRequest(
+      Operation::Tracking, irmv::test::kAutoSequence, producer,
+      irmv::test::FixtureSupervisorId(), epoch, epoch + 2);
+  next.first_command.joints.q[0] += kMovedDelta;
+  const FixtureResult next_result = f.Send(next);
+  CHECK(next_result.applied());
+  CHECK(f.state().execution_state == kTracking);
+  CHECK(f.state().producer_id == producer);
+  CHECK(f.state().epoch == epoch + 2);
+  // kp * kMovedDelta + kd * (0 - dq) with kp = 1, kd = 0.5.
+  CHECK(f.last_tick().output.torque[0] == expected_torque);
+
+  // The identical replay is answered from the record: no second authorization
+  // and no second epoch.
+  {
+    const FixtureResult replay = f.Send(next);
+    CHECK(replay.applied());
+    CHECK(replay.stamp_us == next_result.stamp_us);
+    CHECK(f.state().epoch == epoch + 2);
+  }
+
+  // The old epoch stops being executable at once: a frame carrying it is
+  // dropped by the gate, without a fault and without touching the new target.
+  {
+    const JointCommand stale = f.MakeFirstFrame(producer, epoch);
+    f.QueueCommand(stale);
+    f.Advance(f.ControlPeriodUs());
+    CHECK(f.state().execution_state == kTracking);
+    CHECK(f.state().epoch == epoch + 2);
+    CHECK(f.state().producer_id == producer);
+    CHECK(f.last_tick().output.torque[0] == expected_torque);
+  }
+
+  // Rejected switches: a repeated epoch, a discontinuous frame and an expired
+  // source state.
+  {
+    ExecutionRequest same_epoch = f.MakeRequest(
+        Operation::Tracking, irmv::test::kAutoSequence, producer,
+        irmv::test::FixtureSupervisorId(), epoch + 2, epoch + 2);
+    FixtureResult result = f.Send(same_epoch);
+    CHECK(result.rejected());
+    CHECK(result.reason == RejectReason::EpochMismatch);
+  }
+  {
+    ExecutionRequest jump = f.MakeRequest(
+        Operation::Tracking, irmv::test::kAutoSequence, producer,
+        irmv::test::FixtureSupervisorId(), epoch + 2, epoch + 3);
+    jump.first_command.joints.q[0] += 0.2;
+    const FixtureResult result = f.Send(jump);
+    CHECK(result.rejected());
+    CHECK(result.reason == RejectReason::Discontinuity);
+  }
+  {
+    f.SetSourceStateLagTicks(100);
+    ExecutionRequest old_source = f.MakeRequest(
+        Operation::Tracking, irmv::test::kAutoSequence, producer,
+        irmv::test::FixtureSupervisorId(), epoch + 2, epoch + 3);
+    const FixtureResult result = f.Send(old_source);
+    f.SetSourceStateLagTicks(1);
+    CHECK(result.rejected());
+    CHECK(result.reason == RejectReason::StaleSource);
+  }
+
+  // Every rejection left the running authorization exactly as it was.
+  CHECK(f.state().execution_state == kTracking);
+  CHECK(f.state().epoch == epoch + 2);
+  CHECK(f.state().producer_id == producer);
+  CHECK(f.last_tick().output.torque[0] == expected_torque);
+  return 0;
+}
+
 }  // namespace
 
 int main() {
@@ -2081,5 +2175,6 @@ int main() {
   CHECK(CheckForeignSupervisorCannotUseSession() == 0);
   CHECK(CheckSameTickStopBeatsStart() == 0);
   CHECK(CheckRefusedStopDoesNotOwnTheTick() == 0);
+  CHECK(CheckSameProducerNewEpoch() == 0);
   return 0;
 }
