@@ -932,5 +932,209 @@ int main() {
     CHECK(client.session_owned());
   }
 
+  // ---- a reordered, repeated or zero sequence is not new evidence ---------
+  {
+    // The minimal reproduction: seq=2/Damping arrives first, the older
+    // seq=1/ZeroTorque after it. The older frame is not newer evidence, so it
+    // must not overwrite the snapshot and must not refresh the receive age
+    // from which the state timeout is judged.
+    RecordingSink sink;
+    RobotClient client(sink, config, supervisor_id);
+    client.ObserveState(
+        MakeState(runtime_id, irmv::protocol::kNoId, 0, 2, 2'000,
+                  ExecutionState::Damping, OutputAction::Damping),
+        2'100);
+    client.ObserveState(
+        MakeState(runtime_id, irmv::protocol::kNoId, 0, 1, 2'200,
+                  ExecutionState::ZeroTorque, OutputAction::ZeroTorque),
+        2'200);
+
+    const ClientView kept = client.Poll(2'200);
+    CHECK(kept.state_known);
+    CHECK(kept.state.state_seq == 2);
+    CHECK(kept.state.execution_state == ExecutionState::Damping);
+    CHECK(kept.state.output_action == OutputAction::Damping);
+    CHECK(kept.state_fresh);
+    // One microsecond past the accepted frame's own timeout the link reads
+    // stale: the dropped frame did not extend it.
+    const ClientView stale = client.Poll(2'100 + kStateTimeoutUs + 1);
+    CHECK(stale.state_known);
+    CHECK(!stale.state_fresh);
+  }
+  {
+    // A repeated sequence and a zero sequence are equally not new evidence, and
+    // neither may replace the snapshot or raise the epoch watermark.
+    RecordingSink sink;
+    RobotClient client(sink, config, supervisor_id);
+    observe_state(client, 100'000);  // seq=1, epoch 0
+    client.ObserveState(
+        MakeState(runtime_id, irmv::protocol::kNoId, 0, 7, 100'200,
+                  ExecutionState::Damping, OutputAction::Damping),
+        100'200);
+    // The same sequence again, carrying another state and a newer epoch.
+    client.ObserveState(
+        MakeState(runtime_id, irmv::protocol::kNoId, 5, 7, 100'300,
+                  ExecutionState::ZeroTorque, OutputAction::ZeroTorque),
+        100'300);
+    // A zero sequence is no state at all.
+    client.ObserveState(
+        MakeState(runtime_id, irmv::protocol::kNoId, 5, 0, 100'400,
+                  ExecutionState::Fault, OutputAction::ZeroTorque),
+        100'400);
+
+    const ClientView view = client.Poll(100'400);
+    CHECK(view.state_known);
+    CHECK(view.state.state_seq == 7);
+    CHECK(view.state.execution_state == ExecutionState::Damping);
+    CHECK(view.state.output_action == OutputAction::Damping);
+    CHECK(view.state.epoch == 0);
+    CHECK(client.next_epoch() == 1);
+    CHECK(view.state_fresh);
+  }
+  {
+    // A frame that lags behind the accepted sequence must not revoke a live
+    // session either, and it must not extend the deadline that ends it.
+    RecordingSink sink;
+    RobotClient client(sink, config, supervisor_id);
+    observe_state(client, 110'000);
+    CHECK(acquire(sink, client, 110'100, nullptr) == 0);
+    CHECK(client.session_owned());
+
+    const TimeUs newest_rx_us = 110'400;
+    client.ObserveState(
+        MakeState(runtime_id, session_id, 0, 200, newest_rx_us - 10,
+                  ExecutionState::Damping, OutputAction::Damping),
+        newest_rx_us);
+    // An old frame that names a session this client does not own.
+    client.ObserveState(
+        MakeState(runtime_id, MakeId(0x50), 0, 150, newest_rx_us + 5,
+                  ExecutionState::ZeroTorque, OutputAction::ZeroTorque),
+        newest_rx_us + 10);
+
+    const ClientView kept = client.Poll(newest_rx_us + 10);
+    CHECK(kept.outcome == RequestOutcome::None);
+    CHECK(kept.state_known);
+    CHECK(kept.state.state_seq == 200);
+    CHECK(kept.state.session_id == session_id);
+    CHECK(kept.session_owned && !kept.session_lost);
+    CHECK(client.session_id() == session_id);
+
+    // The dropped frame did not refresh the receive age: one microsecond past
+    // the accepted frame's timeout the session is reported lost.
+    const ClientView lost = client.Poll(newest_rx_us + kStateTimeoutUs + 1);
+    CHECK(lost.outcome == RequestOutcome::Unknown);
+    CHECK(lost.session_lost && !lost.session_owned);
+    CHECK(!lost.state_fresh);
+    CHECK(!lost.state_known);
+  }
+  {
+    // An old Fault frame is no news: it may not replace a newer healthy
+    // snapshot, latch a fault or raise the epoch watermark.
+    RecordingSink sink;
+    RobotClient client(sink, config, supervisor_id);
+    observe_state(client, 120'000);
+    CHECK(acquire(sink, client, 120'100, nullptr) == 0);
+    client.ObserveState(
+        MakeState(runtime_id, session_id, 0, 210, 120'390,
+                  ExecutionState::Damping, OutputAction::Damping),
+        120'400);
+    client.ObserveState(
+        MakeState(runtime_id, session_id, 2, 205, 120'405,
+                  ExecutionState::Fault, OutputAction::ZeroTorque,
+                  irmv::protocol::kNoId, 9),
+        120'410);
+
+    const ClientView view = client.Poll(120'410);
+    CHECK(view.state_known);
+    CHECK(view.state.state_seq == 210);
+    CHECK(view.state.execution_state == ExecutionState::Damping);
+    CHECK(view.state.output_action == OutputAction::Damping);
+    CHECK(view.state.fault_id == 0);
+    CHECK(view.state.epoch == 0);
+    CHECK(client.next_epoch() == 1);
+    CHECK(view.session_owned && !view.session_lost);
+  }
+  {
+    // A dropped frame does not stall the sequence: the next legal one is
+    // accepted and can still witness an Applied answer.
+    RecordingSink sink;
+    RobotClient client(sink, config, supervisor_id);
+    client.ObserveState(
+        MakeState(runtime_id, irmv::protocol::kNoId, 0, 2, 129'990,
+                  ExecutionState::ZeroTorque, OutputAction::ZeroTorque),
+        130'000);
+    client.ObserveState(
+        MakeState(runtime_id, irmv::protocol::kNoId, 0, 1, 130'010,
+                  ExecutionState::Fault, OutputAction::ZeroTorque),
+        130'020);
+    CHECK(client.BeginRequest(Operation::AcquireSession, 130'100));
+    const Sequence id = sink.requests.back().request_id;
+    CHECK(client.Poll(130'100).outcome == RequestOutcome::Pending);
+    client.ObserveResult(
+        MakeResult(supervisor_id, runtime_id, session_id, id, 130'150,
+                   ResultStatus::Applied, RejectReason::None, 0,
+                   ExecutionState::ZeroTorque, OutputAction::ZeroTorque),
+        130'200);
+    CHECK(client.Poll(130'210).outcome == RequestOutcome::Pending);
+    client.ObserveState(
+        MakeState(runtime_id, session_id, 0, 3, 130'290,
+                  ExecutionState::ZeroTorque, OutputAction::ZeroTorque),
+        130'300);
+    const ClientView confirmed = client.Poll(130'310);
+    CHECK(confirmed.outcome == RequestOutcome::Confirmed);
+    CHECK(confirmed.session_owned && !confirmed.session_lost);
+    CHECK(confirmed.state.state_seq == 3);
+    CHECK(client.session_id() == session_id);
+  }
+  {
+    // An instance change rebuilds the sequence baseline: the new instance
+    // numbers its states from its own one, and that first low sequence must
+    // still go through the existing revoke-and-take-over path rather than being
+    // mistaken for an old frame of the instance being left.
+    RecordingSink sink;
+    RobotClient client(sink, config, supervisor_id);
+    observe_state(client, 140'000);
+    CHECK(acquire(sink, client, 140'100, nullptr) == 0);
+    client.ObserveState(
+        MakeState(runtime_id, session_id, 0, 900, 140'390,
+                  ExecutionState::Damping, OutputAction::Damping),
+        140'400);
+
+    const Id new_runtime = MakeId(0x61);
+    const TimeUs change_rx_us = 140'600;
+    client.ObserveState(
+        MakeState(new_runtime, irmv::protocol::kNoId, 0, 1, 140'590,
+                  ExecutionState::ZeroTorque, OutputAction::ZeroTorque),
+        change_rx_us);
+    const ClientView changed = client.Poll(change_rx_us);
+    CHECK(changed.outcome == RequestOutcome::Unknown);
+    CHECK(changed.runtime_changed);
+    CHECK(changed.session_lost && !changed.session_owned);
+    CHECK(changed.state_known && changed.state_fresh);
+    CHECK(changed.state.runtime_id == new_runtime);
+    CHECK(changed.state.state_seq == 1);
+    CHECK(client.session_id() == irmv::protocol::kNoId);
+    CHECK(client.runtime_id() == new_runtime);
+
+    // The new instance's own baseline is its first frame, not the old one's.
+    const Id new_session = MakeId(0x71);
+    CHECK(client.BeginRequest(Operation::AcquireSession, 140'700));
+    const Sequence id = sink.requests.back().request_id;
+    client.ObserveResult(
+        MakeResult(supervisor_id, new_runtime, new_session, id, 140'750,
+                   ResultStatus::Applied, RejectReason::None, 0,
+                   ExecutionState::ZeroTorque, OutputAction::ZeroTorque),
+        140'800);
+    client.ObserveState(
+        MakeState(new_runtime, new_session, 0, 2, 140'760,
+                  ExecutionState::ZeroTorque, OutputAction::ZeroTorque),
+        140'850);
+    const ClientView acquired = client.Poll(140'860);
+    CHECK(acquired.outcome == RequestOutcome::Confirmed);
+    CHECK(acquired.session_owned && !acquired.session_lost);
+    CHECK(acquired.state.state_seq == 2);
+    CHECK(client.session_id() == new_session);
+  }
+
   return 0;
 }

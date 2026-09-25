@@ -268,9 +268,14 @@ void RobotClient::ObserveState(const protocol::RobotState &state,
       // Another runtime instance appeared. It is a new process: the old
       // session, the old watermark, the old request and the old snapshot are
       // all worthless, and the change is reported until a new session is
-      // confirmed on the new instance.
+      // confirmed on the new instance. The new process numbers its states from
+      // its own first value again, so the accepted-sequence floor restarts with
+      // it; a frame of the *old* instance that arrives after this switch is
+      // decided by the same-instance test below and by runtime_changed, never
+      // by that floor, so it can never re-authorize anything.
       runtime_changed_ = true;
       LoseSession();
+      state_seq_floor_ = 0;
     } else if (instance_known_ && !SameInstance(state)) {
       // The same instance with another configuration or another layout: it is
       // not the runtime this client was configured for, so nothing bound to it
@@ -281,13 +286,33 @@ void RobotClient::ObserveState(const protocol::RobotState &state,
     if (!SameInstance(state)) {
       // Not an instance this client can ever talk to; in particular a foreign
       // layout is never a target layout. Keep the last trusted snapshot away
-      // from it.
+      // from it, and drop the floor with the instance it ordered.
       instance_known_ = false;
       runtime_id_ = protocol::kNoId;
+      state_seq_floor_ = 0;
       DropSnapshot();
       return;
     }
   }
+
+  // Within one runtime instance the state sequence is strictly increasing
+  // (docs/runtime-protocol.md), and it is the identity the runtime looks a
+  // target's source state up by, so a zero, repeated or reordered sequence is
+  // not newer evidence about this instance. Drop it whole, before any member is
+  // written: it may not replace the snapshot, enter the history the
+  // confirmation scan reads, refresh `latest_state_rx_us_` (and with it the
+  // state deadline), raise `epoch_watermark_`, mark the state known or reach
+  // the session-mismatch rule below. A monotone `stamp_us` is deliberately not
+  // required a second time: the runtime already publishes it monotone per
+  // instance, while `state_seq` is the identity it orders and indexes by.
+  //
+  // The floor belongs to the instance bound above; the instance branches reset
+  // it, which is what lets a new instance start over at its own first sequence
+  // while an old frame of the same instance can never become current again.
+  if (state.state_seq == 0 || state.state_seq <= state_seq_floor_) {
+    return;
+  }
+  state_seq_floor_ = state.state_seq;
 
   instance_known_ = true;
   runtime_id_ = state.runtime_id;

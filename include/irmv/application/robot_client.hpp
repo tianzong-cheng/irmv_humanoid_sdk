@@ -127,6 +127,19 @@ class RobotClient {
   // protocol version is not the frozen one is ignored; so is a state that
   // cannot be the instance the client talks to, except that such a state
   // invalidates the instance it contradicts.
+  //
+  // Within one runtime instance only a strictly increasing `state_seq` is
+  // accepted: the sequence is the identity under which the runtime publishes
+  // its state and looks a target's source state up, so a zero, repeated or
+  // reordered one is not newer evidence. Such a frame is dropped whole, before
+  // it could touch the snapshot, the history, the receive age, the epoch
+  // watermark or the session: it can neither refresh the state deadline nor
+  // revoke a session. Binding an instance, or replacing or invalidating one,
+  // rebuilds the baseline, because a new runtime process numbers its states
+  // from its own first value again. The floor orders the frames of the instance
+  // already bound and nothing more: a frame of a *previous* instance that
+  // arrives after a switch is decided by the instance rules (it can never
+  // re-authorize anything), not by this sequence floor.
   void ObserveState(const protocol::RobotState &state, protocol::TimeUs rx_us);
 
   // Feeds one received result with its host receive stamp. A result that does
@@ -257,6 +270,13 @@ class RobotClient {
   protocol::RobotState latest_state_{};
   protocol::TimeUs latest_state_rx_us_{0};
   bool state_known_{false};
+
+  // The highest `state_seq` accepted from the instance currently bound; zero
+  // while none is bound, because zero is never a published sequence. It is the
+  // floor of the strictly increasing rule documented on ObserveState, and the
+  // instance branches there rebuild it whenever the instance is bound, replaced
+  // or invalidated.
+  protocol::Sequence state_seq_floor_{0};
 
   // The one pending request, its original payload kept for bounded resends.
   bool pending_{false};
