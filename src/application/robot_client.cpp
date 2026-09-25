@@ -1,5 +1,9 @@
 #include "irmv/application/robot_client.hpp"
 
+#include <unistd.h>
+
+#include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -17,9 +21,50 @@ std::random_device &SupervisorEntropy() {
   return device;
 }
 
-// The band of request ids a client uses, taken from the first eight bytes of
-// its supervisor identity, big-endian. A restarted process has a fresh random
-// identity and therefore never continues the sequence of its predecessor.
+// SplitMix64 finalizer, the same mixing the runtime uses for its own identity:
+// cheap, and it spreads every input bit over the result.
+std::uint64_t MixBits(std::uint64_t value) {
+  value += 0x9e3779b97f4a7c15ULL;
+  value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+  value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+  return value ^ (value >> 31);
+}
+
+// The identity used when the system entropy source is unusable, mixed the way
+// the runtime mixes its own fallback: the host monotonic clock, the wall clock,
+// the process id, a process-local counter and a stack address. It is not
+// random, but no two processes share it - a constant would make two such
+// processes indistinguishable to the runtime, which identifies the session
+// owner by supervisor id alone - and it is never the all-zero id.
+protocol::Id FallbackSupervisorId() {
+  static std::atomic<std::uint64_t> counter{0};
+  const std::uint64_t salt = counter.fetch_add(1, std::memory_order_relaxed);
+  protocol::Id id{};
+  std::uint64_t state = MixBits(static_cast<std::uint64_t>(
+      std::chrono::steady_clock::now().time_since_epoch().count()));
+  state ^= MixBits(static_cast<std::uint64_t>(
+      std::chrono::system_clock::now().time_since_epoch().count()));
+  state ^= MixBits(static_cast<std::uint64_t>(::getpid()));
+  state ^= MixBits(salt);
+  state ^= MixBits(reinterpret_cast<std::uintptr_t>(&id));
+  for (std::size_t index = 0; index < id.size(); ++index) {
+    state = MixBits(state);
+    id[index] = static_cast<std::uint8_t>(state & 0xFFU);
+  }
+  if (id == protocol::kNoId) {
+    id[0] = 1;
+  }
+  return id;
+}
+
+// The request id a client starts from, taken from the first eight bytes of its
+// supervisor identity, big-endian. The band exists so the exhaustion path stays
+// reachable deterministically - a test pins the identity and the band start
+// follows from it, which no counter-based start would allow - and so the first
+// ids of a session are never a degenerate small range. The value carries no
+// further meaning: the runtime clears its request records when it issues a
+// session, and a restarted client restarts from the beginning of its own band
+// anyway.
 protocol::Sequence RequestIdBand(const protocol::Id &supervisor_id) {
   protocol::Sequence base = 0;
   for (std::size_t index = 0; index < 8; ++index) {
@@ -48,10 +93,10 @@ bool Agrees(const protocol::RobotState &state,
 
 protocol::Id MakeSupervisorId() {
   protocol::Id id{};
+  bool filled = false;
   try {
     // The identity comes from the system random source, like the runtime's
-    // session ids. A failure of that source is not worth failing startup over:
-    // the fallback below is still a usable, non-zero identity.
+    // session ids.
     std::random_device &entropy = SupervisorEntropy();
     std::size_t index = 0;
     while (index < id.size()) {
@@ -61,8 +106,14 @@ protocol::Id MakeSupervisorId() {
         id[index] = static_cast<std::uint8_t>((value >> (8U * byte)) & 0xFFU);
       }
     }
+    filled = true;
   } catch (const std::exception &) {
-    id = protocol::kNoId;
+    filled = false;
+  }
+  if (!filled || id == protocol::kNoId) {
+    // An unusable entropy source is not worth failing startup over, but it must
+    // not hand out the same identity to every process either.
+    id = FallbackSupervisorId();
   }
   // Never the all-zero "none" value, and never a first byte that would leave
   // the request-id band without room: 0x01..0x7f keeps the whole upper half of
@@ -117,7 +168,11 @@ const RobotClient::StateObservation &RobotClient::HistoryAt(
 
 void RobotClient::RecordHistory(const protocol::RobotState &state,
                                 protocol::TimeUs rx_us) {
-  history_[history_next_] = StateObservation{state, rx_us};
+  // Assigned field by field: building the observation first would copy the
+  // whole state twice for every received sample.
+  StateObservation &slot = history_[history_next_];
+  slot.state = state;
+  slot.rx_us = rx_us;
   history_next_ = (history_next_ + 1) % kStateHistoryCapacity;
   if (history_count_ < kStateHistoryCapacity) {
     ++history_count_;
@@ -436,11 +491,16 @@ ClientView RobotClient::Poll(protocol::TimeUs now_us) {
   }
 
   if (pending_ && report_outcome_ == RequestOutcome::None) {
-    if (now_us - pending_first_send_us_ >=
-        config_.supervision.request_deadline_us) {
+    // The ages are guarded exactly like the state age: a caller-supplied clock
+    // that is not monotonic must not underflow into an immediate timeout or an
+    // immediate resend.
+    const protocol::TimeUs age =
+        now_us >= pending_first_send_us_ ? now_us - pending_first_send_us_ : 0;
+    const protocol::TimeUs since_send =
+        now_us >= pending_last_send_us_ ? now_us - pending_last_send_us_ : 0;
+    if (age >= config_.supervision.request_deadline_us) {
       Resolve(RequestOutcome::TimedOut, protocol::RejectReason::None);
-    } else if (now_us - pending_last_send_us_ >=
-               config_.supervision.request_retry_us) {
+    } else if (since_send >= config_.supervision.request_retry_us) {
       ResendPending(now_us);
     }
   }

@@ -11,74 +11,15 @@
 #include <string>
 #include <thread>
 
+#include "dds_loop.hpp"
 #include "irmv/protocol/types.hpp"
 #include "irmv/transport/codec.hpp"
+#include "irmv/transport/dds_transport.hpp"
 
 namespace irmv::transport {
 namespace {
 
 namespace wire = irmv::protocol::wire;
-
-// How long the transport thread may wait for inbound traffic before it looks at
-// the outbound channels again. The value bounds both the delay of an outbound
-// sample and the time Stop() needs to be noticed.
-constexpr int kWaitTimeoutMs = 10;
-
-// Samples read from one reader per wake-up. Bounded so that a burst cannot keep
-// the thread from writing pending output or from noticing a stop request.
-constexpr int kReadBatch = 16;
-
-// Bound Stop() gives the transport thread to leave its loop before it joins.
-// The loop only blocks in bounded operations (a ten millisecond WaitSet wait
-// and DDS writes bounded by their max_blocking_time), so the thread leaves well
-// inside this bound and the join that follows returns immediately.
-constexpr int kStopTimeoutMs = 2000;
-
-protocol::TimeUs NowUs() {
-  return static_cast<protocol::TimeUs>(
-      std::chrono::duration_cast<std::chrono::microseconds>(
-          std::chrono::steady_clock::now().time_since_epoch())
-          .count());
-}
-
-// Pins the participant to one network interface. The pinned C++ API takes a
-// configuration string on the participant constructor and parses it as XML when
-// it starts with '<'; this is the only per-participant configuration route the
-// pinned version has.
-std::string InterfaceConfig(const std::string &interface) {
-  return "<CycloneDDS><Domain "
-         "id=\"any\"><General><Interfaces><NetworkInterface "
-         "name=\"" +
-         interface + "\"/></Interfaces></General></Domain></CycloneDDS>";
-}
-
-// A reliable writer can refuse a sample when its history is full and the
-// blocking time expires. The sample is counted instead of being lost silently,
-// and the transport thread keeps running.
-template <typename Writer, typename Sample>
-void TryWrite(Writer &writer, const Sample &sample,
-              std::atomic<std::uint64_t> &dropped) {
-  try {
-    writer.write(sample);
-  } catch (const std::exception &) {
-    dropped.fetch_add(1, std::memory_order_relaxed);
-  }
-}
-
-// Every read in the transport thread runs behind this guard. The thread entry
-// function must not let an exception escape it, so a failing DDS call ends the
-// transport loop cleanly - the same policy as the guarded WaitSet wait - and is
-// counted on its own counter, apart from samples that fail validation.
-template <typename Body>
-bool ReadGuarded(std::atomic<std::uint64_t> &read_failures, Body body) {
-  try {
-    body();
-    return true;
-  } catch (const std::exception &) {
-    read_failures.fetch_add(1, std::memory_order_relaxed);
-    return false;
-  }
-}
 
 }  // namespace
 
@@ -308,10 +249,15 @@ void ClientTransport::Start() {
   if (impl_) {
     return;
   }
+  // Creating the endpoints may throw, and a transport that failed to start must
+  // not report itself as running, so the flag is published only once they exist
+  // - but before the thread is launched: the thread clears it when it leaves
+  // its loop, and a loop that ends immediately must not be reported as running
+  // just because the store had not happened yet.
   std::unique_ptr<Impl> impl = std::make_unique<Impl>(config_, *this);
+  started_.store(true, std::memory_order_release);
   impl->Start();
   impl_ = std::move(impl);
-  started_.store(true, std::memory_order_release);
 }
 
 void ClientTransport::Stop() {
@@ -329,6 +275,13 @@ bool ClientTransport::started() const {
 
 bool ClientTransport::PublishRequest(
     const protocol::ExecutionRequest &request) {
+  // Nobody is draining the lanes before Start() and after Stop(), so a sample
+  // handed over then would be lost without a trace: it is refused and counted
+  // like any other refusal instead.
+  if (!started()) {
+    dropped_requests_.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
   // A stop travels on its own lane; everything else shares the ordinary one.
   if (IsStopLaneOperation(request.operation)) {
     if (stop_requests_.TryPush(request)) {
@@ -343,6 +296,11 @@ bool ClientTransport::PublishRequest(
 }
 
 bool ClientTransport::PublishCommand(const protocol::JointCommand &command) {
+  // Nothing drains the command lane while the transport is not running.
+  if (!started()) {
+    dropped_commands_.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
   // The command lane keeps the newest frame: replacing an unread one is the
   // loss the counter reports, and so is a frame that cannot be stored. Either
   // way the newest frame is the one that reaches the peer, so the caller learns
@@ -357,6 +315,11 @@ bool ClientTransport::PublishCommand(const protocol::JointCommand &command) {
 
 bool ClientTransport::PublishHeartbeat(
     const protocol::SupervisorHeartbeat &heartbeat) {
+  // Nothing drains the heartbeat lane while the transport is not running.
+  if (!started()) {
+    dropped_heartbeats_.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
   if (!heartbeats_.TryPush(heartbeat)) {
     dropped_heartbeats_.fetch_add(1, std::memory_order_relaxed);
     return false;
@@ -366,23 +329,23 @@ bool ClientTransport::PublishHeartbeat(
 
 const ClientEvents &ClientTransport::TakeEvents() {
   events_.result_count = 0;
-  events_.has_state = false;
-  events_.state = protocol::RobotState{};
-  events_.state_rx_us = 0;
 
   // The result lane is FIFO, so it is drained until empty up to the size of its
   // destination; a TryPop that reports false after the last entry is the normal
   // empty signal. The state lane keeps one entry, so a single take drains
-  // everything it holds.
+  // everything it holds. `has_state` is the reader's only guard, so the state
+  // payload is written just when there is one: clearing it on every call would
+  // copy twenty-three kilobytes per empty take for nothing.
   while (events_.result_count < kClientResultCapacity &&
          results_.TryPop(events_.results[events_.result_count])) {
     ++events_.result_count;
   }
-  runtime::Received<protocol::RobotState> received;
-  if (states_.TryTake(received)) {
+  if (states_.TryTake(state_scratch_)) {
     events_.has_state = true;
-    events_.state = received.value;
-    events_.state_rx_us = received.rx_us;
+    events_.state = state_scratch_.value;
+    events_.state_rx_us = state_scratch_.rx_us;
+  } else {
+    events_.has_state = false;
   }
   return events_;
 }

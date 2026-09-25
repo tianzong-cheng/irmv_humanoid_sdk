@@ -5,13 +5,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <string>
 
 #include "irmv/configuration/application_config.hpp"
 #include "irmv/protocol/types.hpp"
 #include "irmv/runtime/command_gate.hpp"
 #include "irmv/transport/bounded_channel.hpp"
-#include "irmv/transport/dds_transport.hpp"
 
 namespace irmv::transport {
 
@@ -25,8 +23,9 @@ inline constexpr std::size_t kClientStopRequestCapacity = 8;
 inline constexpr std::size_t kClientHeartbeatCapacity = 8;
 
 // One drain of the inbound lanes. The transport thread fills the lanes, the
-// supervision thread takes them here; the counts are reset on every call, so an
-// empty call touches constant work and a lane that was busy is reported once.
+// supervision thread takes them here; this batch describes only that one call,
+// so its counts are reset on every take while the drop counters of the
+// transport itself are cumulative accessors.
 struct ClientEvents {
   std::array<runtime::Received<protocol::ExecutionResult>,
              kClientResultCapacity>
@@ -93,24 +92,28 @@ class ClientTransport {
   // ZeroTorque, Reset) goes to its own lane, so a full ordinary queue can never
   // hold one back and a burst of targets can never displace one; every other
   // operation shares the ordinary lane, whose order carries meaning. Never
-  // blocks, never touches DDS and never allocates; a request that does not fit
-  // is refused, counted and reported by returning false.
+  // blocks, never touches DDS and never allocates; a request that does not fit,
+  // and one handed over while the transport is not running, is refused, counted
+  // and reported by returning false.
   bool PublishRequest(const protocol::ExecutionRequest &request);
 
   // Hands one target frame to the newest-entry command lane. A frame that
-  // supersedes an unread one is counted as dropped, and so is one that cannot
-  // be stored at all.
+  // supersedes an unread one is counted as dropped, and so are a frame that
+  // cannot be stored at all and one handed over while the transport is not
+  // running.
   bool PublishCommand(const protocol::JointCommand &command);
 
   // Hands one heartbeat to the queue. A full lane refuses the newest heartbeat
   // and counts it, because only the state machine can tell the owner's sample
-  // from a foreign or reordered one.
+  // from a foreign or reordered one; a heartbeat handed over while the
+  // transport is not running is refused and counted as well.
   bool PublishHeartbeat(const protocol::SupervisorHeartbeat &heartbeat);
 
   // Drains the inbound lanes into the owned event batch and returns it. Only
-  // the entries below the returned count are written, and the batch is reset on
-  // every call, so an empty call touches constant work. The reference stays
-  // valid until the next call. Called only by the supervision thread.
+  // the entries below the returned count are written, and the batch describes
+  // this one call: an empty take costs one pass over the empty result lane and
+  // one try of the state lane. The reference stays valid until the next call.
+  // Called only by the supervision thread.
   const ClientEvents &TakeEvents();
 
   // Execution results dropped because the inbound result queue was full.
@@ -119,13 +122,14 @@ class ClientTransport {
   // keeps one entry, so a slow consumer loses the superseded ones and always
   // gets the newest.
   std::uint64_t dropped_state_count() const;
-  // Requests dropped, from the ordinary and the stop lane.
+  // Requests dropped, from the ordinary and the stop lane, including every one
+  // handed over while the transport was not running.
   std::uint64_t dropped_request_count() const;
-  // Joint commands dropped because a newer command superseded an unread one or
-  // because none could be stored.
+  // Joint commands dropped because a newer command superseded an unread one,
+  // because none could be stored, or because the transport was not running.
   std::uint64_t dropped_command_count() const;
   // Heartbeats dropped because the heartbeat lane was full when the sample was
-  // handed over.
+  // handed over, or because the transport was not running.
   std::uint64_t dropped_heartbeat_count() const;
   // Inbound samples that failed FromWire validation and were discarded whole.
   std::uint64_t inbound_rejected_count() const;
@@ -168,6 +172,10 @@ class ClientTransport {
   ResultChannel results_;
   StateChannel states_;
   ClientEvents events_;
+  // Inbound scratch of the supervision thread, kept out of the take so an empty
+  // take neither clears the batch's state nor builds a twenty-four kilobyte
+  // frame on the stack.
+  runtime::Received<protocol::RobotState> state_scratch_{};
   std::unique_ptr<Impl> impl_;
   std::atomic<bool> started_{false};
   std::atomic<std::uint64_t> stop_lane_published_{0};

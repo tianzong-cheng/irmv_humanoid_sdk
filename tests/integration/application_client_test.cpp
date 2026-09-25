@@ -21,17 +21,20 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "irmv/application/robot_client.hpp"
 #include "irmv/configuration/application_config.hpp"
 #include "irmv/configuration/config.hpp"
 #include "irmv/protocol/types.hpp"
+#include "irmv/protocol/validation.hpp"
 #include "irmv/transport/client_transport.hpp"
 #include "irmv/transport/dds_transport.hpp"
 
@@ -143,6 +146,17 @@ const char *ReasonName(RejectReason reason) {
 
 std::string Number(std::uint64_t value) { return std::to_string(value); }
 
+// The request-id band a supervisor identity carries: its first eight bytes,
+// big-endian. The client derives its sequence start the same way, so this pins
+// the property the identity has to have rather than the client's arithmetic.
+Sequence BandStart(const Id &supervisor_id) {
+  Sequence base = 0;
+  for (std::size_t index = 0; index < 8; ++index) {
+    base = (base << 8U) | supervisor_id[index];
+  }
+  return base;
+}
+
 bool SameCommand(const JointCommand &left, const JointCommand &right) {
   if (left.protocol_version != right.protocol_version ||
       left.runtime_id != right.runtime_id ||
@@ -187,6 +201,24 @@ bool SameRequest(const ExecutionRequest &left, const ExecutionRequest &right) {
 }
 
 // ---- process control ------------------------------------------------------
+
+// Removes the temporary workspace on every path out of main, including the
+// early returns that happen before any transport exists.
+class WorkspaceGuard {
+ public:
+  explicit WorkspaceGuard(fs::path path) : path_(std::move(path)) {}
+
+  ~WorkspaceGuard() {
+    std::error_code ignored;
+    fs::remove_all(path_, ignored);
+  }
+
+  WorkspaceGuard(const WorkspaceGuard &) = delete;
+  WorkspaceGuard &operator=(const WorkspaceGuard &) = delete;
+
+ private:
+  fs::path path_;
+};
 
 // One robot_runtime child with a log file and a bounded lifetime. The
 // destructor kills whatever is still running, so every failure path is clean.
@@ -949,23 +981,29 @@ int main(int argc, char **argv) {
   const fs::path workspace =
       fs::temp_directory_path() /
       ("irmv-application-client-" + std::to_string(::getpid()));
+  const WorkspaceGuard guard(workspace);
   std::error_code ignored;
   fs::remove_all(workspace, ignored);
   fs::create_directories(workspace / "logs", ignored);
 
   // The runtime section is written with the on-disk domain replaced and the
   // telemetry redirected into the workspace, so the run never touches the
-  // source tree.
-  {
+  // source tree. A source configuration that does not parse is reported like
+  // any other failure instead of letting the parser abort the process.
+  const fs::path config_path = workspace / "config.json";
+  try {
     std::ifstream input(source / "config/sdk.json");
     json document;
     input >> document;
     document["dds"]["domain"] = kConfigDomain;
     document["telemetry"]["directory"] = (workspace / "logs").string();
-    std::ofstream output(workspace / "config.json");
+    std::ofstream output(config_path);
     output << document.dump(2);
+  } catch (const std::exception &error) {
+    std::cerr << "FAIL: " << (source / "config/sdk.json")
+              << " did not parse: " << error.what() << "\n";
+    return kExitFailure;
   }
-  const fs::path config_path = workspace / "config.json";
 
   ApplicationConfig config;
   try {
@@ -984,19 +1022,37 @@ int main(int argc, char **argv) {
 
   Fixture fx;
   fx.config = &config;
-  Check(fx, irmv::application::MakeSupervisorId() != irmv::protocol::kNoId,
+
+  // The identity is never the reserved empty id, it differs between two calls
+  // of one process, and the request-id band it carries leaves room below the
+  // reserved last sequence value.
+  const Id first_identity = irmv::application::MakeSupervisorId();
+  const Id second_identity = irmv::application::MakeSupervisorId();
+  Check(fx,
+        first_identity != irmv::protocol::kNoId &&
+            second_identity != irmv::protocol::kNoId,
         "identity: MakeSupervisorId is never the empty id");
+  Check(fx, first_identity != second_identity,
+        "identity: two identities of one process differ");
+  const Sequence band = BandStart(first_identity);
+  Check(fx, band != 0 && band < std::numeric_limits<Sequence>::max(),
+        "identity: the request-id band starts below the reserved maximum",
+        Number(band));
 
   // The DDS-free client cannot include the transport's lane predicate, so this
-  // is where the two definitions are pinned to each other.
-  for (const Operation operation :
-       {Operation::AcquireSession, Operation::Damping, Operation::ZeroTorque,
-        Operation::Tracking, Operation::Reset}) {
+  // is where the two definitions are pinned to each other over the whole frozen
+  // operation range: every value the protocol accepts, not a list this test
+  // wrote down by hand.
+  for (std::uint32_t raw = 0; raw <= 64; ++raw) {
+    const Operation operation = static_cast<Operation>(raw);
+    if (!irmv::protocol::IsValid(operation)) {
+      continue;
+    }
     Check(fx,
           irmv::application::IsStopOperation(operation) ==
               irmv::transport::IsStopLaneOperation(operation),
           "stop lane: the application predicate is the transport's lane",
-          "operation " + std::to_string(static_cast<int>(operation)));
+          "operation " + std::to_string(raw));
   }
 
   bool ok = true;
@@ -1087,6 +1143,5 @@ int main(int argc, char **argv) {
     std::cout << "application_client_test: all " << fx.checks
               << " checks passed (domain " << domain << ")\n";
   }
-  fs::remove_all(workspace, ignored);
   return failed ? kExitFailure : kExitOk;
 }

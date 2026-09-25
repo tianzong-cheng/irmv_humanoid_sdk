@@ -2,7 +2,6 @@
 
 #include <array>
 #include <cstddef>
-#include <cstdint>
 
 #include "irmv/configuration/application_config.hpp"
 #include "irmv/protocol/types.hpp"

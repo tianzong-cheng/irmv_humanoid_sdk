@@ -821,5 +821,71 @@ int main() {
     CHECK(!client.session_owned());
   }
 
+  // ---- the witness survives until the window is full ---------------------
+  {
+    // The witness of an answer is the first state published at or after it, so
+    // it has to stay in the history while seven later states arrive: the depth
+    // the header promises is exactly the last eight observations.
+    RecordingSink sink;
+    RobotClient client(sink, config, supervisor_id);
+    observe_state(client, 80'000);
+    client.ObserveState(
+        MakeState(runtime_id, session_id, 0, 901, 80'120,
+                  ExecutionState::ZeroTorque, OutputAction::ZeroTorque),
+        80'150);
+    CHECK(client.BeginRequest(Operation::AcquireSession, 80'100));
+    const Sequence id = sink.requests.back().request_id;
+    CHECK(client.Poll(80'100).outcome == RequestOutcome::Pending);
+    for (Sequence index = 1; index <= 7; ++index) {
+      const TimeUs stamp = 80'120 + index * 10;
+      client.ObserveState(
+          MakeState(runtime_id, session_id, 0, 901 + index, stamp,
+                    ExecutionState::ZeroTorque, OutputAction::ZeroTorque),
+          stamp + 20);
+    }
+    CHECK(client.Poll(80'300).outcome == RequestOutcome::Pending);
+    // The answer arrives last; the witness that preceded it still confirms it.
+    client.ObserveResult(
+        MakeResult(supervisor_id, runtime_id, session_id, id, 80'120,
+                   ResultStatus::Applied, RejectReason::None, 0,
+                   ExecutionState::ZeroTorque, OutputAction::ZeroTorque),
+        80'320);
+    CHECK(client.Poll(80'330).outcome == RequestOutcome::Confirmed);
+    CHECK(client.session_id() == session_id);
+  }
+
+  // ---- a rolled-over window still resolves a later request ---------------
+  {
+    // Ten observations roll the eight-deep window over completely while the
+    // instance, the session and the configuration stay the same: a request
+    // that starts afterwards must still be confirmed, so the rollover cannot
+    // leave the history in a state that refuses everything after it.
+    RecordingSink sink;
+    RobotClient client(sink, config, supervisor_id);
+    for (Sequence index = 0; index < 10; ++index) {
+      const TimeUs stamp = 90'000 + index * 10;
+      client.ObserveState(
+          MakeState(runtime_id, session_id, 0, 950 + index, stamp,
+                    ExecutionState::ZeroTorque, OutputAction::ZeroTorque),
+          stamp + 5);
+    }
+    CHECK(client.runtime_id() == runtime_id);
+    CHECK(client.BeginRequest(Operation::AcquireSession, 90'200));
+    const Sequence id = sink.requests.back().request_id;
+    CHECK(client.Poll(90'200).outcome == RequestOutcome::Pending);
+    client.ObserveResult(
+        MakeResult(supervisor_id, runtime_id, session_id, id, 90'220,
+                   ResultStatus::Applied, RejectReason::None, 0,
+                   ExecutionState::ZeroTorque, OutputAction::ZeroTorque),
+        90'250);
+    CHECK(client.Poll(90'260).outcome == RequestOutcome::Pending);
+    client.ObserveState(
+        MakeState(runtime_id, session_id, 0, 960, 90'230,
+                  ExecutionState::ZeroTorque, OutputAction::ZeroTorque),
+        90'280);
+    CHECK(client.Poll(90'290).outcome == RequestOutcome::Confirmed);
+    CHECK(client.session_owned());
+  }
+
   return 0;
 }
