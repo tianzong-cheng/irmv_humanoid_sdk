@@ -449,6 +449,45 @@ set_tests_properties(
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
+# The application: the supervising upper process of a separate robot_runtime.
+# It owns the supervision loop no other target needs, so its loop source is
+# compiled into the executable instead of a library of its own. It links the
+# application host libraries and never irmv_runtime (the lower layer is another
+# process, reached through DDS alone) and never irmv_telemetry (phase two ships
+# no application logging; the status goes to stdout).
+add_executable(application src/application/main.cpp
+                           src/application/application_loop.cpp)
+target_compile_features(application PRIVATE cxx_std_17)
+target_include_directories(
+  application
+  PRIVATE "${PROJECT_SOURCE_DIR}/include"
+)
+target_link_libraries(
+  application
+  PRIVATE
+    irmv_application
+    irmv_transport
+    irmv_configuration
+    irmv_protocol
+)
+
+add_test(
+  NAME application_cli_test
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/integration/application_cli_test.py"
+    "$<TARGET_FILE:application>"
+    "$<TARGET_FILE:robot_runtime>"
+    "${PROJECT_SOURCE_DIR}"
+)
+set_tests_properties(
+  application_cli_test
+  PROPERTIES
+    LABELS integration
+    TIMEOUT 180
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
 # The official client against a real standalone runtime: the same transport the
 # application ships, driven by hand so the arrival order of an answer and its
 # witness state is deterministic.
@@ -596,16 +635,18 @@ add_custom_target(
 # Installation
 # ---------------------------------------------------------------------------
 
-# Installed layout of one runtime:
+# Installed layout of the two processes:
 #
-#   <prefix>/bin/robot_runtime      the only runnable artifact of this phase
-#   <prefix>/lib/                   the shared libraries it needs and that are
+#   <prefix>/bin/robot_runtime      the lower layer
+#   <prefix>/bin/application        the supervising upper layer
+#   <prefix>/lib/                   the shared libraries they need and that are
 #                                   not provided system-wide
 #   <prefix>/etc/irmv/sdk.json      the shipped default Fake configuration
 #   <prefix>/etc/irmv/sdk.schema.json
 #
 # The test clients of this phase are never installed.
 install(TARGETS robot_runtime RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+install(TARGETS application RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 
 # The configuration of the default Fake deployment and the schema that describes
 # it: the schema is part of the configuration contract, not of a test.
@@ -620,6 +661,12 @@ install(
 # installed artifact carries a build or source path in its rpath.
 set_target_properties(
   robot_runtime
+  PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
+)
+# The application resolves its libraries the same way: it is built from the same
+# tree, links the same pinned DDS libraries and is started from the same bin.
+set_target_properties(
+  application
   PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
 )
 
@@ -646,6 +693,7 @@ set(_irmv_libdir \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}\")
 file(
   GET_RUNTIME_DEPENDENCIES
   EXECUTABLES \"$<TARGET_FILE:robot_runtime>\"
+              \"$<TARGET_FILE:application>\"
   DIRECTORIES \"$<TARGET_FILE_DIR:CycloneDDS-CXX::ddscxx>\"
             \"$<TARGET_FILE_DIR:CycloneDDS::ddsc>\"
   RESOLVED_DEPENDENCIES_VAR _irmv_resolved
@@ -675,13 +723,18 @@ foreach(_irmv_library IN LISTS _irmv_resolved)
   message(STATUS \"irmv install: bundled \${_irmv_name}\")
 endforeach()
 
-# The installed runtime resolves its libraries through the relative rpath and
-# through nothing else: an installation that leaked a link-path or build-tree
-# directory into that entry fails here instead of producing a tree that only
-# works next to the source it was built from.
+# The installed runtime and the installed application resolve their libraries
+# through the relative rpath and through nothing else: an installation that
+# leaked a link-path or build-tree directory into that entry fails here instead
+# of producing a tree that only works next to the source it was built from.
 file(
   RPATH_CHECK
   FILE \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/robot_runtime\"
+  RPATH \"\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}\"
+)
+file(
+  RPATH_CHECK
+  FILE \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/application\"
   RPATH \"\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}\"
 )
 "

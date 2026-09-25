@@ -1,9 +1,11 @@
 # IRMV humanoid SDK — runtime foundation
 
-Phase one of the humanoid runtime: a standalone execution runtime for the
-**Fake** deployment only, the frozen protocol it speaks with a supervision
-client over real DDS, and the deterministic and real-DDS test suites that prove
-it. There is no real robot backend in this phase.
+Phases one and two of the humanoid runtime: the standalone execution runtime
+(`robot_runtime`) for the **Fake** deployment only, the supervising upper process
+(`application`) that drives it, the frozen protocol they speak with each other
+over real DDS, and the deterministic and real-DDS test suites that prove both.
+There is no real robot backend and no real hardware emergency stop in these
+phases.
 
 ## Build
 
@@ -26,9 +28,9 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug \
       -DIRMV_CYCLONEDDS_PREFIX=/path/to/cyclonedds-prefix
 ```
 
-`robot_runtime` is the only executable this phase ships; `runtime_client`,
-`confirmation_test` and the `*_test` binaries are test-only and are never
-installed.
+`robot_runtime` and `application` are the two executables these phases ship;
+`runtime_client`, `confirmation_test` and the `*_test` binaries are test-only and
+are never installed.
 
 ## Run the default Fake deployment
 
@@ -111,6 +113,118 @@ send path accepted the output implementing a request, never that a device
 acknowledged it. Real hardware, real safety limits, firmware-loss behaviour and
 the physical-execution acceptance belong to later phases.
 
+## Run the application: the supervising upper process
+
+`application` is the upper layer of the two-process fake deployment. It never
+starts, stops, signals or holds the process id of the runtime: it enters through
+DDS alone, and the lower layer keeps running - and keeps damping - after the
+upper one is gone. Start the runtime first, then the application, on the same
+domain and with the same configuration file:
+
+```bash
+build/robot_runtime --config config/sdk.json --domain 3
+build/application  --config config/sdk.json --domain 3
+```
+
+```text
+usage: application --config PATH [--domain N]
+```
+
+`--config` is mandatory and `--domain N` (0..230) overrides `dds.domain` exactly
+like the runtime's option, so both processes describe the same configuration
+digest and the same instance. The file carries the runtime section plus the
+`application` and `input` sections of the upper layer.
+
+### Keys
+
+| Key | Action |
+| --- | --- |
+| `space` | emergency stop: latch `OperatorEmergencyStop`, enter `Fault`, request `Damping`. The latch is left only by an explicit Reset |
+| `d` | damping stop: `Standby`/`Initializing`/`Ready` → `Damping` |
+| `i` | initialize: `Damping` → `Initializing` (a trajectory towards `application.initialization.target_position`), then `Ready` once the target is reached and stable |
+| `z` | zero torque: request a zero-torque stop; a confirmed `ZeroTorque` brings a non-faulted behaviour back to `Standby` |
+| `r` | reset: the only way out of a latched `Fault`, and only into `Standby`, on a confirmed fresh `ZeroTorque` |
+| `x` | exit (see below) |
+| `w` / `s` | body-velocity intent forward / backward |
+| `a` / `f` | body-velocity intent left / right |
+| `q` / `e` | body-velocity intent yaw left / right |
+
+The bindings live in `input.bindings` of the configuration, never in the code: a
+byte the file does not bind is inert, and `emergency_stop` must be the space
+character. `w`/`a`/`s`/`f`/`q`/`e` only maintain and expire the one body-velocity
+intent (`input.intent_timeout_us`); this phase ships no locomotion target
+generator, so no intent ever becomes a joint target.
+
+### Status line
+
+```text
+[application] behavior=<X> runtime=<Y> output=<Z> session=<owned|lost|none> pending=<operation|-> reject=<reason|-> fresh=<yes|no> init=<ok|refused|->
+```
+
+`behavior` is the upper behaviour (`Starting`, `Standby`, `Damping`,
+`Initializing`, `Ready`, `Fault`), `runtime`/`output` the lower layer's own
+`execution_state`/`output_action` (`Unknown` while no current state is known),
+`pending` the operation of the request the application waits on, `reject` the
+reason of the last refused request, `fresh` whether a `RobotState` arrived inside
+`application.supervision.state_timeout_us`, and `init` reports the
+initialization: `ok` while it runs or holds, `refused` for the iteration that
+refused an un-runnable plan. The line is printed whenever a field changes and at
+most every 500 ms otherwise.
+
+### Exit
+
+`x`, `Ctrl+C` and `SIGTERM` are the same exit: the signal handler writes one
+atomic flag, and the loop turns it into exactly the ordered exit the key raises.
+Target generation stops, the pending request is cancelled, the runtime is asked
+for `Damping`, and the application waits for the `Result` **and** a fresh
+`RobotState` that shows the stop, or for
+`application.supervision.request_deadline_us`, whichever comes first:
+
+```text
+application: exit stop=confirmed state=Damping   # the stop was proven, exit 0
+application: exit stop=unknown lower=Fault       # the runtime was already in Fault, exit 3
+application: exit stop=unknown lower=Unknown     # the stop was never proven, exit 3
+```
+
+Exit codes: `0` a confirmed stop, `1` a configuration or startup error (nothing
+touched DDS), `2` a usage error, `3` the bounded exit that could not prove a
+stop. A `3` never says `damped`, `stopped` or `safe`: the runtime keeps its own
+output rule - the damping it was already commanding, or the fault output it
+latched - and this process exits without touching it. The terminal attributes are
+restored on every exit path this process can observe, the signal path included.
+Exiting the application is **not** shutting the system down; stopping the runtime
+and releasing the device is a separate, explicit operation.
+
+### `ZeroTorque` is not a power cut
+
+`ZeroTorque` is a request for zero output torque: it is never a power-off, never
+a brake and never a physical guarantee. `space` is a **software** emergency stop
+that depends on this host and on the DDS link to the runtime; it is not a
+hardware emergency-stop circuit. `Applied` in a `Result` means the host send path
+accepted the request, never that a motor acknowledged or executed it. A lost
+host, a broken link or a killed process leaves the machine to the runtime's own
+watchdogs, which run independently of this process.
+
+### The initialization bound the operator has to respect
+
+`application.initialization.trajectory.duration_us` fixes the largest move the
+initialization can admit: its first frame must satisfy the runtime's continuity
+bounds and no frame may exceed the runtime's target velocity limits, so a start
+position too far from `application.initialization.target_position` for that
+duration is **refused** - the application prints `init=refused`, stays in
+`Damping` and sends nothing - rather than attempted. Raising `duration_us` (and
+`deadline_us` with it) admits a larger move. The shipped values are
+demonstration values for the fake deployment and are **not bench-approved**.
+
+### What these phases do not ship
+
+No ONNX policy, no external producer lifecycle, no `Recorder`, no real backend,
+and no way to enter `Locomotion`: an entry attempt reports unavailable and the
+behaviour stays in `Ready`. Velocity intents are tracked and expired, but nothing
+consumes them. The upper layer never re-implements a lower-layer safety rule: the
+runtime's limits, watchdogs, fault rules and damping stay independent of whether
+the application runs at all.
+
 ## Install
 
 ```bash
@@ -122,26 +236,32 @@ machine and run from any working directory:
 
 ```text
 <prefix>/bin/robot_runtime                      the runtime
+<prefix>/bin/application                        the supervising upper layer
 <prefix>/etc/irmv/sdk.json                      the default Fake configuration
 <prefix>/etc/irmv/sdk.schema.json               its schema
 <prefix>/lib/libddscxx.so*, libddsc.so*         the DDS libraries, when they
                                                 are not provided system-wide
 ```
 
-`robot_runtime` finds its libraries through the relative rpath
+`robot_runtime` and `application` find their libraries through the relative rpath
 `$ORIGIN/../lib`; no installed artifact carries a build or source path in its
 dynamic section (a Debug build still embeds source paths in its DWARF debug
 information, so ship a release build if the tree must be path-clean). The
-installation bundles every shared library the runtime resolves outside the
+installation bundles every shared library either of them resolves outside the
 platform directories and fails if one cannot be resolved, and it verifies that
-the installed runtime has exactly that one relative rpath entry.
+both installed binaries have exactly that one relative rpath entry.
 
 ```bash
 mkdir -p /tmp/run && cd /tmp/run
 /tmp/irmv-sdk-stage/bin/robot_runtime \
     --config /tmp/irmv-sdk-stage/etc/irmv/sdk.json --domain 227
 # ... BootCompleted {from="Boot" to="ZeroTorque"} ...
+# In a second shell, the same staged configuration and the same domain:
+/tmp/irmv-sdk-stage/bin/application \
+    --config /tmp/irmv-sdk-stage/etc/irmv/sdk.json --domain 227
+# [application] behavior=Standby runtime=ZeroTorque output=ZeroTorque ...
 # Ctrl-C / SIGTERM:
+# application: exit stop=confirmed state=Damping
 # robot_runtime: clean shutdown: state=ZeroTorque ticks=... overruns=...
 ```
 
