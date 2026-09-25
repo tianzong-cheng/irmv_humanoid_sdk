@@ -49,8 +49,9 @@ bool IsJointSampleFinite(const protocol::JointFeedback &joint) {
 
 // A sample carries no observation at all when the backend has never delivered
 // a frame for it: unobserved and unconnected, no receive stamp, no driver
-// status, and the documented default shape - the zeros an untouched sample
-// holds. Requiring that shape is what keeps a frame that merely *claims*
+// status, and the documented default shape the backend contract asks for - the
+// zeros an untouched sample holds. Requiring that shape is what keeps a frame
+// that merely *claims*
 // absence while carrying values a measurement: it is judged by those values
 // like any other observation instead of being excused by the grace window, and
 // garbage is never read as absence. Zero-valued defaults therefore stay

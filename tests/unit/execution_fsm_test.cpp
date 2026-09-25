@@ -2171,6 +2171,13 @@ int CheckBootWithoutFirstFrameFaults() {
   CHECK(CountEvents(f.last_tick(), EventCode::FaultLatched) == 1);
   CHECK(f.state().output_action == kActionZeroTorque);
   CHECK(!f.state().healthy);
+  // The grace window expires long before the boot deadline of the shipped
+  // configuration, so what turned the wait into a fault is invalid feedback and
+  // not a boot failure.
+  CHECK(f.config.boot.frequency_grace_us < f.config.boot.deadline_us);
+  CHECK(f.state().faults.count >= 1);
+  CHECK(f.state().faults.details[0].reason ==
+        irmv::protocol::FaultReason::FeedbackInvalid);
   return 0;
 }
 

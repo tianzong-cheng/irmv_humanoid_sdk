@@ -333,9 +333,10 @@ int main() {
 
   feedback = HealthyFeedback(config);
   feedback.joints[0] = irmv::protocol::JointFeedback{};
-  feedback.joints[0].freq_hz = config.boot.minimum_frequency_hz;
+  feedback.joints[0].freq_hz = config.boot.minimum_frequency_hz - 1.0;
   report = CheckFeedback(config, feedback, kNowUs, true);
   CHECK(report.fault);
+  CHECK(report.frequency_low);
   CHECK(report.feedback_invalid);
   CHECK(!report.awaiting_feedback);
 
