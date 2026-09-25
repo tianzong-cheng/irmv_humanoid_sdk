@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <array>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "irmv/configuration/sha256.hpp"
@@ -87,8 +86,8 @@ void ReadGainMap(const Json &mapping, const std::string &path,
   RejectUnknownJointKeys(mapping, path, joint_names);
 }
 
-void ReadTrajectory(const Json &object, TrajectoryConfig &trajectory) {
-  const std::string path = "application.initialization.trajectory";
+void ReadTrajectory(const Json &object, const std::string &path,
+                    TrajectoryConfig &trajectory) {
   trajectory.duration_us = PositiveIntegerMember(object, "duration_us", path);
   trajectory.position_tolerance =
       FiniteMember(object, "position_tolerance", path);
@@ -108,9 +107,9 @@ void ReadTrajectory(const Json &object, TrajectoryConfig &trajectory) {
   }
 }
 
-void ReadInitialization(const Json &object, const RuntimeConfig &runtime,
+void ReadInitialization(const Json &object, const std::string &path,
+                        const RuntimeConfig &runtime,
                         InitializationConfig &initialization) {
-  const std::string path = "application.initialization";
   ReadJointMap(Member(object, "target_position", path),
                path + ".target_position", runtime.joint_names,
                JointValueRule::Finite, initialization.target_q);
@@ -124,16 +123,16 @@ void ReadInitialization(const Json &object, const RuntimeConfig &runtime,
   }
   ReadGainMap(Member(object, "gains", path), path + ".gains",
               runtime.joint_names, initialization.gains);
-  ReadTrajectory(ObjectMember(object, "trajectory", path),
+  ReadTrajectory(ObjectMember(object, "trajectory", path), path + ".trajectory",
                  initialization.trajectory);
 }
 
 // The application periods are host supervision of the runtime, so they are
 // checked against the runtime timeouts they sit inside instead of being trusted
 // on their own.
-void ReadSupervision(const Json &object, const RuntimeConfig &runtime,
+void ReadSupervision(const Json &object, const std::string &path,
+                     const RuntimeConfig &runtime,
                      SupervisionConfig &supervision) {
-  const std::string path = "application.supervision";
   supervision.target_period_us =
       PositiveIntegerMember(object, "target_period_us", path);
   supervision.heartbeat_period_us =
@@ -155,12 +154,14 @@ void ReadSupervision(const Json &object, const RuntimeConfig &runtime,
       std::min(runtime.timeouts.command_us, runtime.timeouts.source_state_us);
   if (supervision.target_period_us >= command_deadline) {
     Fail(path + ".target_period_us",
-         "must be less than the runtime command and source-state timeouts");
+         "must be less than runtime.safety.timeouts.command_us and "
+         "runtime.safety.timeouts.source_state_us (" +
+             std::to_string(command_deadline) + " us)");
   }
 }
 
-void ReadInput(const Json &object, InputConfig &input) {
-  const std::string path = "input";
+void ReadInput(const Json &object, const std::string &path,
+               InputConfig &input) {
   input.intent_timeout_us =
       PositiveIntegerMember(object, "intent_timeout_us", path);
   input.repeat_guard_us =
@@ -276,12 +277,16 @@ ApplicationConfig LoadApplicationConfig(const std::filesystem::path &path,
   // from LoadConfig's own canonical form.
   config.runtime = LoadConfig(path, overrides);
   const Json document = detail::LoadDocument(path);
+  const std::string application_path = "application";
   const Json &application = ObjectMember(document, "application", "");
-  ReadInitialization(ObjectMember(application, "initialization", "application"),
-                     config.runtime, config.initialization);
-  ReadSupervision(ObjectMember(application, "supervision", "application"),
-                  config.runtime, config.supervision);
-  ReadInput(ObjectMember(document, "input", ""), config.input);
+  ReadInitialization(
+      ObjectMember(application, "initialization", application_path),
+      application_path + ".initialization", config.runtime,
+      config.initialization);
+  ReadSupervision(ObjectMember(application, "supervision", application_path),
+                  application_path + ".supervision", config.runtime,
+                  config.supervision);
+  ReadInput(ObjectMember(document, "input", ""), "input", config.input);
   config.application_config_id = Sha256(CanonicalApplication(config).dump());
   return config;
 }

@@ -205,6 +205,40 @@ bool ThrowsWithMessage(std::string_view contents, std::string_view field_path,
   return false;
 }
 
+// One row per canonical leaf, in the order CanonicalApplication enumerates the
+// sections: target position and kp/kd of both joints, the five trajectory
+// fields, the five supervision fields, the two input deadlines and one binding.
+// A row that stops changing application_config_id would mean the canonical form
+// no longer restates that field.
+struct DigestMutation {
+  const char* from;
+  const char* to;
+  bool in_input;
+};
+
+const DigestMutation kDigestMutations[] = {
+    {"\"test_left\": -0.5", "\"test_left\": -0.25", false},
+    {"\"test_right\": 0.25", "\"test_right\": 0.5", false},
+    {"\"kp\": 10.0", "\"kp\": 11.0", false},
+    {"\"kd\": 1.0", "\"kd\": 2.0", false},
+    {"\"kp\": 12.5", "\"kp\": 13.0", false},
+    {"\"kd\": 1.5", "\"kd\": 2.5", false},
+    {"\"duration_us\": 500000", "\"duration_us\": 600000", false},
+    {"\"position_tolerance\": 0.02", "\"position_tolerance\": 0.03", false},
+    {"\"velocity_tolerance\": 0.05", "\"velocity_tolerance\": 0.06", false},
+    {"\"stable_window_us\": 100000", "\"stable_window_us\": 120000", false},
+    {"\"deadline_us\": 2000000", "\"deadline_us\": 2500000", false},
+    {"\"target_period_us\": 20000", "\"target_period_us\": 25000", false},
+    {"\"heartbeat_period_us\": 50000", "\"heartbeat_period_us\": 60000", false},
+    {"\"request_retry_us\": 50000", "\"request_retry_us\": 60000", false},
+    {"\"request_deadline_us\": 1000000", "\"request_deadline_us\": 1200000",
+     false},
+    {"\"state_timeout_us\": 150000", "\"state_timeout_us\": 160000", false},
+    {"\"intent_timeout_us\": 500000", "\"intent_timeout_us\": 600000", true},
+    {"\"repeat_guard_us\": 250000", "\"repeat_guard_us\": 300000", true},
+    {"\"velocity_left\": \"a\"", "\"velocity_left\": \"g\"", true},
+};
+
 ConfigOverrides OverrideDomain(std::uint32_t domain) {
   ConfigOverrides overrides;
   overrides.dds_domain = domain;
@@ -362,6 +396,23 @@ int main() {
   CHECK(rebound_config.application_config_id != config.application_config_id);
   CHECK(rebound_config.runtime_config_id() == config.runtime_config_id());
 
+  // Every application/input leaf reaches the digest: mutating any one of them
+  // changes application_config_id while the runtime identity stays put. This
+  // pins the fields CanonicalApplication restates by name.
+  const std::string base_application(kApplicationBody);
+  const std::string base_input = InputBody(kBindings);
+  for (const DigestMutation& mutation : kDigestMutations) {
+    const std::string& base = mutation.in_input ? base_input : base_application;
+    CHECK(base.find(mutation.from) != std::string::npos);
+    const TemporaryConfig mutated(
+        mutation.in_input ? ValidInputAfter(mutation.from, mutation.to)
+                          : ValidApplicationAfter(mutation.from, mutation.to));
+    const ApplicationConfig mutated_config =
+        LoadApplicationConfig(mutated.path());
+    CHECK(mutated_config.application_config_id != config.application_config_id);
+    CHECK(mutated_config.runtime_config_id() == config.runtime_config_id());
+  }
+
   // A runtime-only command line override reaches the runtime digest and leaves
   // the application digest alone.
   const ApplicationConfig overridden =
@@ -407,16 +458,19 @@ int main() {
                             "\"target_position\": []"),
       initialization + ".target_position"));
 
-  // Gains are finite and non-negative; an initialization joint additionally
-  // needs kp > 0 to hold position. That last rule is initialization-only: this
-  // contract has no tracking gains, so no generic Tracking assertion is added
-  // here.
+  // Gains are non-negative; an initialization joint additionally needs kp > 0
+  // to hold position. That last rule is initialization-only: this contract has
+  // no tracking gains, so no generic Tracking assertion is added here.
   CHECK(ThrowsAt(ValidApplicationAfter("\"kp\": 10.0", "\"kp\": -1.0"),
                  gains + ".test_left.kp"));
   CHECK(ThrowsAt(ValidApplicationAfter("\"kd\": 1.0", "\"kd\": -1.0"),
                  gains + ".test_left.kd"));
+  // A non-number value exercises the type half of the same check.
   CHECK(ThrowsAt(ValidApplicationAfter("\"kp\": 10.0", "\"kp\": \"10\""),
                  gains + ".test_left.kp"));
+  // JSON cannot express a non-finite number, so an overflowing literal is
+  // rejected by the document parse at `$`; FiniteNumber's "must be finite"
+  // branch is defensive and unreachable from a document.
   CHECK(ThrowsAt(ValidApplicationAfter("\"kp\": 10.0", "\"kp\": 1e400"), "$"));
   CHECK(ThrowsWithMessage(ValidApplicationAfter("\"kp\": 10.0", "\"kp\": 0.0"),
                           gains + ".test_left.kp", "position"));
@@ -428,6 +482,36 @@ int main() {
   CHECK(ThrowsAt(
       ValidApplicationAfter("\"test_left\": -0.5", "\"test_left\": -2.5"),
       initialization + ".target_position.test_left"));
+
+  // The limits themselves are inclusive, kd may be zero (only kp has to hold
+  // position), and an optional velocity action may stay unbound: its byte is
+  // inert and the digest records that the binding is absent.
+  std::string at_limits_body =
+      ReplaceOnce(std::string(kApplicationBody), "\"test_left\": -0.5",
+                  "\"test_left\": -2");
+  at_limits_body =
+      ReplaceOnce(at_limits_body, "\"test_right\": 0.25", "\"test_right\": 2");
+  const TemporaryConfig at_limits(ValidWithApplication(at_limits_body));
+  const ApplicationConfig at_limits_config =
+      LoadApplicationConfig(at_limits.path());
+  CHECK(at_limits_config.initialization.target_q[0] == -2.0);
+  CHECK(at_limits_config.initialization.target_q[1] == 2.0);
+
+  const TemporaryConfig zero_kd(
+      ValidApplicationAfter("\"kd\": 1.0", "\"kd\": 0.0"));
+  const ApplicationConfig zero_kd_config =
+      LoadApplicationConfig(zero_kd.path());
+  CHECK(zero_kd_config.initialization.gains.kd[0] == 0.0);
+
+  const TemporaryConfig unbound_velocity(ValidWithInput(InputBody(ReplaceOnce(
+      std::string(kBindings), ",\n    \"velocity_yaw_right\": \"e\"", ""))));
+  const ApplicationConfig unbound_velocity_config =
+      LoadApplicationConfig(unbound_velocity.path());
+  CHECK(unbound_velocity_config.input.actions['e'] == InputAction::None);
+  CHECK(unbound_velocity_config.input.actions['q'] ==
+        InputAction::VelocityYawLeft);
+  CHECK(unbound_velocity_config.application_config_id !=
+        config.application_config_id);
 
   // Trajectory: positive duration, positive tolerances, positive stable window
   // and a deadline beyond the duration.

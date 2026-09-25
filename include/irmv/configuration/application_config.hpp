@@ -20,13 +20,14 @@ struct InitializationGains {
 };
 
 // One initialization move: how long it may take, how close to the target the
-// move must be to count as finished, and how long that closeness must hold.
+// move must be to count as finished, how long that closeness must hold, and a
+// final bound on the whole move that must exceed the duration.
 struct TrajectoryConfig {
   protocol::TimeUs duration_us{0};
   double position_tolerance{0.0};  // rad
   double velocity_tolerance{0.0};  // rad/s
   protocol::TimeUs stable_window_us{0};
-  protocol::TimeUs deadline_us{0};
+  protocol::TimeUs deadline_us{0};  // final bound; must exceed duration_us
 };
 
 struct InitializationConfig {

@@ -16,9 +16,11 @@
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "irmv/configuration/config.hpp"
+#include "irmv/protocol/types.hpp"
 
 namespace irmv::configuration::detail {
 
