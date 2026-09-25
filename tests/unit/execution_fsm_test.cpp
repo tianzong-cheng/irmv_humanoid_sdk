@@ -1862,13 +1862,13 @@ struct StopStartTick {
 };
 
 StopStartTick SendStopAndStart(RuntimeFixture &f, Operation stop_operation,
-                              Sequence stop_id, Sequence start_id,
-                              Id start_producer) {
+                               Sequence stop_id, Sequence start_id,
+                               Id start_producer) {
   const Sequence epoch = f.state().epoch;
   const ExecutionRequest stop = f.MakeRequest(stop_operation, stop_id);
-  const ExecutionRequest start = f.MakeRequest(
-      Operation::Tracking, start_id, start_producer,
-      irmv::test::FixtureSupervisorId(), epoch + 1, epoch + 2);
+  const ExecutionRequest start =
+      f.MakeRequest(Operation::Tracking, start_id, start_producer,
+                    irmv::test::FixtureSupervisorId(), epoch + 1, epoch + 2);
   f.QueueRequest(start);
   f.QueueRequest(stop, 0, true);
   f.Step();
@@ -1890,9 +1890,8 @@ int CheckSameTickStopBeatsStart() {
   CHECK(f.StartTracking().applied());
   const Sequence epoch = f.state().epoch;
 
-  const StopStartTick damping_stop =
-      SendStopAndStart(f, Operation::Damping, 200, 201,
-                       irmv::test::FixtureSecondProducerId());
+  const StopStartTick damping_stop = SendStopAndStart(
+      f, Operation::Damping, 200, 201, irmv::test::FixtureSecondProducerId());
   CHECK(damping_stop.stop.applied());
   CHECK(damping_stop.stop.execution_state == kDamping);
   CHECK(damping_stop.start.rejected());
@@ -1906,9 +1905,9 @@ int CheckSameTickStopBeatsStart() {
 
   // The rule owns one tick only: the same frame with a newer request id is
   // authorized on the next tick, without an extra Damping excursion.
-  ExecutionRequest retry = f.MakeRequest(
-      Operation::Tracking, damping_stop.start_id + 1,
-      irmv::test::FixtureSecondProducerId());
+  ExecutionRequest retry =
+      f.MakeRequest(Operation::Tracking, damping_stop.start_id + 1,
+                    irmv::test::FixtureSecondProducerId());
   const FixtureResult retry_result = f.Send(retry);
   CHECK(retry_result.applied());
   CHECK(f.state().execution_state == kTracking);
@@ -1916,9 +1915,8 @@ int CheckSameTickStopBeatsStart() {
 
   // A ZeroTorque stop of the same tick wins in the same way and leaves the
   // machine at zero torque.
-  const StopStartTick zero_stop =
-      SendStopAndStart(f, Operation::ZeroTorque, 210, 211,
-                       irmv::test::FixtureProducerId());
+  const StopStartTick zero_stop = SendStopAndStart(
+      f, Operation::ZeroTorque, 210, 211, irmv::test::FixtureProducerId());
   CHECK(zero_stop.stop.applied());
   CHECK(zero_stop.start.rejected());
   CHECK(zero_stop.start.reason == RejectReason::InvalidTransition);
@@ -1982,9 +1980,9 @@ int CheckRefusedStopDoesNotOwnTheTick() {
   // A foreign supervisor's stop in the stop lane is refused; the owner's start
   // in the ordinary lane of the same tick is authorized.
   {
-    ExecutionRequest foreign = f.MakeRequest(
-        Operation::Damping, 300, irmv::test::FixtureProducerId(),
-        irmv::test::FixtureOtherSupervisorId());
+    ExecutionRequest foreign =
+        f.MakeRequest(Operation::Damping, 300, irmv::test::FixtureProducerId(),
+                      irmv::test::FixtureOtherSupervisorId());
     const ExecutionRequest start = f.MakeRequest(
         Operation::Tracking, 301, irmv::test::FixtureSecondProducerId(),
         irmv::test::FixtureSupervisorId(), epoch, epoch + 1);
@@ -2008,9 +2006,9 @@ int CheckRefusedStopDoesNotOwnTheTick() {
   // A stop that was already applied in an earlier tick is answered from the
   // record when it is replayed, so it does not own the replaying tick either.
   {
-    const ExecutionRequest stop = f.MakeRequest(
-        Operation::Damping, 310, irmv::test::FixtureProducerId(),
-        irmv::test::FixtureSupervisorId());
+    const ExecutionRequest stop =
+        f.MakeRequest(Operation::Damping, 310, irmv::test::FixtureProducerId(),
+                      irmv::test::FixtureSupervisorId());
     const FixtureResult applied = f.Send(stop, true);
     CHECK(applied.applied());
     CHECK(f.state().execution_state == kDamping);
@@ -2024,7 +2022,8 @@ int CheckRefusedStopDoesNotOwnTheTick() {
     f.QueueRequest(stop, 0, true);
     f.Step();
     const TickResult &tick = f.last_tick();
-    const FixtureResult replay = RuntimeFixture::ResultFor(tick, stop.request_id);
+    const FixtureResult replay =
+        RuntimeFixture::ResultFor(tick, stop.request_id);
     CHECK(replay.applied());
     CHECK(replay.stamp_us == applied_stamp);
     const FixtureResult start_result =
@@ -2059,10 +2058,11 @@ int CheckSameProducerNewEpoch() {
   // expected watermark E and proposed epoch E + 2. The moved target is a dyadic
   // fraction, so the expected torque is exact.
   constexpr double kMovedDelta = 0.0625;
-  const double expected_torque = 1.0 * kMovedDelta + 0.5 * (0.0 - irmv::test::kFixtureDq[0]);
-  ExecutionRequest next = f.MakeRequest(
-      Operation::Tracking, irmv::test::kAutoSequence, producer,
-      irmv::test::FixtureSupervisorId(), epoch, epoch + 2);
+  const double expected_torque =
+      1.0 * kMovedDelta + 0.5 * (0.0 - irmv::test::kFixtureDq[0]);
+  ExecutionRequest next =
+      f.MakeRequest(Operation::Tracking, irmv::test::kAutoSequence, producer,
+                    irmv::test::FixtureSupervisorId(), epoch, epoch + 2);
   next.first_command.joints.q[0] += kMovedDelta;
   const FixtureResult next_result = f.Send(next);
   CHECK(next_result.applied());
@@ -2096,17 +2096,17 @@ int CheckSameProducerNewEpoch() {
   // Rejected switches: a repeated epoch, a discontinuous frame and an expired
   // source state.
   {
-    ExecutionRequest same_epoch = f.MakeRequest(
-        Operation::Tracking, irmv::test::kAutoSequence, producer,
-        irmv::test::FixtureSupervisorId(), epoch + 2, epoch + 2);
+    ExecutionRequest same_epoch =
+        f.MakeRequest(Operation::Tracking, irmv::test::kAutoSequence, producer,
+                      irmv::test::FixtureSupervisorId(), epoch + 2, epoch + 2);
     FixtureResult result = f.Send(same_epoch);
     CHECK(result.rejected());
     CHECK(result.reason == RejectReason::EpochMismatch);
   }
   {
-    ExecutionRequest jump = f.MakeRequest(
-        Operation::Tracking, irmv::test::kAutoSequence, producer,
-        irmv::test::FixtureSupervisorId(), epoch + 2, epoch + 3);
+    ExecutionRequest jump =
+        f.MakeRequest(Operation::Tracking, irmv::test::kAutoSequence, producer,
+                      irmv::test::FixtureSupervisorId(), epoch + 2, epoch + 3);
     jump.first_command.joints.q[0] += 0.2;
     const FixtureResult result = f.Send(jump);
     CHECK(result.rejected());
@@ -2114,9 +2114,9 @@ int CheckSameProducerNewEpoch() {
   }
   {
     f.SetSourceStateLagTicks(100);
-    ExecutionRequest old_source = f.MakeRequest(
-        Operation::Tracking, irmv::test::kAutoSequence, producer,
-        irmv::test::FixtureSupervisorId(), epoch + 2, epoch + 3);
+    ExecutionRequest old_source =
+        f.MakeRequest(Operation::Tracking, irmv::test::kAutoSequence, producer,
+                      irmv::test::FixtureSupervisorId(), epoch + 2, epoch + 3);
     const FixtureResult result = f.Send(old_source);
     f.SetSourceStateLagTicks(1);
     CHECK(result.rejected());

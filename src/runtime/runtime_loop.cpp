@@ -40,8 +40,7 @@ using Clock = std::chrono::steady_clock;
 // band is a hard bound: whatever does not fit is dropped, and a truncated line
 // is never reported as written.
 void StderrLine(std::string_view text) {
-  static_cast<void>(
-      telemetry::WriteDiagnosticBounded(::fileno(stderr), text));
+  static_cast<void>(telemetry::WriteDiagnosticBounded(::fileno(stderr), text));
 }
 
 // Same, for diagnostics with arguments. The line is rendered on the stack and
@@ -53,8 +52,8 @@ void StderrFormat(const char *format, Args... args) {
   if (length <= 0) {
     return;
   }
-  const std::size_t size = std::min<std::size_t>(
-      static_cast<std::size_t>(length), line.size() - 1);
+  const std::size_t size =
+      std::min<std::size_t>(static_cast<std::size_t>(length), line.size() - 1);
   StderrLine(std::string_view(line.data(), size));
 }
 
@@ -1448,27 +1447,32 @@ class ShutdownPlanner {
       case Notice::None:
         return;
       case Notice::Boot:
-        StderrLine("robot_runtime: exit requested during the startup "
-                   "self-check; waiting for ZeroTorque\n");
+        StderrLine(
+            "robot_runtime: exit requested during the startup "
+            "self-check; waiting for ZeroTorque\n");
         return;
       case Notice::Motion:
-        StderrLine("robot_runtime: exit requested while motion may be "
-                   "authorized; ZeroTorque stop requested, an explicit "
-                   "ZeroTorque confirmation is still required\n");
+        StderrLine(
+            "robot_runtime: exit requested while motion may be "
+            "authorized; ZeroTorque stop requested, an explicit "
+            "ZeroTorque confirmation is still required\n");
         return;
       case Notice::MotionWithoutSession:
-        StderrLine("robot_runtime: exit requested while damping holds "
-                   "without a supervision session; no request path is "
-                   "available, an explicit ZeroTorque confirmation is still "
-                   "required\n");
+        StderrLine(
+            "robot_runtime: exit requested while damping holds "
+            "without a supervision session; no request path is "
+            "available, an explicit ZeroTorque confirmation is still "
+            "required\n");
         return;
       case Notice::Fault:
-        StderrLine("robot_runtime: exit requested with a latched fault; a "
-                   "Reset is required, the fault is not cleared\n");
+        StderrLine(
+            "robot_runtime: exit requested with a latched fault; a "
+            "Reset is required, the fault is not cleared\n");
         return;
       case Notice::WriteRefused:
-        StderrLine("robot_runtime: exit requested but the torque write of "
-                   "this tick was not accepted; not exiting\n");
+        StderrLine(
+            "robot_runtime: exit requested but the torque write of "
+            "this tick was not accepted; not exiting\n");
         return;
     }
   }
@@ -1582,9 +1586,10 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
   // this is the second, explicit gate: nothing touches a device or DDS before
   // it passed, and `--fake-scenario` therefore can only reach a fake backend.
   if (config.backend != "fake") {
-    StderrFormat("robot_runtime: backend \"%s\" is not supported; only the "
-                 "fake backend can be started\n",
-                 config.backend.c_str());
+    StderrFormat(
+        "robot_runtime: backend \"%s\" is not supported; only the "
+        "fake backend can be started\n",
+        config.backend.c_str());
     return kExitStartupError;
   }
 

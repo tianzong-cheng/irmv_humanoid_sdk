@@ -1,7 +1,5 @@
 #include "irmv/telemetry/logger.hpp"
 
-#include "irmv/telemetry/diagnostic_write.hpp"
-
 #include <unistd.h>
 
 #include <algorithm>
@@ -17,6 +15,8 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+#include "irmv/telemetry/diagnostic_write.hpp"
 
 namespace irmv::telemetry {
 namespace {
@@ -162,16 +162,15 @@ bool RotatingFileSink::ReportError(std::string_view what,
   error_reported_ = true;
   const std::string message = error ? error.message() : std::string();
   std::array<char, 512> line{};
-  const int length = std::snprintf(
-      line.data(), line.size(), "irmv logger: %.*s: %s%s%s\n",
-      static_cast<int>(what.size()), what.data(), path_.string().c_str(),
-      error ? ": " : "", message.c_str());
+  const int length =
+      std::snprintf(line.data(), line.size(), "irmv logger: %.*s: %s%s%s\n",
+                    static_cast<int>(what.size()), what.data(),
+                    path_.string().c_str(), error ? ": " : "", message.c_str());
   if (length > 0) {
     const std::size_t size = std::min<std::size_t>(
         static_cast<std::size_t>(length), line.size() - 1);
-    static_cast<void>(WriteDiagnosticBlocking(::fileno(stderr),
-                                              std::string_view(line.data(),
-                                                               size)));
+    static_cast<void>(WriteDiagnosticBlocking(
+        ::fileno(stderr), std::string_view(line.data(), size)));
   }
   return false;
 }
@@ -263,8 +262,8 @@ bool RotatingFileSink::Write(const LogEvent &event) {
   // exit path's lines: the worker may park on a jammed pipe, and that parking
   // must never make those lines block behind it or split a pipe it only partly
   // fills.
-  const bool reportable = WriteDiagnosticBlocking(
-      ::fileno(stderr), std::string_view(line, length));
+  const bool reportable =
+      WriteDiagnosticBlocking(::fileno(stderr), std::string_view(line, length));
   const bool stored =
       OpenIfNeeded() && RotateIfNeeded(length) && AppendLine(line, length);
   return reportable && stored;
