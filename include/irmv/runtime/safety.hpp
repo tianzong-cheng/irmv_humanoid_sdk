@@ -10,6 +10,11 @@ namespace irmv::runtime {
 struct SafetyReport {
   bool healthy{false};
   bool fault{false};
+  // The snapshot carries no observation at all for at least one required
+  // sample inside the boot grace window, so this report is neither a fault nor
+  // healthy: startup has to wait, keep commanding zero torque, and fault when
+  // the configured grace/startup limit expires.
+  bool awaiting_feedback{false};
   bool stale_feedback{false};
   bool frequency_low{false};
   bool feedback_invalid{false};
@@ -41,6 +46,15 @@ protocol::ValidationResult ValidateTrackingCommand(
 // timeouts. Inside the boot grace window stale samples and low control
 // frequency are recorded but not treated as faults; already observed invalid
 // samples, driver errors, position and velocity violations always fault.
+//
+// A sample that has never been observed - the all-default sample of a backend
+// that has not delivered a frame yet - is neither a fault nor healthy inside
+// the grace window: absence is no observation, so it cannot satisfy a startup
+// check and the report sets awaiting_feedback with healthy false while the
+// caller keeps commanding zero torque. The boot deadline/startup limit stays
+// the backstop: once the grace window has closed an absent sample faults
+// exactly like invalid feedback, so a machine that never receives a frame
+// still faults. The same rule applies to the required IMU.
 SafetyReport CheckFeedback(const configuration::RuntimeConfig &config,
                            const protocol::FeedbackSnapshot &feedback,
                            protocol::TimeUs now_us, bool boot_grace);

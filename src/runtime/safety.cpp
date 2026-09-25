@@ -47,6 +47,16 @@ bool IsJointSampleFinite(const protocol::JointFeedback &joint) {
          std::isfinite(joint.tau_est) && std::isfinite(joint.freq_hz);
 }
 
+// A sample carries no observation at all when the backend has never delivered
+// a frame for it: unobserved and unconnected, no receive stamp and no driver
+// status. The values must still be finite so garbage is never read as absence.
+// Zero-valued defaults therefore stay distinguishable from a measurement of
+// zero, which is why absence is neither healthy nor faulty.
+bool IsJointSampleAbsent(const protocol::JointFeedback &joint) {
+  return !joint.valid && !joint.connected && joint.rx_stamp_us == 0 &&
+         joint.error_code == 0 && IsJointSampleFinite(joint);
+}
+
 bool IsImuSampleFinite(const protocol::ImuFeedback &imu) {
   for (const double value : imu.orientation_rpy) {
     if (!std::isfinite(value)) {
@@ -64,6 +74,12 @@ bool IsImuSampleFinite(const protocol::ImuFeedback &imu) {
     }
   }
   return true;
+}
+
+// The IMU has no connection flag, so absence is the unobserved sample with no
+// receive stamp and finite fields.
+bool IsImuSampleAbsent(const protocol::ImuFeedback &imu) {
+  return !imu.valid && imu.rx_stamp_us == 0 && IsImuSampleFinite(imu);
 }
 
 // A timestamp from the future is as unusable as one older than the configured
@@ -128,6 +144,17 @@ SafetyReport CheckFeedback(const configuration::RuntimeConfig &config,
     const protocol::JointFeedback &joint = feedback.joints[index];
     const std::uint32_t joint_index = static_cast<std::uint32_t>(index);
 
+    // Inside the boot grace window a sample that was never observed is
+    // "waiting", not faulty and not healthy: there is no measurement to judge,
+    // so its signal integrity, staleness, control frequency, position and
+    // velocity are all skipped and its zero-valued defaults are never read as
+    // observations. The boot deadline stays the backstop, because outside the
+    // window an absent sample faults like any other invalid feedback.
+    if (boot_grace && IsJointSampleAbsent(joint)) {
+      report.awaiting_feedback = true;
+      continue;
+    }
+
     if (!joint.valid || !joint.connected || !IsJointSampleFinite(joint)) {
       report.feedback_invalid = true;
       fault = true;
@@ -171,6 +198,9 @@ SafetyReport CheckFeedback(const configuration::RuntimeConfig &config,
   // Pass B: position limits.
   for (std::size_t index = 0; index < joint_count; ++index) {
     const protocol::JointFeedback &joint = feedback.joints[index];
+    if (boot_grace && IsJointSampleAbsent(joint)) {
+      continue;
+    }
     if (joint.q < config.position_min[index] ||
         joint.q > config.position_max[index]) {
       report.position_exceeded = true;
@@ -190,6 +220,9 @@ SafetyReport CheckFeedback(const configuration::RuntimeConfig &config,
   // velocities are still compared instead of being treated as zero.
   for (std::size_t index = 0; index < joint_count; ++index) {
     const protocol::JointFeedback &joint = feedback.joints[index];
+    if (boot_grace && IsJointSampleAbsent(joint)) {
+      continue;
+    }
     const double limit = config.joint_velocity_limits[index];
     if (!(std::abs(joint.dq) <= limit)) {
       report.velocity_exceeded = true;
@@ -204,25 +237,34 @@ SafetyReport CheckFeedback(const configuration::RuntimeConfig &config,
 
   if (config.imu_required) {
     const protocol::ImuFeedback &imu = feedback.imu;
-    const bool imu_invalid = !imu.valid || !IsImuSampleFinite(imu) ||
-                             (!boot_grace && IsStale(imu.rx_stamp_us, now_us,
-                                                     config.timeouts.imu_us));
-    if (imu_invalid) {
-      report.imu_invalid = true;
-      fault = true;
-      RaiseReason(&reason, protocol::FaultReason::ImuInvalid);
-      AppendDetail(&report.details, protocol::FaultReason::ImuInvalid,
-                   protocol::kNoJointIndex, 0, 0.0, 0.0, imu.rx_stamp_us,
-                   "imu feedback invalid");
+    if (boot_grace && IsImuSampleAbsent(imu)) {
+      // An IMU that has never delivered a sample is waiting, exactly like an
+      // absent joint; an observed invalid or stale IMU keeps faulting.
+      report.awaiting_feedback = true;
+    } else {
+      const bool imu_invalid = !imu.valid || !IsImuSampleFinite(imu) ||
+                               (!boot_grace && IsStale(imu.rx_stamp_us, now_us,
+                                                       config.timeouts.imu_us));
+      if (imu_invalid) {
+        report.imu_invalid = true;
+        fault = true;
+        RaiseReason(&reason, protocol::FaultReason::ImuInvalid);
+        AppendDetail(&report.details, protocol::FaultReason::ImuInvalid,
+                     protocol::kNoJointIndex, 0, 0.0, 0.0, imu.rx_stamp_us,
+                     "imu feedback invalid");
+      }
     }
   }
 
   report.fault = fault;
-  report.healthy = !fault;
+  // Waiting for a first frame is neither healthy (the machine is not verified
+  // yet) nor faulty (nothing was observed to judge), so the caller keeps
+  // commanding zero torque until the grace window or boot deadline expires.
+  report.healthy = !fault && !report.awaiting_feedback;
   report.reason = reason;
-  report.damping_eligible = fault && !report.feedback_invalid &&
-                            !report.stale_feedback && !report.frequency_low &&
-                            !report.driver_error;
+  report.damping_eligible =
+      fault && !report.awaiting_feedback && !report.feedback_invalid &&
+      !report.stale_feedback && !report.frequency_low && !report.driver_error;
 
   const protocol::OutputAction action =
       report.damping_eligible ? protocol::OutputAction::Damping

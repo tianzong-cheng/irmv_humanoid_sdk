@@ -236,7 +236,9 @@ void ExecutionFsm::PublishState(TickScope &scope) {
   state.stop_reason = stop_reason_;
   state.fault_id = fault_id_;
   state.last_applied_command_seq = last_applied_command_seq_;
-  state.healthy = !scope.report->fault;
+  // The published health is the report's own verdict: a machine that is still
+  // waiting for its first feedback frame is neither faulty nor healthy.
+  state.healthy = scope.report->healthy;
   state.damping_eligible = state_ == protocol::ExecutionState::Fault
                                ? fault_damping_eligible_
                                : scope.report->damping_eligible;

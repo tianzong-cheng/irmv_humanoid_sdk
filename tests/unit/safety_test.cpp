@@ -7,6 +7,7 @@
 #include <string>
 
 #include "irmv/configuration/config.hpp"
+#include "irmv/hardware/fake_backend.hpp"
 #include "irmv/protocol/types.hpp"
 #include "support/check.hpp"
 
@@ -55,6 +56,15 @@ FeedbackSnapshot HealthyFeedback(const RuntimeConfig &config) {
   feedback.imu.angular_velocity = {0.0, 0.0, 0.0};
   feedback.imu.linear_acceleration = {0.0, 0.0, 9.81};
   feedback.imu.rx_stamp_us = kFreshUs;
+  return feedback;
+}
+
+// A backend that has never delivered a frame reports the configured joint
+// count with every sample still at its all-default value: unobserved,
+// unconnected, no receive stamp and no driver status.
+FeedbackSnapshot AbsentFeedback(const RuntimeConfig &config) {
+  FeedbackSnapshot feedback;
+  feedback.count = static_cast<std::uint32_t>(config.joint_count());
   return feedback;
 }
 
@@ -127,6 +137,7 @@ int main() {
   SafetyReport report = CheckFeedback(config, feedback, kNowUs, false);
   CHECK(report.healthy);
   CHECK(!report.fault);
+  CHECK(!report.awaiting_feedback);
   CHECK(!report.stale_feedback);
   CHECK(!report.frequency_low);
   CHECK(!report.feedback_invalid);
@@ -213,13 +224,121 @@ int main() {
   CHECK(report.fault);
   CHECK(report.feedback_invalid);
 
-  // An invalid sample is never excused by the boot grace window.
+  // An observed disconnection (valid=false while still connected) and a
+  // non-finite value are observations, so the boot grace window never excuses
+  // them and they are not "waiting for feedback".
   feedback = HealthyFeedback(config);
   feedback.joints[0].valid = false;
   report = CheckFeedback(config, feedback, kNowUs, true);
   CHECK(report.fault);
   CHECK(report.feedback_invalid);
   CHECK(!report.damping_eligible);
+  CHECK(!report.awaiting_feedback);
+
+  feedback = HealthyFeedback(config);
+  feedback.joints[0].connected = false;
+  report = CheckFeedback(config, feedback, kNowUs, true);
+  CHECK(report.fault);
+  CHECK(report.feedback_invalid);
+  CHECK(!report.awaiting_feedback);
+
+  feedback = HealthyFeedback(config);
+  feedback.joints[0].valid = true;
+  feedback.joints[0].q = kNaN;
+  report = CheckFeedback(config, feedback, kNowUs, true);
+  CHECK(report.fault);
+  CHECK(report.feedback_invalid);
+  CHECK(!report.awaiting_feedback);
+
+  // ---- CheckFeedback: boot grace waiting for a first frame ----
+  // A freshly initialized backend returns a snapshot with the right joint
+  // count and no observation at all. Inside the grace window that is waiting,
+  // not faulty and not healthy: the zero-valued defaults are not a
+  // measurement, so no observed-sample flag may be raised from them.
+  feedback = AbsentFeedback(config);
+  report = CheckFeedback(config, feedback, kNowUs, true);
+  CHECK(!report.fault);
+  CHECK(!report.healthy);
+  CHECK(report.awaiting_feedback);
+  CHECK(!report.stale_feedback);
+  CHECK(!report.frequency_low);
+  CHECK(!report.feedback_invalid);
+  CHECK(!report.driver_error);
+  CHECK(!report.position_exceeded);
+  CHECK(!report.velocity_exceeded);
+  CHECK(!report.imu_invalid);
+  CHECK(!report.damping_eligible);
+  CHECK(report.reason == FaultReason::None);
+  CHECK(report.details.count == 0);
+
+  // The same snapshot outside the grace window is invalid feedback: a machine
+  // that never receives a frame faults at the configured startup limit.
+  report = CheckFeedback(config, feedback, kNowUs, false);
+  CHECK(report.fault);
+  CHECK(!report.healthy);
+  CHECK(report.feedback_invalid);
+  CHECK(!report.awaiting_feedback);
+  CHECK(report.reason == FaultReason::FeedbackInvalid);
+  CHECK(FindDetail(report.details, FaultReason::FeedbackInvalid, 0) != nullptr);
+
+  // A driver error is a status the driver reported, so an unobserved sample
+  // carrying one is not "absent": it faults at once inside the grace window.
+  // Its invalid-feedback detail outranks the driver error, exactly as it does
+  // outside the window.
+  feedback = HealthyFeedback(config);
+  feedback.joints[1] = irmv::protocol::JointFeedback{};
+  feedback.joints[1].error_code = 7;
+  report = CheckFeedback(config, feedback, kNowUs, true);
+  CHECK(report.fault);
+  CHECK(report.driver_error);
+  CHECK(report.feedback_invalid);
+  CHECK(report.reason == FaultReason::FeedbackInvalid);
+  CHECK(!report.awaiting_feedback);
+  const FaultDetail *boot_driver =
+      FindDetail(report.details, FaultReason::DriverError, 1);
+  CHECK(boot_driver != nullptr);
+  CHECK(boot_driver->error_code == 7);
+
+  // A non-finite value is never absence either; the sample was observed as
+  // garbage and faults at once.
+  feedback = HealthyFeedback(config);
+  feedback.joints[1] = irmv::protocol::JointFeedback{};
+  feedback.joints[1].q = kInf;
+  report = CheckFeedback(config, feedback, kNowUs, true);
+  CHECK(report.fault);
+  CHECK(report.feedback_invalid);
+  CHECK(!report.awaiting_feedback);
+
+  // A healthy snapshot inside the grace window really is healthy: nothing is
+  // waiting anymore.
+  feedback = HealthyFeedback(config);
+  report = CheckFeedback(config, feedback, kNowUs, true);
+  CHECK(report.healthy);
+  CHECK(!report.fault);
+  CHECK(!report.awaiting_feedback);
+  CHECK(report.details.count == 0);
+
+  // The real backend at boot: Initialize() leaves a snapshot with the
+  // configured joint count and no observation whatsoever, so the first ticks
+  // of the grace window must wait instead of latching a fault.
+  irmv::hardware::FakeBackend boot_backend(config);
+  boot_backend.Initialize();
+  const FeedbackSnapshot boot_feedback = boot_backend.Read(kNowUs);
+  CHECK(boot_feedback.count == config.joint_count());
+  report = CheckFeedback(config, boot_feedback, kNowUs, true);
+  CHECK(!report.fault);
+  CHECK(!report.healthy);
+  CHECK(report.awaiting_feedback);
+  CHECK(report.reason == FaultReason::None);
+  CHECK(report.details.count == 0);
+  CHECK(!report.damping_eligible);
+
+  // Once the grace window has expired the same never-observed snapshot faults
+  // like any other invalid feedback.
+  report = CheckFeedback(config, boot_feedback, kNowUs, false);
+  CHECK(report.fault);
+  CHECK(report.feedback_invalid);
+  CHECK(!report.awaiting_feedback);
 
   // ---- CheckFeedback: freshness ----
   feedback = HealthyFeedback(config);
@@ -365,6 +484,7 @@ int main() {
   report = CheckFeedback(config, feedback, kNowUs, true);
   CHECK(report.fault);
   CHECK(report.position_exceeded);
+  CHECK(!report.awaiting_feedback);
 
   // ---- CheckFeedback: velocity limits ----
   feedback = HealthyFeedback(config);
@@ -427,6 +547,7 @@ int main() {
   report = CheckFeedback(config, feedback, kNowUs, true);
   CHECK(report.fault);
   CHECK(report.velocity_exceeded);
+  CHECK(!report.awaiting_feedback);
 
   // ---- CheckFeedback: IMU ----
   RuntimeConfig imu_config = config;
@@ -480,12 +601,33 @@ int main() {
   report = CheckFeedback(imu_config, feedback, kNowUs, true);
   CHECK(!report.fault);
   CHECK(!report.imu_invalid);
+  CHECK(!report.awaiting_feedback);
 
   feedback = HealthyFeedback(imu_config);
   feedback.imu.valid = false;
   report = CheckFeedback(imu_config, feedback, kNowUs, true);
   CHECK(report.fault);
   CHECK(report.imu_invalid);
+  CHECK(!report.awaiting_feedback);
+
+  // A required IMU that has never delivered a sample is waiting inside the
+  // grace window: no fault, not healthy, and no observed-sample flag.
+  feedback = HealthyFeedback(imu_config);
+  feedback.imu = {};
+  report = CheckFeedback(imu_config, feedback, kNowUs, true);
+  CHECK(!report.fault);
+  CHECK(!report.healthy);
+  CHECK(report.awaiting_feedback);
+  CHECK(!report.imu_invalid);
+  CHECK(report.reason == FaultReason::None);
+  CHECK(report.details.count == 0);
+
+  // Outside the grace window the same absent IMU is invalid feedback.
+  report = CheckFeedback(imu_config, feedback, kNowUs, false);
+  CHECK(report.fault);
+  CHECK(report.imu_invalid);
+  CHECK(!report.awaiting_feedback);
+  CHECK(report.reason == FaultReason::ImuInvalid);
 
   // ---- CheckFeedback: simultaneous offenders and priority ----
   const RuntimeConfig three_joint = ManyJointConfig(3);
