@@ -113,6 +113,35 @@ set_tests_properties(
   WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
+add_library(irmv_application src/application/robot_client.cpp)
+target_compile_features(irmv_application PUBLIC cxx_std_17)
+target_include_directories(
+  irmv_application
+  PUBLIC
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:include>"
+)
+# The application side of the frozen protocol is deliberately DDS-free: it
+# talks to a transport through ClientSink, so this library links the protocol
+# and the configuration and nothing else.
+target_link_libraries(irmv_application PUBLIC irmv_protocol irmv_configuration)
+
+add_executable(robot_client_test tests/unit/robot_client_test.cpp)
+target_compile_features(robot_client_test PRIVATE cxx_std_17)
+target_include_directories(
+  robot_client_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(robot_client_test PRIVATE irmv_application irmv_configuration)
+
+add_test(NAME robot_client_test COMMAND robot_client_test)
+set_tests_properties(
+  robot_client_test PROPERTIES LABELS core
+  WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
 add_library(irmv_hardware src/hardware/fake_backend.cpp)
 target_compile_features(irmv_hardware PUBLIC cxx_std_17)
 target_include_directories(
@@ -263,6 +292,7 @@ idlcxx_generate(
 
 add_library(
   irmv_transport
+  src/transport/client_transport.cpp
   src/transport/codec.cpp
   src/transport/dds_transport.cpp
 )
@@ -348,6 +378,42 @@ set_tests_properties(
   PROPERTIES
     LABELS integration
     TIMEOUT 180
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
+# The official client against a real standalone runtime: the same transport the
+# application ships, driven by hand so the arrival order of an answer and its
+# witness state is deterministic.
+add_executable(application_client_test tests/integration/application_client_test.cpp)
+target_compile_features(application_client_test PRIVATE cxx_std_17)
+target_include_directories(
+  application_client_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(
+  application_client_test
+  PRIVATE
+    irmv_application
+    irmv_transport
+    irmv_configuration
+    irmv_protocol
+    nlohmann_json::nlohmann_json
+    Threads::Threads
+)
+
+add_test(
+  NAME application_client_test
+  COMMAND
+    application_client_test "$<TARGET_FILE:robot_runtime>"
+    "${PROJECT_SOURCE_DIR}"
+)
+set_tests_properties(
+  application_client_test
+  PROPERTIES
+    LABELS integration
+    TIMEOUT 300
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
