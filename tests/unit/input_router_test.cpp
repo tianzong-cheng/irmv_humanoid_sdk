@@ -13,8 +13,6 @@
 
 #include "irmv/application/input_router.hpp"
 
-#include <cstddef>
-#include <cstdint>
 #include <iostream>
 
 #include "irmv/configuration/application_config.hpp"
@@ -144,6 +142,53 @@ int SpacePreemptsOrdinaryKeysOfTheSameBatch() {
   return 0;
 }
 
+// The whole documented order, all seven bound actions pressed at one instant
+// and drained one by one: emergency stop, exit, reset, explicit zero-torque
+// stop, ordinary damping stop, initialize, velocity intent last. Seven distinct
+// events also fill the batch, so the eight slots never truncate one of them.
+int TheBatchDrainsInTheDocumentedOrder() {
+  InputRouter router(Config());
+  CHECK(router.OnKey('w', true, kNowUs) == InputEvent::VelocityIntent);
+  CHECK(router.OnKey('i', true, kNowUs) == InputEvent::Initialize);
+  CHECK(router.OnKey('d', true, kNowUs) == InputEvent::Damping);
+  CHECK(router.OnKey('z', true, kNowUs) == InputEvent::ZeroTorque);
+  CHECK(router.OnKey('r', true, kNowUs) == InputEvent::Reset);
+  CHECK(router.OnKey('x', true, kNowUs) == InputEvent::Exit);
+  CHECK(router.OnKey(' ', true, kNowUs) == InputEvent::EmergencyStop);
+
+  CHECK(router.TakeEvent() == InputEvent::EmergencyStop);
+  CHECK(router.TakeEvent() == InputEvent::Exit);
+  CHECK(router.TakeEvent() == InputEvent::Reset);
+  CHECK(router.TakeEvent() == InputEvent::ZeroTorque);
+  CHECK(router.TakeEvent() == InputEvent::Damping);
+  CHECK(router.TakeEvent() == InputEvent::Initialize);
+  CHECK(router.TakeEvent() == InputEvent::VelocityIntent);
+  CHECK(router.TakeEvent() == InputEvent::None);
+  return 0;
+}
+
+// The guard arithmetic, on the two ends a terminal can actually produce: the
+// very first press of a byte is unguarded even below the guard (nothing was
+// seen yet), and a guard of one microsecond still suppresses a repeat in the
+// same microsecond while a byte one microsecond later is a real re-press.
+int TheRepeatGuardCountsFromTheLastSeenByte() {
+  InputRouter fresh(Config());
+  CHECK(GuardUs() > 1);
+  CHECK(fresh.OnKey('d', true, GuardUs() - 1) == InputEvent::Damping);
+  CHECK(fresh.TakeEvent() == InputEvent::Damping);
+  CHECK(fresh.TakeEvent() == InputEvent::None);
+
+  ApplicationConfig tight_config = Config();
+  tight_config.input.repeat_guard_us = 1;
+  InputRouter tight(tight_config);
+  CHECK(tight.OnKey('d', true, 0) == InputEvent::Damping);
+  CHECK(tight.OnKey('d', true, 0) == InputEvent::None);  // the same microsecond
+  CHECK(tight.OnKey('d', true, 1) == InputEvent::Damping);
+  CHECK(tight.TakeEvent() == InputEvent::Damping);
+  CHECK(tight.TakeEvent() == InputEvent::None);
+  return 0;
+}
+
 // A device that can report a release must not turn the release of the reserved
 // emergency-stop key into anything at all, least of all a Reset.
 int ReleasingSpaceIsNotAReset() {
@@ -159,7 +204,6 @@ int ReleasingSpaceIsNotAReset() {
   CHECK(router.OnKey('r', true, kNowUs + 2) == InputEvent::Reset);
   CHECK(router.TakeEvent() == InputEvent::Reset);
   CHECK(router.TakeEvent() == InputEvent::None);
-  CHECK(InputEvent::Reset != InputEvent::EmergencyStop);
   return 0;
 }
 
@@ -193,7 +237,8 @@ int NoNewKeyIsNotAnInputLoss() {
 }
 
 // EOF or a terminal error asks for the orderly exit, never for the emergency
-// stop, and it is reported once.
+// stop. The request is coalesced per batch: draining it and reporting the loss
+// again raises it again.
 int InputLostAsksForTheExit() {
   InputRouter router(Config());
 
@@ -201,12 +246,10 @@ int InputLostAsksForTheExit() {
   CHECK(router.input_lost());
   CHECK(router.TakeEvent() == InputEvent::Exit);
   CHECK(router.TakeEvent() == InputEvent::None);
-  CHECK(InputEvent::Exit != InputEvent::EmergencyStop);
-  CHECK(InputEvent::Exit != InputEvent::Reset);
 
-  // Reporting it again keeps the latch and asks again: the router raises the
-  // request it was told to raise, and the FSM's exit path is idempotent, so a
-  // repeated report is harmless.
+  // Reporting it again keeps the latch and asks again: the request is coalesced
+  // per batch only, so once the batch above was drained a second lost-device
+  // report raises a second Exit.
   router.OnInputLost();
   CHECK(router.input_lost());
   CHECK(router.TakeEvent() == InputEvent::Exit);
@@ -330,8 +373,6 @@ int VelocityIntentTracksTheHeldAxes() {
 // An explicit zero-torque stop and an ordinary damping stop are two different
 // events, and neither of them touches the intent or the loss latch.
 int ZeroTorqueAndDampingStopsAreDistinct() {
-  CHECK(InputEvent::ZeroTorque != InputEvent::Damping);
-
   InputRouter router(Config());
   CHECK(router.OnKey('z', true, kNowUs) == InputEvent::ZeroTorque);
   CHECK(router.OnKey('d', true, kNowUs) == InputEvent::Damping);
@@ -364,6 +405,8 @@ int main() {
   failures += OnePressRaisesExactlyOneEvent();
   failures += RepeatGuardSuppressesAHeldKey();
   failures += SpacePreemptsOrdinaryKeysOfTheSameBatch();
+  failures += TheBatchDrainsInTheDocumentedOrder();
+  failures += TheRepeatGuardCountsFromTheLastSeenByte();
   failures += ReleasingSpaceIsNotAReset();
   failures += NoNewKeyIsNotAnInputLoss();
   failures += InputLostAsksForTheExit();

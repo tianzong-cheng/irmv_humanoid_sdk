@@ -181,6 +181,9 @@ void InputRouter::Push(InputEvent event) {
       return;
     }
   }
+  // Dedupe caps the batch at the seven distinct events, so this capacity guard
+  // is unreachable by construction: it is the boundary the fixed array needs,
+  // not a case the router can reach.
   if (batch_size_ < kBatchCapacity) {
     batch_[batch_size_] = event;
     ++batch_size_;

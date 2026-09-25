@@ -15,8 +15,10 @@ namespace irmv::application {
 // intent.
 //
 // The enumerator order is frozen: the behaviour FSM switches on these values,
-// the router's batch priority is derived from them, and a reordering would
-// silently change both.
+// so inserting or reordering one changes the meaning of a value already
+// written down. The order is *not* the router's batch priority: that one is
+// explicit in TakeEvent() through Priority() (emergency stop first, velocity
+// intent last).
 enum class InputEvent {
   None = 0,
   Damping,
@@ -31,6 +33,11 @@ enum class InputEvent {
 // The body-velocity intent the keys currently hold. Each axis is zero or the
 // unit value of the bound key (+1 or -1); the intent is never a ramp and never
 // accumulates, so a held key cannot drive an unbounded command.
+//
+// Releasing either direction key of one axis clears that axis (the two keys of
+// an axis are one component, so releasing the one that is not claimed is a
+// no-op anyway) and refreshes `stamp_us`; the other axes and the deadline the
+// held keys keep refreshing are untouched.
 //
 // Units: `forward` and `lateral` are m/s in the body frame (positive forward,
 // positive left), `yaw` is rad/s (positive counter-clockwise). `stamp_us` is
@@ -55,6 +62,12 @@ struct VelocityIntent {
 // terminal adapter), never touches the RobotClient or a joint command, reads no
 // clock, allocates nothing, never throws and has no thread. The keyboard and a
 // future gamepad therefore share this entry point.
+//
+// The caller's clock (`now_us`) must be non-decreasing. A backwards jump is
+// harmless and nothing here defends against it: the repeat guard fails open
+// (the press is raised again) and the intent expires on the spot, because its
+// age underflows past the deadline. Neither is a claim about the machine, and
+// the next key byte restores both.
 //
 // A terminal byte stream has no reliable key-up event, so the router does not
 // claim one: the repeat guard is behavioural idempotence for the one-shot mode
