@@ -12,7 +12,7 @@ says explicitly what no test here proves.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j2
 
-ctest --test-dir build --output-on-failure          # everything (22 tests)
+ctest --test-dir build --output-on-failure          # everything (23 tests)
 ctest --test-dir build -L core --output-on-failure  # deterministic core suite
 ctest --test-dir build -L integration --output-on-failure
 ctest --test-dir build -R integration_normal --output-on-failure
@@ -36,7 +36,7 @@ Every integration entry isolates itself on its **own DDS domain**, always below
 the 230 bound the configuration contract enforces:
 
 * The `run_integration.py` harness takes the domain declared by the scenario
-  (201–210 for the shipped ten), claims it with an exclusive lock file, and
+  (201–211 for the shipped eleven), claims it with an exclusive lock file, and
   refuses to start unless **every RTPS port of that domain** can be bound right
   now. If the declared domain is taken it walks up to the next free one, so two
   scenarios – or two developers – never share a domain. A lock left behind by a
@@ -61,24 +61,24 @@ manual runs and is never used by CTest.
 | `protocol_test` | The frozen wire contract of the core types: every enum validator accepts exactly its own values and rejects everything else, and the command shape rules (joint count against the configured layout, layout-id bounds, non-finite values, negative gains) return exactly the frozen rejection reasons. | "all legal and rejected transitions", "missing/duplicate joints, non-finite intermediate computations" |
 | `config_test` | Configuration loading and validation: the shipped configuration is loaded field by field, malformed or contradictory documents are rejected with the offending field path (uniqueness and completeness of joint names, position-range ordering, boot-deadline ordering, minimum frequency versus control rate, state-window coverage), the numeric contract keeps exact decimal tokens, the SHA-256 known-answer vectors hold, and the configuration identity digest (`config_id`) covers the configuration in effect including a command line domain override. | "the configuration is executable and versioned" |
 | `fake_backend_test` | The fake backend's contract: snapshot stamps, connection/error reporting, write acceptance and refusal, the fixed output ring, and that the last output reports the latest *attempted* output including a refused one. | Fake backend contract (§8) |
-| `safety_test` | The safety gates on feedback and targets: freshness exactly at and beyond every timeout, IMU coherence, control-frequency bounds, driver error codes, position and velocity limits in both directions at and beyond the threshold, multiple joints, non-finite samples, boot grace never excusing an invalid sample, the priority between simultaneous reasons, the complete fault report, and the recovery window. | "forward/reverse/equal-threshold/multi-joint overspeed", "feedback freshness, IMU coherence, complete error codes, recovery window reset" |
+| `safety_test` | The safety gates on feedback and targets: freshness exactly at and beyond every timeout, IMU coherence, control-frequency bounds, driver error codes, position and velocity limits in both directions at and beyond the threshold, multiple joints, non-finite samples, the boot grace waiting for a first frame without calling absence healthy or faulting on it, the same grace never excusing an observed invalid sample, driver error or overspeed, the priority between simultaneous reasons, the complete fault report, and the recovery window. | "forward/reverse/equal-threshold/multi-joint overspeed", "feedback freshness, IMU coherence, complete error codes, recovery window reset" |
 | `command_gate_test` | The command gate: sequence monotonicity, queue wait followed by the transport receive stamp as the validity origin, repeated sequences not refreshing the deadline, the source-state index window (unknown, ignored, stale, fresh), the command and source-state deadlines measured per tick with no new packet, the independent supervisor lease, and that a rejected owner frame refreshes nothing. | "per-tick timeout with no new packet, old packets do not feed the watchdog, source-state window and independent supervisor lease", "single-source authorization" |
-| `execution_fsm_test` | The state machine: every legal and rejected transition, boot grace/deadline rules, the full normal path, write failure, request idempotency and conflicts, stop ordering and the authorization watermark (including a stop that does not change the state), session takeover and lease expiry, first-frame continuity, foreign packets, fault output degradation latching to zero torque, the recovery window with an explicit Reset, epoch exhaustion and the runtime's own stop request. | "all legal and rejected transitions, boot grace/deadline, explicit Reset", "pure feedforward, PD + feedforward with the total torque limit", "request retry/different payload/out-of-order, atomic first-frame and gain switch, stop preemption", "fault first-tick output, damping disqualification degrades permanently to zero torque" |
-| `logger_test` | The bounded asynchronous logger: queue bound and drop accounting, level filtering, FIFO order, the drain on stop, an event racing with the stop, the 256-byte message bound, rotation of the default sink, the formatted line and the error path. | §8 (bounded telemetry) |
-| `channel_test` | The bounded handoff between the control thread and the transport thread: FIFO order, capacity, eviction of the oldest entry with drop accounting, the untouched state of a refused push, the untorn two-thread handoff at the capacity where the producer laps the consumer, a separate stop lane, and that a full ordinary queue can never drop a stop. | §2 (thread model), §4 (lane separation) |
+| `execution_fsm_test` | The state machine: every legal and rejected transition, boot grace/deadline rules, the full normal path, write failure, request idempotency and conflicts, stop ordering and the authorization watermark (including a stop that does not change the state), session takeover and lease expiry, first-frame continuity, foreign packets, fault output degradation latching to zero torque, the recovery window with an explicit Reset, epoch exhaustion, the session's supervisor binding, same-tick stop ownership, a guarded same-producer epoch change, and the runtime's own trusted stop. | "all legal and rejected transitions, boot grace/deadline, explicit Reset", "pure feedforward, PD + feedforward with the total torque limit", "request retry/different payload/out-of-order, atomic first-frame and gain switch, stop preemption", "fault first-tick output, damping disqualification degrades permanently to zero torque" |
+| `logger_test` | The bounded asynchronous logger: queue bound and drop accounting, level filtering, FIFO order, the drain on stop, an event racing with the stop, the 256-byte message bound, rotation of the default sink, the formatted line and the error path - plus the bounded diagnostic writer the sink and the exit path share, against a pipe the test fills itself. | §8 (bounded telemetry) |
+| `channel_test` | The bounded handoff between the control thread and the transport thread: FIFO order, capacity, the untouched state of a refused push, the keep-last-1 handoff of the latest-value channels (a published value is replaced and counted only while no consumer holds it, and a taken one is never counted as a loss), a separate stop lane, and two-thread stress on both shapes whose payloads each carry their own generator, so a torn or overwritten copy fails the test. This is the entry that is also run under ThreadSanitizer; the eviction race it used to hide was found that way. | §2 (thread model), §4 (lane separation) |
 | `config_schema_contract_test` | The shipped `config/sdk.schema.json` against the shipped `config/sdk.json`, the custom `irmv-joint-name` format (non-empty, at most 64 **UTF-8 bytes**), and that standard JSON Schema validity and the loader's own checks agree. | "the configuration is executable and versioned" |
 
 All nine run without a peer, without a network and without a wall-clock
 deadline: they assert exact tick semantics and counter values, and the only
 wall-clock waits in `logger_test` are hang guards.
 
-## Real-DDS suite (`-L integration`, 13 tests)
+## Real-DDS suite (`-L integration`, 14 tests)
 
 ### Process-level entries
 
 | Test | What it proves |
 |---|---|
-| `dds_codec_test` | Against a live endpoint: the codec round trip and field-by-field equality of the core types, codec rejection of malformed samples, that the running transport's readers and writers really carry the frozen QoS (durability, reliability, history depth and kind, resource limits, and `max_blocking_time` on the reliable channels) as read back from the endpoints, and that a peer process sees the published samples. |
+| `dds_codec_test` | Against a live endpoint: the codec round trip and field-by-field equality of the core types - including the empty, unused first command of a session, stop or reset request and the rejection of an over-long or missing joint vector - codec rejection of malformed samples, that the running transport's readers and writers really carry the frozen QoS (durability, reliability, history depth and kind, resource limits, and `max_blocking_time` on the reliable channels) as read back from the endpoints, and that a peer process sees the published samples. |
 | `runtime_cli_test` | The process contract of `robot_runtime`: every startup rejection (missing/malformed configuration, `backend: real`, a broken scenario, unknown argument, out-of-range domain) exits non-zero with a message and without starting DDS; the normal path reaches `ZeroTorque` and exits 0 with a clean shutdown on `SIGTERM`; an unsupervised runtime keeps running; a latched fault keeps running and refuses to leave, and a hard kill is reported as such. |
 | `confirmation_test` | The test-only confirmation helper: a request is only proven when a later-published `Applied` result and an agreeing `RobotState` identify it, in both arrival orders, and a late `Applied` after a `Fault` never confirms anything. Pure protocol logic, no DDS. |
 
@@ -99,6 +99,7 @@ phase.
 | `runtime_restarted` (207) | A restarted runtime is a new instance: packets of the previous instance are answered as foreign, and the fresh instance never enters `Tracking` on its own. | "after a restart, the old instance/session/epoch are refused" |
 | `command_flood` (208) | A flood of ordinary tracking requests starves neither the stop lane nor the control loop: the stop is applied while the flood runs, the target keeps being served, and the runtime reports the requests it dropped instead of hiding the loss. | "target flood must not block control" |
 | `slow_logger` (209) | The log consumer is blocked on purpose: the logger drops events, the control loop keeps its deadlines and the per-tick output trace stays complete. | "a slow log must not block control" |
+| `stderr_backpressure` (211) | The log consumer is never released and the pipe is actually full when `SIGTERM` arrives, so the logger is parked inside its sink: the runtime still reaches `ZeroTorque`, confirmed over DDS, leaves with exit 0 inside the bound without the reader resuming, closes its trace completely and keeps its control deadlines. The final clean-shutdown diagnostic may be dropped by the full pipe - the exit itself, the confirmed state and the complete trace are the assertions. | "the shutdown path is bounded", "a slow log must not block control" |
 | `write_refused` (210) | The fake backend refuses the write of a tracking tick: the refusal latches as a fault, the runtime commands zero torque instead of the refused target, and only a matching `Reset` clears the fault once the write path is healthy again. The trace carries the refused attempt and the effective write of every such tick. | "fault first-tick output", "`Applied` is a host-path acceptance, never a device ack" |
 
 ## Traceability of the design report §9
@@ -116,7 +117,7 @@ phase.
 | Both result/state arrival orders, a lost result retried by the same id, a late result | `confirmation_test`, `normal`, `request_retry` |
 | 50 Hz target under 500 Hz control with per-tick output and target-age checks, no lower-layer interpolation | `normal` (scripted measured-velocity ramp) |
 | Pausing/killing the supervisor while an independent producer or the DDS threads stay alive, revocation by deadline | `supervisor_paused`, `supervisor_killed`, `producer_paused` |
-| After a runtime restart, old instance/session/epoch refused; target flood and slow logging must not block control | `runtime_restarted`, `stale_context`, `command_flood`, `slow_logger` |
+| After a runtime restart, old instance/session/epoch refused; target flood and slow logging must not block control | `runtime_restarted`, `stale_context`, `command_flood`, `slow_logger`, `stderr_backpressure` |
 | Configuration and versioning executable, installable runtime, format check, CI | `config_test`, `config_schema_contract_test`, `runtime_cli_test`, `format-check` and the CI workflow |
 
 ## Timing claims
@@ -145,5 +146,8 @@ bounded worst-case latency under load, and none is run on the target hardware.
 * The test client `runtime_client`, the confirmation helper and the fake
   scenario files are test artifacts. They are not a delivered client API, they
   are not installed, and nothing in the runtime calls into them.
-* Telemetry is not part of the protocol: `logger_test` and `slow_logger` cover
-  the bounded logger's own contract, not a wire format.
+* Telemetry is not part of the protocol: `logger_test`, `slow_logger` and
+  `stderr_backpressure` cover the bounded logger's own contract and the bounded
+  exit diagnostics, not a wire format. A diagnostic that a jammed pipe destroys
+  is dropped by design, so `stderr_backpressure` asserts the exit, the confirmed
+  state and the trace rather than the line.

@@ -69,7 +69,7 @@ by exactly one `ExecutionResult`.
 | `producer_id` | `Id` | the source of the target commands (`Tracking` only) |
 | `fault_id` | `unsigned long long` | the fault a `Reset` clears |
 | `operation` | `Operation` | see below |
-| `first_command` | `JointCommand` | the first target frame of a `Tracking` request |
+| `first_command` | `JointCommand` | the first target frame of a `Tracking` request; every other operation leaves it unused, and an empty one (`joints.count == 0`) is accepted for them and ignored by the runtime |
 
 ### `ExecutionResult` — `irmv/v1/execution_result`
 
@@ -161,7 +161,7 @@ Reject reasons (frozen set, `REJECT_NONE` for an applied request):
 | `MALFORMED` | a field violates its bounds: version-independent layout, counts, joint indices, text bounds, missing identity |
 | `VERSION_MISMATCH` | `protocol_version` is not 1 |
 | `WRONG_INSTANCE` | `runtime_id` is neither empty nor the live instance |
-| `WRONG_SESSION` | the addressed session is not the live one (or the operation needs one and none is given) |
+| `WRONG_SESSION` | the addressed session is not the live one (or the operation needs one and none is given), or the request does not come from the supervisor the session is bound to |
 | `SESSION_BUSY` | `ACQUIRE_SESSION` while another supervisor owns the session |
 | `STALE_REQUEST` | a command or request sequence that is not strictly newer than what was already accepted |
 | `REQUEST_CONFLICT` | the same `request_id` of the same supervisor with a different payload |
@@ -198,6 +198,13 @@ Stop reasons: `STOP_NONE`, `STOP_REQUESTED`, `COMMAND_TIMEOUT`,
   supervisor returns **the same session** without creating a second one; the
   same retry rule covers the answers of every other operation (a lost result is
   recoverable without re-authorizing anything).
+* Every other operation is answered only for the supervisor the session is bound
+  to. A request that echoes the session id of another supervisor is answered
+  `WRONG_SESSION` before the request record is consulted: it is not recorded as
+  that session's newest request, it does not move the request watermark, and it
+  changes no authorization - whether it asks for `TRACKING`, a stop or a
+  `RESET`. The runtime's own stop is not a request and carries no supervisor
+  identity at all (see "Control loop and telemetry").
 * The supervisor lease expires **300 ms** after the last accepted heartbeat, and
   only a **strictly increasing** `heartbeat_seq` refreshes it. Losing the lease
   revokes the session.
@@ -207,6 +214,18 @@ Stop reasons: `STOP_NONE`, `STOP_REQUESTED`, `COMMAND_TIMEOUT`,
   A stop (`REQUEST_DAMPING`, `REQUEST_ZERO_TORQUE`, a timeout, a fault) advances
   the watermark **even when the execution state does not change**, so a target
   captured before the stop can never be replayed after it.
+* A stop accepted in a control tick owns that tick: a `TRACKING` request handled
+  later in the same tick is answered `INVALID_TRANSITION`, even when it carries
+  exactly the watermark the stop produced and a continuous first frame. The rule
+  expires with the tick - the next tick authorizes the same frame - and refused
+  traffic never triggers it.
+* A `TRACKING` request from the producer that already owns the authorization is
+  an ordinary guarded re-authorization: `expected_epoch`, `proposed_epoch`, the
+  first frame and the continuity bounds decide it, so a component entering a new
+  behaviour execution stage moves to a new epoch per the rule above without a
+  `DAMPING` stop in between. Producer identity is a component, not a mode. The
+  old epoch stops being executable the moment the switch is committed, and a
+  true replay is answered from the stored result without re-authorizing.
 
 ## Timeouts and fallbacks
 
@@ -218,6 +237,15 @@ Stop reasons: `STOP_NONE`, `STOP_REQUESTED`, `COMMAND_TIMEOUT`,
 | feedback | the sample receive stamp | 20 ms | feedback invalid → fault |
 | IMU | the sample receive stamp | 20 ms | IMU invalid (only when the configuration requires it) |
 | boot grace / healthy window / boot deadline | process start | 1 s / 100 ms / 2 s | boot failure → `FAULT` |
+
+Inside the boot grace window a **required sample that has never been observed at
+all** - no receive stamp, no driver error - keeps the machine in `BOOT`
+commanding zero torque and publishing `healthy=false` until the first frame
+arrives. Waiting for a first frame is neither health nor a fault: the runtime
+never fabricates a valid zero measurement. Observed driver errors, non-finite
+values, an observed disconnection and overspeed fault immediately, inside the
+window as well, and a machine that never receives a frame faults when the grace
+or the boot deadline expires.
 | recovery window | the last fault transition | 100 ms | the `RESET` of a matching fault clears it |
 
 The command deadline is deliberately anchored to the transport receive stamp,
@@ -244,4 +272,13 @@ against an absolute deadline, publishes one `RobotState` per tick and reads no
 clock inside the state machine. Logging is **not** part of this protocol: the
 runtime writes structured records to stderr and to a rotating local log file
 (`telemetry.*`), and a blocked log consumer can only cost log records, never
-control ticks.
+control ticks. Its own diagnostics - including the clean-shutdown summary - are
+written without waiting for a reader, so a jammed stderr pipe can cost a
+diagnostic but never the safe exit.
+
+The runtime also stops itself when the process is told to leave. That local stop
+is **not** a protocol message: it carries no supervisor identity, it is never
+answered by an `ExecutionResult`, it never displaces a received stop, and it
+never clears a latched fault. It reaches `ZERO_TORQUE` from `DAMPING` and
+`TRACKING` only, and the process leaves only after that state and the torque
+write of its tick were accepted.
