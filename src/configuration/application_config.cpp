@@ -106,9 +106,10 @@ void ReadTrajectory(const Json &object, const std::string &path,
     Fail(path + ".deadline_us", "must exceed duration_us");
   }
   // The deadline also has to leave room for the whole stability window after
-  // the ramp: a deadline at or before `duration_us + stable_window_us` could
-  // never complete, so such a configuration would load already doomed. The
-  // subtraction is safe because the check above proved
+  // the ramp: a deadline before `duration_us + stable_window_us` could never
+  // complete, so such a configuration would load already doomed. The equality
+  // is admissible - a window that completes exactly on the deadline is still in
+  // time. The subtraction is safe because the check above proved
   // `deadline_us > duration_us`.
   if (trajectory.stable_window_us >
       trajectory.deadline_us - trajectory.duration_us) {

@@ -93,10 +93,12 @@ bool Agrees(const protocol::RobotState &state,
 // zero: a stamp at or after `now_us` means "just now" (age 0), never a negative
 // age that the unsigned subtraction would turn into a nearly infinite one.
 //
-// The application loop reads its clock before it drains the transport lane, so
-// a sample that lands in those microseconds carries a receive stamp at or after
-// the instant the iteration started. An unclamped age would call that perfectly
-// good sample stale and turn it into a lost session; the same underflow would
+// The supervision loop takes its decision instant after the transport drain and
+// raises it to the newest receive stamp of that batch, so the samples it acts
+// on are already judged at an instant at or after their arrival. The clamp is
+// the structural backstop for every other caller (and for any future
+// reordering): without it an unclamped subtraction would call a perfectly good
+// sample stale and turn it into a lost session, and the same underflow would
 // make a pending request expire or resend on the spot.
 protocol::TimeUs ClampedAge(protocol::TimeUs now_us,
                             protocol::TimeUs stamp_us) {
@@ -168,9 +170,9 @@ bool RobotClient::StateFresh(protocol::TimeUs now_us) const {
   // The age is judged on the host monotonic clock that stamped the arrival, not
   // on the runtime's publication stamp: a silent link is exactly the case the
   // runtime cannot report about itself. The age is clamped, so a sample whose
-  // receive stamp is at or after `now_us` (the loop read its clock before it
-  // drained the lane) is fresh with age 0 instead of underflowing into a
-  // stale one and losing the session.
+  // receive stamp is at or after `now_us` (a decision instant can never precede
+  // the newest receive stamp of the batch it acts on) is fresh with age 0
+  // instead of underflowing into a stale one and losing the session.
   return state_known_ && ClampedAge(now_us, latest_state_rx_us_) <=
                              config_.supervision.state_timeout_us;
 }
@@ -270,9 +272,12 @@ void RobotClient::ObserveState(const protocol::RobotState &state,
       // all worthless, and the change is reported until a new session is
       // confirmed on the new instance. The new process numbers its states from
       // its own first value again, so the accepted-sequence floor restarts with
-      // it; a frame of the *old* instance that arrives after this switch is
-      // decided by the same-instance test below and by runtime_changed, never
-      // by that floor, so it can never re-authorize anything.
+      // it. A frame of the *old* instance that arrives after this switch is
+      // decided by the instance rules below and by runtime_changed, not by this
+      // floor, and those rules revoke the session and the snapshot bound here.
+      // The floor orders one instance at a time, so it never decides a
+      // cross-instance case; the instance rules are what stand between a
+      // returning old instance and a re-binding.
       runtime_changed_ = true;
       LoseSession();
       state_seq_floor_ = 0;
@@ -309,6 +314,9 @@ void RobotClient::ObserveState(const protocol::RobotState &state,
   // The floor belongs to the instance bound above; the instance branches reset
   // it, which is what lets a new instance start over at its own first sequence
   // while an old frame of the same instance can never become current again.
+  // The `== 0` half of the test is implied by the floor comparison (the floor
+  // is unsigned and never negative); it is spelled out to name the intent that
+  // a zero sequence is not a state the runtime can ever have published.
   if (state.state_seq == 0 || state.state_seq <= state_seq_floor_) {
     return;
   }

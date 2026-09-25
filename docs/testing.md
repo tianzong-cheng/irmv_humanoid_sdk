@@ -12,7 +12,7 @@ says explicitly what no test here proves.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j2
 
-ctest --test-dir build --output-on-failure          # everything (38 tests)
+ctest --test-dir build --output-on-failure          # everything (40 tests)
 ctest --test-dir build -L core --output-on-failure  # deterministic core suite
 ctest --test-dir build -L integration --output-on-failure
 ctest --test-dir build -R integration_normal --output-on-failure
@@ -110,7 +110,7 @@ for the cross-process cases.
 The scenario entry points are also what CI runs; `--all` is a convenience for
 manual runs and is never used by CTest.
 
-## Deterministic core suite (`-L core`, 14 tests)
+## Deterministic core suite (`-L core`, 15 tests)
 
 | Test | What it proves | Design §9 |
 |---|---|---|
@@ -125,15 +125,16 @@ manual runs and is never used by CTest.
 | `config_schema_contract_test` | The shipped `config/sdk.schema.json` against the shipped `config/sdk.json`, the custom `irmv-joint-name` format (non-empty, at most 64 **UTF-8 bytes**), and that standard JSON Schema validity and the loader's own checks agree. | "the configuration is executable and versioned" |
 | `application_config_test` | The upper layer's own configuration: the shipped `application`, `input` and supervision sections load field by field, the trajectory, retry, heartbeat, state-window and intent deadlines are validated as a whole (ordering, non-zero periods, an initialization deadline that leaves room for the whole stable window after the ramp, the state window staying inside the runtime's own source-state deadline so `fresh` and the initializer's usability rule can never disagree, tolerance bounds, the `emergency_stop` binding being the space character), and a document that would make the upper layer unable to supervise is rejected with the offending field path. | phase-2 configuration contract |
 | `robot_client_test` | The official supervisor client as a pure function of the states, results and times it is handed: one request at a time, the retry cadence and the final deadline, a rejection resolving immediately, an `Applied` only confirming against a state published at or after it (both arrival orders, and a terminal refusal after a contradicting state), a reordered, repeated or zero `state_seq` within one runtime instance ignored whole before it can touch the snapshot, the receive age or the session - while a new instance rebuilds the baseline and a legal next frame still witnesses an answer -, the independent lease and instance/session loss, target publication gated on a live session, the epoch proposal never repeating a value, and an abandoned request never resuming. | phase-2 client contract |
-| `application_initialization_test` | The initialization trajectory against the runtime's own formula: the first frame stays inside the continuity bounds and the target velocity limits, a plan the runtime would refuse is refused before anything is sent, completion requires the position and velocity tolerances over the whole stability window and is bounded by the deadline: a move past `trajectory.deadline_us` fails, latches and emits nothing, while a window that completed exactly on the deadline is still `Ready`, and the Ready hold keeps publishing fresh frames or reports the sample unusable without failing. It drives a real `ExecutionFsm` through the runtime fixture, so the generator and the lower layer agree on the same numbers. | phase-2 initialization contract |
+| `application_loop_time_test` | The supervision loop's decision instant: it is never earlier than the newest receive stamp of the transport batch the iteration acts on (a newer stamp wins, an older one keeps the clock read after the drain, equal instants agree, and neither end of the unsigned range wraps). This is the structural replacement for the microsecond race that let a legal state be fresh for the client and stale for the initializer. | phase-2 loop contract |
+| `application_initialization_test` | The initialization trajectory against the runtime's own formula: the first frame stays inside the continuity bounds and the target velocity limits, a plan the runtime would refuse is refused before anything is sent, completion requires the position and velocity tolerances over the whole stability window and is bounded by the deadline: a move past `trajectory.deadline_us` fails, latches and emits nothing, while a window that completed exactly on the deadline is still `Ready`, and the Ready hold keeps publishing fresh frames or reports the sample unusable without failing. It drives a real `ExecutionFsm` through the runtime fixture, so the generator and the lower layer agree on the same numbers. | phase-2 initialization …
 | `application_fsm_test` | The behaviour FSM and the serial supervision order as a pure function over a real `RobotClient` and a recording sink: the full path with its confirmations, the emergency stop latching and preempting, the exit path, `UnexpectedContext` and `RuntimeRestarted` latching, the timeout causes, the Reset clearing the latch only into `Standby` on a fresh `ZeroTorque`, and `StartLocomotion()` refusing without changing `Ready`. | phase-2 behaviour contract |
 | `input_router_test` | The keyboard router: one press is one semantic event, the repeat guard a terminal without key-up needs, the batch priority (emergency stop first, velocity intent last), and the single body-velocity intent with its deadline. | phase-2 input contract |
 
-All fourteen run without a peer, without a network and without a wall-clock
+All fifteen run without a peer, without a network and without a wall-clock
 deadline: they assert exact tick semantics and counter values, and the only
 wall-clock waits in `logger_test` are hang guards.
 
-## Real-DDS suite (`-L integration`, 24 tests)
+## Real-DDS suite (`-L integration`, 25 tests)
 
 ### Process-level entries
 

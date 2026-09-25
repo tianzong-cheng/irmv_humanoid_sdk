@@ -138,8 +138,9 @@ class RobotClient {
   // rebuilds the baseline, because a new runtime process numbers its states
   // from its own first value again. The floor orders the frames of the instance
   // already bound and nothing more: a frame of a *previous* instance that
-  // arrives after a switch is decided by the instance rules (it can never
-  // re-authorize anything), not by this sequence floor.
+  // arrives after a switch is decided by the instance rules (they revoke the
+  // session and the snapshot bound here), never by this sequence floor, which
+  // cannot decide a cross-instance case.
   void ObserveState(const protocol::RobotState &state, protocol::TimeUs rx_us);
 
   // Feeds one received result with its host receive stamp. A result that does

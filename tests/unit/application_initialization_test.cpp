@@ -126,9 +126,9 @@ int StartRefused(Initialization &initialization, const RobotState &fresh,
 constexpr TimeUs kSlowDurationUs = 4'000'000;
 
 // Sets the move length together with a deadline that keeps the loader's rule
-// (deadline_us >= duration_us + stable_window_us) satisfied whatever window the
-// case chooses afterwards, so every mutated fixture is one the real
-// configuration would accept.
+// (deadline_us >= duration_us + stable_window_us) satisfied for every case that
+// uses it: the deadline is four times the ramp plus the window in effect at the
+// call, which leaves room for any window those cases set afterwards.
 void SetDuration(ApplicationConfig &config, TimeUs duration) {
   config.initialization.trajectory.duration_us = duration;
   config.initialization.trajectory.deadline_us =

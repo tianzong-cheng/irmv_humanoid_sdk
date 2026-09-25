@@ -819,6 +819,29 @@ int main() {
     CHECK(again.session_lost && !again.session_owned);
   }
   {
+    // The accepted-sequence floor survives the loss of the session: a frame
+    // that had already been superseded before the lease expired must not come
+    // back as the current snapshot merely because the snapshot it would replace
+    // is gone. (Deriving the floor from the snapshot instead of keeping it
+    // would re-open exactly that hole - the snapshot is dropped by the loss.)
+    RecordingSink sink;
+    RobotClient client(sink, config, supervisor_id);
+    observe_state(client, 80'000);
+    CHECK(acquire(sink, client, 80'100, nullptr) == 0);
+    // The witness state of the acquisition carried sequence 100.
+    const ClientView lost = client.Poll(80'300 + kStateTimeoutUs + 1);
+    CHECK(lost.session_lost && !lost.state_known);
+
+    // An older frame of the same instance, delivered after the loss.
+    client.ObserveState(
+        MakeState(runtime_id, irmv::protocol::kNoId, 0, 99, 90'000,
+                  ExecutionState::ZeroTorque, OutputAction::ZeroTorque),
+        90'000);
+    const ClientView revived = client.Poll(90'000);
+    CHECK(!revived.state_known);
+    CHECK(!revived.state_fresh);
+  }
+  {
     // A pending request is dropped by the link loss, not reported as its own
     // timeout.
     RecordingSink sink;
