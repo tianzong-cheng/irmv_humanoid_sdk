@@ -22,9 +22,17 @@ inline constexpr std::size_t kMaxBoundedDiagnosticBytes = 1024;
 // probes the descriptor and drops whatever does not fit. A dropped diagnostic
 // is an acceptable cost; a safe exit parked in a jammed pipe is not.
 //
-// Returns true only when the whole `text` was accepted, so a truncated or
-// dropped line is never reported as written. Descriptors are assumed to be a
-// pipe, a terminal or a regular file, which is what the runtime's stderr is.
+// Returns true only when the whole `text` was accepted. Text longer than the
+// bound is emitted up to the bound - a prefix may reach the descriptor - and
+// reported as not written, so a caller that cares about the whole line can tell
+// the difference. Descriptors are assumed to be a pipe, a terminal or a regular
+// file, which is what the runtime's stderr is.
+//
+// The descriptor is deliberately left blocking: clearing that flag would change
+// what every other writer of the same open file description sees, the caller's
+// own stdio included. The bound therefore rests on the probe plus at most
+// PIPE_BUF bytes plus the in-process lock above, which is a bound for this
+// process - a writer outside it can still take the room a probe reported.
 bool WriteDiagnosticBounded(int fd, std::string_view text);
 
 // Blocking counterpart for the log worker. The worker is allowed to park on a

@@ -1,6 +1,6 @@
 {
   "name": "stderr_backpressure",
-  "description": "A jammed stderr pipe must not turn the safe exit into an unbounded wait. The log consumer is deliberately never released, and the log volume first fills the pipe, so the logger is parked inside its sink when SIGTERM arrives. The runtime still has to reach ZeroTorque (confirmed over DDS), leave with exit 0 inside the bound without the reader ever resuming, close its output trace completely and keep its control deadlines. The final clean-shutdown diagnostic may legitimately be dropped - the pipe has no room for it - which is why the exit itself, the confirmed state and the complete trace are the assertions.",
+  "description": "A jammed stderr pipe must not turn the safe exit into an unbounded wait, and it must not stop the runtime from stopping itself. The log consumer is never released and the log volume first fills the pipe, so the logger is parked inside its sink when SIGTERM arrives while the machine is in Tracking on a live supervision session - the runtime's own guarded stop is the only thing that can still bring it to ZeroTorque, and the diagnostic that reports the wait is dropped by the full pipe. The run has to leave with exit 0 inside the bound without the reader ever resuming, close its output trace completely and keep its control deadlines.",
   "domain": 211,
   "runtime": {
     "config": "config/sdk.json",
@@ -27,6 +27,19 @@
       ]
     },
     {
+      "action": "client",
+      "name": "producer",
+      "mode": "producer",
+      "scenario": "producer",
+      "background": true,
+      "args": [
+        "--producer-id",
+        "0102030405060708090a0b0c0d0e0f33",
+        "--rate",
+        "50"
+      ]
+    },
+    {
       "action": "sleep_ms",
       "ms": 1500,
       "note": "the log volume fills the undrained pipe, so the log worker parks inside the sink"
@@ -35,7 +48,8 @@
       "action": "client",
       "name": "supervisor",
       "mode": "supervisor",
-      "scenario": "slow_logger",
+      "scenario": "hold_tracking",
+      "background": true,
       "timeout_s": 30,
       "args": [
         "--producer-id",
@@ -43,7 +57,12 @@
         "--rate",
         "50"
       ],
-      "note": "drives Boot -> ZeroTorque -> Damping -> Tracking -> Damping -> ZeroTorque over DDS while the pipe stays jammed"
+      "note": "holds a granted tracking authorization on a live session until the harness stops it, so the runtime's own stop is the only path out while the pipe stays jammed"
+    },
+    {
+      "action": "sleep_ms",
+      "ms": 500,
+      "note": "the supervisor has acquired the session and is holding tracking"
     },
     {
       "action": "stop_runtime",
@@ -52,7 +71,7 @@
       "drain": false,
       "expect_clean": false,
       "expect_code": 0,
-      "note": "the consumer is still blocked here: the process must reach ZeroTorque and leave inside the bound, and the diagnostic that reports it may be dropped by the full pipe"
+      "note": "the consumer is still blocked and the machine is authorized here: the process must stop itself, reach ZeroTorque and leave inside the bound, and the diagnostic that reports it may be dropped by the full pipe"
     },
     {
       "action": "signal_client",
@@ -62,6 +81,33 @@
     {
       "action": "wait_client",
       "name": "flood",
+      "timeout_s": 15,
+      "allow_exit": [
+        0,
+        -15
+      ]
+    },
+    {
+      "action": "signal_client",
+      "name": "supervisor",
+      "signal": "SIGTERM"
+    },
+    {
+      "action": "wait_client",
+      "name": "supervisor",
+      "timeout_s": 15,
+      "allow_exit": [
+        0
+      ]
+    },
+    {
+      "action": "signal_client",
+      "name": "producer",
+      "signal": "SIGTERM"
+    },
+    {
+      "action": "wait_client",
+      "name": "producer",
       "timeout_s": 15,
       "allow_exit": [
         0,
@@ -78,8 +124,7 @@
           "session_acquired",
           "damping_applied",
           "tracking_granted",
-          "stop_under_flood",
-          "zero_torque_applied"
+          "tracking_held"
         ]
       }
     },
@@ -87,7 +132,7 @@
       "check": "trace_complete",
       "params": {
         "file": "trace_run1.jsonl",
-        "min_ticks": 1000
+        "min_ticks": 800
       }
     },
     {

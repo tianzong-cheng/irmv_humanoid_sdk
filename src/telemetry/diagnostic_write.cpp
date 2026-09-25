@@ -14,9 +14,11 @@ namespace {
 
 // How long the bounded writer waits for the diagnostic lock before it gives up
 // on the line. Long enough to interleave with a log worker writing its own line
-// (a plain write, microseconds), short enough that a worker parked in a full
-// pipe costs the control thread one bounded delay instead of a hang.
-constexpr auto kBoundedLockWait = std::chrono::milliseconds(10);
+// (a plain write, microseconds), and capped at one control period of the
+// shipped deployment so a worker parked in a full pipe costs the control thread
+// one counted tick overrun at most - never an unbounded delay, and never a
+// stall several periods long. The line is dropped when the budget runs out.
+constexpr auto kBoundedLockWait = std::chrono::milliseconds(2);
 
 // How long the log worker waits for the same lock. Only a second worker whose
 // peer is already parked in a jammed descriptor reaches it; dropping that line
