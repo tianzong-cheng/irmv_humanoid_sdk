@@ -237,16 +237,18 @@ Stop reasons: `STOP_NONE`, `STOP_REQUESTED`, `COMMAND_TIMEOUT`,
 | feedback | the sample receive stamp | 20 ms | feedback invalid → fault |
 | IMU | the sample receive stamp | 20 ms | IMU invalid (only when the configuration requires it) |
 | boot grace / healthy window / boot deadline | process start | 1 s / 100 ms / 2 s | boot failure → `FAULT` |
+| recovery window | the last fault transition | 100 ms | the `RESET` of a matching fault clears it |
 
 Inside the boot grace window a **required sample that has never been observed at
-all** - no receive stamp, no driver error - keeps the machine in `BOOT`
-commanding zero torque and publishing `healthy=false` until the first frame
-arrives. Waiting for a first frame is neither health nor a fault: the runtime
-never fabricates a valid zero measurement. Observed driver errors, non-finite
-values, an observed disconnection and overspeed fault immediately, inside the
-window as well, and a machine that never receives a frame faults when the grace
-or the boot deadline expires.
-| recovery window | the last fault transition | 100 ms | the `RESET` of a matching fault clears it |
+all** - no receive stamp, no driver error, and the documented default zeros -
+keeps the machine in `BOOT` commanding zero torque and publishing
+`healthy=false` until the first frame arrives. Waiting for a first frame is
+neither health nor a fault: the runtime never fabricates a valid zero
+measurement, and a frame that merely *claims* absence while carrying values is
+judged by those values like any other observation. Observed driver errors,
+non-finite values, an observed disconnection and overspeed fault immediately,
+inside the window as well, and a machine that never receives a frame faults when
+the grace or the boot deadline expires.
 
 The command deadline is deliberately anchored to the transport receive stamp,
 not to the sender's `stamp_us`: a delayed packet is judged by when the runtime

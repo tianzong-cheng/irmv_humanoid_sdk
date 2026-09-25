@@ -19,8 +19,11 @@ namespace irmv::transport::codec {
 // untouched, so that a rejected message is never partially applied.
 //
 // Validation rules, derived from what irmv::protocol already accepts:
-//   * JointVector.count in [1, kMaxJoints]: ValidateCommandShape requires
-//     exactly the configured joint count, which is at least one.
+//   * JointVector.count in [0, kMaxJoints] for the target frame of a request
+//     and in [1, kMaxJoints] for a JointCommand of the command lane and for the
+//     first frame of a Tracking request: ValidateCommandShape requires exactly
+//     the configured joint count, which is at least one, while the other
+//     operations leave their unused frame empty and never read it.
 //   * FeedbackSnapshot.count and FaultReport.count in [0, kMaxJoints]: an empty
 //     snapshot and a healthy state with no faults are both representable, and
 //     the core classifies a count mismatch as invalid feedback.
