@@ -74,6 +74,14 @@ BehaviorStep BehaviorFsm::Step(protocol::TimeUs now_us, InputEvent event,
     out.runtime_fault_reason = FaultReasonOf(view.state);
   }
 
+  // The outcome of a view is edge triggered and the loop may hand one poll to
+  // several Steps (one per input event, then a final one): only the first Step
+  // to see a given poll may act on its outcome, or a Step would apply an answer
+  // to the request the previous Step had just begun.
+  const RequestOutcome outcome =
+      view.poll_seq != consumed_poll_seq_ ? view.outcome : RequestOutcome::None;
+  consumed_poll_seq_ = view.poll_seq;
+
   // Phase 1 - the fresh lower state and every fault it proves. It runs first
   // because nothing may be decided against a state that is already wrong, and
   // because the faults it latches are what the later phases must respect.
@@ -89,16 +97,21 @@ BehaviorStep BehaviorFsm::Step(protocol::TimeUs now_us, InputEvent event,
     RequestExit(now_us);
   }
   if (exit_requested_) {
-    ExitStep(now_us, view, &out);
+    ExitStep(now_us, view, outcome);
   }
 
   // Phase 3 - the answer to the pending request, then the ordinary requests and
   // the initialization targets. Once the exit started it owns the iteration:
   // nothing is generated and nothing new is asked for.
   if (!exit_requested_) {
-    ConsumeOutcome(now_us, view, &out);
-    OrdinaryRequests(now_us, event, view, &out);
-    EmitTarget(now_us, view, &out);
+    ConsumeOutcome(now_us, view, outcome);
+    const bool stop_begun = OrdinaryRequests(now_us, event, view, &out);
+    if (!stop_begun) {
+      // The iteration that begins a stop owns it: the target frame that would
+      // have left in the same Step belongs to the authorization the stop is
+      // withdrawing.
+      EmitTarget(now_us, view, &out);
+    }
   }
 
   // Phase 4 - the supervision heartbeat, and only after every check above:
@@ -163,22 +176,29 @@ void BehaviorFsm::FreshStateAndFaults(protocol::TimeUs now_us,
     return;
   }
   if (view.state.execution_state == protocol::ExecutionState::Tracking &&
-      !ExpectedTracking(view.state)) {
+      state_ != BehaviorState::Starting && !ExpectedTracking(view.state)) {
     // A tracking context nobody here authorized. An unexplained difference is a
     // fault, never a state to compare enumerators on.
+    //
+    // Starting is the exception: a runtime that was left tracking by a previous
+    // application is exactly the takeover this phase exists for, and the
+    // takeover stop of the Starting guard is what ends it. Faulting there would
+    // dead-end the documented restart scenario.
     LatchFault(FaultCause::UnexpectedContext, now_us, true);
     return;
   }
-  if (TrackingBehavior(state_) &&
-      view.state.execution_state != protocol::ExecutionState::Tracking &&
-      !StopPending()) {
+  if (TrackingBehavior(state_) && !StopPending() &&
+      (view.state.execution_state == protocol::ExecutionState::Damping ||
+       view.state.execution_state == protocol::ExecutionState::ZeroTorque)) {
     // The lower layer left tracking on its own: its target deadline expired, or
     // the authorization was revoked. A legal, unlatched combination, and the
     // movement is over - the upper cancels the move, gives up on the answer it
     // was waiting for (so nothing keeps resending an authorization the runtime
     // has withdrawn) and shows the lower layer's stop reason instead of
     // claiming Ready. A latched upper fault is not affected: its state is not a
-    // tracking behaviour.
+    // tracking behaviour, and the states a move can actually fall back to are
+    // the two stops - a lower Boot is not one of them and is never displayed as
+    // Damping.
     CancelInitialization();
     client_.AbandonRequest();
     pending_ = Pending::None;
@@ -209,19 +229,35 @@ void BehaviorFsm::LatchFault(FaultCause cause, protocol::TimeUs now_us,
     return;
   }
   if (StopPending()) {
-    // A stop of ours is already on the wire. The runtime answers it by request
-    // id, and re-asking on every iteration would be a storm nothing needs.
+    // A stop of ours is already on the wire - Damping, ZeroTorque, or the Reset
+    // the operator asked for under a latched fault. The runtime answers it by
+    // request id and re-asking on every iteration would be a storm nothing
+    // needs; for a Reset it would also displace the request the operator made
+    // with a Damping the runtime could only refuse.
     return;
   }
   client_.AbandonRequest();
   pending_ = Pending::None;
-  BeginStop(protocol::Operation::Damping, now_us);
+  BeginDampingStop(now_us);
 }
 
-bool BehaviorFsm::BeginStop(protocol::Operation operation,
+bool BehaviorFsm::BeginDampingStop(protocol::TimeUs now_us) {
+  return BeginStop(protocol::Operation::Damping, Pending::Damping, now_us);
+}
+
+bool BehaviorFsm::BeginZeroTorqueStop(protocol::TimeUs now_us) {
+  return BeginStop(protocol::Operation::ZeroTorque, Pending::ZeroTorque,
+                   now_us);
+}
+
+bool BehaviorFsm::BeginStop(protocol::Operation operation, Pending kind,
                             protocol::TimeUs now_us) {
-  if (operation != protocol::Operation::Damping &&
-      operation != protocol::Operation::ZeroTorque) {
+  if (client_.request_pending() && pending_operation_ == operation) {
+    // A stop of the same operation is already on the wire and owns the
+    // decision: the client resends the identical payload inside the deadline.
+    // Beginning it again would publish a new request id with a fresh deadline
+    // on every key repeat - and a stop that is never answered would then never
+    // reach its own timeout.
     return false;
   }
   if (!client_.BeginRequest(operation, now_us)) {
@@ -229,8 +265,8 @@ bool BehaviorFsm::BeginStop(protocol::Operation operation,
     // stop leaves and none may be claimed.
     return false;
   }
-  pending_ = operation == protocol::Operation::Damping ? Pending::Damping
-                                                       : Pending::ZeroTorque;
+  pending_ = kind;
+  pending_operation_ = operation;
   pending_producer_ = protocol::kNoId;
   pending_epoch_ = 0;
   return true;
@@ -241,6 +277,7 @@ bool BehaviorFsm::BeginAcquire(protocol::TimeUs now_us) {
     return false;
   }
   pending_ = Pending::Acquire;
+  pending_operation_ = protocol::Operation::AcquireSession;
   pending_producer_ = protocol::kNoId;
   pending_epoch_ = 0;
   have_acquire_ = true;
@@ -312,7 +349,7 @@ void BehaviorFsm::EmergencyStop(protocol::TimeUs now_us,
     // A runtime whose own fault output rule is already in charge keeps it: a
     // Damping request would only be refused, because a latched fault is left
     // through Reset alone.
-    BeginStop(protocol::Operation::Damping, now_us);
+    BeginDampingStop(now_us);
   }
 }
 
@@ -330,8 +367,7 @@ void BehaviorFsm::RequestExit(protocol::TimeUs now_us) {
 }
 
 void BehaviorFsm::ExitStep(protocol::TimeUs now_us, const ClientView &view,
-                           BehaviorStep *out) {
-  static_cast<void>(out);
+                           RequestOutcome outcome) {
   const bool fresh = view.state_known && view.state_fresh;
 
   // A runtime already in Fault keeps its own output rule: there is no Damping
@@ -343,7 +379,7 @@ void BehaviorFsm::ExitStep(protocol::TimeUs now_us, const ClientView &view,
     exit_stop_confirmed_ = false;
     return;
   }
-  if (view.outcome == RequestOutcome::Confirmed) {
+  if (outcome == RequestOutcome::Confirmed) {
     const bool stopped =
         pending_ == Pending::Damping && fresh &&
         view.state.execution_state == protocol::ExecutionState::Damping;
@@ -355,9 +391,9 @@ void BehaviorFsm::ExitStep(protocol::TimeUs now_us, const ClientView &view,
       exit_stop_confirmed_ = true;
       return;
     }
-  } else if (view.outcome == RequestOutcome::Rejected ||
-             view.outcome == RequestOutcome::TimedOut ||
-             view.outcome == RequestOutcome::Unknown) {
+  } else if (outcome == RequestOutcome::Rejected ||
+             outcome == RequestOutcome::TimedOut ||
+             outcome == RequestOutcome::Unknown) {
     // The stop cannot be confirmed any more. The exit stays bounded and honest:
     // the loop reports Unknown instead of a stop that never happened.
     pending_ = Pending::None;
@@ -368,7 +404,7 @@ void BehaviorFsm::ExitStep(protocol::TimeUs now_us, const ClientView &view,
   // The damping stop is asked for once, and never before the lower layer is
   // known not to be in a fault of its own.
   if (pending_ == Pending::None && !client_.request_pending()) {
-    BeginStop(protocol::Operation::Damping, now_us);
+    BeginDampingStop(now_us);
   }
   if (now_us >= exit_deadline_us_) {
     exit_ready_ = true;
@@ -377,9 +413,9 @@ void BehaviorFsm::ExitStep(protocol::TimeUs now_us, const ClientView &view,
 }
 
 void BehaviorFsm::ConsumeOutcome(protocol::TimeUs now_us,
-                                 const ClientView &view, BehaviorStep *out) {
-  static_cast<void>(out);
-  switch (view.outcome) {
+                                 const ClientView &view,
+                                 RequestOutcome outcome) {
+  switch (outcome) {
     case RequestOutcome::None:
     case RequestOutcome::Pending:
       return;
@@ -466,27 +502,43 @@ void BehaviorFsm::ConsumeOutcome(protocol::TimeUs now_us,
   }
 }
 
-void BehaviorFsm::OrdinaryRequests(protocol::TimeUs now_us, InputEvent event,
+bool BehaviorFsm::OrdinaryRequests(protocol::TimeUs now_us, InputEvent event,
                                    const ClientView &view, BehaviorStep *out) {
   const bool fresh = view.state_known && view.state_fresh;
+  bool stop_begun = false;
   switch (state_) {
-    case BehaviorState::Starting:
-      if (fresh && client_.session_owned() &&
-          view.state.execution_state == protocol::ExecutionState::ZeroTorque &&
-          SameDigests(config_, view.state)) {
-        // The instance, the layout and the configuration match, the session is
-        // ours and the lower layer is at zero torque: the only way out of
-        // Starting. Nothing else is a reason to show a behaviour.
+    case BehaviorState::Starting: {
+      const bool ours =
+          fresh && client_.session_owned() && SameDigests(config_, view.state);
+      if (ours &&
+          view.state.execution_state == protocol::ExecutionState::ZeroTorque) {
+        // The instance, the layout, the configuration and the session are ours
+        // and the lower layer is at zero torque: the only way out of Starting.
+        // Nothing else is a reason to show a behaviour.
         state_ = BehaviorState::Standby;
         break;
       }
+      if (ours &&
+          (view.state.execution_state == protocol::ExecutionState::Damping ||
+           view.state.execution_state == protocol::ExecutionState::Tracking)) {
+        // The takeover stop: the runtime kept damping after a previous
+        // application left, or was left tracking by one. ZeroTorque is what
+        // takes it over, and a fresh ZeroTorque is the only state that promotes
+        // the behaviour - a left-over tracking state is never shown as Ready or
+        // Locomotion, and the stop is asked for once, not once per iteration.
+        stop_begun = BeginZeroTorqueStop(now_us);
+        break;
+      }
+      // A lower Boot, or a session not ours yet, keeps waiting: Starting sends
+      // no motion request of its own.
       if (AcquireNeeded(now_us, view)) {
         BeginAcquire(now_us);
       }
       break;
+    }
     case BehaviorState::Standby:
       if (event == InputEvent::Damping) {
-        BeginStop(protocol::Operation::Damping, now_us);
+        stop_begun = BeginDampingStop(now_us);
       }
       // A ZeroTorque key here is a repeated key of the current behaviour.
       break;
@@ -494,7 +546,7 @@ void BehaviorFsm::OrdinaryRequests(protocol::TimeUs now_us, InputEvent event,
       if (event == InputEvent::Initialize) {
         TryStartInitialization(now_us, view, out);
       } else if (event == InputEvent::ZeroTorque) {
-        BeginStop(protocol::Operation::ZeroTorque, now_us);
+        stop_begun = BeginZeroTorqueStop(now_us);
       }
       break;
     case BehaviorState::Initializing:
@@ -503,9 +555,9 @@ void BehaviorFsm::OrdinaryRequests(protocol::TimeUs now_us, InputEvent event,
       // Locomotion is unreachable in this phase, but its stop rules are the
       // rules of every behaviour that holds an authorization.
       if (event == InputEvent::Damping) {
-        BeginStop(protocol::Operation::Damping, now_us);
+        stop_begun = BeginDampingStop(now_us);
       } else if (event == InputEvent::ZeroTorque) {
-        BeginStop(protocol::Operation::ZeroTorque, now_us);
+        stop_begun = BeginZeroTorqueStop(now_us);
       }
       // An Initialize key is refused here: nothing returns to the
       // initialization pose from a move, and a repeated key must not restart
@@ -522,6 +574,7 @@ void BehaviorFsm::OrdinaryRequests(protocol::TimeUs now_us, InputEvent event,
       }
       break;
   }
+  return stop_begun;
 }
 
 void BehaviorFsm::TryStartInitialization(protocol::TimeUs now_us,
@@ -562,12 +615,22 @@ void BehaviorFsm::TryStartInitialization(protocol::TimeUs now_us,
     CancelInitialization();
     return;
   }
+  if (client_.pending_proposed_epoch() != epoch) {
+    // The request on the wire proposes another authorization than the one the
+    // generator's frames carry (the client proposes from its own watermark).
+    // Frames and request would disagree, so the move is cancelled rather than
+    // sent for an epoch the request never asked for.
+    client_.AbandonRequest();
+    CancelInitialization();
+    return;
+  }
   // The request proposes exactly the epoch the trajectory was started with, so
   // the first frame and the authorization agree.
   tracking_active_ = true;
   tracking_producer_ = producer_id_;
   tracking_epoch_ = epoch;
   pending_ = Pending::Tracking;
+  pending_operation_ = protocol::Operation::Tracking;
   pending_producer_ = producer_id_;
   pending_epoch_ = epoch;
   // The first frame travelled inside the request: the next target is due one
@@ -596,6 +659,7 @@ void BehaviorFsm::TryReset(protocol::TimeUs now_us, const ClientView &view) {
     }
     if (client_.BeginReset(lower_fault_id_, now_us)) {
       pending_ = Pending::Reset;
+      pending_operation_ = protocol::Operation::Reset;
       pending_producer_ = protocol::kNoId;
       pending_epoch_ = 0;
     }
@@ -606,7 +670,7 @@ void BehaviorFsm::TryReset(protocol::TimeUs now_us, const ClientView &view) {
   }
   // Not in Fault: the runtime is asked for ZeroTorque explicitly. Being in
   // Damping already is not Standby.
-  if (BeginStop(protocol::Operation::ZeroTorque, now_us)) {
+  if (BeginZeroTorqueStop(now_us)) {
     pending_ = Pending::Reset;
   }
 }

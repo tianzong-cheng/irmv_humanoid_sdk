@@ -48,6 +48,10 @@ enum class BehaviorState {
 // a Fault, kept separately from the runtime's own FaultReason (which the lower
 // layer reports about itself and which the FSM never latches on the runtime's
 // behalf). The latch is cleared only by a confirmed Reset.
+//
+// A lost input device is not one of these: the loop turns it into the same
+// RequestExit an exit key raises, so the behaviour leaves through the bounded
+// exit path and reports what it could not prove.
 enum class FaultCause {
   None = 0,
   OperatorEmergencyStop,
@@ -57,7 +61,6 @@ enum class FaultCause {
   InitializationFailed,
   RequestTimeout,
   UnexpectedContext,
-  InputLost,
 };
 
 // What one Step decided, and everything the loop displays. It carries no DDS
@@ -162,11 +165,15 @@ class BehaviorFsm {
 
   void FreshStateAndFaults(protocol::TimeUs now_us, const ClientView &view);
   void EmergencyStop(protocol::TimeUs now_us, const ClientView &view);
+  // `outcome` is the request outcome this Step may act on: the view's own
+  // outcome while this Step is the first to see that poll, and None otherwise.
   void ExitStep(protocol::TimeUs now_us, const ClientView &view,
-                BehaviorStep *out);
+                RequestOutcome outcome);
   void ConsumeOutcome(protocol::TimeUs now_us, const ClientView &view,
-                      BehaviorStep *out);
-  void OrdinaryRequests(protocol::TimeUs now_us, InputEvent event,
+                      RequestOutcome outcome);
+  // True when this iteration began a stop; such an iteration does not also
+  // emit a target frame.
+  bool OrdinaryRequests(protocol::TimeUs now_us, InputEvent event,
                         const ClientView &view, BehaviorStep *out);
   void TryStartInitialization(protocol::TimeUs now_us, const ClientView &view,
                               BehaviorStep *out);
@@ -177,7 +184,10 @@ class BehaviorFsm {
   // Latches `cause` (the first cause wins) and, when the fault owes the machine
   // a stop, asks for Damping unless a stop of ours is already on the wire.
   void LatchFault(FaultCause cause, protocol::TimeUs now_us, bool request_stop);
-  bool BeginStop(protocol::Operation operation, protocol::TimeUs now_us);
+  bool BeginDampingStop(protocol::TimeUs now_us);
+  bool BeginZeroTorqueStop(protocol::TimeUs now_us);
+  bool BeginStop(protocol::Operation operation, Pending kind,
+                 protocol::TimeUs now_us);
   bool BeginAcquire(protocol::TimeUs now_us);
   bool AcquireNeeded(protocol::TimeUs now_us, const ClientView &view) const;
   void CancelInitialization();
@@ -221,6 +231,14 @@ class BehaviorFsm {
   // A state has been observed at least once; before that, Starting waits
   // instead of calling an absent link unreachable.
   bool saw_state_{false};
+  // The serial of the poll whose outcome this FSM already consumed. The loop
+  // hands one view to several Steps (one per input event), and the outcome is
+  // edge triggered: without this a second Step would apply the same answer to a
+  // request it began in the first one.
+  protocol::Sequence consumed_poll_seq_{0};
+  // The operation of the request the FSM began last, so a repeated key can tell
+  // "the same stop is already on the wire" from "a different stop preempts".
+  protocol::Operation pending_operation_{protocol::Operation::AcquireSession};
   // The last handover attempt, so a refused session is retried on the request
   // retry cadence instead of on every iteration.
   bool have_acquire_{false};

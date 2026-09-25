@@ -60,6 +60,18 @@ enum class RequestOutcome {
 // session the client is bound to; losing the link, the instance or the session
 // drops it, so a target generator can never build on a dead state.
 struct ClientView {
+  // Serial of the Poll call that produced this view; the first call reports 1
+  // and every later call a strictly larger value.
+  //
+  // The outcome below is edge triggered - it is reported on the one call that
+  // first observes it and then never again - while a state snapshot stays
+  // meaningful for as long as it is fresh. A caller that shows one view to
+  // several decisions (the supervision loop runs one Step per input event and
+  // then one more Step on the same poll) therefore has to be able to tell the
+  // two apart: only the first decision that sees a given serial may act on the
+  // outcome of that poll, and the behaviour FSM consumes the serial for exactly
+  // that.
+  protocol::Sequence poll_seq{0};
   RequestOutcome outcome{RequestOutcome::None};
   // Reason of a Rejected outcome; None otherwise.
   protocol::RejectReason reject_reason{protocol::RejectReason::None};
@@ -171,6 +183,12 @@ class RobotClient {
   protocol::Sequence pending_request_id() const;
   std::size_t retry_count() const;
 
+  // The authorization watermark the pending request proposes, and 0 while
+  // nothing is pending or the pending request proposes none. Read-only, for a
+  // caller that built the first frame of a tracking request and has to agree
+  // with the epoch that request is asking for.
+  protocol::Sequence pending_proposed_epoch() const;
+
   // Forgets the pending request and an outcome of it that no Poll has reported
   // yet: the exit path gives up on an answer instead of waiting for one.
   void AbandonRequest();
@@ -251,6 +269,9 @@ class RobotClient {
   // Outcome to report exactly once by the next Poll.
   RequestOutcome report_outcome_{RequestOutcome::None};
   protocol::RejectReason report_reason_{protocol::RejectReason::None};
+
+  // Serial of the Poll calls, so one view can be recognized as the same poll.
+  protocol::Sequence poll_seq_{0};
 };
 
 // A stop is exactly the transport's stop lane (Damping, ZeroTorque, Reset), and

@@ -506,6 +506,7 @@ ClientView RobotClient::Poll(protocol::TimeUs now_us) {
   }
 
   ClientView view;
+  view.poll_seq = ++poll_seq_;
   view.state = latest_state_;
   view.state_known = state_known_;
   view.state_fresh = StateFresh(now_us);
@@ -587,6 +588,10 @@ protocol::Sequence RobotClient::pending_request_id() const {
 }
 
 std::size_t RobotClient::retry_count() const { return pending_sends_; }
+
+protocol::Sequence RobotClient::pending_proposed_epoch() const {
+  return pending_ ? pending_request_.proposed_epoch : 0;
+}
 
 void RobotClient::AbandonRequest() {
   pending_ = false;
