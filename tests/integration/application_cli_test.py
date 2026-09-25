@@ -29,9 +29,12 @@ import threading
 import time
 from pathlib import Path
 
-# 100..199, derived from the process id: a band of its own so a parallel run of
-# the runtime CLI test (20 + pid % 190) cannot land on the same domain.
-DOMAIN = 100 + (os.getpid() % 100)
+# 1..19, derived from the process id: a band of its own, and one that is below
+# the band the runtime CLI test and application_client_test share
+# (20 + pid % 190, that is 20..209), so no two entries of a parallel `ctest -j`
+# run can land on the same DDS domain. Each case walks inside this band.
+DOMAIN_BAND = 19
+DOMAIN = 1 + (os.getpid() % DOMAIN_BAND)
 # The configuration on disk carries a different domain; --domain must override
 # it for both processes, which is also what makes their config digests agree.
 CONFIG_DOMAIN = 9
@@ -42,6 +45,10 @@ START_WAIT_S = 15.0
 EXIT_WAIT_S = 6.0
 EOF_WAIT_S = 6.0
 STOP_BOUND_S = 4.0
+# Status lines the runtime has to emit after the application is gone. The
+# runtime logs one per second, so several of them cannot have been produced
+# before the exit even though a single line could still have been in flight.
+STATUS_LINES_AFTER_EXIT = 2
 
 FAILURES = []
 
@@ -122,10 +129,6 @@ class Runtime:
             return self.process.wait(timeout)
         except subprocess.TimeoutExpired:
             return None
-
-    def terminate(self):
-        if self.alive():
-            self.process.send_signal(signal.SIGTERM)
 
     def kill(self):
         if self.alive():
@@ -308,10 +311,8 @@ def build_workspace(source_dir):
     config["telemetry"]["directory"] = str(workspace / "logs")
     config["dds"]["domain"] = CONFIG_DOMAIN
     (workspace / "config.json").write_text(json.dumps(config), "utf-8")
-    (workspace / "absent.json").write_text("", "utf-8")
     (workspace / "malformed.json").write_text(
         '{"schema_version": 1, "backend": "fake"', "utf-8")
-    (workspace / "absent.json").unlink()
     shutil.copy(source_dir / "tests/support/fake_scenario.json",
                 workspace / "normal.json")
     # A refused torque write: the runtime latches WriteFailed on Boot, so the
@@ -323,11 +324,17 @@ def build_workspace(source_dir):
     return workspace
 
 
-# `case` gives every case its own domain: a leftover process of an earlier case
-# then cannot share a session with the runtime of a later one.
+def case_domain(case):
+    """The domain of one case: an offset inside this process's own band,
+    wrapping at its top so the offsets can never leave it."""
+    return 1 + ((DOMAIN + case - 1) % DOMAIN_BAND)
+
+
+# `case` gives every case its own domain inside the band: a leftover process of
+# an earlier case then cannot share a session with the runtime of a later one.
 def runtime_arguments(workspace, case, scenario=None):
     arguments = ["--config", str(workspace / "config.json"),
-                 "--domain", str(DOMAIN + case)]
+                 "--domain", str(case_domain(case))]
     if scenario is not None:
         arguments += ["--fake-scenario", str(scenario)]
     return arguments
@@ -335,7 +342,7 @@ def runtime_arguments(workspace, case, scenario=None):
 
 def application_arguments(workspace, case):
     return ["--config", str(workspace / "config.json"),
-            "--domain", str(DOMAIN + case)]
+            "--domain", str(case_domain(case))]
 
 
 def test_startup_rejections(workspace):
@@ -349,6 +356,15 @@ def test_startup_rejections(workspace):
         ("domain out of range", ["--config", str(workspace / "config.json"),
                                  "--domain", "1000"], 2,
          "--domain must be between 0 and 230"),
+        # A number too large even for the parser's own type is still a range
+        # problem, not a syntax one: stoull throws, and the message has to say
+        # what the range is.
+        ("domain too large", ["--config", str(workspace / "config.json"),
+                              "--domain", "999999999999999999999999"], 2,
+         "--domain must be between 0 and 230"),
+        ("domain not an integer", ["--config", str(workspace / "config.json"),
+                                   "--domain", "abc"], 2,
+         "--domain must be an integer"),
     ]
     for name, arguments, expected_code, expected in cases:
         with Application(arguments, workspace, terminal=False) as app:
@@ -413,7 +429,11 @@ def test_normal_exit_by_key(workspace):
                                             "expected exit 0, got %s" % code))
 
         # Every line from here on is evidence about the lower layer after the
-        # upper process is gone.
+        # upper process is gone: the boundary is the line count taken after the
+        # application's exit, so only status lines *emitted* after it are
+        # accepted - a few of them, because one line could still have been in
+        # flight, while several at the runtime's own status cadence cannot have
+        # been produced before the exit.
         runtime_before = runtime.line_count()
         check(runtime.alive(), failure_report("runtime survival", runtime,
                                               "the runtime exited with the "
@@ -424,7 +444,7 @@ def test_normal_exit_by_key(workspace):
         # deliberately not asserted here.
         kept = runtime.wait_for(
             lambda line: "[runtime] status" in line and 'state="Damping"' in line,
-            5.0, start=runtime_before)
+            5.0, minimum=STATUS_LINES_AFTER_EXIT, start=runtime_before)
         check(kept, failure_report("runtime survival", runtime,
                                    "the runtime stopped controlling after the "
                                    "application exited"))
@@ -504,9 +524,13 @@ def test_latched_runtime_fault(workspace):
         check(runtime.alive(), failure_report("latched fault", runtime,
                                               "the runtime exited with the "
                                               "application"))
+        # Only status lines emitted after the application's exit count, and more
+        # than one of them: the latch survived the supervision, it is not a line
+        # that was already in the pipe.
+        fault_status_before = runtime.line_count()
         still_faulted = runtime.wait_for(
             lambda line: "[runtime] status" in line and 'state="Fault"' in line,
-            5.0)
+            5.0, minimum=STATUS_LINES_AFTER_EXIT, start=fault_status_before)
         check(still_faulted, failure_report("latched fault", runtime,
                                             "the application cleared the "
                                             "latched fault of the runtime"))

@@ -34,9 +34,17 @@ bool InstallStopHandlers() {
 }
 
 // The terminal of the supervision loop, held for the whole life of the process
-// and given back on every exit path that this program can observe - the normal
+// and given back on every exit path that reaches the destructor - the normal
 // one included, because the exit a signal asks for is the same ordered exit as
 // the exit key.
+//
+// "Reaches the destructor" is the precise limit of that promise: the restore
+// runs in ~TerminalGuard, so it covers a return and an exception unwinding
+// through main - which is why main() catches whatever escapes the loop, since
+// an exception that ran to the top of the stack would call std::terminate
+// before this destructor ran. A signal neither returns nor unwinds: SIGINT and
+// SIGTERM are handled by a flag, so the loop leaves through the ordered exit
+// and the destructor still runs.
 //
 // Two things are saved and restored, and only these two: the line discipline
 // attributes (ICANON and ECHO cleared, so one byte reaches the loop without a
@@ -103,6 +111,12 @@ class TerminalGuard {
 constexpr std::string_view kUsageLine =
     "usage: application --config PATH [--domain N]";
 
+std::string DomainRangeMessage(const std::string &value) {
+  return "--domain must be between 0 and " +
+         std::to_string(irmv::configuration::kMaxDdsDomain) + ", got \"" +
+         value + "\"";
+}
+
 struct CommandLine {
   bool ok{false};
   int exit_code{irmv::application::kExitUsageError};
@@ -133,15 +147,18 @@ CommandLine ParseCommandLine(int argc, char **argv) {
       std::uint64_t domain = 0;
       try {
         domain = std::stoull(value, &consumed);
+      } catch (const std::out_of_range &) {
+        // A number too large for the domain range, not a non-number: it gets
+        // the range message, like every other refused value.
+        result.error = DomainRangeMessage(value);
+        return result;
       } catch (const std::exception &) {
         result.error = "--domain must be an integer, got \"" + value + "\"";
         return result;
       }
       if (consumed != value.size() ||
           domain > irmv::configuration::kMaxDdsDomain) {
-        result.error = "--domain must be between 0 and " +
-                       std::to_string(irmv::configuration::kMaxDdsDomain) +
-                       ", got \"" + value + "\"";
+        result.error = DomainRangeMessage(value);
         return result;
       }
       result.options.dds_domain = static_cast<std::uint32_t>(domain);
@@ -181,6 +198,19 @@ int main(int argc, char **argv) {
   // the attributes on every return of `main`, which is why a handled signal
   // leaves the terminal the way it was found.
   const TerminalGuard terminal;
-  return irmv::application::RunApplication(command_line.options,
-                                           g_stop_requested);
+  // An exception escaping the loop would reach the top of the stack and call
+  // std::terminate before the guard above ran its destructor, so it is caught
+  // here. Catching restores nothing by itself - it is what lets the guard run -
+  // and the report claims nothing about hardware: the process failed, and a
+  // startup error is the honest code for that.
+  try {
+    return irmv::application::RunApplication(command_line.options,
+                                             g_stop_requested);
+  } catch (const std::exception &error) {
+    std::fprintf(stderr, "application: internal error: %s\n", error.what());
+    return irmv::application::kExitStartupError;
+  } catch (...) {
+    std::fprintf(stderr, "application: internal error: unknown exception\n");
+    return irmv::application::kExitStartupError;
+  }
 }

@@ -40,6 +40,13 @@ struct ApplicationOptions {
 // holds the process id of a runtime process: the lower layer is an independent
 // process that is entered through DDS alone and outlives this one.
 //
+// Precondition: stdin is already non-blocking (O_NONBLOCK), which is what
+// main's terminal guard sets before calling this function and restores
+// afterwards. The loop does not set it itself, and a second caller that handed
+// in a blocking tty would stall inside the raw-mode read with the heartbeat
+// stopped - the non-blocking flag is what keeps the pacing, the status line and
+// the supervision heartbeat alive while no key arrives.
+//
 // `stop_requested` is the only thing a signal handler may set; the loop turns
 // it into the same RequestExit the exit key raises, so every exit is the one
 // bounded, honest path.

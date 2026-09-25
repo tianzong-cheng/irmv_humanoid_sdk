@@ -186,9 +186,11 @@ application: exit stop=unknown lower=Fault       # the runtime was already in Fa
 application: exit stop=unknown lower=Unknown     # the stop was never proven, exit 3
 ```
 
-Exit codes: `0` a confirmed stop, `1` a configuration or startup error (nothing
-touched DDS), `2` a usage error, `3` the bounded exit that could not prove a
-stop. A `3` never says `damped`, `stopped` or `safe`: the runtime keeps its own
+Exit codes: `0` a confirmed stop, `1` a configuration or startup error (the
+hardware was never commanded - a startup that failed at the transport can
+already have created DDS entities of this process, it just never sent a
+command), `2` a usage error, `3` the bounded exit that could not prove a stop.
+A `3` never says `damped`, `stopped` or `safe`: the runtime keeps its own
 output rule - the damping it was already commanding, or the fault output it
 latched - and this process exits without touching it. The terminal attributes are
 restored on every exit path this process can observe, the signal path included.
@@ -260,9 +262,11 @@ mkdir -p /tmp/run && cd /tmp/run
 /tmp/irmv-sdk-stage/bin/application \
     --config /tmp/irmv-sdk-stage/etc/irmv/sdk.json --domain 227
 # [application] behavior=Standby runtime=ZeroTorque output=ZeroTorque ...
-# Ctrl-C / SIGTERM:
+# Ctrl-C in *this* shell (the application's): the upper process exits through
+# its ordered stop, and the runtime in the other shell is not touched:
 # application: exit stop=confirmed state=Damping
-# robot_runtime: clean shutdown: state=ZeroTorque ticks=... overruns=...
+# It is the runtime's own shell that stops the runtime:
+# (there) Ctrl-C -> robot_runtime: clean shutdown: state=ZeroTorque ticks=... overruns=...
 ```
 
 ## Formatting and CI

@@ -184,6 +184,11 @@ int PollTimeoutMs(protocol::TimeUs period_us) {
 // the input device is lost, which is an EOF or a terminal error and asks for
 // the ordered exit - never for an emergency stop and never for a claim that the
 // hardware stopped.
+//
+// Precondition: STDIN_FILENO is already O_NONBLOCK (main's terminal guard set
+// it). That flag is what makes "nothing to read" return EAGAIN instead of
+// waiting for a byte, so this read, the pacing poll at the end of the iteration
+// and the supervision heartbeat stay independent of the typing hand.
 bool ReadTerminal(InputRouter *router, std::array<char, kReadChunk> *buffer,
                   protocol::TimeUs now_us) {
   for (int attempt = 0; attempt < kReadAttempts; ++attempt) {
@@ -218,7 +223,7 @@ bool ReadTerminal(InputRouter *router, std::array<char, kReadChunk> *buffer,
 // Transport adapter
 // ---------------------------------------------------------------------------
 
-// The four forwards of ClientSink to the transport, plus the one display fact
+// The three forwards of ClientSink to the transport, plus the one display fact
 // the client does not expose: the operation of the request that was handed over
 // last. irmv_transport must not depend on irmv_application, so ClientTransport
 // cannot implement ClientSink itself, and the application executable is the
