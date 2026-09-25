@@ -41,15 +41,19 @@ enum class InitializationStatus { Running, Ready, Failed };
 // At and past the duration the frame is exactly `q = target_q`, `dq = 0`,
 // `tau_ff = 0` with the configured gains.
 //
-// Start admits a plan only when the runtime can accept it: every measured
-// origin inside `[position_min, position_max]`, every planned peak rate inside
-// `runtime.safety.target_velocity_limits`, and the first frame (the measured
+// Start admits a plan only when the runtime can accept it, and then emits the
+// first frame of that plan itself: every measured origin and every target
+// inside `runtime.position_min`/`runtime.position_max`, every planned peak rate
+// inside `runtime.target_velocity_limits`, and the first frame (the measured
 // position, zero velocity, zero feed-forward and the configured gains) inside
-// the runtime's own continuity bounds against the damped predecessor
-// `-damping_kd * dq_fb`. A plan that fails is refused cleanly - no frame, no
-// latch - instead of stalling on a `DISCONTINUITY` rejection or latching a
-// mid-move fault; the operator then has to raise `trajectory.duration_us` (and
-// `deadline_us` with it) for a move that starts far from its target.
+// `runtime.continuity.position_delta`, `velocity_delta` and `torque_delta`
+// against the damped predecessor `-runtime.damping_kd * dq_fb`. A plan that
+// fails is refused cleanly - no frame, no latch - instead of stalling on a
+// `DISCONTINUITY` rejection or latching a mid-move fault; the operator then has
+// to raise `trajectory.duration_us` (and `deadline_us` with it) for a move that
+// starts far from its target. Because the emitted first frame is exactly the
+// one the guard validated, no caller can send a first frame the guard did not
+// approve.
 //
 // The move is finished only after the ramp, when every joint has been inside
 // its position and velocity tolerances for the whole
@@ -69,18 +73,25 @@ class Initialization {
   Initialization(const Initialization &) = delete;
   Initialization &operator=(const Initialization &) = delete;
 
-  // Fixes the trajectory origin at the measured position of `fresh` and starts
-  // the timing window; no frame is emitted. Refused when `fresh` cannot be a
-  // target source, with the all-zero producer, while a move is already active
-  // (a repeated Start is the FSM's to intercept, and refusing here keeps a
-  // restart from silently moving the trajectory origin without resetting the
-  // timing), and when the plan itself is not one the runtime would accept (see
-  // the class comment: origin outside the position limits, peak rate above the
-  // target velocity limit, or a first frame breaking a continuity bound). A
-  // refusal changes nothing and latches nothing, so the operator can raise
+  // Fixes the trajectory origin at the measured position of `fresh`, starts the
+  // timing window, and emits the first frame of the move: exactly the t = 0
+  // frame the admission guard validated (the measured position, dq == 0,
+  // tau_ff == 0, the configured gains and its own command sequence), so a
+  // caller can never send a first frame the guard did not approve.
+  // `first_command` is required: a null output is a caller bug and refuses the
+  // call. Refused when `fresh` cannot be a target source, with the all-zero
+  // producer, while a move is already active (a repeated Start is the FSM's to
+  // intercept, and refusing here keeps a restart from silently moving the
+  // trajectory origin without resetting the timing), and when the plan itself
+  // is not one the runtime would accept (see the class comment: origin or
+  // target outside the position limits, peak rate above the target velocity
+  // limit, or a first frame breaking a continuity bound). A refusal changes
+  // nothing and latches nothing - including filling nothing into
+  // `first_command` - so the operator can raise
   // `trajectory.duration_us`/`deadline_us` and start again.
   bool Start(const protocol::RobotState &fresh, protocol::Sequence epoch,
-             protocol::Id producer_id, protocol::TimeUs now_us);
+             protocol::Id producer_id, protocol::TimeUs now_us,
+             protocol::JointCommand *first_command);
 
   // Emits the frame of this instant of the move, or reports why it cannot:
   // `Running` with the frame the caller sends this period, `Ready` with the

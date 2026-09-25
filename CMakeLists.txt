@@ -156,8 +156,11 @@ target_include_directories(
     "${PROJECT_SOURCE_DIR}/include"
     "${PROJECT_SOURCE_DIR}/tests"
 )
+# The test also drives a real ExecutionFsm through the runtime fixture, so it
+# links the runtime; the application library itself stays DDS-free.
 target_link_libraries(
-  application_initialization_test PRIVATE irmv_application irmv_configuration
+  application_initialization_test
+  PRIVATE irmv_application irmv_configuration irmv_runtime
 )
 
 add_test(NAME application_initialization_test COMMAND application_initialization_test)

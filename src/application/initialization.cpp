@@ -12,10 +12,13 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 
-// The peak rate of the raised-cosine profile: the maximum of
-// |delta| * (pi / (2 * D)) * sin(pi * u) over the ramp.
+// The peak rate of the raised-cosine profile: the supremum of
+// |delta * ((pi / (2 * D)) * sin(pi * u))| over the ramp. It is associated
+// exactly like `FillRamp`'s expression - `|delta| * (pi / (2 * D))` - so a
+// rounding step can never make the bound smaller than an emitted sample, and
+// |sin| <= 1 makes it a true upper bound.
 double PeakRate(double delta, double duration_seconds) {
-  return std::fabs(delta) * kPi / (2.0 * duration_seconds);
+  return std::fabs(delta) * (kPi / (2.0 * duration_seconds));
 }
 
 }  // namespace
@@ -75,15 +78,20 @@ bool Initialization::PlanRunnable(
       static_cast<double>(trajectory.duration_us) / 1'000'000.0;
   for (std::size_t index = 0; index < config_.joint_count(); ++index) {
     const double measured = origin[index];
-    // The measured origin is also the first target, so it must be a position
-    // the runtime accepts.
+    const double target = config_.initialization.target_q[index];
+    // The measured origin is the first target of the move and the ramp ends on
+    // the configured target, so both must be positions the runtime accepts.
     if (!std::isfinite(measured) || measured < runtime.position_min[index] ||
         measured > runtime.position_max[index]) {
       return false;
     }
+    if (!std::isfinite(target) || target < runtime.position_min[index] ||
+        target > runtime.position_max[index]) {
+      return false;
+    }
     // Every frame of the ramp must stay inside the runtime's target velocity
     // limit; the raised-cosine profile is bounded by its peak rate.
-    const double delta = config_.initialization.target_q[index] - measured;
+    const double delta = target - measured;
     const double peak_rate = PeakRate(delta, duration_seconds);
     if (!std::isfinite(peak_rate) ||
         peak_rate > runtime.target_velocity_limits[index]) {
@@ -195,8 +203,14 @@ void Initialization::Fail() {
 
 bool Initialization::Start(const protocol::RobotState &fresh,
                            protocol::Sequence epoch, protocol::Id producer_id,
-                           protocol::TimeUs now_us) {
+                           protocol::TimeUs now_us,
+                           protocol::JointCommand *first_command) {
   if (active_) {
+    return false;
+  }
+  if (first_command == nullptr) {
+    // A caller bug, refused like every other Start refusal: nothing changed,
+    // nothing filled.
     return false;
   }
   if (producer_id == protocol::kNoId) {
@@ -230,6 +244,16 @@ bool Initialization::Start(const protocol::RobotState &fresh,
   active_ = true;
   failed_ = false;
   ready_ = false;
+  // Emit the frame the guard just validated, so the first frame a caller can
+  // send is exactly the one admission approved. BeginFrame can only fail when
+  // the frozen layout text does not fit, which no loaded configuration can do;
+  // if it ever did, it leaves the command untouched and the move failed rather
+  // than half-started.
+  if (!BeginFrame(first_command, fresh)) {
+    Fail();
+    return false;
+  }
+  FillRamp(first_command, 0);
   return true;
 }
 

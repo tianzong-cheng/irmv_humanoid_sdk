@@ -15,6 +15,7 @@
 #include "irmv/configuration/application_config.hpp"
 #include "irmv/protocol/types.hpp"
 #include "support/check.hpp"
+#include "support/runtime_fixture.hpp"
 
 namespace {
 
@@ -22,13 +23,19 @@ using irmv::application::Initialization;
 using irmv::application::InitializationStatus;
 using irmv::configuration::ApplicationConfig;
 using irmv::configuration::LoadApplicationConfig;
+using irmv::protocol::ExecutionState;
 using irmv::protocol::JointCommand;
 using irmv::protocol::kMaxJoints;
 using irmv::protocol::kNoId;
 using irmv::protocol::kProtocolVersion;
+using irmv::protocol::Operation;
+using irmv::protocol::RejectReason;
+using irmv::protocol::ResultStatus;
 using irmv::protocol::RobotState;
 using irmv::protocol::Sequence;
 using irmv::protocol::TimeUs;
+using irmv::test::FixtureProducerId;
+using irmv::test::RuntimeFixture;
 
 using JointPair = std::array<double, 2>;
 
@@ -95,6 +102,25 @@ int CheckUntouched(const JointCommand &command) {
   return 0;
 }
 
+// Starts through a throwaway frame where the case is only about the verdict.
+int StartOk(Initialization &initialization, const RobotState &fresh,
+            Sequence epoch, TimeUs now_us,
+            irmv::protocol::Id producer = Producer()) {
+  JointCommand frame{};
+  CHECK(initialization.Start(fresh, epoch, producer, now_us, &frame));
+  return 0;
+}
+
+// A refused Start changes nothing and fills nothing.
+int StartRefused(Initialization &initialization, const RobotState &fresh,
+                 Sequence epoch, TimeUs now_us,
+                 irmv::protocol::Id producer = Producer()) {
+  JointCommand frame = Sentinel();
+  CHECK(!initialization.Start(fresh, epoch, producer, now_us, &frame));
+  CHECK(CheckUntouched(frame) == 0);
+  return 0;
+}
+
 // The ramp length of the fake fixture within the runtime's velocity continuity
 // bound: |target - start| / duration stays far below velocity_delta.
 constexpr TimeUs kSlowDurationUs = 4'000'000;
@@ -109,7 +135,8 @@ void SetDuration(ApplicationConfig &config, TimeUs duration) {
 
 // The first frame of a move is judged by the runtime against the damped
 // predecessor of the same feedback, so the generator must start from the
-// measured position instead of jumping to the target.
+// measured position instead of jumping to the target - and Start must hand the
+// caller exactly that frame, so a later first Step cannot replace it.
 int FirstFrameContinuity() {
   ApplicationConfig config = FakeConfig();
   SetDuration(config, kSlowDurationUs);
@@ -119,15 +146,18 @@ int FirstFrameContinuity() {
   const RobotState fresh = FreshState(config, measured, still, now - 1'000, 11);
 
   Initialization initialization(config);
-  CHECK(initialization.Start(fresh, kEpoch, Producer(), now));
+  JointCommand frame{};
+  CHECK(initialization.Start(fresh, kEpoch, Producer(), now, &frame));
   CHECK(initialization.active());
   CHECK(!initialization.ready());
   CHECK(!initialization.failed());
 
-  JointCommand frame{};
-  CHECK(initialization.Step(fresh, now, &frame) ==
-        InitializationStatus::Running);
   CHECK(frame.joints.count == config.joint_count());
+  CHECK(frame.layout_id.View() == config.layout_id());
+  CHECK(frame.producer_id == Producer());
+  CHECK(frame.epoch == kEpoch);
+  CHECK(frame.command_seq != 0);
+  CHECK(frame.source_state_seq == fresh.state_seq);
   for (std::size_t index = 0; index < config.joint_count(); ++index) {
     const double position = frame.joints.q[index];
     const double measured_position = fresh.feedback.joints[index].q;
@@ -142,6 +172,9 @@ int FirstFrameContinuity() {
     // the velocity bound for every start position.
     CHECK(position == measured_position);
     CHECK(frame.joints.dq[index] == 0.0);
+    CHECK(frame.joints.tau_ff[index] == 0.0);
+    CHECK(frame.joints.kp[index] == config.initialization.gains.kp[index]);
+    CHECK(frame.joints.kd[index] == config.initialization.gains.kd[index]);
     // Torque continuity against both possible predecessors, computed with the
     // runtime's formula tau = kp*(q - q_fb) + kd*(dq - dq_fb) + tau_ff.
     const double tau_new =
@@ -156,12 +189,31 @@ int FirstFrameContinuity() {
     CHECK(std::fabs(tau_new - tau_zero_torque) <=
           config.runtime.continuity.torque_delta[index]);
   }
+  // The next period continues the ramp from the frame Start emitted, and the
+  // sequence keeps increasing.
+  {
+    const TimeUs next = now + config.supervision.target_period_us;
+    const RobotState advanced =
+        FreshState(config, measured, still, next - 1'000, 13);
+    JointCommand step_frame{};
+    CHECK(initialization.Step(advanced, next, &step_frame) ==
+          InitializationStatus::Running);
+    CHECK(step_frame.command_seq > frame.command_seq);
+    for (std::size_t index = 0; index < config.joint_count(); ++index) {
+      CHECK(std::fabs(step_frame.joints.q[index] - measured[index]) <=
+            config.runtime.continuity.position_delta[index]);
+      CHECK(std::fabs(step_frame.joints.dq[index] -
+                      fresh.feedback.joints[index].dq) <=
+            config.runtime.continuity.velocity_delta[index]);
+    }
+  }
   // A repeated Start is the FSM's to intercept; here it must not silently move
   // the trajectory origin or restart the timing window.
   const TimeUs later = now + 500'000;
   const RobotState moved = FreshState(config, JointPair{0.0, 0.0},
                                       JointPair{0.0, 0.0}, later - 1'000, 12);
-  CHECK(!initialization.Start(moved, kEpoch + 1, Producer(), later));
+  CHECK(StartRefused(initialization, moved, kEpoch + 1, later, Producer()) ==
+        0);
   CHECK(initialization.active());
   CHECK(initialization.epoch() == kEpoch);
   return 0;
@@ -188,7 +240,16 @@ int MonotonicInterpolation() {
   Initialization initialization(config);
   const RobotState origin =
       FreshState(config, start_q, JointPair{0.0, 0.0}, start_us - 1'000, 20);
-  CHECK(initialization.Start(origin, kEpoch, Producer(), start_us));
+  JointCommand start_frame{};
+  CHECK(
+      initialization.Start(origin, kEpoch, Producer(), start_us, &start_frame));
+  // The frame Start emits is the profiled t = 0 frame: the start position and a
+  // zero velocity command, never a jump to the target.
+  CHECK(start_frame.source_state_seq == origin.state_seq);
+  for (std::size_t index = 0; index < config.joint_count(); ++index) {
+    CHECK(start_frame.joints.q[index] == start_q[index]);
+    CHECK(start_frame.joints.dq[index] == 0.0);
+  }
 
   const auto profile_q = [&](std::size_t index, TimeUs elapsed) {
     const double delta = config.initialization.target_q[index] - start_q[index];
@@ -281,9 +342,26 @@ int FrameCompleteness() {
   Initialization initialization(config);
   const RobotState origin =
       FreshState(config, start_q, JointPair{0.0, 0.0}, start_us - 1'000, 100);
-  CHECK(initialization.Start(origin, kEpoch, Producer(), start_us));
+  JointCommand start_frame{};
+  CHECK(
+      initialization.Start(origin, kEpoch, Producer(), start_us, &start_frame));
+  CHECK(start_frame.joints.count == config.joint_count());
+  CHECK(start_frame.layout_id.View() == config.layout_id());
+  CHECK(start_frame.producer_id == Producer());
+  CHECK(start_frame.epoch == kEpoch);
+  CHECK(start_frame.source_state_seq == origin.state_seq);
+  CHECK(start_frame.runtime_id == kNoId);
+  CHECK(start_frame.session_id == kNoId);
+  CHECK(start_frame.stamp_us == 0);
+  for (std::size_t index = 0; index < config.joint_count(); ++index) {
+    CHECK(start_frame.joints.kp[index] ==
+          config.initialization.gains.kp[index]);
+    CHECK(start_frame.joints.kd[index] ==
+          config.initialization.gains.kd[index]);
+    CHECK(start_frame.joints.tau_ff[index] == 0.0);
+  }
 
-  Sequence previous_seq = 0;
+  Sequence previous_seq = start_frame.command_seq;
   for (std::size_t step = 0; step < 4; ++step) {
     const TimeUs now = start_us + step * 20'000;
     const RobotState fresh =
@@ -336,38 +414,44 @@ int UnusableFeedbackFails() {
     RobotState state = good;
     state.feedback.count = 1;
     Initialization initialization(config);
-    CHECK(!initialization.Start(state, kEpoch, Producer(), start_us));
+    CHECK(StartRefused(initialization, state, kEpoch, start_us, Producer()) ==
+          0);
     CHECK(!initialization.active());
   }
   {
     RobotState state = good;
     state.feedback.joints[1].valid = false;
     Initialization initialization(config);
-    CHECK(!initialization.Start(state, kEpoch, Producer(), start_us));
+    CHECK(StartRefused(initialization, state, kEpoch, start_us, Producer()) ==
+          0);
   }
   {
     RobotState state = good;
     state.feedback.joints[0].connected = false;
     Initialization initialization(config);
-    CHECK(!initialization.Start(state, kEpoch, Producer(), start_us));
+    CHECK(StartRefused(initialization, state, kEpoch, start_us, Producer()) ==
+          0);
   }
   {
     RobotState state = good;
     state.stamp_us = 0;
     Initialization initialization(config);
-    CHECK(!initialization.Start(state, kEpoch, Producer(), start_us));
+    CHECK(StartRefused(initialization, state, kEpoch, start_us, Producer()) ==
+          0);
   }
   {
     RobotState state = good;
     state.stamp_us = start_us - config.runtime.timeouts.source_state_us - 1;
     Initialization initialization(config);
-    CHECK(!initialization.Start(state, kEpoch, Producer(), start_us));
+    CHECK(StartRefused(initialization, state, kEpoch, start_us, Producer()) ==
+          0);
   }
   {
     RobotState state = good;
     state.stamp_us = start_us + 1;
     Initialization initialization(config);
-    CHECK(!initialization.Start(state, kEpoch, Producer(), start_us));
+    CHECK(StartRefused(initialization, state, kEpoch, start_us, Producer()) ==
+          0);
   }
   {
     // A zero state sequence names no published state, so the runtime could
@@ -375,29 +459,33 @@ int UnusableFeedbackFails() {
     RobotState state = good;
     state.state_seq = 0;
     Initialization initialization(config);
-    CHECK(!initialization.Start(state, kEpoch, Producer(), start_us));
+    CHECK(StartRefused(initialization, state, kEpoch, start_us, Producer()) ==
+          0);
   }
   {
     RobotState state = good;
     state.protocol_version = kProtocolVersion + 1;
     Initialization initialization(config);
-    CHECK(!initialization.Start(state, kEpoch, Producer(), start_us));
+    CHECK(StartRefused(initialization, state, kEpoch, start_us, Producer()) ==
+          0);
   }
   {
     RobotState state = good;
     state.feedback.joints[0].q = kNaN;
     Initialization initialization(config);
-    CHECK(!initialization.Start(state, kEpoch, Producer(), start_us));
+    CHECK(StartRefused(initialization, state, kEpoch, start_us, Producer()) ==
+          0);
   }
   {
     RobotState state = good;
     state.feedback.joints[1].dq = kInf;
     Initialization initialization(config);
-    CHECK(!initialization.Start(state, kEpoch, Producer(), start_us));
+    CHECK(StartRefused(initialization, state, kEpoch, start_us, Producer()) ==
+          0);
   }
   {
     Initialization initialization(config);
-    CHECK(!initialization.Start(good, kEpoch, kNoId, start_us));
+    CHECK(StartRefused(initialization, good, kEpoch, start_us, kNoId) == 0);
   }
 
   // A running move fails on the same rules, latches, and emits nothing.
@@ -441,7 +529,7 @@ int UnusableFeedbackFails() {
   };
   for (const Case &item : cases) {
     Initialization initialization(config);
-    CHECK(initialization.Start(good, kEpoch, Producer(), start_us));
+    CHECK(StartOk(initialization, good, kEpoch, start_us, Producer()) == 0);
     JointCommand frame = Sentinel();
     CHECK(initialization.Step(item.state, item.now, &frame) ==
           InitializationStatus::Failed);
@@ -455,7 +543,8 @@ int UnusableFeedbackFails() {
     CHECK(initialization.Step(item.state, item.now + 1'000, &again) ==
           InitializationStatus::Failed);
     CHECK(CheckUntouched(again) == 0);
-    CHECK(initialization.Start(good, kEpoch, Producer(), start_us + 20'000));
+    CHECK(StartOk(initialization, good, kEpoch, start_us + 20'000,
+                  Producer()) == 0);
     CHECK(initialization.active());
     CHECK(!initialization.failed());
   }
@@ -465,7 +554,7 @@ int UnusableFeedbackFails() {
   // already wrap the elapsed time past the deadline).
   {
     Initialization initialization(config);
-    CHECK(initialization.Start(good, kEpoch, Producer(), start_us));
+    CHECK(StartOk(initialization, good, kEpoch, start_us, Producer()) == 0);
     JointCommand frame{};
     const RobotState forward =
         FreshState(config, measured, still, start_us + 29'500, 31);
@@ -479,14 +568,15 @@ int UnusableFeedbackFails() {
     CHECK(CheckUntouched(untouched) == 0);
     CHECK(initialization.failed());
     // Start accepts a later origin again after the latch.
-    CHECK(initialization.Start(good, kEpoch, Producer(), start_us + 31'000));
+    CHECK(StartOk(initialization, good, kEpoch, start_us + 31'000,
+                  Producer()) == 0);
     CHECK(initialization.active());
   }
   // A null output is a mid-move failure like any other: it latches and emits
   // nothing.
   {
     Initialization initialization(config);
-    CHECK(initialization.Start(good, kEpoch, Producer(), start_us));
+    CHECK(StartOk(initialization, good, kEpoch, start_us, Producer()) == 0);
     CHECK(initialization.Step(good, start_us + 1'000, nullptr) ==
           InitializationStatus::Failed);
     CHECK(initialization.failed());
@@ -516,10 +606,8 @@ int AdmissionRefusals() {
     const RobotState fresh =
         FreshState(config, far, still, start_us - 1'000, 80);
     Initialization initialization(config);
-    CHECK(initialization.Start(fresh, kEpoch, Producer(), start_us));
     JointCommand frame{};
-    CHECK(initialization.Step(fresh, start_us, &frame) ==
-          InitializationStatus::Running);
+    CHECK(initialization.Start(fresh, kEpoch, Producer(), start_us, &frame));
     for (std::size_t index = 0; index < config.joint_count(); ++index) {
       const double measured = fresh.feedback.joints[index].q;
       const double measured_velocity = fresh.feedback.joints[index].dq;
@@ -539,8 +627,8 @@ int AdmissionRefusals() {
       CHECK(std::fabs(tau_new - tau_old) <=
             config.runtime.continuity.torque_delta[index]);
       const double peak =
-          std::fabs(config.initialization.target_q[index] - measured) * kPi /
-          (2.0 * duration_seconds);
+          std::fabs(config.initialization.target_q[index] - measured) *
+          (kPi / (2.0 * duration_seconds));
       CHECK(peak <= config.runtime.target_velocity_limits[index]);
     }
     // Halfway through, the profile is at the midpoint and at its peak rate.
@@ -558,8 +646,8 @@ int AdmissionRefusals() {
           InitializationStatus::Running);
     for (std::size_t index = 0; index < config.joint_count(); ++index) {
       const double peak =
-          std::fabs(config.initialization.target_q[index] - far[index]) * kPi /
-          (2.0 * duration_seconds);
+          std::fabs(config.initialization.target_q[index] - far[index]) *
+          (kPi / (2.0 * duration_seconds));
       CHECK(std::fabs(half_frame.joints.q[index] - midpoint[index]) <=
             kTolerance);
       CHECK(std::fabs(std::fabs(half_frame.joints.dq[index]) - peak) <=
@@ -574,15 +662,16 @@ int AdmissionRefusals() {
     SetDuration(short_config, 200'000);
     const JointPair far{1.5, -1.5};
     const double peak =
-        std::fabs(short_config.initialization.target_q[0] - far[0]) * kPi /
-        (2.0 * (static_cast<double>(
-                    short_config.initialization.trajectory.duration_us) /
-                1e6));
+        std::fabs(short_config.initialization.target_q[0] - far[0]) *
+        (kPi / (2.0 * (static_cast<double>(
+                           short_config.initialization.trajectory.duration_us) /
+                       1e6)));
     CHECK(peak > short_config.runtime.target_velocity_limits[0]);
     const RobotState fresh =
         FreshState(short_config, far, still, start_us - 1'000, 82);
     Initialization initialization(short_config);
-    CHECK(!initialization.Start(fresh, kEpoch, Producer(), start_us));
+    CHECK(StartRefused(initialization, fresh, kEpoch, start_us, Producer()) ==
+          0);
     CHECK(!initialization.active());
     CHECK(!initialization.failed());
     CHECK(!initialization.ready());
@@ -596,7 +685,7 @@ int AdmissionRefusals() {
     const RobotState later =
         FreshState(long_config, far, still, start_us + 1'000, 83);
     Initialization admitted(long_config);
-    CHECK(admitted.Start(later, kEpoch, Producer(), start_us + 2'000));
+    CHECK(StartOk(admitted, later, kEpoch, start_us + 2'000, Producer()) == 0);
     CHECK(admitted.active());
   }
 
@@ -609,7 +698,8 @@ int AdmissionRefusals() {
     Initialization initialization(limited);
     const RobotState fresh =
         FreshState(limited, outside, still, start_us - 1'000, 84);
-    CHECK(!initialization.Start(fresh, kEpoch, Producer(), start_us));
+    CHECK(StartRefused(initialization, fresh, kEpoch, start_us, Producer()) ==
+          0);
     CHECK(!initialization.active());
     CHECK(!initialization.failed());
     // The same move from inside the limits is admitted, so the refusal is the
@@ -617,7 +707,7 @@ int AdmissionRefusals() {
     const JointPair inside{1.9, 0.0};
     const RobotState ok =
         FreshState(limited, inside, still, start_us - 1'000, 85);
-    CHECK(initialization.Start(ok, kEpoch, Producer(), start_us));
+    CHECK(StartOk(initialization, ok, kEpoch, start_us, Producer()) == 0);
     CHECK(initialization.active());
   }
 
@@ -632,12 +722,13 @@ int AdmissionRefusals() {
     Initialization initialization(moving);
     const RobotState fresh =
         FreshState(moving, origin, fast, start_us - 1'000, 86);
-    CHECK(!initialization.Start(fresh, kEpoch, Producer(), start_us));
+    CHECK(StartRefused(initialization, fresh, kEpoch, start_us, Producer()) ==
+          0);
     CHECK(!initialization.active());
     CHECK(!initialization.failed());
     const RobotState ok =
         FreshState(moving, origin, JointPair{0.4, 0.0}, start_us - 1'000, 87);
-    CHECK(initialization.Start(ok, kEpoch, Producer(), start_us));
+    CHECK(StartOk(initialization, ok, kEpoch, start_us, Producer()) == 0);
     CHECK(initialization.active());
   }
 
@@ -656,7 +747,8 @@ int AdmissionRefusals() {
     Initialization initialization(torque);
     const RobotState fresh =
         FreshState(torque, origin, fast, start_us - 1'000, 88);
-    CHECK(!initialization.Start(fresh, kEpoch, Producer(), start_us));
+    CHECK(StartRefused(initialization, fresh, kEpoch, start_us, Producer()) ==
+          0);
     CHECK(!initialization.active());
     CHECK(!initialization.failed());
     // Inside the torque bound the same plan is admitted.
@@ -665,7 +757,130 @@ int AdmissionRefusals() {
     }
     const RobotState ok =
         FreshState(torque, origin, fast, start_us - 1'000, 89);
-    CHECK(initialization.Start(ok, kEpoch, Producer(), start_us));
+    CHECK(StartOk(initialization, ok, kEpoch, start_us, Producer()) == 0);
+    CHECK(initialization.active());
+  }
+
+  // A target outside the physical limits is refused too, even when the measured
+  // origin is a perfectly good position: a hand-built configuration cannot get
+  // an un-executable plan past the guard.
+  {
+    ApplicationConfig config_out = FakeConfig();
+    SetDuration(config_out, 2'000'000);
+    config_out.initialization.target_q[0] = 2.5;
+    config_out.initialization.target_q[1] = 0.0;
+    CHECK(config_out.initialization.target_q[0] >
+          config_out.runtime.position_max[0]);
+    Initialization initialization(config_out);
+    const RobotState fresh = FreshState(config_out, JointPair{0.0, 0.0}, still,
+                                        start_us - 1'000, 90);
+    CHECK(StartRefused(initialization, fresh, kEpoch, start_us, Producer()) ==
+          0);
+    CHECK(!initialization.active());
+    CHECK(!initialization.failed());
+    // The same move to a target inside the limits is admitted.
+    config_out.initialization.target_q[0] = 1.5;
+    const RobotState ok = FreshState(config_out, JointPair{0.0, 0.0}, still,
+                                     start_us - 1'000, 91);
+    CHECK(StartOk(initialization, ok, kEpoch, start_us, Producer()) == 0);
+    CHECK(initialization.active());
+  }
+
+  // The guard's boundaries are inclusive: a plan whose peak rate equals the
+  // target velocity limit exactly is admitted (the limit is the supremum of the
+  // emitted command, not above it), and an origin exactly on a position limit
+  // is admitted.
+  {
+    ApplicationConfig exact = FakeConfig();
+    SetDuration(exact, 2'000'000);
+    const JointPair at_limit{exact.runtime.position_max[0],
+                             exact.runtime.position_min[1]};
+    CHECK(at_limit[0] == exact.runtime.position_max[0]);
+    CHECK(at_limit[1] == exact.runtime.position_min[1]);
+    const double duration_seconds =
+        static_cast<double>(exact.initialization.trajectory.duration_us) / 1e6;
+    for (std::size_t index = 0; index < exact.joint_count(); ++index) {
+      // Exactly the peak rate this plan will emit at its halfway point.
+      exact.runtime.target_velocity_limits[index] =
+          std::fabs(exact.initialization.target_q[index] - at_limit[index]) *
+          (kPi / (2.0 * duration_seconds));
+    }
+    Initialization initialization(exact);
+    const RobotState fresh =
+        FreshState(exact, at_limit, still, start_us - 1'000, 92);
+    JointCommand frame{};
+    CHECK(initialization.Start(fresh, kEpoch, Producer(), start_us, &frame));
+    CHECK(initialization.active());
+    const TimeUs half =
+        start_us + exact.initialization.trajectory.duration_us / 2;
+    const JointPair midpoint{
+        at_limit[0] + (exact.initialization.target_q[0] - at_limit[0]) / 2.0,
+        at_limit[1] + (exact.initialization.target_q[1] - at_limit[1]) / 2.0};
+    JointCommand half_frame{};
+    CHECK(initialization.Step(
+              FreshState(exact, midpoint, still, half - 1'000, 93), half,
+              &half_frame) == InitializationStatus::Running);
+    for (std::size_t index = 0; index < exact.joint_count(); ++index) {
+      const double peak =
+          std::fabs(exact.initialization.target_q[index] - at_limit[index]) *
+          (kPi / (2.0 * duration_seconds));
+      CHECK(peak == exact.runtime.target_velocity_limits[index]);
+      CHECK(std::fabs(half_frame.joints.dq[index]) <=
+            exact.runtime.target_velocity_limits[index]);
+    }
+  }
+
+  // The peak-rate bound is an upper bound of what FillRamp emits, down to the
+  // last bit: for 1.5 rad over 775 ms the emitted supremum is
+  // 1.5 * (pi / (2 * 0.775)) = 3.040250955086897, while the association
+  // |delta| * pi / (2 * D) rounds one ulp lower. A limit one ulp below the
+  // supremum must refuse the plan: the emitted sample would sit over the
+  // configured limit and the runtime would latch CommandInvalid mid-move.
+  {
+    ApplicationConfig precise = FakeConfig();
+    SetDuration(precise, 775'000);
+    const JointPair origin{1.5, 0.0};
+    const double duration_seconds =
+        static_cast<double>(precise.initialization.trajectory.duration_us) /
+        1e6;
+    const double supremum =
+        std::fabs(precise.initialization.target_q[0] - origin[0]) *
+        (kPi / (2.0 * duration_seconds));
+    const double looser =
+        std::fabs(precise.initialization.target_q[0] - origin[0]) * kPi /
+        (2.0 * duration_seconds);
+    CHECK(looser < supremum);
+    for (std::size_t index = 0; index < precise.joint_count(); ++index) {
+      precise.runtime.target_velocity_limits[index] =
+          std::nextafter(supremum, 0.0);
+    }
+    CHECK(precise.runtime.target_velocity_limits[0] < supremum);
+    CHECK(precise.runtime.target_velocity_limits[0] >= looser);
+    Initialization initialization(precise);
+    const RobotState fresh =
+        FreshState(precise, origin, still, start_us - 1'000, 95);
+    CHECK(StartRefused(initialization, fresh, kEpoch, start_us, Producer()) ==
+          0);
+    CHECK(!initialization.active());
+    CHECK(!initialization.failed());
+  }
+
+  // A null output is a caller bug and is refused like every other refusal:
+  // nothing starts, nothing latches.
+  {
+    ApplicationConfig config_null = FakeConfig();
+    SetDuration(config_null, 4'000'000);
+    Initialization initialization(config_null);
+    const RobotState fresh = FreshState(config_null, JointPair{0.5, -0.5},
+                                        still, start_us - 1'000, 94);
+    CHECK(!initialization.Start(fresh, kEpoch, Producer(), start_us, nullptr));
+    CHECK(!initialization.active());
+    CHECK(!initialization.failed());
+    CHECK(!initialization.ready());
+    // The same plan with an output frame is admitted, so the refusal was the
+    // missing frame and nothing else.
+    JointCommand frame{};
+    CHECK(initialization.Start(fresh, kEpoch, Producer(), start_us, &frame));
     CHECK(initialization.active());
   }
   return 0;
@@ -693,7 +908,7 @@ int StableWindowAndCompletion() {
   Initialization initialization(config);
   const RobotState origin =
       FreshState(config, start_q, still, start_us - 1'000, 40);
-  CHECK(initialization.Start(origin, kEpoch, Producer(), start_us));
+  CHECK(StartOk(initialization, origin, kEpoch, start_us, Producer()) == 0);
 
   // Mid ramp the move keeps running even though the feedback already sits on
   // the target: the window never starts before the ramp is finished.
@@ -762,7 +977,7 @@ int StableWindowAndCompletion() {
     Initialization restarted(config);
     const RobotState origin2 =
         FreshState(config, start_q, still, start_us - 1'000, 50);
-    CHECK(restarted.Start(origin2, kEpoch, Producer(), start_us));
+    CHECK(StartOk(restarted, origin2, kEpoch, start_us, Producer()) == 0);
     JointCommand frame{};
 
     const TimeUs at_target = start_us + duration;
@@ -829,7 +1044,7 @@ int CompletionBeforeDeadline() {
   Initialization initialization(config);
   const RobotState origin =
       FreshState(config, start_q, still, start_us - 1'000, 90);
-  CHECK(initialization.Start(origin, kEpoch, Producer(), start_us));
+  CHECK(StartOk(initialization, origin, kEpoch, start_us, Producer()) == 0);
 
   // The ramp ends here and the window opens; the deadline has not passed yet.
   {
@@ -878,7 +1093,7 @@ int BoundaryArithmetic() {
     Initialization initialization(config);
     const RobotState origin =
         FreshState(config, start_q, JointPair{0.0, 0.0}, start_us - 1'000, 100);
-    CHECK(initialization.Start(origin, kEpoch, Producer(), start_us));
+    CHECK(StartOk(initialization, origin, kEpoch, start_us, Producer()) == 0);
     JointCommand frame{};
     const TimeUs ramp_end = start_us + 1'000'000;
     CHECK(initialization.Step(FreshState(config, start_q, JointPair{0.0, 0.0},
@@ -912,7 +1127,7 @@ int BoundaryArithmetic() {
     Initialization initialization(config);
     const RobotState origin =
         FreshState(config, start_q, still, start_us - 1'000, 110);
-    CHECK(initialization.Start(origin, kEpoch, Producer(), start_us));
+    CHECK(StartOk(initialization, origin, kEpoch, start_us, Producer()) == 0);
     JointCommand frame{};
     for (const TimeUs elapsed :
          {TimeUs{0}, TimeUs{500'000}, TimeUs{1'000'000}}) {
@@ -941,7 +1156,7 @@ int BoundaryArithmetic() {
     Initialization initialization(config);
     const RobotState origin =
         FreshState(config, start_q, still, start_us - 1'000, 120);
-    CHECK(initialization.Start(origin, kEpoch, Producer(), start_us));
+    CHECK(StartOk(initialization, origin, kEpoch, start_us, Producer()) == 0);
     JointCommand frame{};
     // Inside the ramp: the origin exactly, with no velocity.
     CHECK(initialization.Step(
@@ -972,7 +1187,7 @@ int BoundaryArithmetic() {
     Initialization refused(moving);
     const RobotState plan =
         FreshState(moving, far, still, start_us - 1'000, 123);
-    CHECK(!refused.Start(plan, kEpoch, Producer(), start_us));
+    CHECK(StartRefused(refused, plan, kEpoch, start_us, Producer()) == 0);
     CHECK(!refused.active());
     CHECK(!refused.failed());
   }
@@ -991,7 +1206,7 @@ int BoundaryArithmetic() {
     Initialization initialization(config);
     const RobotState origin =
         FreshState(config, start_q, still, start_us - 1'000, 130);
-    CHECK(initialization.Start(origin, kEpoch, Producer(), start_us));
+    CHECK(StartOk(initialization, origin, kEpoch, start_us, Producer()) == 0);
     JointCommand frame{};
     // Deep inside a practically infinite ramp the frame is finite and inside
     // the segment.
@@ -1014,6 +1229,40 @@ int BoundaryArithmetic() {
     CHECK(initialization.Step(
               FreshState(config, target, still, ended - 1'000, 132), ended,
               &frame) == InitializationStatus::Running);
+    for (std::size_t index = 0; index < config.joint_count(); ++index) {
+      CHECK(frame.joints.q[index] == config.initialization.target_q[index]);
+      CHECK(frame.joints.dq[index] == 0.0);
+    }
+  }
+  // The minimum stable window the loader accepts (1 us): it opens at the ramp
+  // end, does not complete on the call that opens it, and completes on the very
+  // next call.
+  {
+    ApplicationConfig config = FakeConfig();
+    SetDuration(config, 1'000'000);
+    config.initialization.trajectory.stable_window_us = 1;
+    config.initialization.trajectory.position_tolerance = 0.02;
+    config.initialization.trajectory.velocity_tolerance = 0.05;
+    const JointPair start_q{-0.5, 0.5};
+    const JointPair at_target{0.0, 0.0};
+    const JointPair still{0.0, 0.0};
+    const TimeUs start_us = 95'000'000;
+    Initialization initialization(config);
+    const RobotState origin =
+        FreshState(config, start_q, still, start_us - 1'000, 140);
+    JointCommand frame{};
+    CHECK(initialization.Start(origin, kEpoch, Producer(), start_us, &frame));
+    // The ramp end opens the window and is not yet ready.
+    const TimeUs ramp_end = start_us + 1'000'000;
+    CHECK(initialization.Step(
+              FreshState(config, at_target, still, ramp_end - 1'000, 141),
+              ramp_end, &frame) == InitializationStatus::Running);
+    CHECK(!initialization.ready());
+    // One microsecond later the window is complete.
+    CHECK(initialization.Step(
+              FreshState(config, at_target, still, ramp_end, 142), ramp_end + 1,
+              &frame) == InitializationStatus::Ready);
+    CHECK(initialization.ready());
     for (std::size_t index = 0; index < config.joint_count(); ++index) {
       CHECK(frame.joints.q[index] == config.initialization.target_q[index]);
       CHECK(frame.joints.dq[index] == 0.0);
@@ -1042,7 +1291,7 @@ int DeadlineFails() {
   Initialization initialization(config);
   const RobotState origin =
       FreshState(config, start_q, still, start_us - 1'000, 60);
-  CHECK(initialization.Start(origin, kEpoch, Producer(), start_us));
+  CHECK(StartOk(initialization, origin, kEpoch, start_us, Producer()) == 0);
 
   // The feedback never moves off the origin, so the tolerance is never met.
   JointCommand frame{};
@@ -1093,7 +1342,8 @@ int DeadlineFails() {
     const TimeUs restart = now + 1'000;
     const RobotState restart_state =
         FreshState(config, JointPair{0.0, 0.0}, still, restart - 1'000, 65);
-    CHECK(initialization.Start(restart_state, kEpoch + 1, Producer(), restart));
+    CHECK(StartOk(initialization, restart_state, kEpoch + 1, restart,
+                  Producer()) == 0);
     CHECK(initialization.active());
     CHECK(!initialization.failed());
     CHECK(!initialization.ready());
@@ -1124,7 +1374,7 @@ int ReadyHold() {
   Initialization initialization(config);
   const RobotState origin =
       FreshState(config, start_q, still, start_us - 1'000, 70);
-  CHECK(initialization.Start(origin, kEpoch, Producer(), start_us));
+  CHECK(StartOk(initialization, origin, kEpoch, start_us, Producer()) == 0);
   CHECK(initialization.epoch() == kEpoch);
   CHECK(initialization.producer_id() == Producer());
 
@@ -1264,11 +1514,106 @@ int ReadyHold() {
     const TimeUs now = first_hold_us + 60'000;
     const RobotState fresh =
         FreshState(config, JointPair{0.0, 0.0}, still, now - 1'000, 78);
-    CHECK(initialization.Start(fresh, kEpoch + 1, Producer(), now));
+    CHECK(StartOk(initialization, fresh, kEpoch + 1, now, Producer()) == 0);
     CHECK(initialization.active());
     CHECK(!initialization.ready());
     CHECK(!initialization.failed());
     CHECK(initialization.epoch() == kEpoch + 1);
+  }
+  return 0;
+}
+
+// The profile's admission rule is not cosmetic: the runtime's own state machine
+// accepts the first frame the generator emits and refuses the frame the linear
+// ramp used to emit for the same start. Driven in process through the real
+// HandleTracking path, on the fixture's simulated clock, with no threads.
+int RuntimeAcceptsTheGeneratedFirstFrame() {
+  const ApplicationConfig app = FakeConfig();
+  const double duration_seconds =
+      static_cast<double>(app.initialization.trajectory.duration_us) / 1e6;
+
+  // (a) The generator's first frame carries the measured position and a zero
+  // velocity command, so the runtime authorizes the move from Damping.
+  {
+    RuntimeFixture fixture;
+    fixture.SetCommandEnabled(false);
+    fixture.BootToZeroTorque();
+    CHECK(fixture.Acquire().status == ResultStatus::Applied);
+    CHECK(fixture.Request(Operation::Damping).status == ResultStatus::Applied);
+    CHECK(fixture.state().execution_state == ExecutionState::Damping);
+
+    const RobotState fresh = fixture.state();
+    const TimeUs now = fixture.now_us();
+    Initialization initialization(app);
+    JointCommand first{};
+    CHECK(initialization.Start(fresh, fresh.epoch + 1, FixtureProducerId(), now,
+                               &first));
+    // What RobotClient::SendCommand completes on the way to the wire.
+    first.runtime_id = fresh.runtime_id;
+    first.session_id = fresh.session_id;
+    first.stamp_us = now;
+
+    auto request = fixture.MakeRequest(Operation::Tracking);
+    request.first_command = first;
+    const auto result = fixture.Send(request);
+    CHECK(result.status == ResultStatus::Applied);
+    CHECK(result.reason == RejectReason::None);
+    CHECK(fixture.state().execution_state == ExecutionState::Tracking);
+    CHECK(fixture.state().last_applied_command_seq == first.command_seq);
+    CHECK(fixture.state().epoch == first.epoch);
+  }
+
+  // (b) The same start position with the linear ramp's first velocity command
+  // is refused as a discontinuity - the shape the raised-cosine profile exists
+  // to avoid.
+  {
+    RuntimeFixture fixture;
+    fixture.SetCommandEnabled(false);
+    fixture.BootToZeroTorque();
+    CHECK(fixture.Acquire().status == ResultStatus::Applied);
+    CHECK(fixture.Request(Operation::Damping).status == ResultStatus::Applied);
+    CHECK(fixture.state().execution_state == ExecutionState::Damping);
+
+    const RobotState fresh = fixture.state();
+    const TimeUs now = fixture.now_us();
+    JointCommand linear{};
+    linear.protocol_version = kProtocolVersion;
+    linear.runtime_id = fresh.runtime_id;
+    linear.session_id = fresh.session_id;
+    linear.producer_id = FixtureProducerId();
+    linear.epoch = fresh.epoch + 1;
+    linear.command_seq = 1;
+    linear.source_state_seq = fresh.state_seq;
+    linear.stamp_us = now;
+    CHECK(linear.layout_id.Assign(app.layout_id()));
+    linear.joints.count = static_cast<std::uint32_t>(app.joint_count());
+    for (std::size_t index = 0; index < app.joint_count(); ++index) {
+      linear.joints.q[index] = fresh.feedback.joints[index].q;
+      linear.joints.dq[index] = (app.initialization.target_q[index] -
+                                 fresh.feedback.joints[index].q) /
+                                duration_seconds;
+      linear.joints.tau_ff[index] = 0.0;
+      linear.joints.kp[index] = app.initialization.gains.kp[index];
+      linear.joints.kd[index] = app.initialization.gains.kd[index];
+    }
+    // The frame really is the one the guard stops: same position as the
+    // measured state, a velocity command the continuity bound cannot absorb,
+    // and still inside the runtime's target velocity limit (so the refusal can
+    // only be the discontinuity).
+    CHECK(std::fabs(linear.joints.q[0] - fresh.feedback.joints[0].q) <=
+          app.runtime.continuity.position_delta[0]);
+    CHECK(std::fabs(linear.joints.dq[0] - fresh.feedback.joints[0].dq) >
+          app.runtime.continuity.velocity_delta[0]);
+    CHECK(std::fabs(linear.joints.dq[0]) <=
+          app.runtime.target_velocity_limits[0]);
+
+    auto request = fixture.MakeRequest(Operation::Tracking);
+    request.first_command = linear;
+    const auto result = fixture.Send(request);
+    CHECK(result.status == ResultStatus::Rejected);
+    CHECK(result.reason == RejectReason::Discontinuity);
+    // A refused request authorizes nothing.
+    CHECK(fixture.state().execution_state == ExecutionState::Damping);
   }
   return 0;
 }
@@ -1287,6 +1632,7 @@ int main() {
   failures += BoundaryArithmetic();
   failures += DeadlineFails();
   failures += ReadyHold();
+  failures += RuntimeAcceptsTheGeneratedFirstFrame();
   if (failures == 0) {
     return 0;
   }
