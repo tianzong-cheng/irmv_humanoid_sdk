@@ -21,11 +21,13 @@ namespace irmv::transport {
 // query is a synchronisation point: size/empty/full/dropped are exact on the
 // owning side and approximate once the other side is running.
 //
-// The assignment of every instance in this project: requests, results and stop
-// requests are FIFO queues, because their order carries meaning and a refusal
-// loses only the newest sample; commands, heartbeats and the robot state keep
+// The assignment of every instance in this project: requests, results, stop
+// requests and heartbeats are FIFO queues, because their order carries meaning
+// and a refusal loses only the newest sample; commands and the robot state keep
 // only their newest value, because an entry that was superseded before anyone
-// read it was never going to be used.
+// read it was never going to be used. A heartbeat is queued rather than
+// replaced because only the state machine can tell an owner sample from a
+// foreign or reordered one, so the lane may not decide the loss for it.
 
 // FIFO ring between exactly two threads, race free by construction rather than
 // by re-checking an entry after it was copied. The producer writes only the

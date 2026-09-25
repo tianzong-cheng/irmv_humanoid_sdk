@@ -70,15 +70,16 @@ struct EndpointQos {
 // explicitly in the configuration as required to be present.
 //
 // Dropping: nothing here waits for the peer, and nothing here blocks on a full
-// channel. The result queue and the two request lanes are FIFO: a push that
-// does not fit is refused and counted, so order is preserved and the refusal
-// costs the newest sample of that lane - for the stop lane that means a stop
-// queued behind a full lane of stops is refused (every queued entry is a stop,
-// the refusal is counted and the supervisor retries), while a burst of ordinary
-// targets can never displace a stop, because the lane is its own. The state,
-// command and heartbeat lanes keep only their newest entry: an unread entry
-// that a newer sample replaces is counted as dropped, so a burst can never hide
-// the latest command or heartbeat behind older samples. Inbound samples that
+// channel. The result queue, the two request lanes and the heartbeat lane are
+// FIFO: a push that does not fit is refused and counted, so order is preserved
+// and the refusal costs the newest sample of that lane - for the stop lane that
+// means a stop queued behind a full lane of stops is refused (every queued
+// entry is a stop, the refusal is counted and the supervisor retries), while a
+// burst of ordinary targets can never displace a stop, because the lane is its
+// own, and a heartbeat the state machine has not judged yet is never displaced
+// by a later one. The state and command lanes keep only their newest entry: an
+// unread entry that a newer sample replaces is counted as dropped, so a burst
+// can never hide the latest command behind older samples. Inbound samples that
 // fail validation are rejected whole and counted. The transport never drops an
 // already received sample silently.
 class DdsTransport {
@@ -131,8 +132,8 @@ class DdsTransport {
   // Joint commands dropped because a newer command superseded an unread one or
   // because none could be stored.
   std::uint64_t dropped_command_count() const;
-  // Supervisor heartbeats dropped because a newer heartbeat superseded an
-  // unread one or because none could be stored.
+  // Supervisor heartbeats dropped because the heartbeat lane was full when the
+  // sample was received.
   std::uint64_t dropped_heartbeat_count() const;
   // Inbound samples that failed FromWire validation and were discarded whole.
   std::uint64_t inbound_rejected_count() const;
@@ -150,10 +151,10 @@ class DdsTransport {
  private:
   struct Impl;
 
-  // The request and result lanes are FIFO, so their order survives and a full
-  // queue refuses the newest entry instead of displacing an older one; the
-  // state, command and heartbeat lanes keep only the newest entry, so a burst
-  // can never hide the latest sample behind an older one.
+  // The request, stop, heartbeat and result lanes are FIFO, so their order
+  // survives and a full queue refuses the newest entry instead of displacing an
+  // older one; the state and command lanes keep only the newest entry, so a
+  // burst can never hide the latest sample behind an older one.
   using RequestChannel =
       BoundedChannel<runtime::Received<protocol::ExecutionRequest>,
                      runtime::kRequestBatchCapacity>;
@@ -162,8 +163,14 @@ class DdsTransport {
                      runtime::kStopRequestBatchCapacity>;
   using CommandChannel =
       LatestValueChannel<runtime::Received<protocol::JointCommand>>;
+  // The heartbeat lane is a FIFO, not a keep-last-1 handoff: only the state
+  // machine can decide whether a heartbeat is the owner's, carries the current
+  // session and a strictly newer sequence, so a later sample must never
+  // displace an earlier one before that decision. Its capacity equals the batch
+  // a tick can hand over, so one take drains the lane completely.
   using HeartbeatChannel =
-      LatestValueChannel<runtime::Received<protocol::SupervisorHeartbeat>>;
+      BoundedChannel<runtime::Received<protocol::SupervisorHeartbeat>,
+                     runtime::kHeartbeatBatchCapacity>;
   using StateChannel = LatestValueChannel<protocol::RobotState>;
   using ResultChannel =
       BoundedChannel<protocol::ExecutionResult, runtime::kResultCapacity>;

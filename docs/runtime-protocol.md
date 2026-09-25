@@ -42,7 +42,12 @@ Notes:
   runtime is a new instance and never resumes a previous session.
 * The two reliable channels are the request/answer lane, where a lost answer
   must be recoverable by a retry. The status lanes stay best-effort and
-  keep-last-1: a stale target or state is worthless.
+  keep-last-1: a stale target or state is worthless. The heartbeat lane is
+  best-effort as well but is **queued, not replaced**: the runtime hands the
+  state machine every received heartbeat in receive order, up to the eight a
+  tick can consume, because only the machine can tell the owner's heartbeat from
+  a foreign or reordered one. A full lane refuses the newest sample and counts
+  it instead of disposing of an older one.
 * `max_blocking_time` is 10 ms on the reliable channels only; every other
   channel never waits, and the control loop never blocks on DDS at all.
 * The domain comes from `dds.domain` (or `--domain`), the participant is bound

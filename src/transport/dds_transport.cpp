@@ -320,13 +320,14 @@ void DdsTransport::Impl::ReadHeartbeats() {
         owner.inbound_rejected_.fetch_add(1, std::memory_order_relaxed);
         continue;
       }
-      // The heartbeat lane keeps only the newest entry, like the command lane,
-      // because a control tick only needs the freshest supervisor state.
-      bool evicted = false;
-      const bool stored = owner.heartbeats_.Publish(
-          runtime::Received<protocol::SupervisorHeartbeat>{value, rx_us},
-          &evicted);
-      if (!stored || evicted) {
+      // The heartbeat lane is a FIFO of kHeartbeatBatchCapacity, like the
+      // request lanes: only the state machine can tell an owner heartbeat from
+      // a foreign or reordered one, so every received sample has to reach it in
+      // receive order. A full lane refuses this newest sample and keeps the
+      // older ones the machine still has to judge.
+      const bool stored = owner.heartbeats_.TryPush(
+          runtime::Received<protocol::SupervisorHeartbeat>{value, rx_us});
+      if (!stored) {
         owner.dropped_heartbeats_.fetch_add(1, std::memory_order_relaxed);
       }
     }
@@ -406,10 +407,10 @@ const runtime::TickInput &DdsTransport::TakeInput() {
   // reaches this class may ever ask the state machine to stop the process.
   input_.local_stop_requested = false;
 
-  // The request lanes and the result lane are FIFO, so each is drained until
-  // empty up to the size of its destination. The command and heartbeat lanes
-  // keep one entry each, so a single take drains everything they hold; a
-  // TryTake that reports false right after a take is the normal empty signal.
+  // The request lanes, the heartbeat lane and the result lane are FIFO, so each
+  // is drained until empty up to the size of its destination. The command lane
+  // keeps one entry, so a single take drains everything it holds; a TryTake
+  // that reports false right after a take is the normal empty signal.
   while (input_.request_count < runtime::kRequestBatchCapacity &&
          requests_.TryPop(input_.requests[input_.request_count])) {
     ++input_.request_count;
@@ -423,8 +424,8 @@ const runtime::TickInput &DdsTransport::TakeInput() {
       commands_.TryTake(input_.commands[input_.command_count])) {
     ++input_.command_count;
   }
-  if (input_.heartbeat_count < runtime::kHeartbeatBatchCapacity &&
-      heartbeats_.TryTake(input_.heartbeats[input_.heartbeat_count])) {
+  while (input_.heartbeat_count < runtime::kHeartbeatBatchCapacity &&
+         heartbeats_.TryPop(input_.heartbeats[input_.heartbeat_count])) {
     ++input_.heartbeat_count;
   }
   return input_;

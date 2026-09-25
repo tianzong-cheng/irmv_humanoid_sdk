@@ -52,6 +52,7 @@ using irmv::protocol::StopReason;
 using irmv::protocol::SupervisorHeartbeat;
 using irmv::protocol::TimeUs;
 using irmv::protocol::TopicDescriptor;
+using irmv::runtime::kHeartbeatBatchCapacity;
 using irmv::runtime::TickInput;
 using irmv::runtime::TickResult;
 using irmv::transport::ChannelKind;
@@ -77,6 +78,12 @@ constexpr Sequence kFlushStateSeq = 4244;
 // channels at least every ten milliseconds, so a publish that is still queued
 // cannot survive fifty milliseconds without being written.
 constexpr int kQuiescenceMs = 50;
+
+// The same bound for the inbound heartbeat lane: two samples published back to
+// back are both read by the transport thread when the consumer waits several
+// wait periods before it takes, which is the case a newest-only lane gets
+// wrong.
+constexpr int kBatchQuiescenceMs = 50;
 
 // Deliberately not a plausible host monotonic value, so a receive stamp copied
 // from the sender would be visible as such.
@@ -1270,6 +1277,100 @@ int main() {
     CHECK(rx_us >= test_start_us);
     std::cout << "[dds_codec_test] supervisor_heartbeat received, rx_us="
               << rx_us << '\n';
+  }
+
+  // (4b) The heartbeat lane hands over every received sample in receive order:
+  // an owner heartbeat is still delivered when a foreign one arrives after it
+  // in the same read window, because only the state machine may decide which
+  // sample the lease comes from. A lane that kept only the newest entry would
+  // have handed over the foreign sample alone.
+  {
+    Sender<wire::SupervisorHeartbeat> sender(
+        publisher, heartbeat_topic, irmv::protocol::kSupervisorHeartbeatTopic);
+    const SupervisorHeartbeat owner = MakeHeartbeat();
+    SupervisorHeartbeat foreign = owner;
+    foreign.supervisor_id = MakeId(0x56);
+    foreign.heartbeat_seq = owner.heartbeat_seq + 1000;
+    wire::SupervisorHeartbeat wire_owner;
+    wire::SupervisorHeartbeat wire_foreign;
+    codec::ToWire(owner, wire_owner);
+    codec::ToWire(foreign, wire_foreign);
+
+    bool owner_seen = false;
+    bool foreign_seen = false;
+    bool owner_first = false;
+    const TimeUs deadline = NowUs() + 3'000'000;
+    while (NowUs() < deadline && !(owner_seen && foreign_seen && owner_first)) {
+      // Both samples are published before the take and the wait covers several
+      // transport wait periods, so the lane holds both when the consumer
+      // drains it: the order of the delivered batch is the order of receipt.
+      sender.Send(wire_owner);
+      sender.Send(wire_foreign);
+      std::this_thread::sleep_for(
+          std::chrono::milliseconds(kBatchQuiescenceMs));
+      const TickInput &input = transport.TakeInput();
+      int owner_index = -1;
+      int foreign_index = -1;
+      for (std::size_t index = 0; index < input.heartbeat_count; ++index) {
+        const SupervisorHeartbeat &received = input.heartbeats[index].value;
+        if (owner_index < 0 && received.supervisor_id == owner.supervisor_id &&
+            received.heartbeat_seq == owner.heartbeat_seq) {
+          owner_index = static_cast<int>(index);
+        }
+        if (foreign_index < 0 &&
+            received.supervisor_id == foreign.supervisor_id &&
+            received.heartbeat_seq == foreign.heartbeat_seq) {
+          foreign_index = static_cast<int>(index);
+        }
+      }
+      owner_seen = owner_seen || owner_index >= 0;
+      foreign_seen = foreign_seen || foreign_index >= 0;
+      owner_first =
+          owner_first || (owner_index >= 0 && foreign_index > owner_index);
+    }
+    CHECK(owner_seen);
+    CHECK(foreign_seen);
+    CHECK(owner_first);
+    std::cout << "[dds_codec_test] heartbeat batch delivered the owner sample "
+                 "before the foreign one\n";
+  }
+
+  // (4c) A full lane refuses what does not fit and counts the refusal: with the
+  // consumer silent, a burst beyond the capacity fills the FIFO and every
+  // further sample is dropped instead of displacing an older entry.
+  {
+    Sender<wire::SupervisorHeartbeat> sender(
+        publisher, heartbeat_topic, irmv::protocol::kSupervisorHeartbeatTopic);
+    const SupervisorHeartbeat sample = MakeHeartbeat();
+    wire::SupervisorHeartbeat wire_sample;
+    codec::ToWire(sample, wire_sample);
+
+    const std::uint64_t dropped_before = transport.dropped_heartbeat_count();
+    bool refused = false;
+    const TimeUs deadline = NowUs() + 3'000'000;
+    while (NowUs() < deadline && !refused) {
+      for (std::size_t index = 0; index < 4 * kHeartbeatBatchCapacity;
+           ++index) {
+        sender.Send(wire_sample);
+      }
+      std::this_thread::sleep_for(
+          std::chrono::milliseconds(kBatchQuiescenceMs));
+      refused = transport.dropped_heartbeat_count() > dropped_before;
+    }
+    CHECK(refused);
+
+    // A refusal is only possible while the lane is full, so the take that
+    // follows drains exactly the capacity - nothing was displaced on the way.
+    const TickInput &input = transport.TakeInput();
+    CHECK(input.heartbeat_count == kHeartbeatBatchCapacity);
+    for (std::size_t index = 0; index < input.heartbeat_count; ++index) {
+      CHECK(input.heartbeats[index].value.heartbeat_seq ==
+            sample.heartbeat_seq);
+    }
+    std::cout << "[dds_codec_test] heartbeat lane full: refused="
+              << (transport.dropped_heartbeat_count() - dropped_before)
+              << " delivered=" << input.heartbeat_count
+              << " capacity=" << kHeartbeatBatchCapacity << '\n';
   }
 
   // (5) execution_result published by the transport.

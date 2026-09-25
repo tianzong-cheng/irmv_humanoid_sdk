@@ -1530,6 +1530,86 @@ int CheckHeartbeatSupervisorOwnership() {
   return 0;
 }
 
+// A receive batch that mixes an owner heartbeat with one the state machine has
+// to discard must still refresh the lease: the entries of a batch are judged in
+// receive order, and a foreign or reordered sample never costs the owner
+// heartbeat its tick. The lane above hands the batch over as a FIFO, so this is
+// the contract the machine is written against.
+int CheckMixedHeartbeatBatchRefreshesLease() {
+  RuntimeFixture f;
+  f.BootToZeroTorque();
+  f.Acquire();
+  CHECK(f.Request(Operation::Damping).applied());
+  CHECK(f.StartTracking().applied());
+  const Id session = f.state().session_id;
+
+  // The automatic feed stops; from here on only the queued batches carry
+  // heartbeats. Half a lease has already lapsed when the first batch arrives.
+  f.SetHeartbeatEnabled(false);
+  f.Advance(50 * f.ControlPeriodUs());
+  CHECK(f.state().execution_state == kTracking);
+
+  irmv::protocol::SupervisorHeartbeat owner;
+  owner.protocol_version = irmv::protocol::kProtocolVersion;
+  owner.runtime_id = irmv::test::FixtureRuntimeId();
+  owner.session_id = session;
+  owner.supervisor_id = irmv::test::FixtureSupervisorId();
+  owner.heartbeat_seq = 5000;
+  owner.stamp_us = f.now_us();
+
+  irmv::protocol::SupervisorHeartbeat foreign = owner;
+  foreign.supervisor_id = irmv::test::FixtureOtherSupervisorId();
+  foreign.heartbeat_seq = owner.heartbeat_seq + 1000;
+
+  // One batch: the owner heartbeat first, a foreign one behind it.
+  f.QueueRawHeartbeat(owner);
+  f.QueueRawHeartbeat(foreign);
+  f.Step();
+  CHECK(f.state().execution_state == kTracking);
+  CHECK(f.state().session_id == session);
+  CHECK(f.state().producer_id == irmv::test::FixtureProducerId());
+
+  // The lease runs from the owner heartbeat of that batch: half of it later the
+  // session is still alive, and it lapses exactly one lease after it rather
+  // than being shortened by the foreign entry.
+  f.Advance(50 * f.ControlPeriodUs());
+  CHECK(f.state().execution_state == kTracking);
+  CHECK(TicksUntil(f, kDamping, 400) == 101);
+  CHECK(f.state().session_id == irmv::protocol::kNoId);
+  CHECK(f.state().stop_reason == StopReason::SupervisorTimeout);
+
+  // A reordered pair is the same rule inside one batch: the newer owner
+  // heartbeat refreshes the lease and the older one behind it refreshes
+  // nothing, and certainly undoes nothing.
+  RuntimeFixture g;
+  g.BootToZeroTorque();
+  g.Acquire();
+  CHECK(g.Request(Operation::Damping).applied());
+  CHECK(g.StartTracking().applied());
+  const Id second_session = g.state().session_id;
+  g.SetHeartbeatEnabled(false);
+  g.Advance(50 * g.ControlPeriodUs());
+
+  irmv::protocol::SupervisorHeartbeat newer = owner;
+  newer.session_id = second_session;
+  newer.heartbeat_seq = 7000;
+  newer.stamp_us = g.now_us();
+  irmv::protocol::SupervisorHeartbeat older = newer;
+  older.heartbeat_seq = newer.heartbeat_seq - 1;
+
+  g.QueueRawHeartbeat(newer);
+  g.QueueRawHeartbeat(older);
+  g.Step();
+  CHECK(g.state().execution_state == kTracking);
+  CHECK(g.state().session_id == second_session);
+  g.Advance(50 * g.ControlPeriodUs());
+  CHECK(g.state().execution_state == kTracking);
+  CHECK(TicksUntil(g, kDamping, 400) == 101);
+  CHECK(g.state().session_id == irmv::protocol::kNoId);
+  CHECK(g.state().stop_reason == StopReason::SupervisorTimeout);
+  return 0;
+}
+
 // G4: a Reset cannot win against a fresh safety observation in the same tick.
 int CheckResetWithFreshSafetyObservation() {
   RuntimeFixture f;
@@ -2218,6 +2298,7 @@ int main() {
   CHECK(CheckForeignSupervisorIsNotTheOwnersReplay() == 0);
   CHECK(CheckAcquireRequiresEmptySession() == 0);
   CHECK(CheckHeartbeatSupervisorOwnership() == 0);
+  CHECK(CheckMixedHeartbeatBatchRefreshesLease() == 0);
   CHECK(CheckResetWithFreshSafetyObservation() == 0);
   CHECK(CheckTakeoverDoesNotInheritStagedAnswer() == 0);
   CHECK(CheckLocalStopIsNotARequest() == 0);
