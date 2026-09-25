@@ -388,6 +388,7 @@ set(
   command_flood
   slow_logger
   stderr_backpressure
+  local_stop
   write_refused
 )
 foreach(scenario IN LISTS IRMV_INTEGRATION_SCENARIOS)

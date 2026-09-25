@@ -140,6 +140,10 @@ constexpr TimeUs kResultHoldUs = 200'000;
 // broken runtime fails the scenario instead of hanging the harness.
 constexpr TimeUs kGlobalCapUs = 30'000'000;
 constexpr TimeUs kObserverCapUs = 25'000'000;
+// How long the holding supervisor of the local-stop scenario keeps a granted
+// authorization alive before it gives up and reports a stuck harness. The
+// scenario is expected to stop the runtime long before this cap.
+constexpr TimeUs kHoldCapUs = 15'000'000;
 
 std::string IdHex(const Id &id) {
   constexpr char kHex[] = "0123456789abcdef";
@@ -1794,6 +1798,36 @@ int Client::RunSupervisor() {
     }
     EnsureDamping(true);
     RequestZeroTorque(true);
+    return Finish("supervisor");
+  }
+
+  if (scenario == "hold_tracking") {
+    // A supervised machine that stays in Tracking until the harness stops it:
+    // no request of this client brings it back to zero torque, so the runtime's
+    // own guarded stop is the only path that can. The hold is bounded like
+    // every other wait here, and the granted authorization is asserted to have
+    // been observed, so a runtime that never granted it fails the scenario
+    // instead of passing it silently.
+    EnsureSession();
+    EnsureDamping(true);
+    if (!EnsureTracking(true, 0)) {
+      return Finish("supervisor");
+    }
+    const TimeUs hold_start_us = now();
+    bool held = false;
+    while (now() - hold_start_us < kHoldCapUs && !StopRequested()) {
+      Poll(true);
+      PumpHeartbeat();
+      const RobotState *state = latest_state();
+      if (state != nullptr &&
+          state->execution_state == ExecutionState::Tracking) {
+        held = true;
+      }
+      std::this_thread::sleep_for(std::chrono::microseconds(kPollSleepUs));
+    }
+    Check(held, "tracking_held",
+          "the granted authorization was never observed");
+    measurements_["hold_us"] = now() - hold_start_us;
     return Finish("supervisor");
   }
 

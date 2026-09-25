@@ -12,7 +12,7 @@ says explicitly what no test here proves.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j2
 
-ctest --test-dir build --output-on-failure          # everything (23 tests)
+ctest --test-dir build --output-on-failure          # everything (24 tests)
 ctest --test-dir build -L core --output-on-failure  # deterministic core suite
 ctest --test-dir build -L integration --output-on-failure
 ctest --test-dir build -R integration_normal --output-on-failure
@@ -52,7 +52,7 @@ Every integration entry isolates itself on its **own DDS domain**, always below
 the 230 bound the configuration contract enforces:
 
 * The `run_integration.py` harness takes the domain declared by the scenario
-  (201–211 for the shipped eleven), claims it with an exclusive lock file, and
+  (201–212 for the shipped twelve), claims it with an exclusive lock file, and
   refuses to start unless **every RTPS port of that domain** can be bound right
   now. If the declared domain is taken it walks up to the next free one, so two
   scenarios – or two developers – never share a domain. A lock left behind by a
@@ -88,7 +88,7 @@ All nine run without a peer, without a network and without a wall-clock
 deadline: they assert exact tick semantics and counter values, and the only
 wall-clock waits in `logger_test` are hang guards.
 
-## Real-DDS suite (`-L integration`, 14 tests)
+## Real-DDS suite (`-L integration`, 15 tests)
 
 ### Process-level entries
 
@@ -116,6 +116,7 @@ phase.
 | `command_flood` (208) | A flood of ordinary tracking requests starves neither the stop lane nor the control loop: the stop is applied while the flood runs, the target keeps being served, and the runtime reports the requests it dropped instead of hiding the loss. | "target flood must not block control" |
 | `slow_logger` (209) | The log consumer is blocked on purpose: the logger drops events, the control loop keeps its deadlines and the per-tick output trace stays complete. | "a slow log must not block control" |
 | `stderr_backpressure` (211) | The log consumer is never released and the pipe is actually full when `SIGTERM` arrives, so the logger is parked inside its sink: the runtime still reaches `ZeroTorque`, confirmed over DDS, leaves with exit 0 inside the bound without the reader resuming, closes its trace completely and keeps its control deadlines. The final clean-shutdown diagnostic may be dropped by the full pipe - the exit itself, the confirmed state and the complete trace are the assertions. | "the shutdown path is bounded", "a slow log must not block control" |
+| `local_stop` (212) | The runtime's own guarded stop is the only way out: a supervisor holds a granted tracking authorization on a live session and a producer keeps the target fresh, and neither asks for a stop before `SIGTERM`. The machine is proven to be in `Tracking` when the signal arrives, and the run then has to reach `ZeroTorque` by itself, accept that torque write and report a clean shutdown - the operator's signal does not depend on a supervisor being reachable, and the process cannot leave without the stop having happened. | "the runtime stops itself when the process leaves", "`Applied` is a host-path acceptance" |
 | `write_refused` (210) | The fake backend refuses the write of a tracking tick: the refusal latches as a fault, the runtime commands zero torque instead of the refused target, and only a matching `Reset` clears the fault once the write path is healthy again. The trace carries the refused attempt and the effective write of every such tick. | "fault first-tick output", "`Applied` is a host-path acceptance, never a device ack" |
 
 ## Traceability of the design report §9
@@ -134,6 +135,7 @@ phase.
 | 50 Hz target under 500 Hz control with per-tick output and target-age checks, no lower-layer interpolation | `normal` (scripted measured-velocity ramp) |
 | Pausing/killing the supervisor while an independent producer or the DDS threads stay alive, revocation by deadline | `supervisor_paused`, `supervisor_killed`, `producer_paused` |
 | After a runtime restart, old instance/session/epoch refused; target flood and slow logging must not block control | `runtime_restarted`, `stale_context`, `command_flood`, `slow_logger`, `stderr_backpressure` |
+| The runtime's own stop leaves the machine only at zero torque, from the state it was found in, and the process leaves only then | `local_stop`, `execution_fsm_test`, `runtime_cli_test` |
 | Configuration and versioning executable, installable runtime, format check, CI | `config_test`, `config_schema_contract_test`, `runtime_cli_test`, `format-check` and the CI workflow |
 
 ## Timing claims

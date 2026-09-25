@@ -1,0 +1,118 @@
+{
+  "name": "local_stop",
+  "description": "The runtime's own guarded stop is the only path out of this run: a supervisor holds a granted tracking authorization on a live session and never asks for a stop, and a producer keeps the target fresh, until SIGTERM arrives. The runtime has to reach ZeroTorque by itself, accept that torque write and leave with a clean shutdown line - the operator's signal must not need a supervisor to be reachable, and it must not be possible to leave without the stop having happened.",
+  "domain": 212,
+  "runtime": {
+    "config": "config/sdk.json",
+    "fake_scenario": "tests/support/fake_ramp.json",
+    "output_trace": "trace_run%d.jsonl"
+  },
+  "steps": [
+    {
+      "action": "start_runtime"
+    },
+    {
+      "action": "wait_log",
+      "pattern": "state=\"ZeroTorque\"",
+      "timeout_s": 15
+    },
+    {
+      "action": "client",
+      "name": "producer",
+      "mode": "producer",
+      "scenario": "producer",
+      "background": true,
+      "args": [
+        "--producer-id",
+        "0102030405060708090a0b0c0d0e0f33",
+        "--rate",
+        "50"
+      ]
+    },
+    {
+      "action": "client",
+      "name": "supervisor",
+      "mode": "supervisor",
+      "scenario": "hold_tracking",
+      "background": true,
+      "timeout_s": 30,
+      "args": [
+        "--producer-id",
+        "0102030405060708090a0b0c0d0e0f33",
+        "--rate",
+        "50"
+      ]
+    },
+    {
+      "action": "sleep_ms",
+      "ms": 600,
+      "note": "the supervisor has acquired the session and is holding tracking"
+    },
+    {
+      "action": "wait_log",
+      "pattern": "state=\"Tracking\"",
+      "timeout_s": 10,
+      "note": "proves the machine is tracking before the signal, so the local stop is what leaves it"
+    },
+    {
+      "action": "stop_runtime",
+      "signal": "SIGTERM",
+      "timeout_s": 10,
+      "expect_clean": true
+    },
+    {
+      "action": "signal_client",
+      "name": "supervisor",
+      "signal": "SIGTERM"
+    },
+    {
+      "action": "wait_client",
+      "name": "supervisor",
+      "timeout_s": 15,
+      "allow_exit": [
+        0
+      ]
+    },
+    {
+      "action": "signal_client",
+      "name": "producer",
+      "signal": "SIGTERM"
+    },
+    {
+      "action": "wait_client",
+      "name": "producer",
+      "timeout_s": 15,
+      "allow_exit": [
+        0,
+        -15
+      ]
+    }
+  ],
+  "checks": [
+    {
+      "check": "client_check",
+      "params": {
+        "client": "supervisor",
+        "names": [
+          "session_acquired",
+          "damping_applied",
+          "tracking_granted",
+          "tracking_held"
+        ]
+      }
+    },
+    {
+      "check": "overruns",
+      "params": {
+        "max_worst_overrun_us": 20000
+      }
+    },
+    {
+      "check": "trace_complete",
+      "params": {
+        "file": "trace_run1.jsonl",
+        "min_ticks": 800
+      }
+    }
+  ]
+}

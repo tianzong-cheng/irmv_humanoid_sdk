@@ -57,7 +57,7 @@ jobs:
                       integration_supervisor_killed integration_supervisor_paused \
                       integration_producer_paused integration_runtime_restarted \
                       integration_command_flood integration_slow_logger \
-                      integration_stderr_backpressure \
+                      integration_stderr_backpressure integration_local_stop \
                       integration_write_refused; do
             grep -Eq "Test +#[0-9]+: ${test}$" registered-tests.txt
           done
