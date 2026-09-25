@@ -72,12 +72,15 @@ struct EndpointQos {
 // Dropping: nothing here waits for the peer, and nothing here blocks on a full
 // channel. The result queue and the two request lanes are FIFO: a push that
 // does not fit is refused and counted, so order is preserved and the refusal
-// costs the newest sample of that lane. The state, command and heartbeat lanes
-// keep only their newest entry: an unread entry that a newer sample replaces is
-// counted as dropped, so a burst can never hide the latest command or stop
-// request behind older samples. Inbound samples that fail validation are
-// rejected whole and counted. The transport never drops an already received
-// sample silently.
+// costs the newest sample of that lane - for the stop lane that means a stop
+// queued behind a full lane of stops is refused (every queued entry is a stop,
+// the refusal is counted and the supervisor retries), while a burst of ordinary
+// targets can never displace a stop, because the lane is its own. The state,
+// command and heartbeat lanes keep only their newest entry: an unread entry
+// that a newer sample replaces is counted as dropped, so a burst can never hide
+// the latest command or heartbeat behind older samples. Inbound samples that
+// fail validation are rejected whole and counted. The transport never drops an
+// already received sample silently.
 class DdsTransport {
  public:
   // Stores the immutable configuration snapshot; the referenced configuration

@@ -401,6 +401,10 @@ const runtime::TickInput &DdsTransport::TakeInput() {
   input_.stop_request_count = 0;
   input_.command_count = 0;
   input_.heartbeat_count = 0;
+  // This instance is filled from received samples only, so the trusted local
+  // stop is cleared here rather than relied upon to stay false: nothing that
+  // reaches this class may ever ask the state machine to stop the process.
+  input_.local_stop_requested = false;
 
   // The request lanes and the result lane are FIFO, so each is drained until
   // empty up to the size of its destination. The command and heartbeat lanes
