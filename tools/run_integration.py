@@ -24,7 +24,9 @@ Only the standard library is used.
 """
 
 import argparse
+import array
 import errno
+import fcntl
 import json
 import os
 import re
@@ -33,9 +35,13 @@ import signal
 import socket
 import subprocess
 import sys
+import termios
 import threading
 import time
 from pathlib import Path
+
+# F_GETPIPE_SZ is not exported by every Python build.
+kFGetPipeSize = getattr(fcntl, "F_GETPIPE_SZ", 1032)
 
 # The client and the runtime both stamp observations with the host monotonic
 # clock, which is the clock Python exposes as time.monotonic on Linux: arrival
@@ -115,6 +121,22 @@ class Runtime:
             self.drainer = StreamDrain(self.process.stdout, self.lines)
             self.drainer.start()
 
+    def pipe_occupancy(self):
+        """Bytes waiting in the stdout/stderr pipe and its capacity.
+
+        Read without consuming: FIONREAD reports what a read would return right
+        now, so a scenario can prove that a blocked consumer really left the
+        pipe full before it measures anything else.
+        """
+        descriptor = self.process.stdout.fileno()
+        pending = array.array("i", [0])
+        fcntl.ioctl(descriptor, termios.FIONREAD, pending, True)
+        try:
+            capacity = fcntl.fcntl(descriptor, kFGetPipeSize)
+        except (OSError, ValueError):
+            capacity = 65536
+        return pending[0], capacity
+
     def text(self):
         return b"".join(self.lines).decode("utf-8", "replace")
 
@@ -143,9 +165,15 @@ class Runtime:
             raise Failure("the runtime is not running, cannot send %s" % name)
         self.process.send_signal(getattr(signal, name))
 
-    def wait_exit(self, timeout_s):
-        """Drains and waits for the exit; returns the code or None on timeout."""
-        self.drain()
+    def wait_exit(self, timeout_s, drain=True):
+        """Waits for the exit; returns the code or None on timeout.
+
+        A scenario that measures the exit itself while the log consumer is
+        blocked passes drain=False, so the pipe stays full until the process
+        has left; the log is read afterwards.
+        """
+        if drain:
+            self.drain()
         try:
             return self.process.wait(timeout=timeout_s)
         except subprocess.TimeoutExpired:
@@ -544,12 +572,29 @@ def step_kill_runtime(ctx, step):
 def step_stop_runtime(ctx, step):
     runtime = ctx.runtime()
     # Orderly shutdown: the caller has already confirmed ZeroTorque, so the
-    # runtime only has to leave. The pipe is drained first so a full pipe can
-    # never delay the final report.
-    runtime.drain()
+    # runtime only has to leave. The pipe is normally drained first, so a full
+    # pipe cannot delay the final report; a scenario that measures exactly that
+    # (the bounded shutdown diagnostic) sets "drain": false and keeps the
+    # consumer blocked until the process has left.
+    drain_first = step.get("drain", True)
+    if drain_first:
+        runtime.drain()
+    else:
+        # The scenario asserts that a blocked consumer cannot delay the
+        # shutdown, so it has to be blocked for real: the pipe must hold as much
+        # as it can before the signal, otherwise the step would prove nothing.
+        occupancy, capacity = runtime.pipe_occupancy()
+        if capacity - occupancy > capacity // 8:
+            raise Failure("the log pipe of the runtime is not under back "
+                          "pressure (%d of %d bytes free), so the blocked "
+                          "consumer is not being measured"
+                          % (capacity - occupancy, capacity))
     runtime.signal(step.get("signal", "SIGTERM"))
     timeout_s = step.get("timeout_s", 10.0)
-    code = runtime.wait_exit(timeout_s)
+    code = runtime.wait_exit(timeout_s, drain=drain_first)
+    if not drain_first:
+        # The exit is what was measured; the log is read afterwards.
+        runtime.drain()
     if not step.get("expect_exit", True):
         # A scenario may end in a state the shutdown policy deliberately refuses
         # to leave on its own (Damping with a revoked session). That the process
@@ -568,6 +613,10 @@ def step_stop_runtime(ctx, step):
         runtime.kill()
         raise Failure("the runtime did not exit within %.1f s of %s"
                       % (timeout_s, step.get("signal", "SIGTERM")))
+    expected_code = step.get("expect_code")
+    if expected_code is not None and code != expected_code:
+        raise Failure("the runtime exited with %s instead of %s"
+                      % (code, expected_code))
     clean = runtime.clean_stop()
     if step.get("expect_clean", True):
         if code != 0 or clean is None:

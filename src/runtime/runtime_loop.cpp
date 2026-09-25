@@ -23,6 +23,7 @@
 #include <utility>
 
 #include "irmv/runtime/execution_fsm.hpp"
+#include "irmv/telemetry/diagnostic_write.hpp"
 #include "irmv/telemetry/logger.hpp"
 #include "irmv/transport/bounded_channel.hpp"
 #include "irmv/transport/dds_transport.hpp"
@@ -31,6 +32,31 @@ namespace irmv::runtime {
 namespace {
 
 using Clock = std::chrono::steady_clock;
+
+// Every diagnostic of the control thread, of the trace worker and of the exit
+// path goes through the bounded writer. stderr may be a pipe nobody drains -
+// the logger can even be left detached inside a sink parked on it - and neither
+// the control loop nor the shutdown may wait for a reader that never comes. The
+// band is a hard bound: whatever does not fit is dropped, and a truncated line
+// is never reported as written.
+void StderrLine(std::string_view text) {
+  static_cast<void>(
+      telemetry::WriteDiagnosticBounded(::fileno(stderr), text));
+}
+
+// Same, for diagnostics with arguments. The line is rendered on the stack and
+// bounded like every other one.
+template <typename... Args>
+void StderrFormat(const char *format, Args... args) {
+  std::array<char, 512> line{};
+  const int length = std::snprintf(line.data(), line.size(), format, args...);
+  if (length <= 0) {
+    return;
+  }
+  const std::size_t size = std::min<std::size_t>(
+      static_cast<std::size_t>(length), line.size() - 1);
+  StderrLine(std::string_view(line.data(), size));
+}
 
 // Period of the bounded status line and of the shutdown summary. Both carry the
 // overrun accounting, so no tick ever logs at control frequency.
@@ -624,7 +650,7 @@ class OutputTrace {
 bool OutputTrace::Start() {
   file_.open(path_, std::ios::out | std::ios::trunc);
   if (!file_) {
-    std::fprintf(stderr, "robot_runtime: cannot open the output trace %s\n",
+    StderrFormat("robot_runtime: cannot open the output trace %s\n",
                  path_.c_str());
     return false;
   }
@@ -729,8 +755,7 @@ void OutputTrace::Render(const OutputTraceRecord &record) {
   file_.put('\n');
   if (!file_) {
     if (write_failures_.load(std::memory_order_relaxed) == 0) {
-      std::fprintf(stderr,
-                   "robot_runtime: the output trace %s cannot be written\n",
+      StderrFormat("robot_runtime: the output trace %s cannot be written\n",
                    path_.c_str());
     }
     write_failures_.fetch_add(1, std::memory_order_relaxed);
@@ -864,13 +889,16 @@ void LogSummary(telemetry::Logger &logger, std::string_view message,
 }
 
 // Final line on stderr: the logger is already stopped here, so the numbers are
-// final. Nothing about a clean stop is claimed before this point.
+// final. Nothing about a clean stop is claimed before this point, and the line
+// itself is bounded: a full pipe must not turn the shutdown into a wait, so it
+// is rendered on the stack and written through the bounded diagnostic writer.
 void ReportCleanStop(const telemetry::Logger &logger,
                      const LoopCounters &counters,
                      const transport::DdsTransport &transport,
                      const OutputTrace::Counters &trace) {
-  std::fprintf(
-      stderr,
+  std::array<char, 512> line{};
+  const int length = std::snprintf(
+      line.data(), line.size(),
       "robot_runtime: clean shutdown: state=ZeroTorque ticks=%llu "
       "overruns=%llu worst_overrun_us=%llu written=%llu undrained=%llu "
       "dropped=%llu filtered=%llu errors=%llu transport_dropped=%llu "
@@ -892,6 +920,12 @@ void ReportCleanStop(const telemetry::Logger &logger,
       trace.active ? 1 : 0, static_cast<unsigned long long>(trace.recorded),
       static_cast<unsigned long long>(trace.dropped),
       static_cast<unsigned long long>(trace.write_failures));
+  if (length <= 0) {
+    return;
+  }
+  const std::size_t size =
+      std::min<std::size_t>(static_cast<std::size_t>(length), line.size() - 1);
+  StderrLine(std::string_view(line.data(), size));
 }
 
 // ---------------------------------------------------------------------------
@@ -1414,32 +1448,27 @@ class ShutdownPlanner {
       case Notice::None:
         return;
       case Notice::Boot:
-        std::fprintf(stderr,
-                     "robot_runtime: exit requested during the startup "
-                     "self-check; waiting for ZeroTorque\n");
+        StderrLine("robot_runtime: exit requested during the startup "
+                   "self-check; waiting for ZeroTorque\n");
         return;
       case Notice::Motion:
-        std::fprintf(stderr,
-                     "robot_runtime: exit requested while motion may be "
-                     "authorized; ZeroTorque stop requested, an explicit "
-                     "ZeroTorque confirmation is still required\n");
+        StderrLine("robot_runtime: exit requested while motion may be "
+                   "authorized; ZeroTorque stop requested, an explicit "
+                   "ZeroTorque confirmation is still required\n");
         return;
       case Notice::MotionWithoutSession:
-        std::fprintf(stderr,
-                     "robot_runtime: exit requested while damping holds "
-                     "without a supervision session; no request path is "
-                     "available, an explicit ZeroTorque confirmation is still "
-                     "required\n");
+        StderrLine("robot_runtime: exit requested while damping holds "
+                   "without a supervision session; no request path is "
+                   "available, an explicit ZeroTorque confirmation is still "
+                   "required\n");
         return;
       case Notice::Fault:
-        std::fprintf(stderr,
-                     "robot_runtime: exit requested with a latched fault; a "
-                     "Reset is required, the fault is not cleared\n");
+        StderrLine("robot_runtime: exit requested with a latched fault; a "
+                   "Reset is required, the fault is not cleared\n");
         return;
       case Notice::WriteRefused:
-        std::fprintf(stderr,
-                     "robot_runtime: exit requested but the torque write of "
-                     "this tick was not accepted; not exiting\n");
+        StderrLine("robot_runtime: exit requested but the torque write of "
+                   "this tick was not accepted; not exiting\n");
         return;
     }
   }
@@ -1546,16 +1575,14 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
   try {
     config = configuration::LoadConfig(options.config_path, overrides);
   } catch (const std::exception &error) {
-    std::fprintf(stderr, "robot_runtime: configuration error: %s\n",
-                 error.what());
+    StderrFormat("robot_runtime: configuration error: %s\n", error.what());
     return kExitStartupError;
   }
   // The configuration parser already refuses every backend but the fake one, so
   // this is the second, explicit gate: nothing touches a device or DDS before
   // it passed, and `--fake-scenario` therefore can only reach a fake backend.
   if (config.backend != "fake") {
-    std::fprintf(stderr,
-                 "robot_runtime: backend \"%s\" is not supported; only the "
+    StderrFormat("robot_runtime: backend \"%s\" is not supported; only the "
                  "fake backend can be started\n",
                  config.backend.c_str());
     return kExitStartupError;
@@ -1566,7 +1593,7 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
     try {
       scenario = LoadFakeScenario(*options.fake_scenario_path, config);
     } catch (const std::exception &error) {
-      std::fprintf(stderr, "robot_runtime: scenario error: %s\n", error.what());
+      StderrFormat("robot_runtime: scenario error: %s\n", error.what());
       return kExitStartupError;
     }
   }
@@ -1591,13 +1618,13 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
   ExecutionFsm fsm(config, identity.id);
   telemetry::Logger logger(config.telemetry);
   if (!logger.Start()) {
-    std::fprintf(stderr, "robot_runtime: the logger did not start\n");
+    StderrLine("robot_runtime: the logger did not start\n");
     trace.reset();
     backend.Close();
     return kExitStartupError;
   }
   if (!InstallStopHandlers()) {
-    std::fprintf(stderr, "robot_runtime: cannot install the stop handlers\n");
+    StderrLine("robot_runtime: cannot install the stop handlers\n");
     logger.Stop();
     trace.reset();
     backend.Close();
@@ -1608,8 +1635,7 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
   try {
     transport.Start();
   } catch (const std::exception &error) {
-    std::fprintf(stderr, "robot_runtime: transport start failed: %s\n",
-                 error.what());
+    StderrFormat("robot_runtime: transport start failed: %s\n", error.what());
     logger.Stop();
     trace.reset();
     backend.Close();

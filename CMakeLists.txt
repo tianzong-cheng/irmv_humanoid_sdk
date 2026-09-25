@@ -201,7 +201,11 @@ set_tests_properties(config_schema_contract_test PROPERTIES LABELS core)
 
 find_package(Threads REQUIRED)
 
-add_library(irmv_telemetry src/telemetry/logger.cpp)
+add_library(
+  irmv_telemetry
+  src/telemetry/diagnostic_write.cpp
+  src/telemetry/logger.cpp
+)
 target_compile_features(irmv_telemetry PUBLIC cxx_std_17)
 target_include_directories(
   irmv_telemetry
@@ -383,6 +387,7 @@ set(
   runtime_restarted
   command_flood
   slow_logger
+  stderr_backpressure
   write_refused
 )
 foreach(scenario IN LISTS IRMV_INTEGRATION_SCENARIOS)

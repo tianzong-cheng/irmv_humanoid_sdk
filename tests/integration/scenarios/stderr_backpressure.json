@@ -1,0 +1,102 @@
+{
+  "name": "stderr_backpressure",
+  "description": "A jammed stderr pipe must not turn the safe exit into an unbounded wait. The log consumer is deliberately never released, and the log volume first fills the pipe, so the logger is parked inside its sink when SIGTERM arrives. The runtime still has to reach ZeroTorque (confirmed over DDS), leave with exit 0 inside the bound without the reader ever resuming, close its output trace completely and keep its control deadlines. The final clean-shutdown diagnostic may legitimately be dropped - the pipe has no room for it - which is why the exit itself, the confirmed state and the complete trace are the assertions.",
+  "domain": 211,
+  "runtime": {
+    "config": "config/sdk.json",
+    "fake_scenario": "tests/support/fake_ramp.json",
+    "output_trace": "trace_run%d.jsonl",
+    "config_overrides": {
+      "telemetry.queue_capacity": 64
+    }
+  },
+  "steps": [
+    {
+      "action": "start_runtime",
+      "note": "its stdout/stderr pipe is never drained in this scenario"
+    },
+    {
+      "action": "client",
+      "name": "flood",
+      "mode": "supervisor",
+      "scenario": "log_volume",
+      "background": true,
+      "args": [
+        "--rate",
+        "4000"
+      ]
+    },
+    {
+      "action": "sleep_ms",
+      "ms": 1500,
+      "note": "the log volume fills the undrained pipe, so the log worker parks inside the sink"
+    },
+    {
+      "action": "client",
+      "name": "supervisor",
+      "mode": "supervisor",
+      "scenario": "slow_logger",
+      "timeout_s": 30,
+      "args": [
+        "--producer-id",
+        "0102030405060708090a0b0c0d0e0f33",
+        "--rate",
+        "50"
+      ],
+      "note": "drives Boot -> ZeroTorque -> Damping -> Tracking -> Damping -> ZeroTorque over DDS while the pipe stays jammed"
+    },
+    {
+      "action": "stop_runtime",
+      "signal": "SIGTERM",
+      "timeout_s": 5,
+      "drain": false,
+      "expect_clean": false,
+      "expect_code": 0,
+      "note": "the consumer is still blocked here: the process must reach ZeroTorque and leave inside the bound, and the diagnostic that reports it may be dropped by the full pipe"
+    },
+    {
+      "action": "signal_client",
+      "name": "flood",
+      "signal": "SIGTERM"
+    },
+    {
+      "action": "wait_client",
+      "name": "flood",
+      "timeout_s": 15,
+      "allow_exit": [
+        0,
+        -15
+      ]
+    }
+  ],
+  "checks": [
+    {
+      "check": "client_check",
+      "params": {
+        "client": "supervisor",
+        "names": [
+          "session_acquired",
+          "damping_applied",
+          "tracking_granted",
+          "stop_under_flood",
+          "zero_torque_applied"
+        ]
+      }
+    },
+    {
+      "check": "trace_complete",
+      "params": {
+        "file": "trace_run1.jsonl",
+        "min_ticks": 1000
+      }
+    },
+    {
+      "check": "deadlines",
+      "params": {
+        "file": "trace_run1.jsonl",
+        "max_gap_us": 10000,
+        "min_rate_hz": 450
+      }
+    }
+  ]
+}

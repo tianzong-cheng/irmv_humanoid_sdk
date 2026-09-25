@@ -11,7 +11,11 @@
 
 #include "irmv/telemetry/logger.hpp"
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -28,17 +32,22 @@
 #include <vector>
 
 #include "irmv/configuration/config.hpp"
+#include "irmv/telemetry/diagnostic_write.hpp"
 #include "support/check.hpp"
 
 namespace {
 
 using irmv::configuration::LogLevel;
 using irmv::configuration::TelemetryConfig;
+using irmv::telemetry::kMaxBoundedDiagnosticBytes;
 using irmv::telemetry::kMaxLogFields;
+using irmv::telemetry::kMaxLogLine;
 using irmv::telemetry::kStopDrainTimeoutMs;
 using irmv::telemetry::LogEvent;
 using irmv::telemetry::Logger;
 using irmv::telemetry::LogSink;
+using irmv::telemetry::WriteDiagnosticBlocking;
+using irmv::telemetry::WriteDiagnosticBounded;
 
 // Generous bound for a wait that is expected to complete in microseconds; only
 // a stalled implementation reaches it, and reaching it fails a CHECK.
@@ -712,6 +721,73 @@ int main() {
       const std::uint64_t undrained = logger.Undrained();
       CHECK(written + undrained >= granted);
     }
+  }
+
+  // The diagnostic writer of the control thread, the trace worker and the exit
+  // path is bounded: a pipe nobody drains must not park it, and a line that
+  // does not fit must be reported as not written instead of waited for. The
+  // log worker keeps the blocking behaviour of its own writer, pinned on the
+  // same pipe.
+  {
+    int pipe_fds[2] = {-1, -1};
+    CHECK(::pipe(pipe_fds) == 0);
+    // The filling writer never blocks the test process itself.
+    const int flags = ::fcntl(pipe_fds[1], F_GETFL, 0);
+    CHECK(flags >= 0);
+    CHECK(::fcntl(pipe_fds[1], F_SETFL, flags | O_NONBLOCK) == 0);
+    std::array<char, 4096> filler{};
+    std::size_t filled = 0;
+    while (::write(pipe_fds[1], filler.data(), filler.size()) > 0) {
+      filled += filler.size();
+    }
+    CHECK(filled > 0);
+
+    // Full pipe: the bounded writer returns inside its budget and reports the
+    // line as not written.
+    const auto start = std::chrono::steady_clock::now();
+    CHECK(!WriteDiagnosticBounded(pipe_fds[1], "dropped line\n"));
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(1));
+
+    // Draining shows that the dropped line really did not arrive: the pipe
+    // holds exactly what the filling writer put in it. The read is bounded by
+    // that byte count - the write end is still open, so a read past it would
+    // park the test.
+    std::array<char, 4096> buffer{};
+    std::size_t drained = 0;
+    while (drained < filled) {
+      const ssize_t count = ::read(pipe_fds[0], buffer.data(), buffer.size());
+      CHECK(count > 0);
+      drained += static_cast<std::size_t>(count);
+    }
+    CHECK(drained == filled);
+
+    // With room again the whole line arrives, byte for byte.
+    CHECK(WriteDiagnosticBounded(pipe_fds[1], "kept line\n"));
+    const ssize_t kept = ::read(pipe_fds[0], buffer.data(), buffer.size());
+    CHECK(kept == 10);
+    CHECK(std::string_view(buffer.data(), 10) == "kept line\n");
+
+    // A line above the bound is refused as a whole: the caller can tell that
+    // its diagnostic was not delivered.
+    const std::string too_long(kMaxBoundedDiagnosticBytes + 1, 'x');
+    CHECK(!WriteDiagnosticBounded(pipe_fds[1], too_long));
+    CHECK(::read(pipe_fds[0], buffer.data(), buffer.size()) ==
+          static_cast<ssize_t>(kMaxBoundedDiagnosticBytes));
+
+    // The log worker's writer still delivers arbitrary lengths, waiting for
+    // room rather than dropping the line.
+    const std::string worker_line(kMaxLogLine / 2, 'w');
+    CHECK(WriteDiagnosticBlocking(pipe_fds[1], worker_line));
+    std::string received;
+    while (received.size() < worker_line.size()) {
+      const ssize_t part = ::read(pipe_fds[0], buffer.data(), buffer.size());
+      CHECK(part > 0);
+      received.append(buffer.data(), static_cast<std::size_t>(part));
+    }
+    CHECK(received == worker_line);
+
+    ::close(pipe_fds[0]);
+    ::close(pipe_fds[1]);
   }
 
   return 0;

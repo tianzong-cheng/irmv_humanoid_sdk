@@ -1,6 +1,11 @@
 #include "irmv/telemetry/logger.hpp"
 
+#include "irmv/telemetry/diagnostic_write.hpp"
+
+#include <unistd.h>
+
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -156,9 +161,18 @@ bool RotatingFileSink::ReportError(std::string_view what,
   }
   error_reported_ = true;
   const std::string message = error ? error.message() : std::string();
-  std::fprintf(stderr, "irmv logger: %.*s: %s%s%s\n",
-               static_cast<int>(what.size()), what.data(),
-               path_.string().c_str(), error ? ": " : "", message.c_str());
+  std::array<char, 512> line{};
+  const int length = std::snprintf(
+      line.data(), line.size(), "irmv logger: %.*s: %s%s%s\n",
+      static_cast<int>(what.size()), what.data(), path_.string().c_str(),
+      error ? ": " : "", message.c_str());
+  if (length > 0) {
+    const std::size_t size = std::min<std::size_t>(
+        static_cast<std::size_t>(length), line.size() - 1);
+    static_cast<void>(WriteDiagnosticBlocking(::fileno(stderr),
+                                              std::string_view(line.data(),
+                                                               size)));
+  }
   return false;
 }
 
@@ -244,8 +258,13 @@ bool RotatingFileSink::Write(const LogEvent &event) {
   char line[kMaxLogLine];
   const std::size_t length = FormatEvent(event, line, sizeof(line));
   // stderr is the sink that never rotates: a run keeps its diagnostics even
-  // when the file backend is unusable.
-  const bool reportable = std::fwrite(line, 1, length, stderr) == length;
+  // when the file backend is unusable. It is written through the shared
+  // diagnostic writer, which serializes it with the control thread's and the
+  // exit path's lines: the worker may park on a jammed pipe, and that parking
+  // must never make those lines block behind it or split a pipe it only partly
+  // fills.
+  const bool reportable = WriteDiagnosticBlocking(
+      ::fileno(stderr), std::string_view(line, length));
   const bool stored =
       OpenIfNeeded() && RotateIfNeeded(length) && AppendLine(line, length);
   return reportable && stored;
