@@ -23,6 +23,7 @@ using irmv::application::InitializationStatus;
 using irmv::configuration::ApplicationConfig;
 using irmv::configuration::LoadApplicationConfig;
 using irmv::protocol::JointCommand;
+using irmv::protocol::kMaxJoints;
 using irmv::protocol::kNoId;
 using irmv::protocol::kProtocolVersion;
 using irmv::protocol::RobotState;
@@ -31,10 +32,10 @@ using irmv::protocol::TimeUs;
 
 using JointPair = std::array<double, 2>;
 
-// The fixture timeouts the literals below rely on.
-constexpr TimeUs kSourceTimeoutUs = 150'000;
+// The fixture values the literals below rely on.
 constexpr Sequence kEpoch = 7;
 constexpr double kTolerance = 1e-9;
+constexpr double kPi = 3.14159265358979323846;
 
 constexpr double kInf = std::numeric_limits<double>::infinity();
 constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
@@ -74,17 +75,23 @@ RobotState FreshState(const ApplicationConfig &config,
   return state;
 }
 
-// A command that a failed call must leave exactly as it found it.
+// A command that a failed call must leave exactly as it found it. The last
+// joint slot is beyond the configured count and deliberately dirty, so a
+// re-emitted frame has to be rebuilt, not patched in place.
 JointCommand Sentinel() {
   JointCommand command{};
   command.command_seq = 424242;
   command.joints.count = 99;
+  command.joints.q[kMaxJoints - 1] = 123.5;
+  command.joints.kd[kMaxJoints - 1] = 456.5;
   return command;
 }
 
 int CheckUntouched(const JointCommand &command) {
   CHECK(command.command_seq == 424242);
   CHECK(command.joints.count == 99);
+  CHECK(command.joints.q[kMaxJoints - 1] == 123.5);
+  CHECK(command.joints.kd[kMaxJoints - 1] == 456.5);
   return 0;
 }
 
@@ -130,8 +137,11 @@ int FirstFrameContinuity() {
           config.runtime.continuity.position_delta[index]);
     CHECK(std::fabs(frame.joints.dq[index] - measured_velocity) <=
           config.runtime.continuity.velocity_delta[index]);
-    // The first target is the measured position: a jump of zero.
+    // The first target is the measured position: a jump of zero, and the
+    // smooth profile starts with zero velocity, so the first frame is inside
+    // the velocity bound for every start position.
     CHECK(position == measured_position);
+    CHECK(frame.joints.dq[index] == 0.0);
     // Torque continuity against both possible predecessors, computed with the
     // runtime's formula tau = kp*(q - q_fb) + kd*(dq - dq_fb) + tau_ff.
     const double tau_new =
@@ -157,19 +167,22 @@ int FirstFrameContinuity() {
   return 0;
 }
 
-// The interpolation is the documented ramp: monotonic towards the target, held
-// inside the physical limits, and its velocity command matches the position
-// ramp. The feedback below tracks the commanded ramp, so every frame stays
-// continuous with the state it is built from.
+// The interpolation is the documented raised-cosine ramp: monotonic towards
+// the target, held inside the physical limits, with the analytic derivative as
+// its velocity command. The feedback below lags the command by one control
+// period, like a real tracker, and the position and velocity continuity bounds
+// are asserted frame by frame.
 int MonotonicInterpolation() {
   ApplicationConfig config = FakeConfig();
-  // Slow enough that the ramp rate fits the runtime's velocity continuity bound
-  // (2.25 rad over 8 s is 0.28 rad/s against velocity_delta 0.5).
+  // Slow enough that even the profile's peak rate (2.25*pi/(2*8) = 0.44 rad/s)
+  // stays inside the runtime's velocity continuity bound 0.5.
   const TimeUs duration = 8'000'000;
   SetDuration(config, duration);
   config.initialization.target_q[0] = 0.25;
   config.initialization.target_q[1] = -0.75;
   const JointPair start_q{-1.0, 1.5};
+  const double duration_seconds = static_cast<double>(duration) / 1e6;
+  const TimeUs period = config.supervision.target_period_us;
   const TimeUs start_us = 2'000'000;
 
   Initialization initialization(config);
@@ -177,27 +190,31 @@ int MonotonicInterpolation() {
       FreshState(config, start_q, JointPair{0.0, 0.0}, start_us - 1'000, 20);
   CHECK(initialization.Start(origin, kEpoch, Producer(), start_us));
 
+  const auto profile_q = [&](std::size_t index, TimeUs elapsed) {
+    const double delta = config.initialization.target_q[index] - start_q[index];
+    const double fraction =
+        static_cast<double>(elapsed) / static_cast<double>(duration);
+    return start_q[index] + delta * (1.0 - std::cos(kPi * fraction)) / 2.0;
+  };
+  const auto profile_dq = [&](std::size_t index, TimeUs elapsed) {
+    const double delta = config.initialization.target_q[index] - start_q[index];
+    const double fraction =
+        static_cast<double>(elapsed) / static_cast<double>(duration);
+    return delta * (kPi / (2.0 * duration_seconds)) * std::sin(kPi * fraction);
+  };
+
   JointPair previous = start_q;
   for (std::size_t step = 0; step <= 8; ++step) {
     const TimeUs elapsed = static_cast<TimeUs>(step) * duration / 8;
     const TimeUs now = start_us + elapsed;
-    // The feedback the generator will judge: the command of this instant, so a
-    // perfect tracker. The trajectory itself is fixed by Start.
+    // The measured state is the command of one control period ago, and
+    // therefore the start position at the very first call.
+    const TimeUs lagged = elapsed > period ? elapsed - period : 0;
     JointPair measured{};
     JointPair measured_velocity{};
     for (std::size_t index = 0; index < config.joint_count(); ++index) {
-      const double delta =
-          config.initialization.target_q[index] - start_q[index];
-      if (elapsed >= duration) {
-        measured[index] = config.initialization.target_q[index];
-        measured_velocity[index] = 0.0;
-      } else {
-        const double fraction =
-            static_cast<double>(elapsed) / static_cast<double>(duration);
-        measured[index] = start_q[index] + delta * fraction;
-        measured_velocity[index] =
-            delta / (static_cast<double>(duration) / 1e6);
-      }
+      measured[index] = profile_q(index, lagged);
+      measured_velocity[index] = profile_dq(index, lagged);
     }
     const RobotState fresh =
         FreshState(config, measured, measured_velocity, now - 1'000, 20 + step);
@@ -205,12 +222,17 @@ int MonotonicInterpolation() {
     CHECK(initialization.Step(fresh, now, &frame) ==
           InitializationStatus::Running);
     for (std::size_t index = 0; index < config.joint_count(); ++index) {
-      // The frame is exactly the documented ramp.
-      CHECK(std::fabs(frame.joints.q[index] - measured[index]) <= kTolerance);
-      CHECK(std::fabs(frame.joints.dq[index] - measured_velocity[index]) <=
-            kTolerance);
+      // Inside the ramp the frame is exactly the profile and its derivative...
+      const double expected_q = elapsed >= duration
+                                    ? config.initialization.target_q[index]
+                                    : profile_q(index, elapsed);
+      const double expected_dq =
+          elapsed >= duration ? 0.0 : profile_dq(index, elapsed);
+      CHECK(std::fabs(frame.joints.q[index] - expected_q) <= kTolerance);
+      CHECK(std::fabs(frame.joints.dq[index] - expected_dq) <= kTolerance);
       CHECK(frame.joints.tau_ff[index] == 0.0);
-      // Inside the segment towards the target and inside the physical limits.
+      // ... inside the segment towards the target and the physical limits,
+      // and inside the runtime's target velocity limit.
       const double low =
           std::fmin(start_q[index], config.initialization.target_q[index]);
       const double high =
@@ -227,6 +249,13 @@ int MonotonicInterpolation() {
             std::fabs(previous[index] - config.initialization.target_q[index]) +
                 kTolerance);
       previous[index] = frame.joints.q[index];
+      // The frame is continuous with the state it was built from, which is what
+      // the runtime measures a first frame against.
+      CHECK(std::fabs(frame.joints.q[index] - fresh.feedback.joints[index].q) <=
+            config.runtime.continuity.position_delta[index]);
+      CHECK(
+          std::fabs(frame.joints.dq[index] - fresh.feedback.joints[index].dq) <=
+          config.runtime.continuity.velocity_delta[index]);
     }
   }
   // The ramp is finished: the target exactly, with no velocity command.
@@ -263,6 +292,10 @@ int FrameCompleteness() {
     CHECK(initialization.Step(fresh, now, &frame) ==
           InitializationStatus::Running);
     CHECK(frame.joints.count == config.joint_count());
+    // The frame is rebuilt, not patched: a dirty slot beyond the configured
+    // count cannot survive into an emitted frame.
+    CHECK(frame.joints.q[kMaxJoints - 1] == 0.0);
+    CHECK(frame.joints.kd[kMaxJoints - 1] == 0.0);
     CHECK(frame.layout_id.View() == config.layout_id());
     CHECK(frame.producer_id == Producer());
     CHECK(frame.epoch == kEpoch);
@@ -326,13 +359,21 @@ int UnusableFeedbackFails() {
   }
   {
     RobotState state = good;
-    state.stamp_us = start_us - kSourceTimeoutUs - 1;
+    state.stamp_us = start_us - config.runtime.timeouts.source_state_us - 1;
     Initialization initialization(config);
     CHECK(!initialization.Start(state, kEpoch, Producer(), start_us));
   }
   {
     RobotState state = good;
     state.stamp_us = start_us + 1;
+    Initialization initialization(config);
+    CHECK(!initialization.Start(state, kEpoch, Producer(), start_us));
+  }
+  {
+    // A zero state sequence names no published state, so the runtime could
+    // never look it up: it is not a target source.
+    RobotState state = good;
+    state.state_seq = 0;
     Initialization initialization(config);
     CHECK(!initialization.Start(state, kEpoch, Producer(), start_us));
   }
@@ -372,9 +413,11 @@ int UnusableFeedbackFails() {
   RobotState disconnected = good;
   disconnected.feedback.joints[1].connected = false;
   RobotState old = good;
-  old.stamp_us = start_us - kSourceTimeoutUs - 1;
+  old.stamp_us = start_us - config.runtime.timeouts.source_state_us - 1;
   RobotState no_stamp = good;
   no_stamp.stamp_us = 0;
+  RobotState no_state_seq = good;
+  no_state_seq.state_seq = 0;
   RobotState future = good;
   future.stamp_us = start_us + 10'000;
   RobotState nan_position = good;
@@ -389,6 +432,7 @@ int UnusableFeedbackFails() {
       {"disconnected joint", disconnected, start_us + 10'000},
       {"old feedback", old, start_us + 10'000},
       {"no feedback stamp", no_stamp, start_us + 10'000},
+      {"zero state sequence", no_state_seq, start_us + 10'000},
       // Now is before the state stamp: a state from the future is unusable.
       {"future feedback", future, start_us + 5'000},
       {"non-finite position", nan_position, start_us + 10'000},
@@ -436,6 +480,192 @@ int UnusableFeedbackFails() {
     CHECK(initialization.failed());
     // Start accepts a later origin again after the latch.
     CHECK(initialization.Start(good, kEpoch, Producer(), start_us + 31'000));
+    CHECK(initialization.active());
+  }
+  // A null output is a mid-move failure like any other: it latches and emits
+  // nothing.
+  {
+    Initialization initialization(config);
+    CHECK(initialization.Start(good, kEpoch, Producer(), start_us));
+    CHECK(initialization.Step(good, start_us + 1'000, nullptr) ==
+          InitializationStatus::Failed);
+    CHECK(initialization.failed());
+    CHECK(!initialization.active());
+  }
+  return 0;
+}
+
+// The plan Start is about to fix must be one the runtime can accept. The
+// shipped 500 ms duration with a start far from the target used to break the
+// first-frame velocity bound and the target velocity limit; the raised-cosine
+// profile is admitted there, and a plan that is genuinely un-runnable is
+// refused before any frame and without latching anything.
+int AdmissionRefusals() {
+  ApplicationConfig config = FakeConfig();
+  const TimeUs start_us = 40'000'000;
+  const JointPair still{0.0, 0.0};
+
+  // 1.5 rad from the target in the shipped 500 ms: the linear ramp's 3 rad/s
+  // first frame would have been a discontinuity against velocity_delta 0.5,
+  // while this profile starts at zero velocity and its peak rate
+  // 1.5*pi/(2*0.5) = 4.71 rad/s stays inside the 10 rad/s target limit.
+  {
+    const JointPair far{1.5, -1.5};
+    const TimeUs duration = config.initialization.trajectory.duration_us;
+    const double duration_seconds = static_cast<double>(duration) / 1e6;
+    const RobotState fresh =
+        FreshState(config, far, still, start_us - 1'000, 80);
+    Initialization initialization(config);
+    CHECK(initialization.Start(fresh, kEpoch, Producer(), start_us));
+    JointCommand frame{};
+    CHECK(initialization.Step(fresh, start_us, &frame) ==
+          InitializationStatus::Running);
+    for (std::size_t index = 0; index < config.joint_count(); ++index) {
+      const double measured = fresh.feedback.joints[index].q;
+      const double measured_velocity = fresh.feedback.joints[index].dq;
+      CHECK(frame.joints.q[index] == measured);
+      CHECK(frame.joints.dq[index] == 0.0);
+      CHECK(std::fabs(frame.joints.q[index] - measured) <=
+            config.runtime.continuity.position_delta[index]);
+      CHECK(std::fabs(frame.joints.dq[index] - measured_velocity) <=
+            config.runtime.continuity.velocity_delta[index]);
+      const double tau_new =
+          frame.joints.kp[index] * (frame.joints.q[index] - measured) +
+          frame.joints.kd[index] *
+              (frame.joints.dq[index] - measured_velocity) +
+          frame.joints.tau_ff[index];
+      const double tau_old =
+          -config.runtime.damping_kd[index] * measured_velocity;
+      CHECK(std::fabs(tau_new - tau_old) <=
+            config.runtime.continuity.torque_delta[index]);
+      const double peak =
+          std::fabs(config.initialization.target_q[index] - measured) * kPi /
+          (2.0 * duration_seconds);
+      CHECK(peak <= config.runtime.target_velocity_limits[index]);
+    }
+    // Halfway through, the profile is at the midpoint and at its peak rate.
+    const TimeUs half = start_us + duration / 2;
+    JointPair midpoint{};
+    for (std::size_t index = 0; index < config.joint_count(); ++index) {
+      midpoint[index] =
+          far[index] +
+          (config.initialization.target_q[index] - far[index]) / 2.0;
+    }
+    const RobotState mid =
+        FreshState(config, midpoint, still, half - 1'000, 81);
+    JointCommand half_frame{};
+    CHECK(initialization.Step(mid, half, &half_frame) ==
+          InitializationStatus::Running);
+    for (std::size_t index = 0; index < config.joint_count(); ++index) {
+      const double peak =
+          std::fabs(config.initialization.target_q[index] - far[index]) * kPi /
+          (2.0 * duration_seconds);
+      CHECK(std::fabs(half_frame.joints.q[index] - midpoint[index]) <=
+            kTolerance);
+      CHECK(std::fabs(std::fabs(half_frame.joints.dq[index]) - peak) <=
+            kTolerance);
+    }
+  }
+
+  // A duration too short for the move: 1.5 rad in 200 ms would peak at
+  // 11.8 rad/s against a 10 rad/s limit. No frame, nothing latched.
+  {
+    ApplicationConfig short_config = FakeConfig();
+    SetDuration(short_config, 200'000);
+    const JointPair far{1.5, -1.5};
+    const double peak =
+        std::fabs(short_config.initialization.target_q[0] - far[0]) * kPi /
+        (2.0 * (static_cast<double>(
+                    short_config.initialization.trajectory.duration_us) /
+                1e6));
+    CHECK(peak > short_config.runtime.target_velocity_limits[0]);
+    const RobotState fresh =
+        FreshState(short_config, far, still, start_us - 1'000, 82);
+    Initialization initialization(short_config);
+    CHECK(!initialization.Start(fresh, kEpoch, Producer(), start_us));
+    CHECK(!initialization.active());
+    CHECK(!initialization.failed());
+    CHECK(!initialization.ready());
+    JointCommand untouched = Sentinel();
+    CHECK(initialization.Step(fresh, start_us, &untouched) ==
+          InitializationStatus::Failed);
+    CHECK(CheckUntouched(untouched) == 0);
+    // The same plan is admitted once the duration can follow it.
+    ApplicationConfig long_config = FakeConfig();
+    SetDuration(long_config, 2'000'000);
+    const RobotState later =
+        FreshState(long_config, far, still, start_us + 1'000, 83);
+    Initialization admitted(long_config);
+    CHECK(admitted.Start(later, kEpoch, Producer(), start_us + 2'000));
+    CHECK(admitted.active());
+  }
+
+  // An origin outside the physical limits is never a target.
+  {
+    ApplicationConfig limited = FakeConfig();
+    SetDuration(limited, 4'000'000);
+    const JointPair outside{2.5, 0.0};
+    CHECK(outside[0] > limited.runtime.position_max[0]);
+    Initialization initialization(limited);
+    const RobotState fresh =
+        FreshState(limited, outside, still, start_us - 1'000, 84);
+    CHECK(!initialization.Start(fresh, kEpoch, Producer(), start_us));
+    CHECK(!initialization.active());
+    CHECK(!initialization.failed());
+    // The same move from inside the limits is admitted, so the refusal is the
+    // limit and not the duration.
+    const JointPair inside{1.9, 0.0};
+    const RobotState ok =
+        FreshState(limited, inside, still, start_us - 1'000, 85);
+    CHECK(initialization.Start(ok, kEpoch, Producer(), start_us));
+    CHECK(initialization.active());
+  }
+
+  // A first frame that would break the velocity continuity bound because the
+  // measured joint is already moving faster than the bound can absorb.
+  {
+    ApplicationConfig moving = FakeConfig();
+    SetDuration(moving, 4'000'000);
+    const JointPair origin{0.5, -0.5};
+    const JointPair fast{1.0, 0.0};
+    CHECK(std::fabs(fast[0]) > moving.runtime.continuity.velocity_delta[0]);
+    Initialization initialization(moving);
+    const RobotState fresh =
+        FreshState(moving, origin, fast, start_us - 1'000, 86);
+    CHECK(!initialization.Start(fresh, kEpoch, Producer(), start_us));
+    CHECK(!initialization.active());
+    CHECK(!initialization.failed());
+    const RobotState ok =
+        FreshState(moving, origin, JointPair{0.4, 0.0}, start_us - 1'000, 87);
+    CHECK(initialization.Start(ok, kEpoch, Producer(), start_us));
+    CHECK(initialization.active());
+  }
+
+  // A first frame that would break the torque continuity bound: the velocity
+  // bound is widened so only the torque clause can refuse, because
+  // kd*(0 - dq) against -damping_kd*dq gives |damping_kd - kd| * |dq| = 6.
+  {
+    ApplicationConfig torque = FakeConfig();
+    SetDuration(torque, 4'000'000);
+    for (std::size_t index = 0; index < torque.joint_count(); ++index) {
+      torque.runtime.continuity.velocity_delta[index] = 100.0;
+      torque.runtime.continuity.torque_delta[index] = 0.1;
+    }
+    const JointPair origin{0.5, -0.5};
+    const JointPair fast{6.0, 0.0};
+    Initialization initialization(torque);
+    const RobotState fresh =
+        FreshState(torque, origin, fast, start_us - 1'000, 88);
+    CHECK(!initialization.Start(fresh, kEpoch, Producer(), start_us));
+    CHECK(!initialization.active());
+    CHECK(!initialization.failed());
+    // Inside the torque bound the same plan is admitted.
+    for (std::size_t index = 0; index < torque.joint_count(); ++index) {
+      torque.runtime.continuity.torque_delta[index] = 10.0;
+    }
+    const RobotState ok =
+        FreshState(torque, origin, fast, start_us - 1'000, 89);
+    CHECK(initialization.Start(ok, kEpoch, Producer(), start_us));
     CHECK(initialization.active());
   }
   return 0;
@@ -507,7 +737,6 @@ int StableWindowAndCompletion() {
   }
   // The window has been held for its whole length: ready, with the final hold
   // frame exactly on the target.
-  Sequence ready_seq = 0;
   {
     const TimeUs now = start_us + duration + window;
     const RobotState fresh = FreshState(
@@ -525,7 +754,6 @@ int StableWindowAndCompletion() {
       CHECK(frame.joints.dq[index] == 0.0);
       CHECK(frame.joints.tau_ff[index] == 0.0);
     }
-    ready_seq = frame.command_seq;
   }
 
   // A broken window restarts: one out-of-tolerance sample after the ramp
@@ -576,7 +804,221 @@ int StableWindowAndCompletion() {
           InitializationStatus::Ready);
     CHECK(restarted.ready());
   }
-  (void)ready_seq;
+  return 0;
+}
+
+// Completion is judged before the deadline: a move whose stable window opens at
+// the ramp end and completes after the deadline is Ready, not Failed.
+int CompletionBeforeDeadline() {
+  ApplicationConfig config = FakeConfig();
+  const TimeUs duration = 1'000'000;
+  const TimeUs window = 100'000;
+  const TimeUs deadline = 1'050'000;
+  // The deadline is deliberately shorter than duration + stable_window, so the
+  // completion block can only answer Ready if it runs before the deadline
+  // check.
+  CHECK(deadline < duration + window);
+  config.initialization.trajectory.duration_us = duration;
+  config.initialization.trajectory.deadline_us = deadline;
+  config.initialization.trajectory.stable_window_us = window;
+  const JointPair start_q{-0.5, 0.5};
+  const JointPair at_target{0.0, 0.0};
+  const JointPair still{0.0, 0.0};
+  const TimeUs start_us = 50'000'000;
+
+  Initialization initialization(config);
+  const RobotState origin =
+      FreshState(config, start_q, still, start_us - 1'000, 90);
+  CHECK(initialization.Start(origin, kEpoch, Producer(), start_us));
+
+  // The ramp ends here and the window opens; the deadline has not passed yet.
+  {
+    const TimeUs now = start_us + duration;
+    CHECK(now - start_us <= deadline);
+    JointCommand frame{};
+    CHECK(initialization.Step(
+              FreshState(config, at_target, still, now - 1'000, 91), now,
+              &frame) == InitializationStatus::Running);
+    CHECK(!initialization.ready());
+  }
+  // The window has been held for its whole length, so the move is Ready even
+  // though the run is past its deadline.
+  {
+    const TimeUs now = start_us + duration + window;
+    CHECK(now - start_us > deadline);
+    JointCommand frame{};
+    CHECK(initialization.Step(
+              FreshState(config, at_target, still, now - 1'000, 92), now,
+              &frame) == InitializationStatus::Ready);
+    CHECK(initialization.ready());
+    CHECK(!initialization.failed());
+    CHECK(!initialization.active());
+    for (std::size_t index = 0; index < config.joint_count(); ++index) {
+      CHECK(frame.joints.q[index] == config.initialization.target_q[index]);
+      CHECK(frame.joints.dq[index] == 0.0);
+      CHECK(frame.joints.tau_ff[index] == 0.0);
+    }
+  }
+  return 0;
+}
+
+// The arithmetic boundaries: the tolerances are inclusive, a zero-length move
+// is exact, and the extremes of `duration_us` neither divide by zero nor
+// overflow.
+int BoundaryArithmetic() {
+  // Exactly on the tolerance counts as inside it.
+  {
+    ApplicationConfig config = FakeConfig();
+    SetDuration(config, 1'000'000);
+    config.initialization.trajectory.stable_window_us = 100'000;
+    config.initialization.trajectory.position_tolerance = 0.02;
+    config.initialization.trajectory.velocity_tolerance = 0.05;
+    const JointPair start_q{0.0, 0.0};
+    const TimeUs start_us = 60'000'000;
+    Initialization initialization(config);
+    const RobotState origin =
+        FreshState(config, start_q, JointPair{0.0, 0.0}, start_us - 1'000, 100);
+    CHECK(initialization.Start(origin, kEpoch, Producer(), start_us));
+    JointCommand frame{};
+    const TimeUs ramp_end = start_us + 1'000'000;
+    CHECK(initialization.Step(FreshState(config, start_q, JointPair{0.0, 0.0},
+                                         ramp_end - 1'000, 101),
+                              ramp_end,
+                              &frame) == InitializationStatus::Running);
+    CHECK(!initialization.ready());
+    // Exactly `position_tolerance` away and exactly `velocity_tolerance` fast.
+    const JointPair boundary{0.02, -0.02};
+    const JointPair boundary_velocity{0.05, -0.05};
+    CHECK(std::fabs(boundary[0] - config.initialization.target_q[0]) ==
+          config.initialization.trajectory.position_tolerance);
+    CHECK(std::fabs(boundary_velocity[0]) ==
+          config.initialization.trajectory.velocity_tolerance);
+    const TimeUs held = ramp_end + 100'000;
+    CHECK(initialization.Step(FreshState(config, boundary, boundary_velocity,
+                                         held - 1'000, 102),
+                              held, &frame) == InitializationStatus::Ready);
+    CHECK(initialization.ready());
+  }
+
+  // target_q == start_q: the move is exactly the origin, at every instant.
+  {
+    ApplicationConfig config = FakeConfig();
+    SetDuration(config, 1'000'000);
+    config.initialization.target_q[0] = 0.5;
+    config.initialization.target_q[1] = -0.5;
+    const JointPair start_q{0.5, -0.5};
+    const JointPair still{0.0, 0.0};
+    const TimeUs start_us = 70'000'000;
+    Initialization initialization(config);
+    const RobotState origin =
+        FreshState(config, start_q, still, start_us - 1'000, 110);
+    CHECK(initialization.Start(origin, kEpoch, Producer(), start_us));
+    JointCommand frame{};
+    for (const TimeUs elapsed :
+         {TimeUs{0}, TimeUs{500'000}, TimeUs{1'000'000}}) {
+      const TimeUs now = start_us + elapsed;
+      CHECK(initialization.Step(
+                FreshState(config, start_q, still, now - 1'000, 111), now,
+                &frame) == InitializationStatus::Running);
+      for (std::size_t index = 0; index < config.joint_count(); ++index) {
+        CHECK(frame.joints.q[index] == start_q[index]);
+        CHECK(frame.joints.dq[index] == 0.0);
+      }
+    }
+    CHECK(!initialization.ready());
+  }
+
+  // duration_us == 1: a one-microsecond ramp of a stationary target is exact,
+  // and a move that fast is refused instead of emitted.
+  {
+    ApplicationConfig config = FakeConfig();
+    SetDuration(config, 1);
+    config.initialization.target_q[0] = 0.5;
+    config.initialization.target_q[1] = -0.5;
+    const JointPair start_q{0.5, -0.5};
+    const JointPair still{0.0, 0.0};
+    const TimeUs start_us = 80'000'000;
+    Initialization initialization(config);
+    const RobotState origin =
+        FreshState(config, start_q, still, start_us - 1'000, 120);
+    CHECK(initialization.Start(origin, kEpoch, Producer(), start_us));
+    JointCommand frame{};
+    // Inside the ramp: the origin exactly, with no velocity.
+    CHECK(initialization.Step(
+              FreshState(config, start_q, still, start_us - 1'000, 121),
+              start_us, &frame) == InitializationStatus::Running);
+    for (std::size_t index = 0; index < config.joint_count(); ++index) {
+      CHECK(std::isfinite(frame.joints.q[index]));
+      CHECK(std::isfinite(frame.joints.dq[index]));
+      CHECK(frame.joints.q[index] == start_q[index]);
+      CHECK(frame.joints.dq[index] == 0.0);
+    }
+    // At the ramp end: the target exactly.
+    const TimeUs ended = start_us + 1;
+    const JointPair target{config.initialization.target_q[0],
+                           config.initialization.target_q[1]};
+    CHECK(initialization.Step(
+              FreshState(config, target, still, ended - 1'000, 122), ended,
+              &frame) == InitializationStatus::Running);
+    for (std::size_t index = 0; index < config.joint_count(); ++index) {
+      CHECK(frame.joints.q[index] == config.initialization.target_q[index]);
+      CHECK(frame.joints.dq[index] == 0.0);
+    }
+    // The same one-microsecond ramp of a real move needs an enormous rate, so
+    // it is refused rather than emitted.
+    ApplicationConfig moving = FakeConfig();
+    SetDuration(moving, 1);
+    const JointPair far{0.5, -0.5};
+    Initialization refused(moving);
+    const RobotState plan =
+        FreshState(moving, far, still, start_us - 1'000, 123);
+    CHECK(!refused.Start(plan, kEpoch, Producer(), start_us));
+    CHECK(!refused.active());
+    CHECK(!refused.failed());
+  }
+
+  // A huge duration stays finite and still ends exactly on the target.
+  {
+    ApplicationConfig config = FakeConfig();
+    const TimeUs duration = 1ULL << 62;
+    config.initialization.trajectory.duration_us = duration;
+    config.initialization.trajectory.deadline_us =
+        std::numeric_limits<TimeUs>::max();
+    config.initialization.trajectory.stable_window_us = 100'000;
+    const JointPair start_q{0.5, -0.5};
+    const JointPair still{0.0, 0.0};
+    const TimeUs start_us = 90'000'000;
+    Initialization initialization(config);
+    const RobotState origin =
+        FreshState(config, start_q, still, start_us - 1'000, 130);
+    CHECK(initialization.Start(origin, kEpoch, Producer(), start_us));
+    JointCommand frame{};
+    // Deep inside a practically infinite ramp the frame is finite and inside
+    // the segment.
+    const TimeUs early = start_us + 1'000'000;
+    CHECK(initialization.Step(
+              FreshState(config, start_q, still, early - 1'000, 131), early,
+              &frame) == InitializationStatus::Running);
+    for (std::size_t index = 0; index < config.joint_count(); ++index) {
+      CHECK(std::isfinite(frame.joints.q[index]));
+      CHECK(std::isfinite(frame.joints.dq[index]));
+      CHECK(frame.joints.q[index] >=
+            std::fmin(start_q[index], config.initialization.target_q[index]));
+      CHECK(frame.joints.q[index] <=
+            std::fmax(start_q[index], config.initialization.target_q[index]));
+    }
+    // The ramp end lands exactly on the target, with no velocity.
+    const TimeUs ended = start_us + duration;
+    const JointPair target{config.initialization.target_q[0],
+                           config.initialization.target_q[1]};
+    CHECK(initialization.Step(
+              FreshState(config, target, still, ended - 1'000, 132), ended,
+              &frame) == InitializationStatus::Running);
+    for (std::size_t index = 0; index < config.joint_count(); ++index) {
+      CHECK(frame.joints.q[index] == config.initialization.target_q[index]);
+      CHECK(frame.joints.dq[index] == 0.0);
+    }
+  }
   return 0;
 }
 
@@ -705,6 +1147,21 @@ int ReadyHold() {
   }
   CHECK(initialization.ready());
 
+  // A Step with no move in flight reports Failed, emits nothing and leaves the
+  // finished move unlatched: the Ready state holds with Hold.
+  {
+    const TimeUs now = start_us + duration + window;
+    JointCommand command = Sentinel();
+    const RobotState fresh =
+        FreshState(config, JointPair{0.0, 0.0}, still, now - 1'000, 72);
+    CHECK(initialization.Step(fresh, now, &command) ==
+          InitializationStatus::Failed);
+    CHECK(CheckUntouched(command) == 0);
+    CHECK(initialization.ready());
+    CHECK(!initialization.failed());
+    CHECK(!initialization.active());
+  }
+
   // Hold before Start is refused.
   {
     Initialization untouched(config);
@@ -778,7 +1235,7 @@ int ReadyHold() {
     JointCommand command = Sentinel();
     RobotState stale =
         FreshState(config, JointPair{0.0, 0.0}, still, now - 1'000, 75);
-    stale.stamp_us = now - kSourceTimeoutUs - 1;
+    stale.stamp_us = now - config.runtime.timeouts.source_state_us - 1;
     CHECK(initialization.Hold(stale, now, &command) ==
           InitializationStatus::Failed);
     CHECK(CheckUntouched(command) == 0);
@@ -795,6 +1252,11 @@ int ReadyHold() {
         FreshState(config, JointPair{0.0, 0.0}, still, now - 1'000, 77);
     CHECK(initialization.Hold(fresh, now, &command_again) ==
           InitializationStatus::Ready);
+    // A null output fails the call without losing Ready.
+    CHECK(initialization.Hold(fresh, now, nullptr) ==
+          InitializationStatus::Failed);
+    CHECK(initialization.ready());
+    CHECK(!initialization.failed());
   }
   // A finished initialization may be started again; the new move clears Ready
   // and carries its own epoch.
@@ -819,7 +1281,10 @@ int main() {
   failures += MonotonicInterpolation();
   failures += FrameCompleteness();
   failures += UnusableFeedbackFails();
+  failures += AdmissionRefusals();
   failures += StableWindowAndCompletion();
+  failures += CompletionBeforeDeadline();
+  failures += BoundaryArithmetic();
   failures += DeadlineFails();
   failures += ReadyHold();
   if (failures == 0) {
