@@ -255,6 +255,13 @@ non-finite values, an observed disconnection and overspeed fault immediately,
 inside the window as well, and a machine that never receives a frame faults when
 the grace or the boot deadline expires.
 
+The excuse is **per required input and lasts exactly until its first frame**:
+the runtime records whether each joint and the required IMU has ever delivered
+a sample, so a joint or an IMU that goes missing *after* it was observed - its
+sample reverting to that same all-default shape - is an observed loss and
+faults at once, inside the window as well. A first frame that is itself
+erroneous never earns a grace tick of its own: it is judged, not excused.
+
 The command deadline is deliberately anchored to the transport receive stamp,
 not to the sender's `stamp_us`: a delayed packet is judged by when the runtime
 received it. A stalled producer therefore costs the session its target, not its

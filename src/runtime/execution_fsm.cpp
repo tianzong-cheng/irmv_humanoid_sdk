@@ -58,12 +58,18 @@ TickResult ExecutionFsm::Tick(protocol::TimeUs now_us,
     EnterState(state_, scope);
   }
 
-  // 2. Feedback safety and the published state sequence.
+  // 2. Feedback safety and the published state sequence. The observation
+  //    history is updated before the check: the tick that carries an input's
+  //    first sample judges it, so only an input that was never observed can
+  //    still be waiting for its first frame.
   const bool boot_grace =
       state_ == protocol::ExecutionState::Boot && boot_started_ &&
       now_us - boot_start_us_ <= config_.boot.frequency_grace_us;
+  if (boot_grace) {
+    observed_.Observe(feedback, config_.joint_count());
+  }
   const SafetyReport report =
-      CheckFeedback(config_, feedback, now_us, boot_grace);
+      CheckFeedback(config_, feedback, now_us, boot_grace, observed_);
   scope.report = &report;
   gate_.RecordState(published_seq, now_us);
 

@@ -1,11 +1,38 @@
 #pragma once
 
+#include <array>
+#include <cstddef>
+
 #include "irmv/configuration/config.hpp"
 #include "irmv/hardware/backend.hpp"
 #include "irmv/protocol/types.hpp"
 #include "irmv/protocol/validation.hpp"
 
 namespace irmv::runtime {
+
+// Which required inputs have ever delivered a sample, one flag per possible
+// joint plus one for the IMU. The boot grace window only excuses an input that
+// was never observed at all: a sample that goes missing after the input has
+// already delivered a frame is judged like any other invalid feedback, so a
+// backend that goes quiet after its first frame faults at once instead of
+// waiting out the window.
+//
+// The caller updates the history from the snapshot of the tick *before* it
+// calls CheckFeedback, so the tick that carries an input's first sample already
+// counts as observed. A first frame that is erroneous is therefore judged
+// rather than excused: an unobserved input is the documented all-default shape
+// a backend reports when it has never delivered a frame, not a frame that
+// merely claims absence.
+struct FeedbackObservation {
+  std::array<bool, protocol::kMaxJoints> joints{};
+  bool imu{false};
+
+  // Marks every required input this snapshot carries a sample for. A sample is
+  // an observation when it is not the documented all-default shape of an input
+  // that has never delivered a frame.
+  void Observe(const protocol::FeedbackSnapshot &feedback,
+               std::size_t joint_count);
+};
 
 struct SafetyReport {
   bool healthy{false};
@@ -54,10 +81,17 @@ protocol::ValidationResult ValidateTrackingCommand(
 // caller keeps commanding zero torque. The boot deadline/startup limit stays
 // the backstop: once the grace window has closed an absent sample faults
 // exactly like invalid feedback, so a machine that never receives a frame
-// still faults. The same rule applies to the required IMU.
+// still faults.
+//
+// `observed` is the history of `FeedbackObservation::Observe` over the previous
+// ticks including this one, and it narrows the excuse to inputs that were never
+// observed: once a joint or the required IMU has delivered a sample, a later
+// absent or invalid sample is an observation of a failure and faults
+// immediately, inside the grace window as well.
 SafetyReport CheckFeedback(const configuration::RuntimeConfig &config,
                            const protocol::FeedbackSnapshot &feedback,
-                           protocol::TimeUs now_us, bool boot_grace);
+                           protocol::TimeUs now_us, bool boot_grace,
+                           const FeedbackObservation &observed);
 
 // Computes the torque command for tracking. Any malformed, out of range or
 // non-finite input rejects the whole command: no partial output is produced.

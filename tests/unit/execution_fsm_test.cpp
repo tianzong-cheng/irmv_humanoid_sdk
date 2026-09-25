@@ -2261,6 +2261,81 @@ int CheckBootWithoutFirstFrameFaults() {
   return 0;
 }
 
+// A frame that already arrived is an observation: the boot grace window never
+// excuses a sample that goes missing afterwards, so a joint or the required IMU
+// that stops delivering faults at once instead of waiting out the window. A
+// machine that never received a first frame keeps waiting, and every boot tick
+// commands zero torque.
+int CheckBootObservedThenLostFaults() {
+  {  // A joint that delivered a frame and then reverts to the absent shape.
+    RuntimeFixture f;
+    f.Advance(f.ControlPeriodUs());
+    CHECK(f.state().execution_state == kBoot);
+    CHECK(f.state().healthy);
+    CHECK(f.state().fault_id == 0);
+    CHECK(IsZeroTorque(f.last_tick().output));
+
+    f.SetJointAbsent(0, true);
+    f.Advance(f.ControlPeriodUs());
+    CHECK(f.state().execution_state == kFault);
+    CHECK(f.state().fault_id != 0);
+    CHECK(CountEvents(f.last_tick(), EventCode::FaultLatched) == 1);
+    CHECK(!f.state().healthy);
+    CHECK(f.state().faults.count >= 1);
+    CHECK(f.state().faults.details[0].reason ==
+          irmv::protocol::FaultReason::FeedbackInvalid);
+    CHECK(f.state().faults.details[0].joint_index == 0);
+    CHECK(f.state().output_action == kActionZeroTorque);
+    CHECK(IsZeroTorque(f.last_tick().output));
+  }
+
+  {  // The required IMU that delivered a frame and then goes missing.
+    RuntimeConfig config = RuntimeFixture::LoadFixtureConfig();
+    config.imu_required = true;
+    RuntimeFixture f(std::move(config));
+    f.Advance(f.ControlPeriodUs());
+    CHECK(f.state().execution_state == kBoot);
+    CHECK(f.state().healthy);
+    CHECK(IsZeroTorque(f.last_tick().output));
+
+    f.SetImuAbsent(true);
+    f.Advance(f.ControlPeriodUs());
+    CHECK(f.state().execution_state == kFault);
+    CHECK(f.state().fault_id != 0);
+    CHECK(CountEvents(f.last_tick(), EventCode::FaultLatched) == 1);
+    CHECK(f.state().faults.count >= 1);
+    CHECK(f.state().faults.details[0].reason ==
+          irmv::protocol::FaultReason::ImuInvalid);
+    // The measured joints are still usable, so this fault keeps the damping
+    // output; only the joints' own invalidity degrades it to zero torque.
+    CHECK(f.state().output_action == kActionDamping);
+  }
+
+  {  // Never observed: the same absent sample waits, and an observation that
+     // arrives later ends the excuse inside the same grace window.
+    RuntimeFixture f;
+    f.SetJointAbsent(1, true);
+    f.Advance(5 * f.ControlPeriodUs());
+    CHECK(f.state().execution_state == kBoot);
+    CHECK(f.state().fault_id == 0);
+    CHECK(!f.state().healthy);
+    CHECK(IsZeroTorque(f.last_tick().output));
+
+    f.SetJointAbsent(1, false);
+    f.Advance(f.ControlPeriodUs());
+    CHECK(f.state().execution_state == kBoot);
+    CHECK(f.state().healthy);
+    CHECK(IsZeroTorque(f.last_tick().output));
+
+    f.SetJointAbsent(1, true);
+    f.Advance(f.ControlPeriodUs());
+    CHECK(f.state().execution_state == kFault);
+    CHECK(f.state().faults.details[0].joint_index == 1);
+    CHECK(IsZeroTorque(f.last_tick().output));
+  }
+  return 0;
+}
+
 }  // namespace
 
 int main() {
@@ -2309,5 +2384,6 @@ int main() {
   CHECK(CheckSameProducerNewEpoch() == 0);
   CHECK(CheckBootWaitsForFirstFrame() == 0);
   CHECK(CheckBootWithoutFirstFrameFaults() == 0);
+  CHECK(CheckBootObservedThenLostFaults() == 0);
   return 0;
 }

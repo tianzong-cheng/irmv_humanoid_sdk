@@ -329,6 +329,10 @@ class ExecutionFsm {
   protocol::TimeUs boot_start_us_{0};
   bool boot_window_started_{false};
   protocol::TimeUs boot_window_start_us_{0};
+  // Which required inputs have delivered a frame at least once. The boot grace
+  // window only excuses an input that was never observed, so a joint or the
+  // required IMU that goes missing after its first frame faults immediately.
+  FeedbackObservation observed_{};
 
   protocol::Id session_id_{};
   protocol::Id session_supervisor_id_{};

@@ -14,6 +14,10 @@ void ExecutionFsm::EnterBoot(TickScope &scope) {
   boot_start_us_ = scope.now_us;
   boot_window_started_ = false;
   boot_window_start_us_ = 0;
+  // A boot starts with no observation history: the grace window of this boot
+  // waits for a first frame of every required input, whatever an earlier boot
+  // saw.
+  observed_ = FeedbackObservation{};
   output_action_ = protocol::OutputAction::ZeroTorque;
 }
 

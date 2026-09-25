@@ -147,9 +147,33 @@ double ClampToLimit(double value, double limit) {
 
 }  // namespace
 
+void FeedbackObservation::Observe(const protocol::FeedbackSnapshot &feedback,
+                                  std::size_t joint_count) {
+  if (joint_count > protocol::kMaxJoints) {
+    joint_count = protocol::kMaxJoints;
+  }
+  const std::size_t count =
+      feedback.count < joint_count ? feedback.count : joint_count;
+  for (std::size_t index = 0; index < count; ++index) {
+    // Anything that is not the all-default shape of an input that never
+    // delivered a frame is a sample, so the first erroneous frame counts as
+    // observed and is judged instead of being excused by the grace window.
+    if (!IsJointSampleAbsent(feedback.joints[index])) {
+      joints[index] = true;
+    }
+  }
+  // The IMU is recorded even when the configuration does not require it: the
+  // configuration is immutable, so a flag that can never be consulted is
+  // harmless, and the rule stays independent of which config is loaded.
+  if (!IsImuSampleAbsent(feedback.imu)) {
+    imu = true;
+  }
+}
+
 SafetyReport CheckFeedback(const configuration::RuntimeConfig &config,
                            const protocol::FeedbackSnapshot &feedback,
-                           protocol::TimeUs now_us, bool boot_grace) {
+                           protocol::TimeUs now_us, bool boot_grace,
+                           const FeedbackObservation &observed) {
   SafetyReport report;
   const std::size_t joint_count = config.joint_count();
   if (joint_count == 0 || joint_count > protocol::kMaxJoints ||
@@ -172,9 +196,11 @@ SafetyReport CheckFeedback(const configuration::RuntimeConfig &config,
     // "waiting", not faulty and not healthy: there is no measurement to judge,
     // so its signal integrity, staleness, control frequency, position and
     // velocity are all skipped and its zero-valued defaults are never read as
-    // observations. The boot deadline stays the backstop, because outside the
-    // window an absent sample faults like any other invalid feedback.
-    if (boot_grace && IsJointSampleAbsent(joint)) {
+    // observations. Only an input that has never delivered a frame qualifies;
+    // one that was observed before is judged by this absent sample like any
+    // other invalid feedback. The boot deadline stays the backstop, because
+    // outside the window an absent sample faults anyway.
+    if (boot_grace && !observed.joints[index] && IsJointSampleAbsent(joint)) {
       report.awaiting_feedback = true;
       continue;
     }
@@ -222,7 +248,7 @@ SafetyReport CheckFeedback(const configuration::RuntimeConfig &config,
   // Pass B: position limits.
   for (std::size_t index = 0; index < joint_count; ++index) {
     const protocol::JointFeedback &joint = feedback.joints[index];
-    if (boot_grace && IsJointSampleAbsent(joint)) {
+    if (boot_grace && !observed.joints[index] && IsJointSampleAbsent(joint)) {
       continue;
     }
     if (joint.q < config.position_min[index] ||
@@ -244,7 +270,7 @@ SafetyReport CheckFeedback(const configuration::RuntimeConfig &config,
   // velocities are still compared instead of being treated as zero.
   for (std::size_t index = 0; index < joint_count; ++index) {
     const protocol::JointFeedback &joint = feedback.joints[index];
-    if (boot_grace && IsJointSampleAbsent(joint)) {
+    if (boot_grace && !observed.joints[index] && IsJointSampleAbsent(joint)) {
       continue;
     }
     const double limit = config.joint_velocity_limits[index];
@@ -261,9 +287,9 @@ SafetyReport CheckFeedback(const configuration::RuntimeConfig &config,
 
   if (config.imu_required) {
     const protocol::ImuFeedback &imu = feedback.imu;
-    if (boot_grace && IsImuSampleAbsent(imu)) {
+    if (boot_grace && !observed.imu && IsImuSampleAbsent(imu)) {
       // An IMU that has never delivered a sample is waiting, exactly like an
-      // absent joint; an observed invalid or stale IMU keeps faulting.
+      // absent joint; an observed invalid, missing or stale IMU keeps faulting.
       report.awaiting_feedback = true;
     } else {
       const bool imu_invalid = !imu.valid || !IsImuSampleFinite(imu) ||

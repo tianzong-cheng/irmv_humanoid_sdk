@@ -385,14 +385,7 @@ class RuntimeFixture {
     for (std::size_t index = 0;
          index < config.joint_count() && index < protocol::kMaxJoints;
          ++index) {
-      protocol::JointFeedback &joint = feedback_.joints[index];
-      joint.valid = true;
-      joint.connected = true;
-      joint.q = index < 2 ? kFixtureQ[index] : 0.0;
-      joint.dq = index < 2 ? kFixtureDq[index] : 0.0;
-      joint.tau_est = 0.0;
-      joint.freq_hz = kFixtureFrequencyHz;
-      joint.error_code = 0;
+      ResetJoint(index);
     }
     feedback_.imu.valid = true;
     UpdateFeedbackStamps();
@@ -446,6 +439,35 @@ class RuntimeFixture {
     feedback_count_override_ = count;
   }
 
+  // Reports one joint at the documented default of an input that has never
+  // delivered a frame - unobserved, unconnected, no receive stamp and the
+  // zero-valued defaults - while the other joints keep their healthy template.
+  // The override survives every tick until it is cleared, so a test can let a
+  // joint deliver a frame first and then make it go missing again; clearing it
+  // restores the healthy template of that joint.
+  void SetJointAbsent(std::size_t index, bool absent) {
+    if (index >= config.joint_count() || index >= protocol::kMaxJoints) {
+      return;
+    }
+    const std::uint64_t bit = std::uint64_t{1} << index;
+    if (absent) {
+      absent_joint_mask_ |= bit;
+      return;
+    }
+    absent_joint_mask_ &= ~bit;
+    ResetJoint(index);
+  }
+
+  // The IMU goes missing: the sample reverts to the all-default shape of an IMU
+  // that has never delivered a frame. Clearing the flag restores it as a valid
+  // sample whose receive stamp the next tick refreshes.
+  void SetImuAbsent(bool absent) {
+    imu_absent_ = absent;
+    if (!absent) {
+      feedback_.imu.valid = true;
+    }
+  }
+
   // Ages every measured receive stamp by the requested amount without moving
   // the simulated clock, which makes the snapshot stale.
   void AgeFeedback(TimeUs age_us) {
@@ -469,6 +491,18 @@ class RuntimeFixture {
     return newest > source_lag_ticks_ ? newest - source_lag_ticks_ : 0;
   }
 
+  void ResetJoint(std::size_t index) {
+    protocol::JointFeedback &joint = feedback_.joints[index];
+    joint = protocol::JointFeedback{};
+    joint.valid = true;
+    joint.connected = true;
+    joint.q = index < 2 ? kFixtureQ[index] : 0.0;
+    joint.dq = index < 2 ? kFixtureDq[index] : 0.0;
+    joint.tau_est = 0.0;
+    joint.freq_hz = kFixtureFrequencyHz;
+    joint.error_code = 0;
+  }
+
   void UpdateFeedbackStamps() {
     feedback_.count = feedback_count_override_ != 0
                           ? feedback_count_override_
@@ -487,7 +521,15 @@ class RuntimeFixture {
     for (std::size_t index = 0;
          index < config.joint_count() && index < protocol::kMaxJoints;
          ++index) {
+      if ((absent_joint_mask_ & (std::uint64_t{1} << index)) != 0) {
+        feedback_.joints[index] = protocol::JointFeedback{};
+        continue;
+      }
       feedback_.joints[index].rx_stamp_us = now_us_;
+    }
+    if (imu_absent_) {
+      feedback_.imu = protocol::ImuFeedback{};
+      return;
     }
     feedback_.imu.rx_stamp_us =
         imu_fresh_ ? now_us_ : feedback_.imu.rx_stamp_us;
@@ -581,9 +623,11 @@ class RuntimeFixture {
   bool heartbeat_sequence_fixed_{false};
   bool command_enabled_{true};
   bool imu_fresh_{true};
+  bool imu_absent_{false};
   bool feedback_absent_{false};
   bool local_stop_pending_{false};
   std::uint32_t feedback_count_override_{0};
+  std::uint64_t absent_joint_mask_{0};
 
   std::array<Received<ExecutionRequest>, kRequestBatchCapacity>
       pending_requests_{};
