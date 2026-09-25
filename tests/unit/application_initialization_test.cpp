@@ -585,6 +585,100 @@ int UnusableFeedbackFails() {
   return 0;
 }
 
+// The admission boundary of the initializer's own clock comparison, in both
+// directions and in both phases of the move.
+//
+// `stamp_us` is the runtime's publication instant and `now_us` the host
+// decision instant of the iteration; both are same-host monotonic times, so a
+// state published exactly at the decision instant is legal (`stamp_us ==
+// now_us` is accepted), while one microsecond ahead is genuinely from the
+// future and is refused. The supervision loop guarantees this direction
+// structurally: it takes its decision instant after draining the transport
+// events and raises it to the newest host receive stamp among them, so the
+// instant handed here is never earlier than the moment the sample it acts on
+// was received - which is what keeps a state the client's clamped receive age
+// calls fresh from being refused here.
+int DecisionTimeBoundary() {
+  ApplicationConfig config = FakeConfig();
+  SetDuration(config, kSlowDurationUs);
+  const JointPair measured{-0.5, 0.5};
+  const JointPair still{0.0, 0.0};
+  const TimeUs start_us = 6'000'000;
+  const TimeUs period_us = config.supervision.target_period_us;
+
+  // Start: a state published exactly at the decision instant is admitted and
+  // the first frame of the move is emitted.
+  {
+    const RobotState fresh = FreshState(config, measured, still, start_us, 70);
+    Initialization initialization(config);
+    JointCommand frame{};
+    CHECK(initialization.Start(fresh, kEpoch, Producer(), start_us, &frame));
+    CHECK(initialization.active());
+    CHECK(!initialization.ready());
+    CHECK(!initialization.failed());
+    CHECK(frame.source_state_seq == fresh.state_seq);
+    CHECK(frame.joints.q[0] == measured[0]);
+    CHECK(frame.joints.q[1] == measured[1]);
+    CHECK(frame.joints.dq[0] == 0.0);
+  }
+  // Start: one microsecond in the future is refused and emits nothing, and the
+  // refusal does not latch the generator.
+  {
+    const RobotState fresh =
+        FreshState(config, measured, still, start_us + 1, 71);
+    Initialization initialization(config);
+    CHECK(StartRefused(initialization, fresh, kEpoch, start_us, Producer()) ==
+          0);
+    CHECK(!initialization.active());
+    CHECK(!initialization.ready());
+    CHECK(!initialization.failed());
+  }
+  // Step: a sample published exactly at the decision instant continues the
+  // move, and the frame it emits is built from that sample.
+  {
+    Initialization initialization(config);
+    const RobotState origin = FreshState(config, measured, still, start_us, 72);
+    CHECK(StartOk(initialization, origin, kEpoch, start_us, Producer()) == 0);
+    const TimeUs now = start_us + period_us;
+    const RobotState fresh = FreshState(config, measured, still, now, 73);
+    JointCommand frame{};
+    CHECK(initialization.Step(fresh, now, &frame) ==
+          InitializationStatus::Running);
+    CHECK(frame.source_state_seq == fresh.state_seq);
+    CHECK(initialization.active());
+    CHECK(!initialization.failed());
+  }
+  // Step: one microsecond in the future fails, latches, and leaves the output
+  // command exactly as it found it - the caller cannot send a frame after it.
+  {
+    Initialization initialization(config);
+    const RobotState origin = FreshState(config, measured, still, start_us, 74);
+    CHECK(StartOk(initialization, origin, kEpoch, start_us, Producer()) == 0);
+    const TimeUs now = start_us + period_us;
+    const RobotState future = FreshState(config, measured, still, now + 1, 75);
+    JointCommand frame = Sentinel();
+    CHECK(initialization.Step(future, now, &frame) ==
+          InitializationStatus::Failed);
+    CHECK(CheckUntouched(frame) == 0);
+    CHECK(initialization.failed());
+    CHECK(!initialization.active());
+    CHECK(!initialization.ready());
+    // The latch holds; only a new Start clears it.
+    JointCommand again = Sentinel();
+    CHECK(initialization.Step(future, now + 1'000, &again) ==
+          InitializationStatus::Failed);
+    CHECK(CheckUntouched(again) == 0);
+    const TimeUs restart = now + 2'000;
+    const RobotState restart_state =
+        FreshState(config, measured, still, restart, 76);
+    CHECK(StartOk(initialization, restart_state, kEpoch + 1, restart,
+                  Producer()) == 0);
+    CHECK(initialization.active());
+    CHECK(!initialization.failed());
+  }
+  return 0;
+}
+
 // The plan Start is about to fix must be one the runtime can accept. The
 // shipped 500 ms duration with a start far from the target used to break the
 // first-frame velocity bound and the target velocity limit; the raised-cosine
@@ -1626,6 +1720,7 @@ int main() {
   failures += MonotonicInterpolation();
   failures += FrameCompleteness();
   failures += UnusableFeedbackFails();
+  failures += DecisionTimeBoundary();
   failures += AdmissionRefusals();
   failures += StableWindowAndCompletion();
   failures += CompletionBeforeDeadline();

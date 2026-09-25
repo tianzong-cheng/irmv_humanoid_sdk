@@ -5,7 +5,39 @@
 #include <filesystem>
 #include <optional>
 
+#include "irmv/protocol/types.hpp"
+
 namespace irmv::application {
+
+// The decision instant of one supervision iteration: the host clock read after
+// the transport events of that iteration were drained, raised to the newest
+// host receive stamp among those events.
+//
+// Two instants pace one iteration and they are not interchangeable. `input_now`
+// is read before the terminal is drained and stamps only the keystrokes that
+// read produced; the decision instant is the one every supervision judgement
+// uses (the router tick, the client poll, the behaviour step, the sends and the
+// status cadence). Taking it after the drain and raising it to the newest
+// receive stamp gives the loop the chain
+//
+//   publication stamp <= host receive stamp <= decision instant,
+//
+// which is what makes the ordering structural instead of lucky. A state the
+// transport thread received while the iteration was still starting carries a
+// receive stamp at or after the clock read of that iteration; without the raise
+// the client's clamped receive age would call such a sample fresh (age 0)
+// while the initializer, handed the earlier instant, would refuse it for
+// `stamp_us > now_us` and latch a failed initialization. No iteration decision
+// may therefore predate the data it acts on, and a legal same-host state can
+// never be judged fresh by one layer and stale by the other.
+//
+// The raise is a comparison, not an addition: hostile inputs at either end of
+// the unsigned range can only leave the clock where it was or move the instant
+// to the receive stamp, never wrap it behind the data.
+inline protocol::TimeUs DecisionInstant(
+    protocol::TimeUs clock_us, protocol::TimeUs newest_rx_us) noexcept {
+  return newest_rx_us > clock_us ? newest_rx_us : clock_us;
+}
 
 // Exit codes of the standalone application.
 inline constexpr int kExitOk = 0;

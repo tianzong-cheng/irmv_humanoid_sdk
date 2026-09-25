@@ -171,6 +171,20 @@ set_tests_properties(
   WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
+# The decision instant of one iteration is a pure function of the host clock
+# read after the event drain and the newest receive stamp of those events, so
+# it is pinned on its own without DDS, a thread or a wall clock.
+add_executable(application_loop_time_test tests/unit/application_loop_time_test.cpp)
+target_compile_features(application_loop_time_test PRIVATE cxx_std_17)
+target_include_directories(
+  application_loop_time_test
+  PRIVATE "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(application_loop_time_test PRIVATE irmv_application irmv_protocol)
+
+add_test(NAME application_loop_time_test COMMAND application_loop_time_test)
+set_tests_properties(application_loop_time_test PROPERTIES LABELS core)
+
 add_executable(application_fsm_test tests/unit/application_fsm_test.cpp)
 target_compile_features(application_fsm_test PRIVATE cxx_std_17)
 target_include_directories(

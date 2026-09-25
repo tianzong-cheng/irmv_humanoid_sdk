@@ -443,38 +443,61 @@ int RunApplication(const ApplicationOptions &options,
   bool input_lost = false;
 
   while (true) {
-    // One monotonic clock per iteration, taken once and passed everywhere. The
-    // loop itself reads no other clock, and the runtime's stamps are only ever
-    // compared against a host receive stamp.
-    const protocol::TimeUs now = MonotonicUs();
+    // Two instants per iteration, both from the one monotonic host clock and
+    // both named for what they time. `input_now` is read before the terminal
+    // is drained and stamps only the keystrokes that read produced: a key is
+    // one event in the byte stream, and its timestamp is the moment it was
+    // read, not the moment its effect is judged. `decision_now` is read after
+    // the transport events of the iteration were drained, raised by
+    // DecisionInstant to the newest receive stamp among them, and it is the
+    // instant of every supervision judgement (the router tick, the client
+    // poll, the request exit, the Step of each input event, the sends and the
+    // status cadence). The raise is why the second read exists: a state the
+    // transport thread received while this iteration was starting is stamped
+    // after `input_now`, so judging it with `input_now` would call a legal
+    // state stale in the initializer while the client's clamped receive age
+    // calls it fresh. With `decision_now` the loop has `stamp_us <= rx_us <=
+    // decision_now` for every event of the iteration, and no decision predates
+    // the data it acts on. The loop reads no other clock, and the runtime's
+    // stamps are only ever compared against a host receive stamp.
+    const protocol::TimeUs input_now = MonotonicUs();
 
     // (1) The terminal. A read that would block is not the loop's pacing: the
     // poll at the end of the iteration is, so the terminal can never stall the
     // heartbeat.
     if (!input_lost) {
-      input_lost = ReadTerminal(&router, &bytes, now);
+      input_lost = ReadTerminal(&router, &bytes, input_now);
     }
-    router.Tick(now);
 
     // (2) Everything the transport thread received since the last iteration.
     const transport::ClientEvents &events = transport.TakeEvents();
+    protocol::TimeUs newest_rx_us = 0;
     for (std::size_t index = 0; index < events.result_count; ++index) {
       client.ObserveResult(events.results[index].value,
                            events.results[index].rx_us);
+      if (events.results[index].rx_us > newest_rx_us) {
+        newest_rx_us = events.results[index].rx_us;
+      }
     }
     if (events.has_state) {
       client.ObserveState(events.state, events.state_rx_us);
+      if (events.state_rx_us > newest_rx_us) {
+        newest_rx_us = events.state_rx_us;
+      }
     }
+    const protocol::TimeUs decision_now =
+        DecisionInstant(MonotonicUs(), newest_rx_us);
+    router.Tick(decision_now);
 
     // (3) Exactly one poll per iteration: the outcome it reports is edge
     // triggered, and the behaviour consumes the serial of this poll for its
     // own outcome handling.
-    const ClientView view = client.Poll(now);
+    const ClientView view = client.Poll(decision_now);
 
     // The signal is not a keystroke and never a control path of its own: it
     // asks for the same ordered exit the exit key does.
     if (stop_requested.load(std::memory_order_relaxed)) {
-      fsm.RequestExit(now);
+      fsm.RequestExit(decision_now);
     }
 
     // (4) One Step per input event, then one final Step that does the periodic
@@ -484,15 +507,15 @@ int RunApplication(const ApplicationOptions &options,
     bool initialization_refused = false;
     for (;;) {
       const InputEvent event = router.TakeEvent();
-      behavior = fsm.Step(now, event, view);
+      behavior = fsm.Step(decision_now, event, view);
       if (behavior.initialization_refused) {
         initialization_refused = true;
       }
       if (behavior.send_command) {
-        static_cast<void>(client.SendCommand(&behavior.command, now));
+        static_cast<void>(client.SendCommand(&behavior.command, decision_now));
       }
       if (behavior.send_heartbeat) {
-        static_cast<void>(client.SendHeartbeat(now));
+        static_cast<void>(client.SendHeartbeat(decision_now));
       }
       if (behavior.exit_ready || event == InputEvent::None) {
         break;
@@ -526,11 +549,12 @@ int RunApplication(const ApplicationOptions &options,
     fields.stop = behavior.runtime_state_known
                       ? StopReasonName(behavior.runtime_stop_reason)
                       : "-";
-    if (!have_status || !SameFields(fields, last) || now >= next_status_us) {
+    if (!have_status || !SameFields(fields, last) ||
+        decision_now >= next_status_us) {
       PrintStatus(fields);
       last = fields;
       have_status = true;
-      next_status_us = now + kStatusIntervalUs;
+      next_status_us = decision_now + kStatusIntervalUs;
     }
 
     // (7) The exit. `exit_ready` is the FSM's own statement that the sequence
