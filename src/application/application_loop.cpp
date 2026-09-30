@@ -449,10 +449,9 @@ int RunApplication(const ApplicationOptions &options,
   // request - the local model this configuration carries. A deployment that
   // configures no model therefore runs without a locomotion source, exactly as
   // it did before this phase, instead of refusing to start.
-  const LocomotionSource source =
-      options.locomotion_source.value_or(config.policy.model_path.empty()
-                                             ? LocomotionSource::None
-                                             : LocomotionSource::Local);
+  const LocomotionSource source = options.locomotion_source.value_or(
+      config.policy.model_path.empty() ? LocomotionSource::None
+                                       : LocomotionSource::Local);
   if (source == LocomotionSource::Local) {
     if (config.policy.model_path.empty()) {
       std::fprintf(stderr,
