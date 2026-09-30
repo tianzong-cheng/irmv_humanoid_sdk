@@ -23,6 +23,10 @@ import onnx
 
 METADATA_KEY = "irmv.deployment"
 
+# The highest ONNX IR version the pinned ONNX Runtime loads; the fixture models
+# are pinned to it, because tools/verify_policy.py refuses anything above it.
+IR_VERSION = 10
+
 
 def make_model(dimension: int, out_dimension: int) -> onnx.ModelProto:
     weight = onnx.helper.make_tensor(
@@ -41,6 +45,7 @@ def make_model(dimension: int, out_dimension: int) -> onnx.ModelProto:
         [weight],
     )
     model = onnx.helper.make_model(graph, opset_imports=[onnx.helper.make_opsetid("", 18)])
+    model.ir_version = IR_VERSION
     model.metadata_props.add(key="unrelated", value="kept")
     return model
 
@@ -50,6 +55,15 @@ def write_package(path: Path, document: dict | None, *, entries: int = 1, dimens
     if document is not None:
         for _ in range(entries):
             model.metadata_props.add(key=METADATA_KEY, value=json.dumps(document))
+    onnx.save(model, str(path))
+
+
+def write_model_with_newer_ir(path: Path, document: dict) -> None:
+    """The same package saved by a newer onnx, which the pinned runtime cannot load."""
+
+    model = make_model(18, 3)
+    model.ir_version = IR_VERSION + 3
+    model.metadata_props.add(key=METADATA_KEY, value=json.dumps(document))
     onnx.save(model, str(path))
 
 
@@ -66,6 +80,15 @@ def write_model_with_moved_weights(path: Path, document: dict) -> None:
             raw=True,
         )
     )
+    model.metadata_props.add(key=METADATA_KEY, value=json.dumps(document))
+    onnx.save(model, str(path))
+
+
+def write_model_with_newer_ir(path: Path, document: dict) -> None:
+    """The same package saved by a newer onnx, which the pinned runtime cannot load."""
+
+    model = make_model(18, 3)
+    model.ir_version = IR_VERSION + 3
     model.metadata_props.add(key=METADATA_KEY, value=json.dumps(document))
     onnx.save(model, str(path))
 
@@ -131,6 +154,7 @@ def main() -> int:
                 )
             ),
             "a model whose weights moved": (lambda: write_model_with_moved_weights(after, fixture)),
+            "a model of a newer IR version": (lambda: write_model_with_newer_ir(after, fixture)),
         }
         for note, mutate in cases.items():
             mutate()
