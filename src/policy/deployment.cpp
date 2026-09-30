@@ -757,6 +757,14 @@ DeploymentContract ParseDeployment(std::string_view json_text) {
   return contract;
 }
 
+bool CoversEveryJoint(const DeploymentContract &contract,
+                      std::size_t robot_joint_count) {
+  return contract.action.joints.size() == robot_joint_count &&
+         contract.observation.joint_pos_rel.joints.size() ==
+             robot_joint_count &&
+         contract.observation.joint_vel_rel.joints.size() == robot_joint_count;
+}
+
 JointMapping BuildJointMapping(const DeploymentContract &contract,
                                const std::vector<std::string> &robot_joints) {
   std::unordered_map<std::string, std::uint32_t> index_of;

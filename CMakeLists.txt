@@ -118,7 +118,14 @@ set_tests_properties(
 # transformation. It is the only internal library besides the application that
 # may link ONNX Runtime, which is what keeps `ldd build/robot_runtime` free of
 # it: the lower process never parses a model.
-add_library(irmv_policy src/policy/deployment.cpp)
+irmv_make_onnxruntime_available()
+add_library(
+  irmv_policy
+  src/policy/action.cpp
+  src/policy/deployment.cpp
+  src/policy/observation.cpp
+  src/policy/onnx_model.cpp
+)
 target_compile_features(irmv_policy PUBLIC cxx_std_17)
 target_include_directories(
   irmv_policy
@@ -126,7 +133,13 @@ target_include_directories(
     "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
     "$<INSTALL_INTERFACE:include>"
 )
-target_link_libraries(irmv_policy PRIVATE nlohmann_json::nlohmann_json)
+# ONNX Runtime is linked privately: only this library and the targets that link
+# it carry the dependency, and robot_runtime never links irmv_policy.
+target_link_libraries(
+  irmv_policy
+  PUBLIC irmv_protocol irmv_configuration
+  PRIVATE nlohmann_json::nlohmann_json IRMV::onnxruntime
+)
 
 add_executable(deployment_test tests/unit/deployment_test.cpp)
 target_compile_features(deployment_test PRIVATE cxx_std_17)
@@ -376,6 +389,78 @@ add_test(
     "${PROJECT_SOURCE_DIR}/tests/support/deployment"
 )
 set_tests_properties(deployment_schema_contract_test PROPERTIES LABELS core)
+
+# The policy math is pure: it reads a frozen contract, one snapshot and one
+# model action. The fixtures it is exercised against are the very documents the
+# contract test parses.
+add_executable(policy_math_test tests/unit/policy_math_test.cpp)
+target_compile_features(policy_math_test PRIVATE cxx_std_17)
+target_include_directories(
+  policy_math_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(policy_math_test PRIVATE irmv_policy irmv_configuration)
+
+add_test(NAME policy_math_test COMMAND policy_math_test)
+set_tests_properties(
+  policy_math_test PROPERTIES LABELS core
+  WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
+# The model fixtures are generated, not checked in: one command builds every
+# model from the frozen deployment document, so a binary blob cannot drift away
+# from the contract it claims to carry.
+set(IRMV_POLICY_FIXTURE_DIR "${CMAKE_CURRENT_BINARY_DIR}/policy-fixtures")
+add_custom_command(
+  OUTPUT "${IRMV_POLICY_FIXTURE_DIR}/.stamp"
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tools/make_test_model.py"
+    "${IRMV_POLICY_FIXTURE_DIR}"
+    "${PROJECT_SOURCE_DIR}/tests/support/deployment/valid_three_orders.json"
+  COMMAND "${CMAKE_COMMAND}" -E touch "${IRMV_POLICY_FIXTURE_DIR}/.stamp"
+  DEPENDS
+    "${PROJECT_SOURCE_DIR}/tools/make_test_model.py"
+    "${PROJECT_SOURCE_DIR}/tests/support/deployment/valid_three_orders.json"
+  COMMENT "Generating the policy model fixtures"
+  VERBATIM
+)
+add_custom_target(policy_model_fixtures ALL
+                  DEPENDS "${IRMV_POLICY_FIXTURE_DIR}/.stamp")
+
+add_executable(onnx_model_test tests/unit/onnx_model_test.cpp)
+target_compile_features(onnx_model_test PRIVATE cxx_std_17)
+target_include_directories(
+  onnx_model_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(onnx_model_test PRIVATE irmv_policy)
+add_dependencies(onnx_model_test policy_model_fixtures)
+
+add_test(NAME onnx_model_test COMMAND onnx_model_test "${IRMV_POLICY_FIXTURE_DIR}")
+set_tests_properties(onnx_model_test PROPERTIES LABELS core)
+
+# The application config test also covers the policy section of the shipped
+# configuration, and the config schema contract test the schema that describes
+# it.
+add_test(
+  NAME policy_package_test
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/integration/policy_package_test.py"
+    "${PROJECT_SOURCE_DIR}"
+)
+set_tests_properties(
+  policy_package_test
+  PROPERTIES
+    LABELS integration
+    TIMEOUT 300
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
 
 find_package(Threads REQUIRED)
 

@@ -1,5 +1,6 @@
 #include "irmv/configuration/application_config.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -113,7 +114,20 @@ constexpr std::string_view kApplicationBody = R"({
       "request_retry_us": 50000,
       "request_deadline_us": 1000000,
       "state_timeout_us": 150000
-    }
+    },
+    "policy": {
+      "model_path": null,
+      "inference_timeout_us": 100000
+    },
+    "policy_overrides": [
+      {
+        "model_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "joints": {
+          "test_right": {"kp": 30.0},
+          "test_left": {"kp": 25.0, "kd": 3.0}
+        }
+      }
+    ]
   })";
 
 constexpr std::string_view kBindings = R"({
@@ -207,9 +221,10 @@ bool ThrowsWithMessage(std::string_view contents, std::string_view field_path,
 
 // One row per canonical leaf, in the order CanonicalApplication enumerates the
 // sections: target position and kp/kd of both joints, the five trajectory
-// fields, the five supervision fields, the two input deadlines and one binding.
-// A row that stops changing application_config_id would mean the canonical form
-// no longer restates that field.
+// fields, the five supervision fields, the policy path and deadline, the
+// override set, the two input deadlines and one binding. A row that stops
+// changing application_config_id would mean the canonical form no longer
+// restates that field.
 struct DigestMutation {
   const char* from;
   const char* to;
@@ -234,6 +249,16 @@ const DigestMutation kDigestMutations[] = {
     {"\"request_deadline_us\": 1000000", "\"request_deadline_us\": 1200000",
      false},
     {"\"state_timeout_us\": 150000", "\"state_timeout_us\": 140000", false},
+    {"\"inference_timeout_us\": 100000", "\"inference_timeout_us\": 150000",
+     false},
+    {"\"model_path\": null", "\"model_path\": \"policy.onnx\"", false},
+    {"\"kp\": 30.0", "\"kp\": 31.0", false},
+    {"\"kd\": 3.0", "\"kd\": 4.0", false},
+    {"\"model_sha256\": "
+     "\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"",
+     "\"model_sha256\": "
+     "\"fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210\"",
+     false},
     {"\"intent_timeout_us\": 500000", "\"intent_timeout_us\": 600000", true},
     {"\"repeat_guard_us\": 250000", "\"repeat_guard_us\": 300000", true},
     {"\"velocity_left\": \"a\"", "\"velocity_left\": \"g\"", true},
@@ -350,6 +375,19 @@ int main() {
         "test_left": {"kd": 1.0, "kp": 10.0}
       },
       "target_position": {"test_right": 0.25, "test_left": -0.5}
+    },
+    "policy_overrides": [
+      {
+        "joints": {
+          "test_left": {"kd": 3.0, "kp": 25.0},
+          "test_right": {"kp": 30.0}
+        },
+        "model_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      }
+    ],
+    "policy": {
+      "inference_timeout_us": 100000,
+      "model_path": null
     }
   })";
   constexpr std::string_view kReorderedBindings = R"({
@@ -621,6 +659,107 @@ int main() {
       "input.repeat_guard_us"));
   CHECK(ThrowsAt(ValidInputAfter("\"bindings\"", "\"bindings_removed\""),
                  bindings));
+
+  // Policy: the path may be absent, but what is written down must be usable;
+  // an override must name a configured joint, change at least one gain, and
+  // belong to exactly one model.
+  const std::string policy = "application.policy";
+  const std::string overrides = "application.policy_overrides";
+  CHECK(ThrowsAt(
+      ValidApplicationAfter("\"model_path\": null", "\"model_path\": \"\""),
+      policy + ".model_path"));
+  CHECK(ThrowsAt(
+      ValidApplicationAfter("\"model_path\": null", "\"model_path\": 3"),
+      policy + ".model_path"));
+  CHECK(ThrowsAt(ValidApplicationAfter("\"inference_timeout_us\": 100000",
+                                       "\"inference_timeout_us\": 0"),
+                 policy + ".inference_timeout_us"));
+  CHECK(ThrowsAt(ValidApplicationAfter("\"inference_timeout_us\": 100000",
+                                       "\"inference_timeout_us\": 100000.5"),
+                 policy + ".inference_timeout_us"));
+  CHECK(ThrowsAt(ValidApplicationAfter("    \"policy\": {\n",
+                                       "    \"policy_removed\": {\n"),
+                 policy));
+  CHECK(ThrowsAt(ValidApplicationAfter(
+                     "\"model_sha256\": \"0123456789abcdef0123456789abcdef"
+                     "0123456789abcdef0123456789abcdef\"",
+                     "\"model_sha256\": \"0123456789ABCDEF0123456789abcdef"
+                     "0123456789abcdef0123456789abcdef\""),
+                 overrides + "[0].model_sha256"));
+  CHECK(ThrowsAt(ValidApplicationAfter(
+                     "\"model_sha256\": \"0123456789abcdef0123456789abcdef"
+                     "0123456789abcdef0123456789abcdef\"",
+                     "\"model_sha256\": \"0123456789abcdef\""),
+                 overrides + "[0].model_sha256"));
+  CHECK(
+      ThrowsAt(ValidApplicationAfter(
+                   "\"joints\": {\n",
+                   "\"joints\": {\n          \"test_knob\": {\"kp\": 1.0},\n"),
+               overrides + "[0].joints.test_knob"));
+  CHECK(ThrowsAt(ValidApplicationAfter("\"joints\": {\n",
+                                       "\"joints\": {},\n"
+                                       "        \"ignored\": {\n"),
+                 overrides + "[0].joints"));
+  CHECK(ThrowsAt(ValidApplicationAfter("\"test_right\": {\"kp\": 30.0}",
+                                       "\"test_right\": {}"),
+                 overrides + "[0].joints.test_right"));
+  CHECK(ThrowsAt(ValidApplicationAfter("\"test_right\": {\"kp\": 30.0}",
+                                       "\"test_right\": {\"kp\": -1.0}"),
+                 overrides + "[0].joints.test_right.kp"));
+  CHECK(ThrowsAt(ValidApplicationAfter("\"test_right\": {\"kp\": 30.0}",
+                                       "\"test_right\": {\"ki\": 30.0}"),
+                 overrides + "[0].joints.test_right.ki"));
+
+  {
+    // The parsed overrides keep the file's own per-joint differences and the
+    // record of which gain each entry replaces.
+    const TemporaryConfig policed(
+        ConfigWith(ApplicationSection(kApplicationBody),
+                   InputSection(InputBody(kBindings))));
+    const ApplicationConfig policed_config =
+        LoadApplicationConfig(policed.path());
+    CHECK(policed_config.policy.model_path.empty());
+    CHECK(policed_config.policy.inference_timeout_us == 100000);
+    CHECK(policed_config.policy.overrides.size() == 1);
+    const auto& entry = policed_config.policy.overrides.front();
+    CHECK(entry.model_sha256 ==
+          "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    CHECK(entry.joints.size() == 2);
+    // The reader keeps the entries in the order the JSON object iterates them;
+    // the digest is what makes the order canonical, so the assertions look the
+    // joints up by name.
+    const auto right = std::find_if(
+        entry.joints.begin(), entry.joints.end(),
+        [](const auto& candidate) { return candidate.joint == "test_right"; });
+    const auto left = std::find_if(
+        entry.joints.begin(), entry.joints.end(),
+        [](const auto& candidate) { return candidate.joint == "test_left"; });
+    CHECK(right != entry.joints.end() && left != entry.joints.end());
+    CHECK(right->overrides_kp && !right->overrides_kd);
+    CHECK(right->kp == 30.0);
+    CHECK(left->overrides_kp && left->overrides_kd);
+    CHECK(left->kp == 25.0 && left->kd == 3.0);
+  }
+
+  {
+    const TemporaryConfig model(ValidApplicationAfter(
+        "\"model_path\": null", "\"model_path\": \"policy.onnx\""));
+    const ApplicationConfig model_config = LoadApplicationConfig(model.path());
+    CHECK(model_config.policy.model_path ==
+          std::filesystem::path("policy.onnx"));
+  }
+
+  {
+    // A second entry for the same digest is dropped nowhere: it would never
+    // apply, so it is refused instead.
+    const std::string digest =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const std::string duplicate =
+        "\"policy_overrides\": [{\"model_sha256\": \"" + digest +
+        "\", \"joints\": {\"test_left\": {\"kp\": 1.0}}},";
+    CHECK(ThrowsAt(ValidApplicationAfter("\"policy_overrides\": [", duplicate),
+                   overrides + "[1].model_sha256"));
+  }
 
   // A section present but malformed, or missing entirely, is reported at the
   // section path.

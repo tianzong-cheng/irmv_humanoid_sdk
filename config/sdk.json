@@ -101,6 +101,10 @@
       "request_retry_us": 50000,
       "request_deadline_us": 1000000,
       "state_timeout_us": 150000
+    },
+    "policy": {
+      "model_path": null,
+      "inference_timeout_us": 100000
     }
   },
   "input": {

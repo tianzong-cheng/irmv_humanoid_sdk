@@ -13,6 +13,7 @@ namespace {
 
 using detail::Fail;
 using detail::FiniteMember;
+using detail::FiniteNumber;
 using detail::JointValueRule;
 using detail::Json;
 using detail::Member;
@@ -20,6 +21,7 @@ using detail::ObjectMember;
 using detail::PositiveIntegerMember;
 using detail::ReadJointMap;
 using detail::RejectUnknownJointKeys;
+using detail::StringMember;
 
 // The action names are declared once, in the order the canonical digest and the
 // duplicate-binding precedence use. `required` is the mode set the behaviour
@@ -242,6 +244,104 @@ void ReadInput(const Json &object, const std::string &path,
   }
 }
 
+// The policy section points at the model and records the experimental gain
+// differences agreed for it. The path may be empty - the shipped Fake
+// deployment configures none - but every value that is written down must be
+// usable: a digest is complete and lower case, an override names a configured
+// joint, and an override changes at least one gain.
+void ReadPolicy(const Json &application, const std::string &path,
+                const std::vector<std::string> &joint_names,
+                PolicyConfig &policy) {
+  const Json &section = ObjectMember(application, "policy", path);
+  const std::string section_path = path + ".policy";
+  const Json &model_path = Member(section, "model_path", section_path);
+  if (!model_path.is_null()) {
+    if (!model_path.is_string()) {
+      Fail(section_path + ".model_path", "must be a string or null");
+    }
+    const std::string text = model_path.get<std::string>();
+    if (text.empty()) {
+      Fail(section_path + ".model_path", "must not be empty");
+    }
+    policy.model_path = std::filesystem::path(text);
+  }
+  policy.inference_timeout_us =
+      PositiveIntegerMember(section, "inference_timeout_us", section_path);
+
+  const auto overrides = application.find("policy_overrides");
+  if (overrides == application.end()) {
+    return;
+  }
+  const std::string overrides_path = path + ".policy_overrides";
+  if (!overrides->is_array()) {
+    Fail(overrides_path, "must be an array");
+  }
+  std::unordered_set<std::string> seen_digests;
+  for (std::size_t entry = 0; entry < overrides->size(); ++entry) {
+    const std::string entry_path =
+        overrides_path + "[" + std::to_string(entry) + "]";
+    const Json &object = (*overrides)[entry];
+    if (!object.is_object()) {
+      Fail(entry_path, "must be an object");
+    }
+    PolicyOverrides parsed;
+    parsed.model_sha256 = StringMember(object, "model_sha256", entry_path);
+    const std::string &digest = parsed.model_sha256;
+    if (digest.size() != 64 ||
+        digest.find_first_not_of("0123456789abcdef") != std::string::npos) {
+      Fail(entry_path + ".model_sha256",
+           "must be 64 lower-case hexadecimal characters");
+    }
+    if (!seen_digests.insert(digest).second) {
+      Fail(entry_path + ".model_sha256",
+           "is already described by an earlier override");
+    }
+    const Json &joints = ObjectMember(object, "joints", entry_path);
+    const std::string joints_path = entry_path + ".joints";
+    if (joints.empty()) {
+      Fail(joints_path, "must name at least one joint");
+    }
+    // A key that does not name a configured joint is an error, not an entry
+    // that silently never applies.
+    RejectUnknownJointKeys(joints, joints_path, joint_names);
+    for (auto item = joints.begin(); item != joints.end(); ++item) {
+      const std::string joint_path = joints_path + "." + item.key();
+      if (!item.value().is_object()) {
+        Fail(joint_path, "must be an object with kp and/or kd");
+      }
+      PolicyJointOverride override_entry;
+      override_entry.joint = item.key();
+      const auto kp = item.value().find("kp");
+      if (kp != item.value().end()) {
+        override_entry.kp = FiniteNumber(*kp, joint_path + ".kp");
+        if (override_entry.kp < 0.0) {
+          Fail(joint_path + ".kp", "must be non-negative");
+        }
+        override_entry.overrides_kp = true;
+      }
+      const auto kd = item.value().find("kd");
+      if (kd != item.value().end()) {
+        override_entry.kd = FiniteNumber(*kd, joint_path + ".kd");
+        if (override_entry.kd < 0.0) {
+          Fail(joint_path + ".kd", "must be non-negative");
+        }
+        override_entry.overrides_kd = true;
+      }
+      for (auto field = item.value().begin(); field != item.value().end();
+           ++field) {
+        if (field.key() != "kp" && field.key() != "kd") {
+          Fail(joint_path + "." + field.key(), "does not name a known gain");
+        }
+      }
+      if (!override_entry.overrides_kp && !override_entry.overrides_kd) {
+        Fail(joint_path, "must override kp, kd or both");
+      }
+      parsed.joints.push_back(std::move(override_entry));
+    }
+    policy.overrides.push_back(std::move(parsed));
+  }
+}
+
 // Canonical form of the application+input sections only. The joint maps are
 // rebuilt from the parsed arrays in robot.joints order and the bindings from
 // the action table, so key order in the file does not enter the digest and no
@@ -264,6 +364,31 @@ Json CanonicalApplication(const ApplicationConfig &config) {
       }
     }
   }
+  // The overrides are rebuilt in robot.joints order so that the digest does not
+  // depend on the key order of the file, and a joint that is not overridden is
+  // absent rather than written with a value the file never carried.
+  Json overrides = Json::array();
+  for (const PolicyOverrides &entry : config.policy.overrides) {
+    Json joints = Json::object();
+    for (const std::string &name : config.joint_names()) {
+      for (const PolicyJointOverride &override_entry : entry.joints) {
+        if (override_entry.joint != name) {
+          continue;
+        }
+        Json gains = Json::object();
+        if (override_entry.overrides_kp) {
+          gains["kp"] = override_entry.kp;
+        }
+        if (override_entry.overrides_kd) {
+          gains["kd"] = override_entry.kd;
+        }
+        joints[name] = gains;
+        break;
+      }
+    }
+    overrides.push_back(
+        {{"model_sha256", entry.model_sha256}, {"joints", joints}});
+  }
   return {
       {"application",
        {{"initialization",
@@ -283,7 +408,13 @@ Json CanonicalApplication(const ApplicationConfig &config) {
           {"heartbeat_period_us", config.supervision.heartbeat_period_us},
           {"request_retry_us", config.supervision.request_retry_us},
           {"request_deadline_us", config.supervision.request_deadline_us},
-          {"state_timeout_us", config.supervision.state_timeout_us}}}}},
+          {"state_timeout_us", config.supervision.state_timeout_us}}},
+        {"policy",
+         {{"model_path", config.policy.model_path.empty()
+                             ? Json(nullptr)
+                             : Json(config.policy.model_path.string())},
+          {"inference_timeout_us", config.policy.inference_timeout_us}}},
+        {"policy_overrides", overrides}}},
       {"input",
        {{"intent_timeout_us", config.input.intent_timeout_us},
         {"repeat_guard_us", config.input.repeat_guard_us},
@@ -311,6 +442,8 @@ ApplicationConfig LoadApplicationConfig(const std::filesystem::path &path,
   ReadSupervision(ObjectMember(application, "supervision", application_path),
                   application_path + ".supervision", config.runtime,
                   config.supervision);
+  ReadPolicy(application, application_path, config.runtime.joint_names,
+             config.policy);
   ReadInput(ObjectMember(document, "input", ""), "input", config.input);
   config.application_config_id = Sha256(CanonicalApplication(config).dump());
   return config;

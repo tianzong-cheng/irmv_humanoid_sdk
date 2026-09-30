@@ -81,6 +81,46 @@ struct InputConfig {
   protocol::TimeUs repeat_guard_us{0};    // one-shot key repeat suppression
 };
 
+// One experimental gain override of one model joint. A field the file does not
+// mention leaves the model's own value in place, and the loader records which
+// of the two it changed; both values are finite and non-negative, like every
+// gain this deployment may send. The override never relaxes a runtime boundary:
+// robot_runtime validates and clamps what it receives regardless of this file.
+struct PolicyJointOverride {
+  std::string joint;
+  bool overrides_kp{false};
+  double kp{0.0};
+  bool overrides_kd{false};
+  double kd{0.0};
+};
+
+// The overrides that belong to exactly one model, keyed by the complete
+// SHA-256 of the model file. Complete-digest matching is deliberate: a digest
+// prefix or a file name would let a re-export inherit an experiment's gains
+// without anybody noticing.
+struct PolicyOverrides {
+  std::string model_sha256;  // lower-case hexadecimal, 64 characters
+  std::vector<PolicyJointOverride> joints;
+};
+
+// Where the local locomotion policy comes from and how long one policy step
+// may take. The gains themselves are not configured here: they are part of the
+// model's own deployment contract, so the model stays the single source of the
+// trained values and this file only points at the model and records the
+// differences that were agreed for it.
+struct PolicyConfig {
+  // Empty when this deployment ships no local policy, which is what the
+  // shipped Fake configuration does. Selecting the local source without a path
+  // is refused at startup rather than falling back to another model.
+  std::filesystem::path model_path;
+  // Deadline of one policy step: a submitted observation that produced no
+  // result within this age is a fault of the local source. It must exceed the
+  // model's own policy_period_us, which is checked when the model is loaded,
+  // because the period is a property of the model and not of this file.
+  protocol::TimeUs inference_timeout_us{0};
+  std::vector<PolicyOverrides> overrides;
+};
+
 // The whole application configuration: the runtime snapshot plus the
 // application and input sections of the same file.
 struct ApplicationConfig {
@@ -94,6 +134,7 @@ struct ApplicationConfig {
   InitializationConfig initialization;
   SupervisionConfig supervision;
   InputConfig input;
+  PolicyConfig policy;
 
   const std::vector<std::string> &joint_names() const {
     return runtime.joint_names;

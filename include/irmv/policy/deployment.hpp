@@ -229,4 +229,11 @@ JointMapping BuildJointMapping(
     const DeploymentContract &contract,
     const std::vector<std::string> &robot_joint_names);
 
+// True when the model's three joint lists cover exactly `robot_joint_count`
+// joints. A policy that commands only part of the robot would leave the
+// remaining joints at a stale target, so the application refuses such a model
+// when it is loaded instead of discovering it on the first frame.
+bool CoversEveryJoint(const DeploymentContract &contract,
+                      std::size_t robot_joint_count);
+
 }  // namespace irmv::policy

@@ -202,7 +202,7 @@
     },
     "application": {
       "type": "object",
-      "required": ["initialization", "supervision"],
+      "required": ["initialization", "supervision", "policy"],
       "properties": {
         "initialization": {
           "type": "object",
@@ -273,6 +273,28 @@
             }
           },
           "$comment": "All times are microseconds. LoadApplicationConfig requires request_deadline_us > request_retry_us, heartbeat_period_us < runtime.safety.timeouts.supervisor_us, target_period_us < min(command_us, source_state_us) and state_timeout_us <= runtime.safety.timeouts.source_state_us (the client's host-age freshness and the initializer's runtime-age usability rule must agree, or a snapshot can be fresh to the supervisor and unusable to the generator)."
+        },
+        "policy": {
+          "type": "object",
+          "required": ["model_path", "inference_timeout_us"],
+          "properties": {
+            "model_path": {
+              "type": ["string", "null"],
+              "$comment": "Path of the policy ONNX carrying the irmv.deployment contract. null means this deployment ships no local policy, which is the shipped Fake configuration; the local locomotion source is refused at startup without a path. The path is not a model identity: the model's own SHA-256 is what selects the overrides below."
+            },
+            "inference_timeout_us": {
+              "$ref": "#/$defs/positiveTimeUs",
+              "$comment": "microseconds; deadline of one policy step on the local source. Must exceed the model's policy_period_us, which LoadApplicationConfig cannot check because the period is a property of the loaded model."
+            }
+          },
+          "$comment": "Where the local locomotion policy comes from. The gains themselves are not configured here: they are read from the model's own deployment contract, so the model stays the single source of the trained values."
+        },
+        "policy_overrides": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/policyOverrideSet"
+          },
+          "$comment": "Optional. Each entry records the differences agreed for exactly one model, matched by the complete SHA-256 of the model file and then by joint name; nothing here relaxes a runtime boundary."
         }
       }
     },
@@ -432,6 +454,41 @@
         "type": "number"
       },
       "$comment": "rad; LoadApplicationConfig requires the keys to cover robot.joints exactly and every value to lie within that joint's [position_min, position_max]."
+    },
+    "policyOverrideSet": {
+      "type": "object",
+      "required": ["model_sha256", "joints"],
+      "properties": {
+        "model_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "$comment": "The complete SHA-256 of the policy ONNX file, lower case. LoadApplicationConfig refuses a value of another length or alphabet, and refuses two entries for the same digest (an override set that never applies is an error, not a silent no-op)."
+        },
+        "joints": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 64,
+          "additionalProperties": {
+            "type": "object",
+            "minProperties": 1,
+            "properties": {
+              "kp": {
+                "type": "number",
+                "minimum": 0,
+                "$comment": "N*m/rad, joint output side; the model's value is replaced, the runtime boundary still applies."
+              },
+              "kd": {
+                "type": "number",
+                "minimum": 0,
+                "$comment": "N*m*s/rad; same rule as kp."
+              }
+            },
+            "$comment": "At least one of kp and kd; a joint with neither is refused because it would record nothing."
+          },
+          "$comment": "Keyed by robot.joints[].name, the same names the model's deployment contract resolves its own joints against. LoadApplicationConfig requires every key to name a configured joint."
+        }
+      },
+      "$comment": "The experimental gain differences of one model, matched by the model's complete SHA-256 and then per joint name. A model that is not listed runs with the values its own contract carries."
     },
     "initializationGainMap": {
       "type": "object",
