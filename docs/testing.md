@@ -335,7 +335,11 @@ the gains land on the joints the document names).
 * **No external producer.** The lifecycle protocol (announcement, preparation,
   authorization, stop notice, velocity intent), its DDS endpoints and the
   supervisor that selects one source at a time are phase 3's Tasks 5 and 6 and
-  are not implemented.
+  are not implemented; `--locomotion-source external` is refused at startup.
+* **No source is a legal configuration.** A deployment that configures no
+  `policy.model_path` runs with no locomotion source (the default follows the
+  configuration), which is what the shipped Fake one does, and the existing
+  process entries still pass unchanged.
 * **No `Recorder`.** Nothing samples the control tick, writes a columnar run or
   reads a time range back; phase 3's Tasks 7 and 8 are not implemented.
 * **No behavioural equivalence against the training side** beyond the package

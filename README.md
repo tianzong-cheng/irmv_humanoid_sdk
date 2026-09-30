@@ -261,6 +261,16 @@ overrides the other, and the runtime never reads a model at all.
 python3 tools/verify_policy.py before.onnx policy.onnx
 ```
 
+The source of the locomotion behaviour is chosen at startup and never hot
+swapped. With no `--locomotion-source` the application follows its
+configuration: a configured `model_path` selects the local model, and a
+configuration without one - the shipped Fake deployment - runs with no source at
+all, exactly as the earlier phases did, so pressing `l` arms nothing and the
+behaviour keeps holding `Ready`. `--locomotion-source local` demands a model
+path and fails at startup without one; `external` is refused because the
+producer lifecycle is not implemented yet; `none` states the no-source case
+explicitly.
+
 `tools/verify_policy.py` is the gate between the training export and this
 deployment: it checks the model with the ONNX checker, refuses a model whose
 document does not conform to the schema or does not agree with the graph it is

@@ -445,7 +445,15 @@ int RunApplication(const ApplicationOptions &options,
   std::unique_ptr<policy::OnnxModel> model;
   std::unique_ptr<policy::InferenceWorker> worker;
   policy::ResolvedGains gains;
-  if (options.locomotion_source == LocomotionSource::Local) {
+  // The source of this run: what the operator asked for, or - with no explicit
+  // request - the local model this configuration carries. A deployment that
+  // configures no model therefore runs without a locomotion source, exactly as
+  // it did before this phase, instead of refusing to start.
+  const LocomotionSource source =
+      options.locomotion_source.value_or(config.policy.model_path.empty()
+                                             ? LocomotionSource::None
+                                             : LocomotionSource::Local);
+  if (source == LocomotionSource::Local) {
     if (config.policy.model_path.empty()) {
       std::fprintf(stderr,
                    "application: the local locomotion source needs "
@@ -513,7 +521,7 @@ int RunApplication(const ApplicationOptions &options,
           record.applied_kd);
     }
     std::fflush(stdout);
-  } else {
+  } else if (source == LocomotionSource::External) {
     // The external lifecycle is not implemented: selecting it is an explicit
     // startup refusal, never a silent fall back on the model.
     std::fprintf(stderr,
@@ -521,6 +529,9 @@ int RunApplication(const ApplicationOptions &options,
                  " in this build\n");
     transport.Stop();
     return kExitStartupError;
+  } else {
+    std::printf("[application] policy=none source=none\n");
+    std::fflush(stdout);
   }
 
   // The local source's own state across iterations: the authorization

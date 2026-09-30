@@ -60,6 +60,11 @@ inline constexpr int kExitStopUnknown = 3;
 // at startup and never changes while the process runs: switching sources is a
 // stop, an initialization and a new authorization, not a hot swap.
 enum class LocomotionSource {
+  // No source at all: the operator may ask for the locomotion behaviour, but
+  // nothing is there to produce a first frame, so the behaviour keeps holding
+  // Ready. This is what a deployment without a configured model resolves to,
+  // and it is the shipped Fake configuration's own mode.
+  None,
   // The model named by `application.policy.model_path`, run in this process.
   Local,
   // A producer process that registers with this application over DDS. The
@@ -71,7 +76,11 @@ enum class LocomotionSource {
 struct ApplicationOptions {
   std::filesystem::path config_path;
   std::optional<std::uint32_t> dds_domain;
-  LocomotionSource locomotion_source{LocomotionSource::Local};
+  // Unset means "follow the configuration": the local source when
+  // `application.policy.model_path` is configured, and none otherwise. An
+  // explicit `local` on a configuration without a model is refused at startup
+  // rather than silently ignored.
+  std::optional<LocomotionSource> locomotion_source;
 };
 
 // Runs the supervision loop until the ordered exit completes and returns the
