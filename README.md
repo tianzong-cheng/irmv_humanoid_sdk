@@ -238,6 +238,35 @@ consumes them. The upper layer never re-implements a lower-layer safety rule: th
 runtime's limits, watchdogs, fault rules and damping stay independent of whether
 the application runs at all.
 
+
+## The policy model contract (phase 3, in progress)
+
+A local locomotion policy is a `policy.onnx` that carries its deployment
+parameters in one model-level metadata key, `irmv.deployment`, whose document is
+frozen by `schema/onnx-deployment-v1.schema.json`. The model is the single
+source of the trained values - the ordered action joints, the default pose, the
+per-joint kp/kd, the action scale and resolved offset, both clip layers, the six
+observation terms and the normalizer - and `config/sdk.json` stays the single
+source of the deployment's own facts (the joint table, the wiring, the limits,
+the initialization gains, the fallback damping). Neither file silently
+overrides the other, and the runtime never reads a model at all.
+
+```bash
+# Point the application at a model and the experimental overrides that match it.
+#   "application": { "policy": { "model_path": "policy.onnx",
+#                                "inference_timeout_us": 100000 } }
+python3 tools/verify_policy.py before.onnx policy.onnx
+```
+
+`tools/verify_policy.py` is the gate between the training export and this
+deployment: it checks the model with the ONNX checker, refuses a model whose
+document does not conform to the schema or does not agree with the graph it is
+embedded in, proves the graph and the weights did not move when the document was
+written, and compares the outputs of the two files on a fixed input. The
+training side writes that document from the instantiated environment; see
+`docs/testing.md` for the contract the recorded run produced and for what is
+still missing before a `Locomotion` behaviour drives the machine.
+
 ## Install
 
 ```bash

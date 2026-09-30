@@ -12,14 +12,14 @@ says explicitly what no test here proves.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j2
 
-ctest --test-dir build --output-on-failure          # everything (40 tests)
+ctest --test-dir build --output-on-failure          # everything (46 tests)
 ctest --test-dir build -L core --output-on-failure  # deterministic core suite
 ctest --test-dir build -L integration --output-on-failure
 ctest --test-dir build -R integration_normal --output-on-failure
 ```
 
 The whole matrix takes about a minute and a half on a developer machine
-(`ctest -N` reports 14 core and 24 integration entries) and each integration
+(`ctest -N` reports 20 core and 26 integration entries) and each integration
 entry is bounded by its own CTest timeout (30 s for `dds_codec_test`, 180 s for
 `runtime_cli_test` and `application_cli_test`, 300 s for `application_client_test`
 and per scenario, 600 s for `application_flow_test`).
@@ -110,7 +110,7 @@ for the cross-process cases.
 The scenario entry points are also what CI runs; `--all` is a convenience for
 manual runs and is never used by CTest.
 
-## Deterministic core suite (`-L core`, 15 tests)
+## Deterministic core suite (`-L core`, 20 tests)
 
 | Test | What it proves | Design §9 |
 |---|---|---|
@@ -130,11 +130,17 @@ manual runs and is never used by CTest.
 | `application_fsm_test` | The behaviour FSM and the serial supervision order as a pure function over a real `RobotClient` and a recording sink: the full path with its confirmations, the emergency stop latching and preempting, the exit path, `UnexpectedContext` and `RuntimeRestarted` latching, the timeout causes, the Reset clearing the latch only into `Standby` on a fresh `ZeroTorque`, and `StartLocomotion()` refusing without changing `Ready`. | phase-2 behaviour contract |
 | `input_router_test` | The keyboard router: one press is one semantic event, the repeat guard a terminal without key-up needs, the batch priority (emergency stop first, velocity intent last), and the single body-velocity intent with its deadline. | phase-2 input contract |
 
-All fifteen run without a peer, without a network and without a wall-clock
+| `deployment_test` | The frozen deployment contract of a policy ONNX: two valid documents (a two-joint one whose three joint lists are in three different orders, and a three-joint one with a non-null action clip, a scaled and a clipped observation term) parse into the contract the SDK implements, `BuildJointMapping` resolves each list against the deployment table by exact name and refuses a model joint the table does not have, and about fifty mutations are refused with the exact JSON field path of their first violation - a missing or unknown field, schema version 2, a wrong policy type, a joint list of the wrong length, a duplicate joint name, a wrong unit, frame, clip or pipeline order, a negative gain, an unsupported normalizer, a null provenance field that `source.missing` does not explain, and a document that is not readable JSON (including the NaN/Infinity tokens and a number that overflows the double range). | §3.4, review focus 1 and 2 |
+| `deployment_schema_contract_test` | The same two fixtures against `schema/onnx-deployment-v1.schema.json`: the document that the C++ parser accepts must also satisfy the schema, a value the schema pins must be refused when changed, an undeclared field must be refused, and the frozen facts (the six term positions with their name, unit and frame, the four action stages, the nullable digest pattern, the non-negative gain) must be spelled out in the schema exactly as the parser implements them. | §3.4 |
+| `policy_math_test` | The two pure transformations against the frozen fixtures: the observation is the six contracted segments in order, with the command, the gravity projected into the base frame from roll and pitch, the base angular velocity, the two joint terms in *their own* orders with their own references and the previous action; a term's clip is applied before its scale; an invalid IMU snapshot, a joint count that disagrees, an invalid joint sample and a non-finite value are refused. The action applies the frozen pipeline (wrapper clip, scale, offset, term clip) and scatters the result into the deployment's canonical order with the resolved gains; a wrong action count, a non-finite action and a state of another joint count are refused. The gain merge applies only the override set whose complete digest matches, records the model value and the applied value of every difference, and refuses a model that does not command every configured joint. | §3.1-3.3 |
+| `onnx_model_test` | The model loader against ten generated models: the valid one loads with its contract, mapping and digest, and one inference returns a finite action; a model with no contract, another schema version, an input width or output name the graph contradicts, a dynamic width, two inputs, an unknown joint or a non-finite output is refused, as is a file that does not exist and a model whose observation is of the wrong width. The fixtures are generated from the frozen document, so no binary blob is checked in. | §3.4, review focus 1 |
+| `inference_test` | The inference worker: a new worker runs nothing until something is submitted, one request produces one response that carries the identity of its request (generation, epoch, state sequence and stamp, submission instant), a burst of submissions never blocks and is compressed rather than queued (every accepted request is either replaced or run, and replaced ones are counted), and a model that cannot answer produces a failed step rather than a silent zero action. `Stop()` is idempotent and joins. | §3.4, §8.4 |
+
+All twenty run without a peer, without a network and without a wall-clock
 deadline: they assert exact tick semantics and counter values, and the only
 wall-clock waits in `logger_test` are hang guards.
 
-## Real-DDS suite (`-L integration`, 25 tests)
+## Real-DDS suite (`-L integration`, 26 tests)
 
 ### Process-level entries
 
@@ -142,6 +148,7 @@ wall-clock waits in `logger_test` are hang guards.
 |---|---|
 | `dds_codec_test` | Against a live endpoint: the codec round trip and field-by-field equality of the core types - including the empty, unused first command of a session, stop or reset request and the rejection of an over-long or missing joint vector - codec rejection of malformed samples, that the running transport's readers and writers really carry the frozen QoS (durability, reliability, history depth and kind, resource limits, and `max_blocking_time` on the reliable channels) as read back from the endpoints, and that a peer process sees the published samples. It also proves the transport's own lane policy for heartbeats: a batch that receives a foreign sample after the owner's still hands the owner sample over first, and a lane that is full refuses what does not fit and counts it instead of displacing an older entry. |
 | `runtime_cli_test` | The process contract of `robot_runtime`: every startup rejection (missing/malformed configuration, `backend: real`, a broken scenario, unknown argument, out-of-range domain) exits non-zero with a message and without starting DDS; the normal path reaches `ZeroTorque` and exits 0 with a clean shutdown on `SIGTERM`; an unsupervised runtime keeps running; a latched fault keeps running and refuses to leave, and a hard kill is reported as such. |
+| `policy_package_test` | The SDK half of the ONNX deployment contract: `tools/verify_policy.py` accepts a package whose document agrees with the model it is embedded in and is numerically unchanged, and refuses a model without the contract, with the contract twice, with a document of another policy type, a document claiming another input, a document with an unsupported observation frame, a model whose weights moved, and a model saved at an ONNX IR version above the one the pinned runtime loads. The models are built in a temporary directory, so the check needs no simulator and no checked-in binary. | §3.4, §11.1 |
 | `confirmation_test` | The test-only confirmation helper: a request is only proven when a later-published `Applied` result and an agreeing `RobotState` identify it, in both arrival orders, and a late `Applied` after a `Fault` never confirms anything. Pure protocol logic, no DDS. |
 | `application_cli_test` | The process contract of `application` against a real runtime: every startup rejection (missing/malformed configuration, unknown argument, out-of-range domain) exits with the usage or configuration code and message before DDS exists; the normal exit and the signalled exit are the same confirmed ordered stop (`stop=confirmed state=Damping`, exit 0); a latched lower fault is reported as Fault and leaves with `stop=unknown lower=Fault`, exit 3, without claiming a stop; an unreachable lower leaves with `stop=unknown lower=Unknown`, exit 3, inside its bound; the terminal is restored on every exit path; and a lost input device is the same bounded exit. |
 | `application_client_test` | The official client against a real standalone runtime, driven by hand: the same transport and request/answer rules the application ships, with the arrival order of an answer and its witness state made deterministic, so a confirmation in both orders, a session takeover, a stop preempting a pending request and the epoch watermark are proven against the real lower layer rather than only against a recording sink. |
@@ -235,6 +242,106 @@ host**. They are not a hard real-time proof and this phase does not claim one:
 no test here demonstrates a bounded worst-case latency under load, and none is
 run on the target hardware.
 
+## Phase 3 so far: the ONNX deployment contract
+
+The policy model, its contract and the runtime that reads it are in place and
+verified against the model the training side really exported. What is *not* in
+place is the behaviour that would drive the machine with it, and this section
+says exactly where the line is.
+
+### The contract
+
+`schema/onnx-deployment-v1.schema.json` freezes the document a policy ONNX
+carries in its single model-level metadata key `irmv.deployment`: the model
+interface, the policy period, the action joint list with its aligned default
+q/dq, gains, scale, resolved offset, both clip layers and the frozen pipeline
+order, the six observation terms of the training policy group with their unit,
+frame, scale, clip and history, the two joint reference lists, the normalizer
+and the provenance block. `irmv::policy::ParseDeployment` implements it and
+refuses a document it cannot honour with the JSON field path of the first
+violation; `schema/onnx-deployment-v1.schema.json` and the parser are kept in
+step by `deployment_schema_contract_test`, which validates the same fixtures
+against the schema.
+
+### The model that was exported
+
+`scripts/rsl_rl/play.py` in the training repository now writes the document from
+the *resolved* values of the running environment after the ONNX export it
+already performed. Running it against the recorded checkpoint
+(`logs/rsl_rl/irmv_flat/2026-09-08_09-56-44`, checkpoint `model_2999.pt`) with
+
+```bash
+# in irmv_humanoid_locomotion, with env_humanoid active
+python scripts/rsl_rl/play.py --task Irmv-Flat-v0 --headless --num_envs 1 \
+    --load_run 2026-09-08_09-56-44
+```
+
+produced a package whose contract is:
+
+| Field | Value |
+|---|---|
+| model | `obs[1,45] -> actions[1,12]` |
+| policy period | 20000 us (50 Hz, `sim.dt * decimation`) |
+| action joints | 12, in the PhysX dof order the action term resolved |
+| kp / kd | 100 / 6 for hip pitch, roll, yaw and knee; 60 / 4 for ankle pitch and roll |
+| scale, offset | 0.5, and the resolved default pose (hip_pitch -0.3, knee 0.6, ankle_pitch -0.3, rest 0) |
+| clip layers | both absent (no wrapper clip, no term clip) |
+| observation | command 3, projected_gravity 3, base_ang_vel 3, joint_pos_rel 12, joint_vel_rel 12, last_action 12 = 45 |
+| normalizer | disabled and not embedded |
+| model SHA-256 | `0dea6741905a0531ca91f9b83423503d358de6f6325e54495e8cce12cde0e97d` |
+| provenance | checkpoint, env and agent configuration digests, the exporting commit and the asset digest, `missing` empty |
+
+`tools/verify_policy.py` accepts the package against the very same file before
+the document was written: the ONNX checker passes, the document conforms to the
+schema, the declared interface agrees with the graph, the graph and the weights
+are byte-identical between the two files, ONNX Runtime reads the document back
+out of the saved file, and both sessions produce bit-identical outputs for the
+same fixed input. The SDK's own C++ loader then accepts the same file with the
+deployment's twelve joint names, assembles a 45-component observation from a
+synthetic coherent snapshot, runs one inference and builds one complete
+twelve-joint frame (printed `q` values are exactly `action * 0.5 + offset` and
+the gains land on the joints the document names).
+
+### What is in place
+
+* The contract, its schema, the parser and the joint mapping (`deployment_test`,
+  `deployment_schema_contract_test`).
+* The offline package gate (`tools/verify_policy.py`,
+  `tools/deployment_contract.py`, `policy_package_test`).
+* The application-side configuration (`application.policy` and
+  `application.policy_overrides`, matched by the model's complete SHA-256).
+* The pinned ONNX Runtime dependency (1.22.0 by URL and archive SHA-256, with a
+  provenance manifest and an offline prefix override) and the model loader.
+* The observation and action transformations and the gain merge
+  (`policy_math_test`).
+* The inference worker on its own thread with a bounded keep-last-1 handoff
+  (`inference_test`).
+* `ldd build/robot_runtime` names no ONNX Runtime: the lower process still loads
+  nothing but its own configuration.
+
+### What is not in place yet
+
+* **`Locomotion` is still not entered by the application.** The behaviour
+  enumerator, its entry guard and the `StartLocomotion` input event are what
+  remains of phase 3's Task 4: the supervision loop does not yet submit
+  observations, offer a first frame to the behaviour FSM or publish the frames
+  the worker produces, so no target of this contract has reached the execution
+  topic. `application_fsm_test` still pins `StartLocomotion()` as refused.
+* **No external producer.** The lifecycle protocol (announcement, preparation,
+  authorization, stop notice, velocity intent), its DDS endpoints and the
+  supervisor that selects one source at a time are phase 3's Tasks 5 and 6 and
+  are not implemented.
+* **No `Recorder`.** Nothing samples the control tick, writes a columnar run or
+  reads a time range back; phase 3's Tasks 7 and 8 are not implemented.
+* **No behavioural equivalence against the training side** beyond the package
+  gate: the observation vector, the model action and the resulting joint target
+  have not been compared element by element against the training environment for
+  the same state and intent. The C++ check above proves the pipeline runs and
+  agrees with its own contract, not that it reproduces the training numbers.
+* **No bench validation.** Every gain, tolerance and limit in this contract is a
+  nominal training value; nothing here is a validated machine limit, and the
+  phase-4 bench acceptance is still owed.
+
 ## What is not covered
 
 * **Real hardware.** There is no `RealBackend`, no CAN or EtherCAT transport and
@@ -244,12 +351,16 @@ run on the target hardware.
   motion, torque or brake behaviour, and no safety number here is a validated
   machine limit.
 * **Firmware loss behaviour** and the recovery of a real drive are untested.
-* **What phase two does not cover.** The two-process acceptance drives the real
-  `application` and the real `robot_runtime`, but the list it does *not* accept
-  is explicit:
-  * **No ONNX policy** and no inference at all: the upper layer ships no policy,
-    no model loader and no observation/action mapping, so nothing here checks
-    inference consistency or model I/O.
+* **What phase two did not cover, and what phase three added.** The two-process
+  acceptance drives the real `application` and the real `robot_runtime`; the list
+  it did *not* accept, and the part of it phase three has closed so far:
+  * **The ONNX policy contract is in place, its behaviour is not.** The model
+    contract, the loader, the observation and action transformations and the
+    inference worker are implemented and tested, but the supervision loop does
+    not yet drive a `Locomotion` behaviour with them - see
+    [Phase 3 so far](#phase-3-so-far-the-onnx-deployment-contract). The earlier
+    statement that the upper layer ships no policy at all is therefore no longer
+    accurate.
   * **No external producer lifecycle**: a producer that registers, warms up and
     publishes velocity intents is not part of this phase. The one body-velocity
     intent the keyboard maintains and expires has no consumer.
