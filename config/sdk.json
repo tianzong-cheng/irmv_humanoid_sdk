@@ -114,6 +114,7 @@
       "emergency_stop": " ",
       "damping": "d",
       "initialize": "i",
+      "start_locomotion": "l",
       "zero_torque": "z",
       "reset": "r",
       "exit": "x",

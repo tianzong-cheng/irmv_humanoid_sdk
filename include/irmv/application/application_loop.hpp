@@ -56,9 +56,22 @@ inline constexpr int kExitStopUnknown = 3;
 // the configuration layer, exactly like the runtime's own `--domain`, so the
 // configuration digest the application compares against a published state is
 // the digest of the configuration actually in effect.
+// Who produces the joint targets of the locomotion behaviour. It is chosen once
+// at startup and never changes while the process runs: switching sources is a
+// stop, an initialization and a new authorization, not a hot swap.
+enum class LocomotionSource {
+  // The model named by `application.policy.model_path`, run in this process.
+  Local,
+  // A producer process that registers with this application over DDS. The
+  // external lifecycle is a later phase of this plan; selecting it now is a
+  // startup error rather than a silent fall back to the model.
+  External,
+};
+
 struct ApplicationOptions {
   std::filesystem::path config_path;
   std::optional<std::uint32_t> dds_domain;
+  LocomotionSource locomotion_source{LocomotionSource::Local};
 };
 
 // Runs the supervision loop until the ordered exit completes and returns the

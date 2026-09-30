@@ -633,6 +633,10 @@ target_link_libraries(
     irmv_transport
     irmv_configuration
     irmv_protocol
+    # The policy layer is linked into the application executable and into
+    # nothing else: ONNX Runtime reaches the supervising process and never the
+    # runtime process, which the build verifies afterwards with `ldd`.
+    irmv_policy
 )
 
 add_test(

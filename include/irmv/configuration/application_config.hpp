@@ -71,6 +71,11 @@ enum class InputAction {
   VelocityRight,
   VelocityYawLeft,
   VelocityYawRight,
+  // Asks the Ready behaviour to propose the local policy as the new execution
+  // source. It is a mode request like Initialize, not a velocity key: it asks
+  // for one authorization, and a repeated press while the request is pending is
+  // the same request.
+  StartLocomotion,
 };
 
 struct InputConfig {

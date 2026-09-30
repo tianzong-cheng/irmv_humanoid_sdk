@@ -37,6 +37,10 @@ InputEvent InputRouter::OnKey(char key, bool pressed, protocol::TimeUs now_us) {
       return OneShot(byte, pressed, now_us, InputEvent::Reset);
     case InputAction::Exit:
       return OneShot(byte, pressed, now_us, InputEvent::Exit);
+    case InputAction::StartLocomotion:
+      // A mode request: one event per press, like Initialize. Whether it can be
+      // honoured is the behaviour's decision, not the router's.
+      return OneShot(byte, pressed, now_us, InputEvent::StartLocomotion);
     case InputAction::VelocityForward:
     case InputAction::VelocityBackward:
     case InputAction::VelocityLeft:
@@ -204,8 +208,13 @@ std::size_t InputRouter::Priority(InputEvent event) {
       return 4;
     case InputEvent::Initialize:
       return 5;
-    case InputEvent::VelocityIntent:
+    // The locomotion request ranks with the ordinary mode requests and above
+    // the velocity intent: a key that asks for a behaviour must not be held
+    // behind the axis keys it would then be driven by.
+    case InputEvent::StartLocomotion:
       return 6;
+    case InputEvent::VelocityIntent:
+      return 7;
     case InputEvent::None:
       break;
   }

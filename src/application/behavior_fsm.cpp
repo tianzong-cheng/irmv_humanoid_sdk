@@ -138,6 +138,7 @@ BehaviorStep BehaviorFsm::Step(protocol::TimeUs now_us, InputEvent event,
   out.last_reject_reason = last_reject_reason_;
   out.exit_ready = exit_ready_;
   out.exit_stop_confirmed = exit_stop_confirmed_;
+  out.locomotion_armed = locomotion_armed_;
   return out;
 }
 
@@ -224,6 +225,9 @@ void BehaviorFsm::FreshStateAndFaults(protocol::TimeUs now_us,
 
 void BehaviorFsm::LatchFault(FaultCause cause, protocol::TimeUs now_us,
                              bool request_stop) {
+  // A fault withdraws whatever authorization this behaviour held, the
+  // locomotion source included: no frame of it may be published afterwards.
+  CancelLocomotion();
   // The first cause wins: a latch is reported once, and a later observation
   // never replaces the identity of what went wrong first.
   const bool first = fault_cause_ == FaultCause::None;
@@ -280,6 +284,9 @@ bool BehaviorFsm::BeginZeroTorqueStop(protocol::TimeUs now_us) {
 
 bool BehaviorFsm::BeginStop(protocol::Operation operation, Pending kind,
                             protocol::TimeUs now_us) {
+  // A stop is the withdrawal of every authorization this behaviour held; the
+  // frames of the locomotion source are part of it.
+  CancelLocomotion();
   if (client_.request_pending() && pending_operation_ == operation) {
     // A stop of the same operation is already on the wire and owns the
     // decision: the client resends the identical payload inside the deadline.
@@ -551,6 +558,16 @@ BehaviorFsm::Confirmation BehaviorFsm::ApplyConfirmation(
         // The context the answer authorized is already gone: nothing was
         // started, and no frame may follow it.
         CancelInitialization();
+        CancelLocomotion();
+        return Confirmation::Applied;
+      }
+      if (pending_locomotion_) {
+        // The authorized context is the locomotion source. Its first frame
+        // travelled inside the request; it stays the current target until the
+        // loop offers the next one, so the machine is never left without a
+        // frame it just authorized.
+        pending_locomotion_ = false;
+        state_ = BehaviorState::Locomotion;
         return Confirmation::Applied;
       }
       state_ = BehaviorState::Initializing;
@@ -654,16 +671,30 @@ void BehaviorFsm::OrdinaryRequests(protocol::TimeUs now_us, InputEvent event,
     case BehaviorState::Initializing:
     case BehaviorState::Ready:
     case BehaviorState::Locomotion:
-      // Locomotion is unreachable in this phase, but its stop rules are the
-      // rules of every behaviour that holds an authorization.
       if (event == InputEvent::Damping) {
         BeginDampingStop(now_us);
       } else if (event == InputEvent::ZeroTorque) {
         BeginZeroTorqueStop(now_us);
+      } else if (event == InputEvent::StartLocomotion) {
+        // The operator asks for the locomotion behaviour. It is accepted only
+        // from Ready - a move in flight is not interrupted by it, and a running
+        // locomotion is not restarted - and it only *arms* the source: the
+        // request follows once a first frame produced from a fresh state is
+        // available, which is what keeps the authorization and its first frame
+        // atomic.
+        if (state_ == BehaviorState::Ready) {
+          locomotion_armed_ = true;
+        }
       }
       // An Initialize key is refused here: nothing returns to the
       // initialization pose from a move, and a repeated key must not restart
       // the move either.
+      if (state_ == BehaviorState::Ready && locomotion_armed_) {
+        // Arming and proposing are separate: the operator's key arms the source
+        // and the first frame produced from a fresh state is what turns it into
+        // a request. Until then the Ready hold keeps the machine where it is.
+        TryStartLocomotion(now_us, view);
+      }
       break;
     case BehaviorState::Fault:
       if (event == InputEvent::Reset) {
@@ -786,6 +817,35 @@ void BehaviorFsm::TryReset(protocol::TimeUs now_us, const ClientView &view) {
 
 void BehaviorFsm::EmitTarget(protocol::TimeUs now_us, const ClientView &view,
                              BehaviorStep *out) {
+  if (state_ == BehaviorState::Locomotion) {
+    // The locomotion source is the generator, and this behaviour only decides
+    // when its newest frame leaves. A frame is published only while the source
+    // is still fresh - a stop, a fault or a late result withdraws it - and only
+    // while it belongs to the producer and epoch this behaviour authorized.
+    if (!have_locomotion_target_ || !locomotion_armed_ || StopInFlight()) {
+      return;
+    }
+    if (now_us - locomotion_target_us_ > config_.policy.inference_timeout_us) {
+      return;
+    }
+    if (locomotion_target_.producer_id != tracking_producer_ ||
+        locomotion_target_.epoch != tracking_epoch_) {
+      return;
+    }
+    if (!TargetDue(now_us)) {
+      return;
+    }
+    protocol::JointCommand frame = locomotion_target_;
+    // Each published frame carries a new sequence: the runtime's command
+    // deadline is refreshed by a strictly increasing sequence, and republishing
+    // a frame under its old sequence would not refresh anything.
+    frame.command_seq = ++locomotion_seq_;
+    last_target_us_ = now_us;
+    have_target_ = true;
+    out->send_command = true;
+    out->command = std::move(frame);
+    return;
+  }
   if (state_ != BehaviorState::Initializing && state_ != BehaviorState::Ready) {
     return;
   }
@@ -851,11 +911,102 @@ bool BehaviorFsm::HeartbeatDue(protocol::TimeUs now_us) const {
          now_us - last_heartbeat_us_ >= config_.supervision.heartbeat_period_us;
 }
 
-bool BehaviorFsm::StartLocomotion() {
-  // This phase ships no locomotion target generator, so there is no execution
-  // context to propose, nothing to prepare and nothing to change: the call
-  // reports unavailable and the behaviour stays where it is, Ready included.
-  return false;
+void BehaviorFsm::OfferLocomotionCandidate(const protocol::JointCommand &frame,
+                                           protocol::TimeUs now_us) {
+  // The freshest candidate wins: an older one describes a state that has
+  // already been superseded, and the request must carry the newest first frame
+  // the source produced.
+  locomotion_candidate_ = frame;
+  locomotion_candidate_us_ = now_us;
+  have_locomotion_candidate_ = true;
+}
+
+void BehaviorFsm::OfferLocomotionTarget(const protocol::JointCommand &frame,
+                                        protocol::TimeUs now_us) {
+  locomotion_target_ = frame;
+  locomotion_target_us_ = now_us;
+  have_locomotion_target_ = true;
+}
+
+void BehaviorFsm::LatchLocalPolicyFault(protocol::TimeUs now_us) {
+  LatchFault(FaultCause::LocalPolicyFailed, now_us, true);
+}
+
+protocol::Id BehaviorFsm::locomotion_producer() const {
+  return pending_locomotion_ || state_ == BehaviorState::Locomotion
+             ? tracking_producer_
+             : protocol::kNoId;
+}
+
+protocol::Sequence BehaviorFsm::locomotion_epoch() const {
+  return pending_locomotion_ || state_ == BehaviorState::Locomotion
+             ? tracking_epoch_
+             : 0;
+}
+
+void BehaviorFsm::CancelLocomotion() {
+  have_locomotion_candidate_ = false;
+  have_locomotion_target_ = false;
+  locomotion_candidate_us_ = 0;
+  locomotion_target_us_ = 0;
+  locomotion_armed_ = false;
+  locomotion_seq_ = 0;
+  pending_locomotion_ = false;
+}
+
+void BehaviorFsm::TryStartLocomotion(protocol::TimeUs now_us,
+                                     const ClientView &view) {
+  if (!have_locomotion_candidate_) {
+    return;
+  }
+  if (now_us - locomotion_candidate_us_ > config_.policy.inference_timeout_us) {
+    // The first frame is older than the local source's own deadline: it is the
+    // first frame of nothing any more. The supervision loop latches the fault;
+    // proposing it here would authorize a frame no state still supports.
+    return;
+  }
+  if (!(view.state_known && view.state_fresh) || client_.request_pending() ||
+      StopInFlight()) {
+    return;
+  }
+  const protocol::Sequence epoch = client_.next_epoch();
+  protocol::JointCommand first = locomotion_candidate_;
+  // The behaviour owns the identity of the source it authorizes: the producer
+  // is this application and the epoch is the one the request proposes, so the
+  // frame and the request that carries it can never disagree.
+  first.producer_id = producer_id_;
+  first.epoch = epoch;
+  first.command_seq = ++locomotion_seq_;
+  if (!client_.BeginRequest(protocol::Operation::Tracking, now_us, producer_id_,
+                            &first)) {
+    return;
+  }
+  if (client_.pending_proposed_epoch() != epoch) {
+    // The client proposes from its own watermark and the request on the wire
+    // asks for another authorization than the frame carries: Nothing that would
+    // be sent after it could match, so the request is abandoned instead.
+    client_.AbandonRequest();
+    return;
+  }
+  tracking_active_ = true;
+  tracking_producer_ = producer_id_;
+  tracking_epoch_ = epoch;
+  pending_ = Pending::Tracking;
+  pending_operation_ = protocol::Operation::Tracking;
+  pending_producer_ = producer_id_;
+  pending_epoch_ = epoch;
+  pending_locomotion_ = true;
+  // The first frame travelled inside the request and stays the current target
+  // until the loop offers the next one, so the authorization is never left
+  // without the frame it just adopted.
+  locomotion_target_ = first;
+  locomotion_target_us_ = locomotion_candidate_us_;
+  have_locomotion_target_ = true;
+  have_locomotion_candidate_ = false;
+  // The first frame is what the request carried: the next target is due one
+  // target period later, exactly like the initialization's first frame.
+  have_target_ = true;
+  last_target_us_ = now_us;
 }
 
 }  // namespace irmv::application

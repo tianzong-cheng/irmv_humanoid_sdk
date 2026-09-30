@@ -28,6 +28,7 @@ enum class InputEvent {
   Reset,
   Exit,
   VelocityIntent,
+  StartLocomotion,
 };
 
 // The body-velocity intent the keys currently hold. Each axis is zero or the

@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <memory>
 #include <optional>
 #include <thread>
 
@@ -19,6 +20,10 @@
 #include "irmv/application/input_router.hpp"
 #include "irmv/application/robot_client.hpp"
 #include "irmv/configuration/application_config.hpp"
+#include "irmv/policy/action.hpp"
+#include "irmv/policy/inference.hpp"
+#include "irmv/policy/observation.hpp"
+#include "irmv/policy/onnx_model.hpp"
 #include "irmv/transport/client_transport.hpp"
 
 namespace irmv::application {
@@ -433,6 +438,102 @@ int RunApplication(const ApplicationOptions &options,
   BehaviorFsm fsm(config, client);
   InputRouter router(config);
 
+  // The local policy source: its model, the gains its frames are sent with and
+  // the worker that runs it. Everything that could refuse the model is decided
+  // here, before the supervision loop exists, so a deployment that cannot run
+  // its policy never starts supervising a link.
+  std::unique_ptr<policy::OnnxModel> model;
+  std::unique_ptr<policy::InferenceWorker> worker;
+  policy::ResolvedGains gains;
+  if (options.locomotion_source == LocomotionSource::Local) {
+    if (config.policy.model_path.empty()) {
+      std::fprintf(stderr,
+                   "application: the local locomotion source needs "
+                   "application.policy.model_path\n");
+      transport.Stop();
+      return kExitStartupError;
+    }
+    try {
+      model = policy::OnnxModel::Load(config.policy.model_path,
+                                      config.joint_names());
+    } catch (const std::exception &error) {
+      std::fprintf(stderr, "application: %s\n", error.what());
+      transport.Stop();
+      return kExitStartupError;
+    }
+    if (!policy::CoversEveryJoint(model->contract(), config.joint_count())) {
+      std::fprintf(stderr,
+                   "application: the policy commands %zu joints but the "
+                   "deployment has %zu\n",
+                   model->contract().action.joints.size(),
+                   config.joint_count());
+      transport.Stop();
+      return kExitStartupError;
+    }
+    if (model->contract().policy_period_us >
+        config.policy.inference_timeout_us) {
+      // The deadline has to leave room for at least one policy step, or every
+      // step of the model would be latched as a failure before it could finish.
+      std::fprintf(
+          stderr,
+          "application: application.policy.inference_timeout_us (%llu) "
+          "is below the model's policy period (%llu)\n",
+          static_cast<unsigned long long>(config.policy.inference_timeout_us),
+          static_cast<unsigned long long>(model->contract().policy_period_us));
+      transport.Stop();
+      return kExitStartupError;
+    }
+    if (!policy::ResolveGains(model->contract(), model->mapping(),
+                              config.joint_names(), config.policy,
+                              model->sha256(), &gains)) {
+      std::fprintf(stderr,
+                   "application: the model's gains cannot be applied to this "
+                   "deployment\n");
+      transport.Stop();
+      return kExitStartupError;
+    }
+    worker = std::make_unique<policy::InferenceWorker>(*model);
+    std::printf(
+        "[application] policy=%s sha256=%s joints=%zu period_us=%llu "
+        "timeout_us=%llu overrides=%u\n",
+        config.policy.model_path.c_str(), model->sha256().c_str(),
+        model->contract().action.joints.size(),
+        static_cast<unsigned long long>(model->contract().policy_period_us),
+        static_cast<unsigned long long>(config.policy.inference_timeout_us),
+        gains.override_count);
+    for (std::uint32_t index = 0; index < gains.override_count; ++index) {
+      const policy::GainOverride &record = gains.overrides[index];
+      std::printf(
+          "[application] override joint=%.*s kp=%s %.6f->%.6f "
+          "kd=%s %.6f->%.6f\n",
+          static_cast<int>(record.joint.View().size()),
+          record.joint.View().data(), record.kp_overridden ? "yes" : "no",
+          record.model_kp, record.applied_kp,
+          record.kd_overridden ? "yes" : "no", record.model_kd,
+          record.applied_kd);
+    }
+    std::fflush(stdout);
+  } else {
+    // The external lifecycle is not implemented: selecting it is an explicit
+    // startup refusal, never a silent fall back on the model.
+    std::fprintf(stderr,
+                 "application: --locomotion-source external is not implemented"
+                 " in this build\n");
+    transport.Stop();
+    return kExitStartupError;
+  }
+
+  // The local source's own state across iterations: the authorization
+  // generation that drops a result of a withdrawn stop, the previous arming
+  // (so the transition out of it can be detected), whether a result is on its
+  // way, and the raw action the observation carries.
+  std::uint64_t generation = 0;
+  bool armed_previously = false;
+  bool result_outstanding = false;
+  bool submitted_once = false;
+  protocol::TimeUs last_submit_us = 0;
+  std::array<float, protocol::kMaxJoints> last_action{};
+
   const protocol::TimeUs period_us = LoopPeriodUs(config);
   const int poll_timeout_ms = PollTimeoutMs(period_us);
   std::array<char, kReadChunk> bytes{};
@@ -522,6 +623,107 @@ int RunApplication(const ApplicationOptions &options,
       }
     }
 
+    // (5b) The local policy source. The behaviour above decided whether it is
+    // wanted - a stop, a fault or the exit clears that - and this is the only
+    // place that runs it: the observation is submitted to the worker, the
+    // newest result is taken back and the frame it produced is offered to the
+    // behaviour, which is what publishes it. The loop never blocks on the
+    // model, and a result that is late, of a withdrawn authorization or not
+    // usable is a latched upper fault instead of a frame.
+    if (worker) {
+      if (!behavior.locomotion_armed && armed_previously) {
+        // The authorization ended: every result still on its way belongs to it,
+        // the next one starts from the contract's initial action, and the
+        // generation makes the identity of the two unmistakable.
+        ++generation;
+        policy::PolicyResponse withdrawn;
+        while (worker->TryTake(&withdrawn)) {
+        }
+        result_outstanding = false;
+        submitted_once = false;
+        last_action.fill(0.0f);
+      }
+      armed_previously = behavior.locomotion_armed;
+      const bool generating = behavior.locomotion_armed &&
+                              (behavior.state == BehaviorState::Ready ||
+                               behavior.state == BehaviorState::Locomotion);
+      if (generating && !result_outstanding &&
+          (!submitted_once || decision_now - last_submit_us >=
+                                  model->contract().policy_period_us) &&
+          view.state_known && view.state_fresh) {
+        const VelocityIntent &intent = router.velocity_intent();
+        policy::VelocityCommand command;
+        command.forward = intent.forward;
+        command.lateral = intent.lateral;
+        command.yaw = intent.yaw;
+        policy::Observation observation;
+        if (!policy::BuildObservation(model->contract(), model->mapping(),
+                                      view.state, command, last_action,
+                                      &observation)) {
+          // A snapshot the observation cannot be built from is a failure of the
+          // local source, not a reason to feed the model something else.
+          fsm.LatchLocalPolicyFault(decision_now);
+        } else {
+          policy::PolicyRequest request;
+          request.generation = generation;
+          request.epoch = fsm.locomotion_epoch();
+          request.state_seq = view.state.state_seq;
+          request.state_stamp_us = view.state.stamp_us;
+          request.submitted_us = decision_now;
+          request.observation = observation;
+          worker->Submit(request);
+          result_outstanding = true;
+          submitted_once = true;
+          last_submit_us = decision_now;
+        }
+      }
+      if (result_outstanding &&
+          decision_now - last_submit_us > config.policy.inference_timeout_us) {
+        // No result inside the deadline the configuration gave this source.
+        result_outstanding = false;
+        fsm.LatchLocalPolicyFault(decision_now);
+      }
+      policy::PolicyResponse response;
+      if (worker->TryTake(&response)) {
+        result_outstanding = false;
+        if (response.generation != generation) {
+          // A result of an authorization that was withdrawn while it ran: it
+          // drives nothing, and the current generation is unaffected.
+        } else if (!response.ok) {
+          fsm.LatchLocalPolicyFault(decision_now);
+        } else if (view.state_known) {
+          // The action of this step is what the observation of the next one
+          // carries, in the stage the contract names.
+          for (std::uint32_t index = 0;
+               index < response.action_count && index < protocol::kMaxJoints;
+               ++index) {
+            last_action[index] = response.action[index];
+          }
+          // The frame is stamped with the state the action was computed from -
+          // not with the newest one the loop happens to hold - because that
+          // sequence is what the runtime checks the target's source age
+          // against.
+          protocol::RobotState source = view.state;
+          source.state_seq = response.state_seq;
+          protocol::JointCommand frame;
+          if (!policy::BuildCommand(
+                  model->contract(), model->mapping(), gains,
+                  response.action.data(), response.action_count, source,
+                  config.layout_id(), fsm.locomotion_producer(),
+                  fsm.locomotion_epoch(), 0, &frame)) {
+            fsm.LatchLocalPolicyFault(decision_now);
+          } else if (behavior.state == BehaviorState::Ready) {
+            // Not authorized yet: the frame is the candidate the behaviour
+            // turns into the first frame of its request, and nothing of it is
+            // published before that request is confirmed.
+            fsm.OfferLocomotionCandidate(frame, decision_now);
+          } else if (behavior.state == BehaviorState::Locomotion) {
+            fsm.OfferLocomotionTarget(frame, decision_now);
+          }
+        }
+      }
+    }
+
     // (6) The display: on every change, and at most every status interval
     // otherwise.
     StatusFields fields;
@@ -575,6 +777,9 @@ int RunApplication(const ApplicationOptions &options,
       // Nothing of this process keeps running behind the exit line: the
       // transport thread is joined here, and the runtime is not touched - its
       // own watchdog owns the link this process leaves behind.
+      if (worker) {
+        worker->Stop();
+      }
       transport.Stop();
       return exit_code;
     }

@@ -39,6 +39,7 @@ constexpr InputBinding kInputBindings[] = {
     {"zero_torque", InputAction::ZeroTorque, true},
     {"reset", InputAction::Reset, true},
     {"exit", InputAction::Exit, true},
+    {"start_locomotion", InputAction::StartLocomotion, false},
     {"velocity_forward", InputAction::VelocityForward, false},
     {"velocity_backward", InputAction::VelocityBackward, false},
     {"velocity_left", InputAction::VelocityLeft, false},

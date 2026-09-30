@@ -332,6 +332,10 @@
             "initialize": {
               "$ref": "#/$defs/keyByte"
             },
+            "start_locomotion": {
+              "$ref": "#/$defs/keyByte",
+              "$comment": "Optional. Asks the Ready behaviour to propose the local policy as the new execution source; unbound means the behaviour cannot be asked for, which is what a deployment with no model wants."
+            },
             "zero_torque": {
               "$ref": "#/$defs/keyByte"
             },

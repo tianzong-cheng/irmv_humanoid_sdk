@@ -400,6 +400,27 @@ int ZeroTorqueAndDampingStopsAreDistinct() {
 
 }  // namespace
 
+// The locomotion key is a mode request like the others: one event per press,
+// suppressed while the key is held, and it never claims a velocity axis.
+int StartLocomotionIsAModeRequest() {
+  InputRouter router(Config());
+
+  CHECK(router.OnKey('l', true, kNowUs) == InputEvent::StartLocomotion);
+  CHECK(router.TakeEvent() == InputEvent::StartLocomotion);
+
+  // A held key raises nothing more until it is really pressed again.
+  CHECK(router.OnKey('l', true, kNowUs + RepeatUs()) == InputEvent::None);
+  CHECK(router.TakeEvent() == InputEvent::None);
+  CHECK(router.OnKey('l', true, kNowUs + RepeatUs() + GuardUs()) ==
+        InputEvent::StartLocomotion);
+  CHECK(router.TakeEvent() == InputEvent::StartLocomotion);
+
+  // Its release is not a new request, and it leaves the velocity intent alone.
+  CHECK(router.OnKey('l', false, kNowUs) == InputEvent::None);
+  CHECK(!router.velocity_intent().active);
+  return 0;
+}
+
 int main() {
   int failures = 0;
   failures += OnePressRaisesExactlyOneEvent();
@@ -414,6 +435,7 @@ int main() {
   failures += ExpiredVelocityEventIsNotDelivered();
   failures += VelocityIntentTracksTheHeldAxes();
   failures += ZeroTorqueAndDampingStopsAreDistinct();
+  failures += StartLocomotionIsAModeRequest();
   if (failures == 0) {
     return 0;
   }

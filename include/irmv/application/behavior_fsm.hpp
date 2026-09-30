@@ -44,6 +44,11 @@ enum class FaultCause {
   InitializationFailed,
   RequestTimeout,
   UnexpectedContext,
+  // The local policy source did not produce a usable result inside the
+  // configured deadline: a failed inference, a late one, or a first frame that
+  // was never confirmed. The behaviour stops generating and asks for damping;
+  // the frames a stale result would have produced are never published.
+  LocalPolicyFailed,
 };
 
 // What one Step decided, and everything the loop displays. It carries no DDS
@@ -77,6 +82,11 @@ struct BehaviorStep {
   bool send_heartbeat{false};
   // The exit sequence finished: the process may leave now.
   bool exit_ready{false};
+  // True while the operator has asked for the locomotion behaviour and no stop,
+  // fault or exit has cancelled it. The supervision loop submits observations
+  // and offers frames exactly while this holds, so the two layers cannot
+  // disagree about whether a source is wanted.
+  bool locomotion_armed{false};
   // ... and the damping stop was confirmed by a fresh lower state. False means
   // the stop was never proven, which the loop must report as Unknown (or as the
   // runtime's own fault), never as "damped".
@@ -128,10 +138,34 @@ class BehaviorFsm {
   BehaviorState state() const { return state_; }
   FaultCause fault_cause() const { return fault_cause_; }
 
-  // This phase has no locomotion target generator, so entering Locomotion is
-  // not available: the call reports unavailable and changes nothing, Ready
-  // included.
-  bool StartLocomotion();
+  // Offers the newest frame the local policy produced while the source is not
+  // authorized yet. The behaviour keeps the freshest one and uses it as the
+  // first frame of the Tracking request it proposes when the operator asks for
+  // the locomotion behaviour; nothing of it is published before that request is
+  // confirmed.
+  void OfferLocomotionCandidate(const protocol::JointCommand &frame,
+                                protocol::TimeUs now_us);
+
+  // Offers the newest frame of an authorized locomotion source. The behaviour
+  // publishes the freshest one at the target cadence while it is in Locomotion,
+  // and refuses to publish a frame that belongs to another producer or epoch
+  // than the one it authorized.
+  void OfferLocomotionTarget(const protocol::JointCommand &frame,
+                             protocol::TimeUs now_us);
+
+  // The supervision loop could not obtain a usable local policy result inside
+  // the configured deadline. It is the same latch as any other upper fault: the
+  // generation stops, the candidate is dropped and the machine is asked to
+  // damp.
+  void LatchLocalPolicyFault(protocol::TimeUs now_us);
+
+  // The producer and the epoch of the locomotion authorization this behaviour
+  // holds - the pending one included - or kNoId and zero while it holds none.
+  // The supervision loop stamps the frames it builds with them, so a frame that
+  // belongs to a withdrawn authorization is refused by the check EmitTarget
+  // applies rather than published under the current one.
+  protocol::Id locomotion_producer() const;
+  protocol::Sequence locomotion_epoch() const;
 
   // Starts the exit sequence: stop generating, cancel the pending request, ask
   // for Damping and wait for its confirmation for at most
@@ -193,6 +227,13 @@ class BehaviorFsm {
   void TryReset(protocol::TimeUs now_us, const ClientView &view);
   void EmitTarget(protocol::TimeUs now_us, const ClientView &view,
                   BehaviorStep *out);
+  // Proposes the locomotion authorization when the operator asked for it, the
+  // behaviour is Ready, the link is fresh and a first frame is still fresh.
+  void TryStartLocomotion(protocol::TimeUs now_us, const ClientView &view);
+  // Drops the pending first frame, the published target and the sequence of the
+  // locomotion source. Every stop, fault and exit calls it: nothing of a
+  // withdrawn authorization may be published afterwards.
+  void CancelLocomotion();
 
   // Latches `cause` (the first cause wins) and, when the fault owes the machine
   // a stop, asks for Damping unless a stop of ours is already on the wire.
@@ -272,6 +313,23 @@ class BehaviorFsm {
   protocol::TimeUs last_target_us_{0};
   bool have_heartbeat_{false};
   protocol::TimeUs last_heartbeat_us_{0};
+
+  // The local policy source: the freshest frame produced before the request,
+  // the freshest frame of the authorized source and the sequence this behaviour
+  // stamps on each frame it publishes.
+  bool have_locomotion_candidate_{false};
+  protocol::JointCommand locomotion_candidate_{};
+  protocol::TimeUs locomotion_candidate_us_{0};
+  bool have_locomotion_target_{false};
+  protocol::JointCommand locomotion_target_{};
+  protocol::TimeUs locomotion_target_us_{0};
+  protocol::Sequence locomotion_seq_{0};
+  // The operator asked for the locomotion behaviour and no stop has cancelled
+  // it.
+  bool locomotion_armed_{false};
+  // The Tracking request on the wire is the locomotion one, so its confirmation
+  // enters Locomotion and not Initializing.
+  bool pending_locomotion_{false};
 
   bool exit_requested_{false};
   bool exit_ready_{false};

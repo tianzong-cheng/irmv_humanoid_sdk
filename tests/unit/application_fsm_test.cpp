@@ -1327,8 +1327,10 @@ int RuntimeFaultRecovery() {
   CHECK(step.runtime_state == ExecutionState::ZeroTorque);
   CHECK(step.runtime_fault_reason == FaultReason::None);
   CHECK(!step.send_command);
-  // Ready is not restored by the reset either.
-  CHECK(!h.fsm().StartLocomotion());
+  // Ready is not restored by the reset either, and no locomotion
+  // authorization survives it.
+  CHECK(h.fsm().locomotion_epoch() == 0);
+  CHECK(h.fsm().locomotion_producer() == kNoId);
   CHECK(h.fsm().state() == BehaviorState::Standby);
   return 0;
 }
@@ -1758,27 +1760,160 @@ int ExitSequence() {
   return 0;
 }
 
-// This phase ships no locomotion target generator, so entering Locomotion is
-// unavailable and Ready is left exactly as it was.
-int StartLocomotionUnavailable() {
+// One complete frame of the local policy, as the supervision loop would build
+// it: every joint of the layout, the identity of the authorization it belongs
+// to and the state sequence it was computed from.
+JointCommand LocomotionFrame(const Harness &h, double q, Sequence epoch,
+                             Id producer) {
+  JointCommand frame{};
+  frame.layout_id.Assign(h.config().layout_id());
+  frame.producer_id = producer;
+  frame.epoch = epoch;
+  frame.command_seq = 0;
+  frame.source_state_seq = h.published().state_seq;
+  frame.joints.count = static_cast<std::uint32_t>(h.config().joint_count());
+  for (std::size_t index = 0; index < h.config().joint_count(); ++index) {
+    frame.joints.q[index] = q;
+    frame.joints.dq[index] = 0.0;
+    frame.joints.tau_ff[index] = 0.0;
+    frame.joints.kp[index] = 10.0;
+    frame.joints.kd[index] = 1.0;
+  }
+  return frame;
+}
+
+// The local locomotion source: the key arms it, the first frame the loop offers
+// becomes the first frame of the Tracking request, the confirmed context enters
+// Locomotion, and only frames of that very authorization are published
+// afterwards.
+int LocomotionRequest() {
   Harness h;
   CHECK(ToStandby(h) == 0);
   CHECK(ToReady(h) == 0);
-
   const std::size_t requests = h.sink().requests.size();
-  CHECK(!h.fsm().StartLocomotion());
-  BehaviorStep step = h.Step();
+
+  // The key only arms the source: without a first frame there is nothing to
+  // propose, and Ready keeps holding.
+  BehaviorStep step = h.Step(InputEvent::StartLocomotion);
   CHECK(step.state == BehaviorState::Ready);
-  CHECK(h.fsm().state() == BehaviorState::Ready);
+  CHECK(step.locomotion_armed);
   CHECK(h.sink().requests.size() == requests);
+  CHECK(h.fsm().locomotion_epoch() == 0);
+
+  // A frame offered before the operator asked changes nothing either: the
+  // behaviour is not armed.
+  Harness idle;
+  CHECK(ToStandby(idle) == 0);
+  CHECK(ToReady(idle) == 0);
+  idle.fsm().OfferLocomotionCandidate(LocomotionFrame(idle, 0.1, 0, kNoId),
+                                      idle.now_us());
+  step = idle.Step();
+  CHECK(step.state == BehaviorState::Ready);
+  CHECK(!step.locomotion_armed);
+
+  // The first frame arrives while armed: the behaviour proposes Tracking
+  // carrying it, with the epoch the request proposes and the first frame
+  // sharing it.
+  h.fsm().OfferLocomotionCandidate(LocomotionFrame(h, 0.25, 0, kNoId),
+                                   h.now_us());
+  step = h.Step();
+  CHECK(h.sink().requests.size() == requests + 1);
+  const ExecutionRequest *request = h.last_request();
+  CHECK(request->operation == Operation::Tracking);
+  CHECK(request->producer_id != kNoId);
+  CHECK(request->proposed_epoch > 0);
+  CHECK(request->first_command.epoch == request->proposed_epoch);
+  CHECK(request->first_command.producer_id == request->producer_id);
+  CHECK(request->first_command.command_seq == 1);
+  CHECK(request->first_command.joints.q[0] == 0.25);
+  // The answer has not been confirmed yet, so the behaviour is still Ready.
+  CHECK(step.state == BehaviorState::Ready);
+  CHECK(h.fsm().locomotion_epoch() == request->proposed_epoch);
+
+  // The runtime applied it and reports the authorized context.
+  h.EnterTracking();
+  CHECK(h.Answer());
+  step = h.Step();
+  CHECK(step.state == BehaviorState::Locomotion);
+  CHECK(step.locomotion_armed);
+  CHECK(step.fault_cause == FaultCause::None);
+
+  // A frame of the authorized source is published once the target period
+  // passed, and it carries a new sequence every time.
+  const Sequence epoch = h.fsm().locomotion_epoch();
+  const Id producer = h.fsm().locomotion_producer();
+  h.fsm().OfferLocomotionTarget(LocomotionFrame(h, 0.5, epoch, producer),
+                                h.now_us());
+  step = h.Step(InputEvent::None, h.config().supervision.target_period_us);
+  CHECK(step.state == BehaviorState::Locomotion);
+  CHECK(step.send_command);
+  CHECK(step.command.joints.q[0] == 0.5);
+  CHECK(step.command.epoch == epoch);
+  CHECK(step.command.producer_id == producer);
+  const Sequence published_seq = step.command.command_seq;
+
+  // A frame that belongs to another authorization is never published: a result
+  // of a withdrawn epoch cannot drive the machine.
+  h.fsm().OfferLocomotionTarget(LocomotionFrame(h, 0.75, epoch + 1, producer),
+                                h.now_us());
+  step = h.Step(InputEvent::None, h.config().supervision.target_period_us);
   CHECK(!step.send_command);
 
-  // An initialization request in Ready returns to no pose: it is refused.
-  step = h.Step(InputEvent::Initialize);
-  CHECK(step.state == BehaviorState::Ready);
-  CHECK(h.sink().requests.size() == requests);
-  CHECK(!h.fsm().StartLocomotion());
-  CHECK(h.fsm().state() == BehaviorState::Ready);
+  h.fsm().OfferLocomotionTarget(LocomotionFrame(h, 0.75, epoch, kNoId),
+                                h.now_us());
+  step = h.Step(InputEvent::None, h.config().supervision.target_period_us);
+  CHECK(!step.send_command);
+
+  // The same frame of the right authorization is published, and republishing it
+  // never reuses the sequence of the previous one.
+  h.fsm().OfferLocomotionTarget(LocomotionFrame(h, 0.75, epoch, producer),
+                                h.now_us());
+  step = h.Step(InputEvent::None, h.config().supervision.target_period_us);
+  CHECK(step.send_command);
+  CHECK(step.command.joints.q[0] == 0.75);
+  CHECK(step.command.command_seq > published_seq);
+
+  // The operator stops: the source is disarmed at once, the stop is on the
+  // wire, and no further frame of it is published.
+  step = h.Step(InputEvent::Damping, h.config().supervision.target_period_us);
+  CHECK(!step.locomotion_armed);
+  CHECK(h.last_request_of(Operation::Damping) != nullptr);
+  step = h.Step(InputEvent::None, h.config().supervision.target_period_us);
+  CHECK(!step.send_command);
+
+  // An inference the loop could not complete latches the upper fault and asks
+  // for damping.
+  Harness failing;
+  CHECK(ToStandby(failing) == 0);
+  CHECK(ToReady(failing) == 0);
+  failing.fsm().OfferLocomotionCandidate(
+      LocomotionFrame(failing, 0.25, 0, kNoId), failing.now_us());
+  static_cast<void>(failing.Step(InputEvent::StartLocomotion));
+  failing.EnterTracking();
+  CHECK(failing.Answer());
+  BehaviorStep faulted = failing.Step();
+  CHECK(faulted.state == BehaviorState::Locomotion);
+  failing.fsm().LatchLocalPolicyFault(failing.now_us());
+  faulted = failing.Step();
+  CHECK(faulted.state == BehaviorState::Fault);
+  CHECK(faulted.fault_cause == FaultCause::LocalPolicyFailed);
+  CHECK(!faulted.locomotion_armed);
+  CHECK(failing.last_request_of(Operation::Damping) != nullptr);
+  CHECK(failing.fsm().locomotion_epoch() == 0);
+
+  // A first frame that is older than the local source's deadline is not
+  // proposed: it is the first frame of nothing any more.
+  Harness stale;
+  CHECK(ToStandby(stale) == 0);
+  CHECK(ToReady(stale) == 0);
+  const std::size_t stale_requests = stale.sink().requests.size();
+  static_cast<void>(stale.Step(InputEvent::StartLocomotion));
+  stale.fsm().OfferLocomotionCandidate(LocomotionFrame(stale, 0.25, 0, kNoId),
+                                       stale.now_us());
+  step = stale.Step(InputEvent::None,
+                    stale.config().policy.inference_timeout_us + 1);
+  CHECK(stale.sink().requests.size() == stale_requests);
+  CHECK(stale.fsm().state() == BehaviorState::Ready);
   return 0;
 }
 
@@ -2003,7 +2138,7 @@ int main() {
   failures += StopFromMotionKeepsTheContext();
   failures += ResetConfirmationWaitsForTheState();
   failures += HeldConfirmationIsDropped();
-  failures += StartLocomotionUnavailable();
+  failures += LocomotionRequest();
   if (failures == 0) {
     return 0;
   }

@@ -109,7 +109,8 @@ class TerminalGuard {
 // ---------------------------------------------------------------------------
 
 constexpr std::string_view kUsageLine =
-    "usage: application --config PATH [--domain N]";
+    "usage: application --config PATH [--domain N]"
+    " [--locomotion-source local|external]";
 
 std::string DomainRangeMessage(const std::string &value) {
   return "--domain must be between 0 and " +
@@ -135,6 +136,25 @@ CommandLine ParseCommandLine(int argc, char **argv) {
         return result;
       }
       result.options.config_path = argv[++index];
+      continue;
+    }
+    if (argument == "--locomotion-source") {
+      if (!has_value) {
+        result.error = "--locomotion-source requires a value";
+        return result;
+      }
+      const std::string value(argv[++index]);
+      if (value == "local") {
+        result.options.locomotion_source =
+            irmv::application::LocomotionSource::Local;
+      } else if (value == "external") {
+        result.options.locomotion_source =
+            irmv::application::LocomotionSource::External;
+      } else {
+        result.error = "--locomotion-source must be local or external, got \"" +
+                       value + "\"";
+        return result;
+      }
       continue;
     }
     if (argument == "--domain") {
