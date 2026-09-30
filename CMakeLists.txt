@@ -477,6 +477,28 @@ set_tests_properties(
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
+# The acceptance of the local policy: the real application and the real runtime,
+# over real DDS, driven through the application's terminal, from a generated
+# twelve-joint Fake deployment whose model commands exactly those joints. It is
+# the only entry that proves the whole chain - the contract, the loader, the
+# worker, the first frame, the authorization and the published target.
+add_test(
+  NAME policy_locomotion_test
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/integration/policy_locomotion_test.py"
+    "$<TARGET_FILE:application>"
+    "$<TARGET_FILE:robot_runtime>"
+    "${PROJECT_SOURCE_DIR}"
+)
+set_tests_properties(
+  policy_locomotion_test
+  PROPERTIES
+    LABELS integration
+    TIMEOUT 300
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
 find_package(Threads REQUIRED)
 
 add_library(

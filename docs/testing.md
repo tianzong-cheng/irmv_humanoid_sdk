@@ -12,14 +12,14 @@ says explicitly what no test here proves.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j2
 
-ctest --test-dir build --output-on-failure          # everything (46 tests)
+ctest --test-dir build --output-on-failure          # everything (47 tests)
 ctest --test-dir build -L core --output-on-failure  # deterministic core suite
 ctest --test-dir build -L integration --output-on-failure
 ctest --test-dir build -R integration_normal --output-on-failure
 ```
 
 The whole matrix takes about a minute and a half on a developer machine
-(`ctest -N` reports 20 core and 26 integration entries) and each integration
+(`ctest -N` reports 20 core and 27 integration entries) and each integration
 entry is bounded by its own CTest timeout (30 s for `dds_codec_test`, 180 s for
 `runtime_cli_test` and `application_cli_test`, 300 s for `application_client_test`
 and per scenario, 600 s for `application_flow_test`).
@@ -140,7 +140,7 @@ All twenty run without a peer, without a network and without a wall-clock
 deadline: they assert exact tick semantics and counter values, and the only
 wall-clock waits in `logger_test` are hang guards.
 
-## Real-DDS suite (`-L integration`, 26 tests)
+## Real-DDS suite (`-L integration`, 27 tests)
 
 ### Process-level entries
 
@@ -149,6 +149,7 @@ wall-clock waits in `logger_test` are hang guards.
 | `dds_codec_test` | Against a live endpoint: the codec round trip and field-by-field equality of the core types - including the empty, unused first command of a session, stop or reset request and the rejection of an over-long or missing joint vector - codec rejection of malformed samples, that the running transport's readers and writers really carry the frozen QoS (durability, reliability, history depth and kind, resource limits, and `max_blocking_time` on the reliable channels) as read back from the endpoints, and that a peer process sees the published samples. It also proves the transport's own lane policy for heartbeats: a batch that receives a foreign sample after the owner's still hands the owner sample over first, and a lane that is full refuses what does not fit and counts it instead of displacing an older entry. |
 | `runtime_cli_test` | The process contract of `robot_runtime`: every startup rejection (missing/malformed configuration, `backend: real`, a broken scenario, unknown argument, out-of-range domain) exits non-zero with a message and without starting DDS; the normal path reaches `ZeroTorque` and exits 0 with a clean shutdown on `SIGTERM`; an unsupervised runtime keeps running; a latched fault keeps running and refuses to leave, and a hard kill is reported as such. |
 | `policy_package_test` | The SDK half of the ONNX deployment contract: `tools/verify_policy.py` accepts a package whose document agrees with the model it is embedded in and is numerically unchanged, and refuses a model without the contract, with the contract twice, with a document of another policy type, a document claiming another input, a document with an unsupported observation frame, a model whose weights moved, and a model saved at an ONNX IR version above the one the pinned runtime loads. The models are built in a temporary directory, so the check needs no simulator and no checked-in binary. | §3.4, §11.1 |
+| `policy_locomotion_test` | The acceptance of the local policy, end to end: a generated twelve-joint Fake deployment (a configuration and a policy ONNX whose document commands exactly those joints) is started as a real runtime and a real application, and the application is driven through its terminal from Standby into Damping, through Initializing into Ready, into Locomotion, and out through the ordered exit. It asserts that the policy was loaded from the configured path, that the runtime really entered Tracking, that holding the behaviour for far longer than the target and source-state deadlines produces neither a `LocalPolicyFailed` latch nor a runtime target timeout, and that the exit is confirmed. The model's weights are small on purpose: its first frame has to be a continuous target, and the runtime's own continuity guard - never a relaxed test configuration - is what enforces that. | §11 and §11.1 (local ONNX locomotion) |
 | `confirmation_test` | The test-only confirmation helper: a request is only proven when a later-published `Applied` result and an agreeing `RobotState` identify it, in both arrival orders, and a late `Applied` after a `Fault` never confirms anything. Pure protocol logic, no DDS. |
 | `application_cli_test` | The process contract of `application` against a real runtime: every startup rejection (missing/malformed configuration, unknown argument, out-of-range domain) exits with the usage or configuration code and message before DDS exists; the normal exit and the signalled exit are the same confirmed ordered stop (`stop=confirmed state=Damping`, exit 0); a latched lower fault is reported as Fault and leaves with `stop=unknown lower=Fault`, exit 3, without claiming a stop; an unreachable lower leaves with `stop=unknown lower=Unknown`, exit 3, inside its bound; the terminal is restored on every exit path; and a lost input device is the same bounded exit. |
 | `application_client_test` | The official client against a real standalone runtime, driven by hand: the same transport and request/answer rules the application ships, with the arrival order of an answer and its witness state made deterministic, so a confirmation in both orders, a session takeover, a stop preempting a pending request and the epoch watermark are proven against the real lower layer rather than only against a recording sink. |
@@ -321,12 +322,16 @@ the gains land on the joints the document names).
 
 ### What is not in place yet
 
-* **`Locomotion` is still not entered by the application.** The behaviour
-  enumerator, its entry guard and the `StartLocomotion` input event are what
-  remains of phase 3's Task 4: the supervision loop does not yet submit
-  observations, offer a first frame to the behaviour FSM or publish the frames
-  the worker produces, so no target of this contract has reached the execution
-  topic. `application_fsm_test` still pins `StartLocomotion()` as refused.
+* **`Locomotion` is entered, driven by the local policy.**
+  `InputEvent::StartLocomotion` (`l`) arms the source from Ready, the first
+  frame the loop offers becomes the first frame of the Tracking request, the
+  confirmed context enters Locomotion, and the frames the worker produces are
+  published at the target cadence - see `policy_locomotion_test` for the
+  end-to-end acceptance and `application_fsm_test` for the rules (a frame of
+  another epoch is never published, a late result latches `LocalPolicyFailed`).
+  What is still missing is the *external* producer path: selecting
+  `--locomotion-source external` is refused at startup, because the lifecycle
+  protocol and its supervisor are Tasks 5 and 6 and are not implemented.
 * **No external producer.** The lifecycle protocol (announcement, preparation,
   authorization, stop notice, velocity intent), its DDS endpoints and the
   supervisor that selects one source at a time are phase 3's Tasks 5 and 6 and
