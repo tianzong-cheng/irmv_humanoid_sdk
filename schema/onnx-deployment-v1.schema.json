@@ -1,0 +1,610 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://irmv.example/schema/onnx-deployment-v1.json",
+  "title": "IRMV humanoid ONNX policy deployment contract, version 1",
+  "type": "object",
+  "$comment": "The value of the single model-level metadata key `irmv.deployment` of a policy ONNX, encoded as UTF-8 JSON. The SDK parses it with irmv::policy::ParseDeployment into the DeploymentContract of include/irmv/policy/deployment.hpp and refuses every model whose key is absent, duplicated, of another schema_version or of another policy_type; it never falls back to a hard-coded array of an older SDK. Conforming validation MUST evaluate the irmv-joint-name format as a nonempty string whose UTF-8 encoding is at most 64 bytes; validators that ignore format annotations do not implement this contract. JSON Schema cannot express the finiteness rule, so it is stated here: ParseDeployment rejects every NaN and Infinity anywhere in the document, and it rejects any null that is not one of the explicitly nullable fields of `clip` and `source` (a null of `source` must additionally be listed in `source.missing`, so an absent provenance fact is always explained). The document is descriptive: it never changes the computation graph, its inputs or its outputs, and it never executes PD, scaling or clipping - the SDK implements those from this contract. All gains and targets are joint-output-side quantities in rad, rad/s, N*m, N*m/rad and N*m*s/rad." ,
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "policy_type",
+    "model",
+    "policy_period_us",
+    "action",
+    "observation",
+    "normalizer",
+    "source"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "policy_type": {
+      "const": "joint_position",
+      "$comment": "The only policy type this phase implements: the model output is a normalized joint position action that the contract below scales, offsets and clips into a q target."
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input", "output"],
+      "properties": {
+        "input": {
+          "$ref": "#/$defs/modelInterface",
+          "$comment": "The observation tensor the SDK feeds. Its dimension must equal the sum over `observation.terms` of the term dimensions, and the name must equal the input name of the loaded ONNX."
+        },
+        "output": {
+          "$ref": "#/$defs/modelInterface",
+          "$comment": "The action tensor the SDK reads. Its dimension must equal the number of `action.joints`, and the name must equal the output name of the loaded ONNX."
+        }
+      }
+    },
+    "policy_period_us": {
+      "$ref": "#/$defs/positiveInteger",
+      "$comment": "The period one policy step is expected to take, derived on the training side from sim.dt * decimation (0.005 s * 4 = 20 ms = 50 Hz for the recorded training run). The application uses it as the inference cadence and as the fresh-result deadline; it is not a runtime safety parameter."
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "joints",
+        "source_joints",
+        "default_q",
+        "default_dq",
+        "kp",
+        "kd",
+        "scale",
+        "offset",
+        "clip",
+        "order",
+        "last_action"
+      ],
+      "properties": {
+        "joints": {
+          "$ref": "#/$defs/jointNameList",
+          "$comment": "The deployment joint names of the action vector, in the order the model output uses. ParseDeployment resolves them by exact name against robot.joints[].name and refuses a model joint the deployment does not have."
+        },
+        "source_joints": {
+          "$ref": "#/$defs/jointNameList",
+          "$comment": "The joint names the training asset actually resolved for this list, element-wise aligned with `joints`. They are the explicit, checkable mapping between the training asset (for example `left_hip_pitch_joint`) and the deployment name (for example `left_hip_pitch`): the exporter must derive them from the instantiated asset, never from a guess, and the field keeps the mapping in the model package instead of in a separate file."
+        },
+        "default_q": {
+          "$ref": "#/$defs/finiteArray",
+          "$comment": "rad; the default joint positions of the action joints, one per entry of `joints`, as the instantiated asset resolved them (asset default joint positions, including the per-joint regex rules of the training configuration)."
+        },
+        "default_dq": {
+          "$ref": "#/$defs/finiteArray",
+          "$comment": "rad/s; the default joint velocities, one per entry of `joints`."
+        },
+        "kp": {
+          "$ref": "#/$defs/gainArray",
+          "$comment": "N*m/rad, joint output side, one per entry of `joints`. The action term's stiffness as the training configuration resolved it (the recorded run: 100 for hip yaw/roll/pitch and knee, 60 for ankle pitch/roll)."
+        },
+        "kd": {
+          "$ref": "#/$defs/gainArray",
+          "$comment": "N*m*s/rad, one per entry of `joints` (the recorded run: 6 and 4)."
+        },
+        "scale": {
+          "$ref": "#/$defs/finiteArray",
+          "$comment": "The action scale of the action term, one per entry of `joints` (0.5 for the recorded run)."
+        },
+        "offset": {
+          "$ref": "#/$defs/finiteArray",
+          "$comment": "rad; the resolved action offset, one per entry of `joints`. With `use_default_offset=true` this is the resolved default joint position, not the raw `offset=0.0` of the configuration file."
+        },
+        "clip": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["wrapper", "term"],
+          "properties": {
+            "wrapper": {
+              "$ref": "#/$defs/clipLayer",
+              "$comment": "The clip the training runner applies to the raw policy output before the environment sees it (agent.clip_actions). null means no clipping, which is the recorded run."
+            },
+            "term": {
+              "$ref": "#/$defs/clipLayer",
+              "$comment": "The clip the action term applies after scale and offset (actions.joint_pos.clip). null means no clipping, which is the recorded run. agent.algorithm.clip_param is the PPO surrogate clip and is never this value."
+            }
+          }
+        },
+        "order": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "enum": ["wrapper_clip", "scale", "offset", "term_clip"]
+          },
+          "$comment": "The frozen pipeline order. Exactly [\"wrapper_clip\",\"scale\",\"offset\",\"term_clip\"], matching isaaclab JointAction.process_actions (raw * scale + offset, then the term clip) preceded by the runner's raw-action clip; ParseDeployment refuses any other order instead of guessing one."
+        },
+        "last_action": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["stage", "initial"],
+          "properties": {
+            "stage": {
+              "enum": ["raw", "processed"],
+              "$comment": "Which action the `last_action` observation holds. The recorded run observes the raw action (isaaclab mdp.last_action returns action_manager.action, the action the policy emitted before scale, offset and the term clip); `processed` names the post-pipeline q target."
+            },
+            "initial": {
+              "$ref": "#/$defs/finiteArray",
+              "$comment": "The value the last_action history starts from when a behavior is entered, one per entry of `joints`; all zeros for the recorded run, which is what the training action manager resets to."
+            }
+          }
+        }
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["terms", "joint_pos_rel", "joint_vel_rel"],
+      "properties": {
+        "terms": {
+          "type": "array",
+          "minItems": 6,
+          "maxItems": 6,
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/termCommand"
+            },
+            {
+              "$ref": "#/$defs/termProjectedGravity"
+            },
+            {
+              "$ref": "#/$defs/termBaseAngularVelocity"
+            },
+            {
+              "$ref": "#/$defs/termJointPosition"
+            },
+            {
+              "$ref": "#/$defs/termJointVelocity"
+            },
+            {
+              "$ref": "#/$defs/termLastAction"
+            }
+          ],
+          "items": false,
+          "$comment": "The policy observation group in concatenation order. ParseDeployment requires exactly the six supported terms in exactly this order: command, projected_gravity, base_ang_vel, joint_pos_rel, joint_vel_rel, last_action. Each position pins the name, the unit and the frame of its term, so a document cannot claim a meaning this build does not implement. A YAML dictionary or an uninstantiated configuration must never be the source of this order."
+        },
+        "joint_pos_rel": {
+          "$ref": "#/$defs/jointReference",
+          "$comment": "rad; `reference` is the resolved default joint position the term subtracts, element-wise aligned with `joints`. It is the same value as action.default_q only when the action and the observation resolve the same joint list, which is checked rather than assumed."
+        },
+        "joint_vel_rel": {
+          "$ref": "#/$defs/jointReference",
+          "$comment": "rad/s; `reference` is the resolved default joint velocity the term subtracts."
+        }
+      }
+    },
+    "normalizer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "embedded", "location"],
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "$comment": "Whether the trained policy normalizes its actor observation at all (agent.policy.actor_obs_normalization). false for the recorded run: no normalizer is applied and no statistics are needed."
+        },
+        "embedded": {
+          "type": "boolean",
+          "$comment": "Whether the normalization is already part of the ONNX graph instead of being an application-side step. Must be false when `enabled` is false. true means the SDK must not normalize again."
+        },
+        "location": {
+          "enum": ["none", "model", "application"],
+          "$comment": "Where the normalization happens: `none` when disabled, `model` when the graph embeds it, `application` when the SDK must apply it from `algorithm`/`statistics`."
+        },
+        "algorithm": {
+          "enum": ["mean_std"],
+          "$comment": "Required when `enabled` is true. The only supported semantics: (x - mean) / std per observation component, component-wise, applied to the concatenated observation before inference. Any other algorithm is refused."
+        },
+        "statistics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["count", "mean", "std"],
+          "properties": {
+            "count": {
+              "$ref": "#/$defs/positiveInteger",
+              "$comment": "The number of samples the statistics were accumulated from."
+            },
+            "mean": {
+              "$ref": "#/$defs/finiteArray"
+            },
+            "std": {
+              "$ref": "#/$defs/positiveArray",
+              "$comment": "Per component, element-wise aligned with the concatenated observation; strictly positive and finite."
+            }
+          },
+          "$comment": "Required when the normalizer is enabled and not embedded; forbidden otherwise. An enabled model without its statistics is refused, because the SDK would otherwise have to guess the normalization."
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["missing"],
+      "properties": {
+        "checkpoint_file": {
+          "$ref": "#/$defs/nullableText",
+          "$comment": "Path or file name of the checkpoint the model was exported from."
+        },
+        "checkpoint_sha256": {
+          "$ref": "#/$defs/nullableDigest",
+          "$comment": "SHA-256 of the checkpoint file."
+        },
+        "env_config_file": {
+          "$ref": "#/$defs/nullableText",
+          "$comment": "Path or file name of the serialized training environment configuration (params/env.yaml)."
+        },
+        "env_config_sha256": {
+          "$ref": "#/$defs/nullableDigest"
+        },
+        "agent_config_file": {
+          "$ref": "#/$defs/nullableText",
+          "$comment": "Path or file name of the serialized training agent configuration (params/agent.yaml)."
+        },
+        "agent_config_sha256": {
+          "$ref": "#/$defs/nullableDigest"
+        },
+        "training_repo": {
+          "$ref": "#/$defs/nullableText",
+          "$comment": "Identifier of the training repository."
+        },
+        "training_commit": {
+          "$ref": "#/$defs/nullableText",
+          "$comment": "Commit the exporter ran at."
+        },
+        "asset_revision": {
+          "$ref": "#/$defs/nullableText",
+          "$comment": "Revision or digest of the robot asset the environment instantiated."
+        },
+        "software": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          },
+          "$comment": "Software versions the export depended on, for example isaaclab, rsl_rl, torch, python, onnx. May be empty when nothing could be read."
+        },
+        "missing": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "$comment": "The names of the fields above that could not be determined, spelled exactly as the property name (for example \"checkpoint_sha256\"). Every null field must appear here, and no other name may: an unexplained null is refused, so a package never claims provenance it does not have."
+        }
+      }
+    }
+  },
+  "$defs": {
+    "jointName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "format": "irmv-joint-name",
+      "$comment": "maxLength counts code points; the contract is 1..64 UTF-8 bytes."
+    },
+    "jointNameList": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/jointName"
+      },
+      "$comment": "Duplicate names inside one list are refused."
+    },
+    "finiteNumber": {
+      "type": "number",
+      "$comment": "Finite: NaN and Infinity are refused wherever a number appears."
+    },
+    "finiteArray": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/finiteNumber"
+      }
+    },
+    "positiveNumber": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "positiveArray": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4096,
+      "items": {
+        "$ref": "#/$defs/positiveNumber"
+      }
+    },
+    "gainArray": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "number",
+        "minimum": 0
+      },
+      "$comment": "Finite and non-negative. A pure feed-forward command (kp = kd = 0, tau_ff != 0) is legal; the runtime performs the final torque limiting."
+    },
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615
+    },
+    "clipRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min", "max"],
+      "properties": {
+        "min": {
+          "$ref": "#/$defs/finiteNumber"
+        },
+        "max": {
+          "$ref": "#/$defs/finiteNumber"
+        }
+      },
+      "$comment": "min <= max."
+    },
+    "clipLayer": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/clipRange"
+          }
+        }
+      ]
+    },
+    "scalarLayer": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/$defs/finiteNumber"
+          }
+        }
+      ],
+      "$comment": "The shape of an observation term scale: absent, or one finite factor per component of the term."
+    },
+    "modelInterface": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "dimension"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "dimension": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        }
+      }
+    },
+    "observationTermShape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "dimension",
+        "unit",
+        "frame",
+        "scale",
+        "clip",
+        "history_length"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dimension": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "frame": {
+          "enum": ["body", "joint", "none"]
+        },
+        "scale": {
+          "$ref": "#/$defs/scalarLayer",
+          "$comment": "null or one factor per component of the term; the training configuration leaves every scale null."
+        },
+        "clip": {
+          "$ref": "#/$defs/clipLayer",
+          "$comment": "null or one range per component of the term; applied to the term value after its scale."
+        },
+        "history_length": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1,
+          "$comment": "0 or 1 mean the term is not stacked; a term with a longer history is refused, because this phase ships no history stacking."
+        }
+      }
+    },
+    "termCommand": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/observationTermShape"
+        }
+      ],
+      "properties": {
+        "name": {
+          "const": "command"
+        },
+        "dimension": {
+          "const": 3
+        },
+        "unit": {
+          "const": "m/s,m/s,rad/s",
+          "$comment": "Body-frame forward velocity, lateral velocity and yaw rate, in this order."
+        },
+        "frame": {
+          "const": "body"
+        }
+      }
+    },
+    "termProjectedGravity": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/observationTermShape"
+        }
+      ],
+      "properties": {
+        "name": {
+          "const": "projected_gravity"
+        },
+        "dimension": {
+          "const": 3
+        },
+        "unit": {
+          "const": "1"
+        },
+        "frame": {
+          "const": "body"
+        }
+      }
+    },
+    "termBaseAngularVelocity": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/observationTermShape"
+        }
+      ],
+      "properties": {
+        "name": {
+          "const": "base_ang_vel"
+        },
+        "dimension": {
+          "const": 3
+        },
+        "unit": {
+          "const": "rad/s"
+        },
+        "frame": {
+          "const": "body"
+        }
+      }
+    },
+    "termJointPosition": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/observationTermShape"
+        }
+      ],
+      "properties": {
+        "name": {
+          "const": "joint_pos_rel"
+        },
+        "dimension": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64,
+          "$comment": "Must equal the length of observation.joint_pos_rel.joints, which JSON Schema cannot express; ParseDeployment checks it."
+        },
+        "unit": {
+          "const": "rad"
+        },
+        "frame": {
+          "const": "joint"
+        }
+      }
+    },
+    "termJointVelocity": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/observationTermShape"
+        }
+      ],
+      "properties": {
+        "name": {
+          "const": "joint_vel_rel"
+        },
+        "dimension": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64,
+          "$comment": "Must equal the length of observation.joint_vel_rel.joints; ParseDeployment checks it."
+        },
+        "unit": {
+          "const": "rad/s"
+        },
+        "frame": {
+          "const": "joint"
+        }
+      }
+    },
+    "termLastAction": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/observationTermShape"
+        }
+      ],
+      "properties": {
+        "name": {
+          "const": "last_action"
+        },
+        "dimension": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64,
+          "$comment": "Must equal the length of action.joints; ParseDeployment checks it."
+        },
+        "unit": {
+          "const": "1"
+        },
+        "frame": {
+          "const": "none"
+        }
+      }
+    },
+    "jointReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["term", "joints", "source_joints", "reference", "unit"],
+      "properties": {
+        "term": {
+          "enum": ["joint_pos_rel", "joint_vel_rel"],
+          "$comment": "The observation term this list belongs to."
+        },
+        "joints": {
+          "$ref": "#/$defs/jointNameList",
+          "$comment": "Deployment joint names, in the order the term concatenates them; must equal the joint list the term's dimension implies."
+        },
+        "source_joints": {
+          "$ref": "#/$defs/jointNameList"
+        },
+        "reference": {
+          "$ref": "#/$defs/finiteArray",
+          "$comment": "The reference the term subtracts, one per entry of `joints`: the resolved default joint position in rad for joint_pos_rel, the resolved default joint velocity in rad/s for joint_vel_rel."
+        },
+        "unit": {
+          "enum": ["rad", "rad/s"]
+        }
+      }
+    },
+    "nullableText": {
+      "type": ["string", "null"],
+      "minLength": 1
+    },
+    "nullableDigest": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "policy_type": "joint_position",
+  "model": {
+    "input": {
+      "name": "obs",
+      "dimension": 15
+    },
+    "output": {
+      "name": "actions",
+      "dimension": 2
+    }
+  },
+  "policy_period_us": 20000,
+  "action": {
+    "joints": ["left", "right"],
+    "source_joints": ["left_joint", "right_joint"],
+    "default_q": [0.1, -0.2],
+    "default_dq": [0.0, 0.0],
+    "kp": [0.0, 100.0],
+    "kd": [0.0, 6.0],
+    "scale": [0.5, 0.5],
+    "offset": [0.1, -0.2],
+    "clip": {
+      "wrapper": null,
+      "term": null
+    },
+    "order": ["wrapper_clip", "scale", "offset", "term_clip"],
+    "last_action": {
+      "stage": "raw",
+      "initial": [0.0, 0.0]
+    }
+  },
+  "observation": {
+    "terms": [
+      {
+        "name": "command",
+        "dimension": 3,
+        "unit": "m/s,m/s,rad/s",
+        "frame": "body",
+        "scale": null,
+        "clip": null,
+        "history_length": 0
+      },
+      {
+        "name": "projected_gravity",
+        "dimension": 3,
+        "unit": "1",
+        "frame": "body",
+        "scale": null,
+        "clip": null,
+        "history_length": 0
+      },
+      {
+        "name": "base_ang_vel",
+        "dimension": 3,
+        "unit": "rad/s",
+        "frame": "body",
+        "scale": null,
+        "clip": null,
+        "history_length": 0
+      },
+      {
+        "name": "joint_pos_rel",
+        "dimension": 2,
+        "unit": "rad",
+        "frame": "joint",
+        "scale": null,
+        "clip": null,
+        "history_length": 0
+      },
+      {
+        "name": "joint_vel_rel",
+        "dimension": 2,
+        "unit": "rad/s",
+        "frame": "joint",
+        "scale": null,
+        "clip": null,
+        "history_length": 0
+      },
+      {
+        "name": "last_action",
+        "dimension": 2,
+        "unit": "1",
+        "frame": "none",
+        "scale": null,
+        "clip": null,
+        "history_length": 0
+      }
+    ],
+    "joint_pos_rel": {
+      "term": "joint_pos_rel",
+      "joints": ["right", "left"],
+      "source_joints": ["right_joint", "left_joint"],
+      "reference": [-0.2, 0.1],
+      "unit": "rad"
+    },
+    "joint_vel_rel": {
+      "term": "joint_vel_rel",
+      "joints": ["left", "right"],
+      "source_joints": ["left_joint", "right_joint"],
+      "reference": [0.0, 0.0],
+      "unit": "rad/s"
+    }
+  },
+  "normalizer": {
+    "enabled": false,
+    "embedded": false,
+    "location": "none"
+  },
+  "source": {
+    "checkpoint_file": "model_2999.pt",
+    "checkpoint_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "env_config_file": "params/env.yaml",
+    "env_config_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "agent_config_file": "params/agent.yaml",
+    "agent_config_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "training_repo": "irmv_humanoid_locomotion",
+    "training_commit": "0123456789abcdef0123456789abcdef01234567",
+    "asset_revision": "irmv_v3_description@worktree",
+    "software": {
+      "isaaclab": "2.3.2",
+      "onnx": "1.22.0",
+      "python": "3.11.13",
+      "rsl_rl": "3.1.2",
+      "torch": "2.7.0+cu128"
+    },
+    "missing": []
+  }
+}

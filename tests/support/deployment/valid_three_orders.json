@@ -1,0 +1,138 @@
+{
+  "schema_version": 1,
+  "policy_type": "joint_position",
+  "model": {
+    "input": {
+      "name": "obs",
+      "dimension": 18
+    },
+    "output": {
+      "name": "actions",
+      "dimension": 3
+    }
+  },
+  "policy_period_us": 20000,
+  "action": {
+    "joints": ["knee", "hip_pitch", "ankle_pitch"],
+    "source_joints": ["knee_joint", "hip_pitch_joint", "ankle_pitch_joint"],
+    "default_q": [0.6, -0.3, -0.3],
+    "default_dq": [0.0, 0.0, 0.0],
+    "kp": [100.0, 100.0, 60.0],
+    "kd": [6.0, 6.0, 4.0],
+    "scale": [0.5, 0.5, 0.5],
+    "offset": [0.6, -0.3, -0.3],
+    "clip": {
+      "wrapper": [
+        { "min": -2.0, "max": 2.0 },
+        { "min": -2.0, "max": 2.0 },
+        { "min": -2.0, "max": 2.0 }
+      ],
+      "term": null
+    },
+    "order": ["wrapper_clip", "scale", "offset", "term_clip"],
+    "last_action": {
+      "stage": "raw",
+      "initial": [0.0, 0.0, 0.0]
+    }
+  },
+  "observation": {
+    "terms": [
+      {
+        "name": "command",
+        "dimension": 3,
+        "unit": "m/s,m/s,rad/s",
+        "frame": "body",
+        "scale": null,
+        "clip": null,
+        "history_length": 0
+      },
+      {
+        "name": "projected_gravity",
+        "dimension": 3,
+        "unit": "1",
+        "frame": "body",
+        "scale": null,
+        "clip": null,
+        "history_length": 0
+      },
+      {
+        "name": "base_ang_vel",
+        "dimension": 3,
+        "unit": "rad/s",
+        "frame": "body",
+        "scale": [1.0, 1.0, 1.0],
+        "clip": null,
+        "history_length": 0
+      },
+      {
+        "name": "joint_pos_rel",
+        "dimension": 3,
+        "unit": "rad",
+        "frame": "joint",
+        "scale": null,
+        "clip": null,
+        "history_length": 0
+      },
+      {
+        "name": "joint_vel_rel",
+        "dimension": 3,
+        "unit": "rad/s",
+        "frame": "joint",
+        "scale": null,
+        "clip": [
+          { "min": -30.0, "max": 30.0 },
+          { "min": -30.0, "max": 30.0 },
+          { "min": -30.0, "max": 30.0 }
+        ],
+        "history_length": 0
+      },
+      {
+        "name": "last_action",
+        "dimension": 3,
+        "unit": "1",
+        "frame": "none",
+        "scale": null,
+        "clip": null,
+        "history_length": 0
+      }
+    ],
+    "joint_pos_rel": {
+      "term": "joint_pos_rel",
+      "joints": ["ankle_pitch", "knee", "hip_pitch"],
+      "source_joints": ["ankle_pitch_joint", "knee_joint", "hip_pitch_joint"],
+      "reference": [-0.3, 0.6, -0.3],
+      "unit": "rad"
+    },
+    "joint_vel_rel": {
+      "term": "joint_vel_rel",
+      "joints": ["hip_pitch", "ankle_pitch", "knee"],
+      "source_joints": ["hip_pitch_joint", "ankle_pitch_joint", "knee_joint"],
+      "reference": [0.0, 0.0, 0.0],
+      "unit": "rad/s"
+    }
+  },
+  "normalizer": {
+    "enabled": false,
+    "embedded": false,
+    "location": "none"
+  },
+  "source": {
+    "checkpoint_file": "model_2999.pt",
+    "checkpoint_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "env_config_file": "params/env.yaml",
+    "env_config_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "agent_config_file": "params/agent.yaml",
+    "agent_config_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "training_repo": "irmv_humanoid_locomotion",
+    "training_commit": null,
+    "asset_revision": "irmv_v3_description@worktree",
+    "software": {
+      "isaaclab": "2.3.2",
+      "onnx": "1.22.0",
+      "python": "3.11.13",
+      "rsl_rl": "3.1.2",
+      "torch": "2.7.0+cu128"
+    },
+    "missing": ["training_commit"]
+  }
+}

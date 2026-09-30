@@ -113,6 +113,42 @@ set_tests_properties(
   WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
+# The policy layer owns the deployment contract a policy ONNX carries and, from
+# the next step on, the ONNX Runtime loader and the observation/action
+# transformation. It is the only internal library besides the application that
+# may link ONNX Runtime, which is what keeps `ldd build/robot_runtime` free of
+# it: the lower process never parses a model.
+add_library(irmv_policy src/policy/deployment.cpp)
+target_compile_features(irmv_policy PUBLIC cxx_std_17)
+target_include_directories(
+  irmv_policy
+  PUBLIC
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:include>"
+)
+target_link_libraries(irmv_policy PRIVATE nlohmann_json::nlohmann_json)
+
+add_executable(deployment_test tests/unit/deployment_test.cpp)
+target_compile_features(deployment_test PRIVATE cxx_std_17)
+target_include_directories(
+  deployment_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(
+  deployment_test PRIVATE irmv_policy nlohmann_json::nlohmann_json
+)
+
+add_test(NAME deployment_test COMMAND deployment_test)
+# The fixtures of the contract live in tests/support/deployment/ and are read
+# relative to the source directory, like the configuration tests read
+# config/sdk.json.
+set_tests_properties(
+  deployment_test PROPERTIES LABELS core
+  WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
 add_library(
   irmv_application
   src/application/behavior_fsm.cpp
@@ -326,6 +362,20 @@ add_test(
     "${PROJECT_SOURCE_DIR}/config/sdk.json"
 )
 set_tests_properties(config_schema_contract_test PROPERTIES LABELS core)
+
+# The deployment contract has two independent witnesses: the C++ parser (through
+# deployment_test) and the frozen JSON Schema. This check validates the very
+# fixtures the parser accepts against the schema, so neither document can drift
+# away from the other.
+add_test(
+  NAME deployment_schema_contract_test
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/unit/deployment_schema_contract_test.py"
+    "${PROJECT_SOURCE_DIR}/schema/onnx-deployment-v1.schema.json"
+    "${PROJECT_SOURCE_DIR}/tests/support/deployment"
+)
+set_tests_properties(deployment_schema_contract_test PROPERTIES LABELS core)
 
 find_package(Threads REQUIRED)
 
