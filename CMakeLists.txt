@@ -524,6 +524,7 @@ add_library(
   irmv_telemetry
   src/telemetry/diagnostic_write.cpp
   src/telemetry/logger.cpp
+  src/telemetry/recorder.cpp
 )
 target_compile_features(irmv_telemetry PUBLIC cxx_std_17)
 target_include_directories(
@@ -535,7 +536,7 @@ target_include_directories(
 target_link_libraries(
   irmv_telemetry
   PUBLIC irmv_protocol irmv_configuration
-  PRIVATE Threads::Threads
+  PRIVATE Threads::Threads nlohmann_json::nlohmann_json
 )
 
 add_executable(logger_test tests/unit/logger_test.cpp)
@@ -547,6 +548,22 @@ target_include_directories(
     "${PROJECT_SOURCE_DIR}/tests"
 )
 target_link_libraries(logger_test PRIVATE irmv_telemetry)
+
+add_executable(recorder_test tests/unit/recorder_test.cpp)
+target_compile_features(recorder_test PRIVATE cxx_std_17)
+target_include_directories(
+  recorder_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(
+  recorder_test PRIVATE irmv_telemetry Threads::Threads
+                       nlohmann_json::nlohmann_json
+)
+
+add_test(NAME recorder_test COMMAND recorder_test)
+set_tests_properties(recorder_test PROPERTIES LABELS core TIMEOUT 120)
 
 add_test(NAME logger_test COMMAND logger_test)
 set_tests_properties(

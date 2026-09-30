@@ -12,14 +12,14 @@ says explicitly what no test here proves.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j2
 
-ctest --test-dir build --output-on-failure          # everything (49 tests)
+ctest --test-dir build --output-on-failure          # everything (50 tests)
 ctest --test-dir build -L core --output-on-failure  # deterministic core suite
 ctest --test-dir build -L integration --output-on-failure
 ctest --test-dir build -R integration_normal --output-on-failure
 ```
 
 The whole matrix takes about a minute and a half on a developer machine
-(`ctest -N` reports 21 core and 28 integration entries) and each integration
+(`ctest -N` reports 22 core and 28 integration entries) and each integration
 entry is bounded by its own CTest timeout (30 s for `dds_codec_test`, 180 s for
 `runtime_cli_test` and `application_cli_test`, 300 s for `application_client_test`
 and per scenario, 600 s for `application_flow_test`).
@@ -110,7 +110,7 @@ for the cross-process cases.
 The scenario entry points are also what CI runs; `--all` is a convenience for
 manual runs and is never used by CTest.
 
-## Deterministic core suite (`-L core`, 21 tests)
+## Deterministic core suite (`-L core`, 22 tests)
 
 | Test | What it proves | Design §9 |
 |---|---|---|
@@ -120,6 +120,7 @@ manual runs and is never used by CTest.
 | `safety_test` | The safety gates on feedback and targets: freshness exactly at and beyond every timeout, IMU coherence, control-frequency bounds, driver error codes, position and velocity limits in both directions at and beyond the threshold, multiple joints, non-finite samples, the boot grace waiting for a first frame without calling absence healthy or faulting on it, the observation history that narrows the grace to inputs that never delivered a frame (an observed joint or required IMU that goes missing faults at once, a never-observed one keeps waiting, and a first erroneous frame is judged), the same grace never excusing an observed invalid sample, driver error or overspeed, the priority between simultaneous reasons, the complete fault report, and the recovery window. | "forward/reverse/equal-threshold/multi-joint overspeed", "feedback freshness, IMU coherence, complete error codes, recovery window reset" |
 | `command_gate_test` | The command gate: sequence monotonicity, queue wait followed by the transport receive stamp as the validity origin, repeated sequences not refreshing the deadline, the source-state index window (unknown, ignored, stale, fresh), the command and source-state deadlines measured per tick with no new packet, the independent supervisor lease, and that a rejected owner frame refreshes nothing. | "per-tick timeout with no new packet, old packets do not feed the watchdog, source-state window and independent supervisor lease", "single-source authorization" |
 | `execution_fsm_test` | The state machine: every legal and rejected transition, boot grace/deadline rules with the per-input observation history (an observed joint or required IMU that goes missing faults inside the grace window, a never-observed one keeps waiting to the deadline), the full normal path, write failure, request idempotency and conflicts, stop ordering and the authorization watermark (including a stop that does not change the state), session takeover and lease expiry, a heartbeat batch that mixes the owner's sample with a foreign or reordered one refreshing the lease, first-frame continuity, foreign packets, fault output degradation latching to zero torque, the recovery window with an explicit Reset, epoch exhaustion, the session's supervisor binding, same-tick stop ownership, a guarded same-producer epoch change, and the runtime's own trusted stop. | "all legal and rejected transitions, boot grace/deadline, explicit Reset", "pure feedforward, PD + feedforward with the total torque limit", "request retry/different payload/out-of-order, atomic first-frame and gain switch, stop preemption", "fault first-tick output, damping disqualification degrades permanently to zero torque" |
+| `recorder_test` | The run recorder: a recorder that was never started accepts nothing and creates nothing, while a started one creates exactly one run directory with its metadata and refuses a directory that does not exist; a paced run of 910 samples is written as one full chunk and one remainder, every chunk renamed into place with no partial file left behind, and the index reports the rows, the joint count and each chunk's sequence and time range; a deliberate hole in the published sequence becomes a gap with its exact range; a burst that fills the bounded handoff costs the refused samples, which are counted *and* reported as a gap of their own, because the worker never saw them and they could not show up as a hole between two samples it did write; stopping twice is harmless and keeps naming the run. | §8.2, §8.4 |
 | `logger_test` | The bounded asynchronous logger: queue bound and drop accounting, level filtering, FIFO order, the drain on stop, an event racing with the stop, the 256-byte message bound, rotation of the default sink, the formatted line and the error path - plus the bounded diagnostic writer the sink and the exit path share, against a pipe the test fills itself. | §8 (bounded telemetry) |
 | `channel_test` | The bounded handoff between the control thread and the transport thread: FIFO order, capacity, the untouched state of a refused push, the keep-last-1 handoff of the latest-value channels (a published value is replaced and counted only while no consumer holds it, and a taken one is never counted as a loss), a separate stop lane, and two-thread stress on both shapes whose payloads each carry their own generator, so a torn or overwritten copy fails the test. This is the entry that is also run under ThreadSanitizer; the eviction race it used to hide was found that way. | §2 (thread model), §4 (lane separation) |
 | `config_schema_contract_test` | The shipped `config/sdk.schema.json` against the shipped `config/sdk.json`, the custom `irmv-joint-name` format (non-empty, at most 64 **UTF-8 bytes**), and that standard JSON Schema validity and the loader's own checks agree. | "the configuration is executable and versioned" |
@@ -137,7 +138,7 @@ manual runs and is never used by CTest.
 | `onnx_model_test` | The model loader against ten generated models: the valid one loads with its contract, mapping and digest, and one inference returns a finite action; a model with no contract, another schema version, an input width or output name the graph contradicts, a dynamic width, two inputs, an unknown joint or a non-finite output is refused, as is a file that does not exist and a model whose observation is of the wrong width. The fixtures are generated from the frozen document, so no binary blob is checked in. | §3.4, review focus 1 |
 | `inference_test` | The inference worker: a new worker runs nothing until something is submitted, one request produces one response that carries the identity of its request (generation, epoch, state sequence and stamp, submission instant), a burst of submissions never blocks and is compressed rather than queued (every accepted request is either replaced or run, and replaced ones are counted), and a model that cannot answer produces a failed step rather than a silent zero action. `Stop()` is idempotent and joins. | §3.4, §8.4 |
 
-All twenty-one run without a peer, without a network and without a wall-clock
+All twenty-two run without a peer, without a network and without a wall-clock
 deadline: they assert exact tick semantics and counter values, and the only
 wall-clock waits in `logger_test` are hang guards.
 
@@ -369,8 +370,14 @@ on another machine.
   `policy.model_path` runs with no locomotion source (the default follows the
   configuration), which is what the shipped Fake one does, and the existing
   process entries still pass unchanged.
-* **No `Recorder`.** Nothing samples the control tick, writes a columnar run or
-  reads a time range back; phase 3's Tasks 7 and 8 are not implemented.
+* **No `Recorder` in the runtime yet.** The recorder itself is implemented and
+  tested - a bounded handoff the control thread pushes into without ever
+  allocating, blocking or touching a file, a worker that writes columnar chunks
+  and renames them into place only when complete, a metadata file per run and an
+  index that reports every gap in the published sequence. What is missing is the
+  wiring: the runtime does not yet build a `RecordSample` per sampled tick, no
+  `telemetry.recorder` block exists in the configuration, and no time-range
+  reader or NPZ conversion (Task 8) exists. No long run has been recorded.
 * **No behavioural equivalence against the training side** beyond the package
   gate: the observation vector, the model action and the resulting joint target
   have not been compared element by element against the training environment for
