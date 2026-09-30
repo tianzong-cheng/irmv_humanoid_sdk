@@ -123,6 +123,7 @@ add_library(
   irmv_policy
   src/policy/action.cpp
   src/policy/deployment.cpp
+  src/policy/inference.cpp
   src/policy/observation.cpp
   src/policy/onnx_model.cpp
 )
@@ -138,7 +139,7 @@ target_include_directories(
 target_link_libraries(
   irmv_policy
   PUBLIC irmv_protocol irmv_configuration
-  PRIVATE nlohmann_json::nlohmann_json IRMV::onnxruntime
+  PRIVATE nlohmann_json::nlohmann_json IRMV::onnxruntime Threads::Threads
 )
 
 add_executable(deployment_test tests/unit/deployment_test.cpp)
@@ -429,6 +430,20 @@ add_custom_command(
 )
 add_custom_target(policy_model_fixtures ALL
                   DEPENDS "${IRMV_POLICY_FIXTURE_DIR}/.stamp")
+
+add_executable(inference_test tests/unit/inference_test.cpp)
+target_compile_features(inference_test PRIVATE cxx_std_17)
+target_include_directories(
+  inference_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(inference_test PRIVATE irmv_policy Threads::Threads)
+add_dependencies(inference_test policy_model_fixtures)
+
+add_test(NAME inference_test COMMAND inference_test "${IRMV_POLICY_FIXTURE_DIR}")
+set_tests_properties(inference_test PROPERTIES LABELS core TIMEOUT 120)
 
 add_executable(onnx_model_test tests/unit/onnx_model_test.cpp)
 target_compile_features(onnx_model_test PRIVATE cxx_std_17)
