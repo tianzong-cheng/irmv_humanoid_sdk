@@ -559,6 +559,7 @@ add_library(
   src/transport/codec.cpp
   src/transport/dds_transport.cpp
   src/transport/producer_codec.cpp
+  src/transport/producer_transport.cpp
 )
 target_compile_features(irmv_transport PUBLIC cxx_std_17)
 target_include_directories(

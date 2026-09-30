@@ -19,8 +19,11 @@
 #include <string>
 #include <thread>
 
+#include "irmv/configuration/application_config.hpp"
+#include "irmv/configuration/config.hpp"
 #include "irmv/protocol/producer.hpp"
 #include "irmv/protocol/types.hpp"
+#include "irmv/transport/producer_transport.hpp"
 #include "producer.hpp"
 #include "support/check.hpp"
 
@@ -50,6 +53,8 @@ using irmv::protocol::StopReason;
 using irmv::protocol::TimeUs;
 using irmv::protocol::TopicDescriptor;
 using irmv::protocol::VelocityIntentMessage;
+using irmv::transport::ProducerEvents;
+using irmv::transport::ProducerTransport;
 
 Id MakeId(std::uint8_t seed) {
   Id id{};
@@ -91,6 +96,29 @@ VelocityIntentMessage MakeIntent(Sequence seq, TimeUs valid_for_us) {
   intent.send_stamp_us = 1234;
   intent.valid_for_us = valid_for_us;
   return intent;
+}
+
+std::uint32_t Domain() {
+  if (const char *override_domain = std::getenv("IRMV_TEST_DDS_DOMAIN")) {
+    return static_cast<std::uint32_t>(
+        std::strtoul(override_domain, nullptr, 10));
+  }
+  return 221;
+}
+
+// The same interface binding the running transport uses, so a machine with a
+// second network card cannot answer for a peer. An empty value lets CycloneDDS
+// choose, which is what the transport does for an empty `dds.interface`.
+std::string InterfaceConfig() {
+  const char *interface = std::getenv("IRMV_TEST_DDS_INTERFACE");
+  const std::string name = interface != nullptr && *interface != '\0'
+                               ? std::string(interface)
+                               : std::string("lo");
+  return "<CycloneDDS><Domain><General><Interfaces><NetworkInterface "
+         "name=\"" +
+         name +
+         "\" priority=\"default\"/></Interfaces></General></Domain>"
+         "</CycloneDDS>";
 }
 
 // ---- round trips ----------------------------------------------------------
@@ -308,6 +336,215 @@ int RefusedMessages() {
   return 0;
 }
 
+// ---- the transport itself -------------------------------------------------
+
+// A raw peer on the six topics, in the direction a producer process would use:
+// it writes the two inbound messages and reads the four outbound ones. The
+// transport under test is the application's, so this is the whole interface
+// crossed in both directions over real DDS.
+struct ProducerPeer {
+  explicit ProducerPeer(dds::domain::DomainParticipant &participant)
+      : publisher(participant),
+        subscriber(participant),
+        announcement_writer(
+            publisher,
+            dds::topic::Topic<wire::ProducerAnnouncement>(
+                participant, std::string(kProducerAnnouncementTopic.name)),
+            producer_codec::ToWriterQos(kProducerAnnouncementTopic.qos)),
+        result_writer(
+            publisher,
+            dds::topic::Topic<wire::PrepareResult>(
+                participant, std::string(kProducerPrepareResultTopic.name)),
+            producer_codec::ToWriterQos(kProducerPrepareResultTopic.qos)),
+        request_reader(
+            subscriber,
+            dds::topic::Topic<wire::PrepareRequest>(
+                participant, std::string(kProducerPrepareRequestTopic.name)),
+            producer_codec::ToReaderQos(kProducerPrepareRequestTopic.qos)),
+        authorization_reader(
+            subscriber,
+            dds::topic::Topic<wire::AuthorizationNotice>(
+                participant, std::string(kProducerAuthorizationTopic.name)),
+            producer_codec::ToReaderQos(kProducerAuthorizationTopic.qos)),
+        stop_reader(subscriber,
+                    dds::topic::Topic<wire::StopNotice>(
+                        participant, std::string(kProducerStopTopic.name)),
+                    producer_codec::ToReaderQos(kProducerStopTopic.qos)),
+        intent_reader(
+            subscriber,
+            dds::topic::Topic<wire::VelocityIntentMessage>(
+                participant, std::string(kProducerVelocityIntentTopic.name)),
+            producer_codec::ToReaderQos(kProducerVelocityIntentTopic.qos)) {}
+
+  template <typename T>
+  static bool Receive(dds::sub::DataReader<T> &reader, T *out) {
+    for (int attempt = 0; attempt < 300; ++attempt) {
+      const auto samples = reader.select()
+                               .max_samples(8)
+                               .state(dds::sub::status::DataState::any())
+                               .take();
+      for (const auto &sample : samples) {
+        if (sample.info().valid()) {
+          *out = sample.data();
+          return true;
+        }
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return false;
+  }
+
+  dds::pub::Publisher publisher;
+  dds::sub::Subscriber subscriber;
+  dds::pub::DataWriter<wire::ProducerAnnouncement> announcement_writer;
+  dds::pub::DataWriter<wire::PrepareResult> result_writer;
+  dds::sub::DataReader<wire::PrepareRequest> request_reader;
+  dds::sub::DataReader<wire::AuthorizationNotice> authorization_reader;
+  dds::sub::DataReader<wire::StopNotice> stop_reader;
+  dds::sub::DataReader<wire::VelocityIntentMessage> intent_reader;
+};
+
+int TransportRoundTrip() {
+  const std::uint32_t domain = Domain();
+  irmv::configuration::ConfigOverrides overrides;
+  overrides.dds_domain = domain;
+  const irmv::configuration::ApplicationConfig config =
+      irmv::configuration::LoadApplicationConfig("config/sdk.json", overrides);
+
+  dds::domain::DomainParticipant peer_participant(
+      domain, dds::domain::qos::DomainParticipantQos(), nullptr,
+      dds::core::status::StatusMask::none(), InterfaceConfig());
+  ProducerPeer peer(peer_participant);
+
+  ProducerTransport transport(config);
+  CHECK(!transport.started());
+  transport.Start();
+  CHECK(transport.started());
+
+  // The producer announces itself and the application's transport hands it over
+  // whole, with the fields the producer wrote.
+  ProducerAnnouncement announcement;
+  announcement.producer_process_id = MakeId(0x11);
+  announcement.runtime_id = MakeId(0x12);
+  announcement.layout_id.Assign("peer-layout");
+  announcement.target_period_us = 20000;
+  announcement.reads_robot_state = true;
+  wire::ProducerAnnouncement wire_announcement;
+  producer_codec::ToWire(announcement, wire_announcement);
+  peer.announcement_writer.write(wire_announcement);
+
+  bool saw_announcement = false;
+  for (int attempt = 0; attempt < 300 && !saw_announcement; ++attempt) {
+    const ProducerEvents &events = transport.TakeEvents();
+    for (std::size_t index = 0; index < events.announcement_count; ++index) {
+      CHECK(SameId(events.announcements[index].producer_process_id,
+                   announcement.producer_process_id));
+      CHECK(events.announcements[index].layout_id.View() == "peer-layout");
+      CHECK(events.announcements[index].target_period_us == 20000);
+      saw_announcement = true;
+    }
+    if (!saw_announcement) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  }
+  CHECK(saw_announcement);
+
+  // The application asks it to prepare, and the peer receives the request with
+  // the association key the interface freezes.
+  PrepareRequest request;
+  request.producer_process_id = announcement.producer_process_id;
+  request.prepare_id = 5;
+  request.runtime_id = announcement.runtime_id;
+  request.session_id = MakeId(0x13);
+  request.producer_id = MakeId(0x14);
+  request.epoch = 2;
+  request.target_period_us = 20000;
+  request.intent = MakeIntent(1, 500000);
+  CHECK(transport.PublishPrepareRequest(request));
+  wire::PrepareRequest received_request;
+  CHECK(ProducerPeer::Receive(peer.request_reader, &received_request));
+  CHECK(received_request.prepare_id() == 5);
+  CHECK(received_request.epoch() == 2);
+  CHECK(received_request.intent().seq() == 1);
+
+  // The producer answers Ready with a frame, and the transport hands the result
+  // over with its frame intact.
+  PrepareResult result;
+  result.producer_process_id = announcement.producer_process_id;
+  result.prepare_id = 5;
+  result.runtime_id = announcement.runtime_id;
+  result.session_id = request.session_id;
+  result.producer_id = request.producer_id;
+  result.epoch = 2;
+  result.status = ProducerStatus::Ready;
+  result.first_command = MakeCommand(2, 2, 1);
+  wire::PrepareResult wire_result;
+  producer_codec::ToWire(result, wire_result);
+  peer.result_writer.write(wire_result);
+
+  bool saw_result = false;
+  for (int attempt = 0; attempt < 300 && !saw_result; ++attempt) {
+    const ProducerEvents &events = transport.TakeEvents();
+    for (std::size_t index = 0; index < events.prepare_result_count; ++index) {
+      const PrepareResult &decoded = events.prepare_results[index];
+      CHECK(decoded.prepare_id == 5);
+      CHECK(decoded.status == ProducerStatus::Ready);
+      CHECK(decoded.first_command.joints.count == 2);
+      saw_result = true;
+    }
+    if (!saw_result) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  }
+  CHECK(saw_result);
+
+  // The authorization and the stop notices travel the other way, and the
+  // velocity intent keeps only its newest sample.
+  AuthorizationNotice authorization;
+  authorization.producer_process_id = announcement.producer_process_id;
+  authorization.prepare_id = 5;
+  authorization.runtime_id = announcement.runtime_id;
+  authorization.session_id = request.session_id;
+  authorization.producer_id = request.producer_id;
+  authorization.epoch = 2;
+  authorization.first_command_seq = 1;
+  CHECK(transport.PublishAuthorization(authorization));
+  wire::AuthorizationNotice received_authorization;
+  CHECK(ProducerPeer::Receive(peer.authorization_reader,
+                              &received_authorization));
+  CHECK(received_authorization.prepare_id() == 5);
+  CHECK(received_authorization.epoch() == 2);
+
+  CHECK(transport.PublishVelocityIntent(MakeIntent(1, 500000)));
+  CHECK(transport.PublishVelocityIntent(MakeIntent(2, 500000)));
+  wire::VelocityIntentMessage received_intent;
+  CHECK(ProducerPeer::Receive(peer.intent_reader, &received_intent));
+  CHECK(received_intent.seq() == 2);
+
+  StopNotice stop;
+  stop.producer_process_id = announcement.producer_process_id;
+  stop.runtime_id = announcement.runtime_id;
+  stop.session_id = request.session_id;
+  stop.producer_id = request.producer_id;
+  stop.epoch = 2;
+  stop.reason = StopReason::Requested;
+  CHECK(transport.PublishStop(stop));
+  wire::StopNotice received_stop;
+  CHECK(ProducerPeer::Receive(peer.stop_reader, &received_stop));
+  CHECK(received_stop.epoch() == 2);
+  CHECK(received_stop.reason() ==
+        static_cast<wire::StopReason>(StopReason::Requested));
+
+  // A publish on a stopped transport is refused and counted, never silently
+  // dropped and never a crash.
+  transport.Stop();
+  CHECK(!transport.started());
+  const std::uint64_t refused_before = transport.dropped_stop_count();
+  CHECK(!transport.PublishStop(stop));
+  CHECK(transport.dropped_stop_count() == refused_before + 1);
+  return 0;
+}
+
 // ---- the frozen endpoints -------------------------------------------------
 
 int FrozenTopics() {
@@ -338,29 +575,6 @@ int FrozenTopics() {
   CHECK(kProducerVelocityIntentTopic.qos.history_depth == 1);
   CHECK(kProducerVelocityIntentTopic.qos.max_blocking_time_us == 0);
   return 0;
-}
-
-std::uint32_t Domain() {
-  if (const char *override_domain = std::getenv("IRMV_TEST_DDS_DOMAIN")) {
-    return static_cast<std::uint32_t>(
-        std::strtoul(override_domain, nullptr, 10));
-  }
-  return 221;
-}
-
-// The same interface binding the running transport uses, so a machine with a
-// second network card cannot answer for a peer. An empty value lets CycloneDDS
-// choose, which is what the transport does for an empty `dds.interface`.
-std::string InterfaceConfig() {
-  const char *interface = std::getenv("IRMV_TEST_DDS_INTERFACE");
-  const std::string name = interface != nullptr && *interface != '\0'
-                               ? std::string(interface)
-                               : std::string("lo");
-  return "<CycloneDDS><Domain><General><Interfaces><NetworkInterface "
-         "name=\"" +
-         name +
-         "\" priority=\"default\"/></Interfaces></General></Domain>"
-         "</CycloneDDS>";
 }
 
 }  // namespace
@@ -474,6 +688,8 @@ int main() {
     CHECK(history.kind() == dds::core::policy::HistoryKind::KEEP_LAST);
     CHECK(history.depth() == 1);
   }
+
+  CHECK(TransportRoundTrip() == 0);
 
   std::cout << "producer_codec_test: ok\n";
   return 0;
