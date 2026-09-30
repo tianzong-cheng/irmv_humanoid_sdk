@@ -12,14 +12,14 @@ says explicitly what no test here proves.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j2
 
-ctest --test-dir build --output-on-failure          # everything (48 tests)
+ctest --test-dir build --output-on-failure          # everything (49 tests)
 ctest --test-dir build -L core --output-on-failure  # deterministic core suite
 ctest --test-dir build -L integration --output-on-failure
 ctest --test-dir build -R integration_normal --output-on-failure
 ```
 
 The whole matrix takes about a minute and a half on a developer machine
-(`ctest -N` reports 20 core and 28 integration entries) and each integration
+(`ctest -N` reports 21 core and 28 integration entries) and each integration
 entry is bounded by its own CTest timeout (30 s for `dds_codec_test`, 180 s for
 `runtime_cli_test` and `application_cli_test`, 300 s for `application_client_test`
 and per scenario, 600 s for `application_flow_test`).
@@ -110,7 +110,7 @@ for the cross-process cases.
 The scenario entry points are also what CI runs; `--all` is a convenience for
 manual runs and is never used by CTest.
 
-## Deterministic core suite (`-L core`, 20 tests)
+## Deterministic core suite (`-L core`, 21 tests)
 
 | Test | What it proves | Design §9 |
 |---|---|---|
@@ -128,6 +128,7 @@ manual runs and is never used by CTest.
 | `application_loop_time_test` | The supervision loop's decision instant: it is never earlier than the newest receive stamp of the transport batch the iteration acts on (a newer stamp wins, an older one keeps the clock read after the drain, equal instants agree, and neither end of the unsigned range wraps). This is the structural replacement for the microsecond race that let a legal state be fresh for the client and stale for the initializer. | phase-2 loop contract |
 | `application_initialization_test` | The initialization trajectory against the runtime's own formula: the first frame stays inside the continuity bounds and the target velocity limits, a plan the runtime would refuse is refused before anything is sent, completion requires the position and velocity tolerances over the whole stability window and is bounded by the deadline: a move past `trajectory.deadline_us` fails, latches and emits nothing, while a window that completed exactly on the deadline is still `Ready`, and the Ready hold keeps publishing fresh frames or reports the sample unusable without failing. It drives a real `ExecutionFsm` through the runtime fixture, so the generator and the lower layer agree on the same numbers. | phase-2 initialization …
 | `application_fsm_test` | The behaviour FSM and the serial supervision order as a pure function over a real `RobotClient` and a recording sink: the full path with its confirmations, the emergency stop latching and preempting, the exit path, `UnexpectedContext` and `RuntimeRestarted` latching, the timeout causes, the Reset clearing the latch only into `Standby` on a fresh `ZeroTorque`, and `StartLocomotion()` refusing without changing `Ready`. | phase-2 behaviour contract |
+| `producer_supervisor_test` | The external producer supervisor, as a pure decision component: a producer is selected only when it reports itself Ready with this deployment's layout and a period inside the runtime's own target deadline (another version, a failed status, an empty process identity, another layout and a period of zero are all refused), the producer is authorized under its own process identity, one preparation is outstanding at a time with a number that never repeats, a reply of another process, another preparation or another session is ignored rather than applied, the next preparation never reuses a number, a candidate frame must have this deployment's layout and joint count with finite values and non-negative gains, a frame generated from a state this deployment never published is a failure, a replacement drops the previous producer's preparation and candidate and queues its stop notice, the authorization notice names the preparation and the granted identity, a revocation clears both and names the context, the producer stays registered for the next authorization, and `Forget` makes a restarted process register again. | §6.3 |
 | `input_router_test` | The keyboard router: one press is one semantic event, the repeat guard a terminal without key-up needs, the batch priority (emergency stop first, velocity intent last), and the single body-velocity intent with its deadline. | phase-2 input contract |
 
 | `deployment_test` | The frozen deployment contract of a policy ONNX: two valid documents (a two-joint one whose three joint lists are in three different orders, and a three-joint one with a non-null action clip, a scaled and a clipped observation term) parse into the contract the SDK implements, `BuildJointMapping` resolves each list against the deployment table by exact name and refuses a model joint the table does not have, and about fifty mutations are refused with the exact JSON field path of their first violation - a missing or unknown field, schema version 2, a wrong policy type, a joint list of the wrong length, a duplicate joint name, a wrong unit, frame, clip or pipeline order, a negative gain, an unsupported normalizer, a null provenance field that `source.missing` does not explain, and a document that is not readable JSON (including the NaN/Infinity tokens and a number that overflows the double range). | §3.4, review focus 1 and 2 |
@@ -136,7 +137,7 @@ manual runs and is never used by CTest.
 | `onnx_model_test` | The model loader against ten generated models: the valid one loads with its contract, mapping and digest, and one inference returns a finite action; a model with no contract, another schema version, an input width or output name the graph contradicts, a dynamic width, two inputs, an unknown joint or a non-finite output is refused, as is a file that does not exist and a model whose observation is of the wrong width. The fixtures are generated from the frozen document, so no binary blob is checked in. | §3.4, review focus 1 |
 | `inference_test` | The inference worker: a new worker runs nothing until something is submitted, one request produces one response that carries the identity of its request (generation, epoch, state sequence and stamp, submission instant), a burst of submissions never blocks and is compressed rather than queued (every accepted request is either replaced or run, and replaced ones are counted), and a model that cannot answer produces a failed step rather than a silent zero action. `Stop()` is idempotent and joins. | §3.4, §8.4 |
 
-All twenty run without a peer, without a network and without a wall-clock
+All twenty-one run without a peer, without a network and without a wall-clock
 deadline: they assert exact tick semantics and counter values, and the only
 wall-clock waits in `logger_test` are hang guards.
 
@@ -357,13 +358,12 @@ on another machine.
   What is still missing is the *external* producer path: selecting
   `--locomotion-source external` is refused at startup, because the lifecycle
   protocol and its supervisor are Tasks 5 and 6 and are not implemented.
-* **No external producer yet.** The lifecycle *protocol* is frozen and tested -
-  `protocol/producer.idl`, `include/irmv/protocol/producer.hpp`, the codec in
-  `src/transport/producer_codec.cpp` and `producer_codec_test` cover the six
-  messages, the association key, the refusal rules and the six endpoints'
-  QoS. What is missing is the runtime side of it: the DDS transport for those
-  topics, the supervisor that selects one producer and prepares it, the example
-  process and the cross-process scenarios. `--locomotion-source external` is
+* **No external producer yet.** The protocol, its codec, its transport and the
+  supervisor are in place and tested (`protocol/producer.idl`,
+  `producer_codec_test`, `producer_supervisor_test`), but the supervision loop
+  does not yet drive any of them: no producer is selected, prepared or
+  authorized at runtime, no example process exists, and no cross-process
+  scenario exercises the external path. `--locomotion-source external` is
   therefore still refused at startup.
 * **No source is a legal configuration.** A deployment that configures no
   `policy.model_path` runs with no locomotion source (the default follows the

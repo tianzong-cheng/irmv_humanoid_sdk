@@ -168,6 +168,7 @@ add_library(
   src/application/behavior_fsm.cpp
   src/application/initialization.cpp
   src/application/input_router.cpp
+  src/application/producer_supervisor.cpp
   src/application/robot_client.cpp
 )
 target_compile_features(irmv_application PUBLIC cxx_std_17)
@@ -247,6 +248,24 @@ target_include_directories(
 # no DDS, no clock and no thread takes part.
 target_link_libraries(
   application_fsm_test PRIVATE irmv_application irmv_configuration
+)
+
+add_executable(producer_supervisor_test tests/unit/producer_supervisor_test.cpp)
+target_compile_features(producer_supervisor_test PRIVATE cxx_std_17)
+target_include_directories(
+  producer_supervisor_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(producer_supervisor_test PRIVATE irmv_application)
+
+add_test(NAME producer_supervisor_test COMMAND producer_supervisor_test)
+set_tests_properties(
+  producer_supervisor_test
+  PROPERTIES
+    LABELS core
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
 add_test(NAME application_fsm_test COMMAND application_fsm_test)
