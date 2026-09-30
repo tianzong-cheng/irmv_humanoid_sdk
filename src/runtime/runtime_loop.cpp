@@ -25,6 +25,7 @@
 #include "irmv/runtime/execution_fsm.hpp"
 #include "irmv/telemetry/diagnostic_write.hpp"
 #include "irmv/telemetry/logger.hpp"
+#include "irmv/telemetry/recorder.hpp"
 #include "irmv/transport/bounded_channel.hpp"
 #include "irmv/transport/dds_transport.hpp"
 
@@ -554,6 +555,47 @@ class JsonLine {
   std::size_t nested_{0};
   std::array<bool, kMaxDepth + 1> has_field_{};
 };
+
+// One coherent snapshot of this tick for the run recorder: the state the
+// runtime published, the target that was in force for it - the same frame the
+// trace records, so the two files describe the same run - the feedback the tick
+// used and the host send path's answer. It is built from values the tick
+// already holds; nothing here reads a device, a clock or a file.
+telemetry::RecordSample MakeRecordSample(const ExecutionFsm &fsm,
+                                         const runtime::TickResult &result,
+                                         bool feedback_valid) {
+  telemetry::RecordSample sample;
+  sample.stamp_us = result.state.stamp_us;
+  sample.state_seq = result.state.state_seq;
+  sample.execution_state = result.state.execution_state;
+  sample.output_action = result.state.output_action;
+  sample.stop_reason = result.state.stop_reason;
+  sample.fault_id = result.state.fault_id;
+  sample.healthy = result.state.healthy;
+  sample.damping_eligible = result.state.damping_eligible;
+  sample.feedback_seq = result.state.feedback.snapshot_seq;
+  sample.feedback_stamp_us = result.state.feedback.stamp_us;
+  sample.feedback_valid = feedback_valid;
+  sample.imu_valid = result.state.feedback.imu.valid;
+  sample.send_accepted = result.write_result.accepted;
+  sample.joint_count = std::min<std::uint32_t>(result.state.feedback.count,
+                                               protocol::kMaxJoints);
+  if (fsm.has_target()) {
+    const protocol::JointCommand &target = fsm.current_target();
+    sample.command_present = true;
+    sample.producer_id = target.producer_id;
+    sample.epoch = target.epoch;
+    sample.command_seq = target.command_seq;
+    sample.source_state_seq = target.source_state_seq;
+    sample.command_rx_us = fsm.target_rx_us();
+    sample.q = target.joints.q;
+    sample.dq = target.joints.dq;
+    sample.tau_ff = target.joints.tau_ff;
+    sample.kp = target.joints.kp;
+    sample.kd = target.joints.kd;
+  }
+  return sample;
+}
 
 OutputTraceRecord MakeTraceRecord(const ExecutionFsm &fsm,
                                   const runtime::TickResult &result,
@@ -1603,6 +1645,29 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
     }
   }
 
+  // The metadata of one recorded run: what a reader needs to interpret its rows
+  // without any other file. The digests identify the configuration and the
+  // joint layout in effect, and the units are the protocol's own.
+  const auto record_metadata = [](const configuration::RuntimeConfig &config) {
+    Json metadata;
+    metadata["schema_version"] = telemetry::kRecordSchemaVersion;
+    metadata["config_id"] = config.config_id;
+    metadata["layout_id"] = config.layout_id;
+    metadata["backend"] = config.backend;
+    metadata["control_hz"] = config.control_hz;
+    metadata["sample_hz"] = config.telemetry.recorder.sample_hz;
+    metadata["joint_count"] = config.joint_count();
+    metadata["joints"] = config.joint_names;
+    metadata["units"] = {{"position", "rad"},    {"velocity", "rad_s"},
+                         {"torque", "Nm"},       {"kp", "Nm_per_rad"},
+                         {"kd", "Nm_s_per_rad"}, {"time", "us"}};
+    metadata["row"] =
+        "one control tick: the published state, the target in force, the "
+        "feedback it used and the host send result; the joint columns follow "
+        "`joints` in order";
+    return metadata.dump(1);
+  };
+
   // The output trace records the fake backend's own output history, so it is
   // part of the fake deployment only: the backend gate above has already
   // refused every other backend, which is what keeps this option away from a
@@ -1628,8 +1693,50 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
     backend.Close();
     return kExitStartupError;
   }
+  // The run recorder: the control thread offers one coherent snapshot per
+  // recorded tick and never waits for it, so the disk cannot delay a tick. A
+  // run directory that cannot be created is a startup error, like a missing log
+  // directory, instead of a silent absence of evidence.
+  // The recorder samples at its own rate from a fixed phase: every
+  // `record_ratio`-th control tick, counted from the first one, so a run's rows
+  // are evenly spaced and its rate is the configured one rather than the
+  // control rate. The stride is what the recorder needs to tell a missing
+  // sample from the next recorded tick.
+  const std::uint32_t record_ratio = [&config]() {
+    if (!config.telemetry.recorder.enabled ||
+        config.telemetry.recorder.sample_hz == 0) {
+      return 0U;
+    }
+    const auto ratio = static_cast<std::uint32_t>(
+        std::lround(config.control_hz /
+                    static_cast<double>(config.telemetry.recorder.sample_hz)));
+    return ratio == 0 ? 1U : ratio;
+  }();
+  std::uint32_t record_tick = 0;
+  std::unique_ptr<telemetry::Recorder> recorder;
+  if (config.telemetry.recorder.enabled) {
+    telemetry::RecorderConfig recorder_config;
+    recorder_config.enabled = true;
+    recorder_config.sample_hz = config.telemetry.recorder.sample_hz;
+    recorder_config.queue_capacity = config.telemetry.recorder.queue_capacity;
+    recorder_config.stride = record_ratio;
+    recorder_config.directory = config.telemetry.recorder.directory;
+    recorder = std::make_unique<telemetry::Recorder>();
+    std::string recorder_error;
+    if (!recorder->Start(recorder_config, record_metadata(config),
+                         &recorder_error)) {
+      StderrFormat("robot_runtime: %s\n", recorder_error.c_str());
+      logger.Stop();
+      trace.reset();
+      backend.Close();
+      return kExitStartupError;
+    }
+  }
   if (!InstallStopHandlers()) {
     StderrLine("robot_runtime: cannot install the stop handlers\n");
+    if (recorder) {
+      static_cast<void>(recorder->Stop());
+    }
     logger.Stop();
     trace.reset();
     backend.Close();
@@ -1688,6 +1795,23 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
         result.dropped_result_count + result.dropped_event_count;
     LogTickEvents(logger, result);
 
+    if (recorder && record_ratio != 0) {
+      if (record_tick % record_ratio == 0) {
+        // The feedback of this tick is usable only when it describes every
+        // configured joint: a snapshot that is short or carries an invalid
+        // sample is recorded as such, never smoothed over.
+        bool feedback_valid =
+            result.state.feedback.count == config.joint_count();
+        for (std::uint32_t index = 0;
+             index < result.state.feedback.count && feedback_valid; ++index) {
+          feedback_valid = result.state.feedback.joints[index].valid;
+        }
+        static_cast<void>(
+            recorder->TryRecord(MakeRecordSample(fsm, result, feedback_valid)));
+      }
+      ++record_tick;
+    }
+
     if (trace) {
       // The torque the backend really recorded, one record per write the tick
       // made: hand it to the writer thread, never to a file.
@@ -1715,6 +1839,15 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
       // from a truncated one.
       if (trace) {
         trace->Stop();
+      }
+      // The recorder is closed before the summary line, so everything it could
+      // not keep is on disk by the time the process reports it stopped. Its own
+      // index carries the counts a reader needs - rows, chunks, gaps, drops and
+      // failed writes - which is where they belong, next to the samples they
+      // describe.
+      if (recorder) {
+        static_cast<void>(recorder->Stop());
+        recorder.reset();
       }
       ReportCleanStop(logger, counters, transport,
                       trace ? trace->counters() : OutputTrace::Counters{});

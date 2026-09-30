@@ -370,14 +370,16 @@ on another machine.
   `policy.model_path` runs with no locomotion source (the default follows the
   configuration), which is what the shipped Fake one does, and the existing
   process entries still pass unchanged.
-* **No `Recorder` in the runtime yet.** The recorder itself is implemented and
-  tested - a bounded handoff the control thread pushes into without ever
-  allocating, blocking or touching a file, a worker that writes columnar chunks
-  and renames them into place only when complete, a metadata file per run and an
-  index that reports every gap in the published sequence. What is missing is the
-  wiring: the runtime does not yet build a `RecordSample` per sampled tick, no
-  `telemetry.recorder` block exists in the configuration, and no time-range
-  reader or NPZ conversion (Task 8) exists. No long run has been recorded.
+* **The `Recorder` is wired and records, but no long run has been measured
+  yet.** The recorder, its configuration and the runtime wiring are in place: a
+  `telemetry.recorder` block decides whether a run records, at what rate and
+  with how much handoff, the runtime builds one coherent sample per sampled tick
+  and never waits for the disk, and the run's own index reports its rows, chunks
+  and gaps. A six-second smoke run of the Fake deployment records 597 rows over
+  2981 control ticks - exactly the configured 100 Hz on a 500 Hz loop - with no
+  gaps and no failed writes. What is still owed is the ten-minute run of §11.1
+  with its rate, drop and memory statistics, and the time-range reader with its
+  NPZ conversion (Task 8).
 * **No behavioural equivalence against the training side** beyond the package
   gate: the observation vector, the model action and the resulting joint target
   have not been compared element by element against the training environment for

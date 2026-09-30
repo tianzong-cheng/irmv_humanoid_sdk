@@ -168,17 +168,20 @@ void Recorder::Impl::RecordGaps(const RecordSample &sample) {
     last_state_seq = sample.state_seq;
     return;
   }
-  if (sample.state_seq > last_state_seq + 1) {
+  const protocol::Sequence stride = config.stride == 0 ? 1 : config.stride;
+  if (sample.state_seq > last_state_seq + stride) {
     // Everything between the last sample that was written and this one is
     // missing: the queue refused it, or a chunk write failed, or both. The gap
     // is recorded in the sequence space the runtime published, so a reader can
     // tell a missing stretch from a stretch that never existed.
     RecordGap gap;
-    gap.first_seq = last_state_seq + 1;
-    gap.last_seq = sample.state_seq - 1;
+    gap.first_seq = last_state_seq + stride;
+    gap.last_seq = sample.state_seq - stride;
     gap.first_stamp_us = 0;
     gap.last_stamp_us = sample.stamp_us;
-    gap.dropped = gap.last_seq - gap.first_seq + 1;
+    // The gap is measured in recorded samples, not in ticks: with a stride of
+    // five, four ticks between two rows are one missing sample.
+    gap.dropped = (gap.last_seq - gap.first_seq) / stride + 1;
     gap.reason = write_failed ? RecordGapReason::WriteFailed
                               : RecordGapReason::QueueFull;
     gaps.push_back(gap);
@@ -385,6 +388,7 @@ void Recorder::Impl::WriteIndex() const {
   }
   // The samples the queue refused are a gap of their own: the worker never saw
   // them, so they cannot show up as a hole between two samples it did write.
+  const protocol::Sequence stride = config.stride == 0 ? 1 : config.stride;
   const protocol::Sequence drop_first =
       owner.dropped_first_seq_.load(std::memory_order_relaxed);
   const protocol::Sequence drop_last =
@@ -395,7 +399,7 @@ void Recorder::Impl::WriteIndex() const {
     entry["last_seq"] = drop_last;
     entry["first_stamp_us"] = 0;
     entry["last_stamp_us"] = 0;
-    entry["dropped"] = drop_last - drop_first + 1;
+    entry["dropped"] = (drop_last - drop_first) / stride + 1;
     entry["reason"] = GapReasonName(RecordGapReason::QueueFull);
     gap_list.push_back(std::move(entry));
   }

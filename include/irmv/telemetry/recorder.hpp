@@ -57,6 +57,11 @@ struct RecorderConfig {
   // rate: the runtime offers the control tick to the recorder and the
   // recorder's caller decides which ticks those are.
   std::uint32_t sample_hz{100};
+  // How many control ticks pass between two recorded samples. The recorder is
+  // told this because the gap detector works in the sequence the runtime
+  // published: consecutive rows of a run sampled every fifth tick differ by
+  // five, and calling that a gap would make every run report a hole per row.
+  std::uint32_t stride{1};
   // Samples the handoff holds. Refused by Start() when it is above the fixed
   // capacity of this build.
   std::size_t queue_capacity{kRecordQueueCapacity};

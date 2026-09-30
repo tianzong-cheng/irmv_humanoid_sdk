@@ -73,10 +73,11 @@ std::filesystem::path MakeDirectory() {
 }
 
 bool StartRecorder(Recorder *recorder, const std::filesystem::path &directory,
-                   bool enabled = true) {
+                   bool enabled = true, std::uint32_t stride = 1) {
   RecorderConfig config;
   config.enabled = enabled;
   config.sample_hz = 100;
+  config.stride = stride;
   config.directory = directory;
   std::string error;
   const std::string metadata = R"({"schema_version":1,"joints":["a","b"]})";
@@ -257,6 +258,38 @@ int FullQueueIsCounted() {
   return 0;
 }
 
+// A run sampled every fifth control tick - what a 100 Hz recorder on a 500 Hz
+// control loop is - must not report a gap per row: consecutive rows differ by
+// the stride by construction, and only a jump beyond it is a missing sample.
+int StridedRun() {
+  const std::filesystem::path directory = MakeDirectory();
+  Recorder recorder;
+  constexpr std::uint32_t kStride = 5;
+  CHECK(StartRecorder(&recorder, directory, true, kStride));
+  // Twenty samples, each five ticks apart, and then a hole of two samples.
+  Sequence seq = 1;
+  for (int index = 0; index < 20; ++index) {
+    CHECK(recorder.TryRecord(MakeSample(seq)));
+    seq += kStride;
+  }
+  const Sequence hole_start = seq;
+  seq += 2 * kStride;
+  for (int index = 0; index < 5; ++index) {
+    CHECK(recorder.TryRecord(MakeSample(seq)));
+    seq += kStride;
+  }
+  CHECK(recorder.Stop());
+  const nlohmann::json index = ReadIndex(recorder.run_directory());
+  CHECK(index["rows_recorded"] == 25);
+  CHECK(index["gaps"].size() == 1);
+  // The gap names the two missing samples, not the eight ticks between them.
+  CHECK(index["gaps"][0]["first_seq"] == hole_start);
+  CHECK(index["gaps"][0]["last_seq"] == hole_start + kStride);
+  CHECK(index["gaps"][0]["dropped"] == 2);
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
 // A disabled recorder opens nothing at all - the configuration decides whether
 // a run exists, not the caller.
 int Disabled() {
@@ -277,6 +310,7 @@ int main() {
   failures += RecordedRun();
   failures += Gaps();
   failures += FullQueueIsCounted();
+  failures += StridedRun();
   failures += Disabled();
   if (failures == 0) {
     return 0;
