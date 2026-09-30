@@ -320,6 +320,30 @@ the gains land on the joints the document names).
 * `ldd build/robot_runtime` names no ONNX Runtime: the lower process still loads
   nothing but its own configuration.
 
+### The installed tree
+
+`cmake --install build --prefix <tmp>` produces the two processes, the pinned
+CycloneDDS pair, the pinned ONNX Runtime and the configuration under
+`<prefix>/etc/irmv`. Verified after this phase:
+
+* both installed binaries run from a directory that is not the source tree;
+* the installed `bin/application` resolves `libonnxruntime.so.1` through its own
+  `$ORIGIN/../lib` entry, and the installed `bin/robot_runtime` names no ONNX
+  Runtime at all (`ldd`);
+* every installed artifact's only rpath entry is that relative one, which the
+  install rules check with `file(RPATH_CHECK)`;
+* the installed configuration has no model path, so the installed application
+  starts with no locomotion source - `policy=none source=none` - and supervises
+  the runtime through its ordered states.
+
+Adding the policy layer made the first version of this fail: the ONNX Runtime
+library is not a system library and was only resolved through the *build* rpath,
+so the installed application could not start. The install rules now name the
+pinned ONNX Runtime prefix as a dependency search directory, exactly like the
+two DDS prefixes, so the resolution no longer depends on the build tree and an
+unresolved dependency is a configure-time error instead of a binary that fails
+on another machine.
+
 ### What is not in place yet
 
 * **`Locomotion` is entered, driven by the local policy.**

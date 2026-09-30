@@ -905,12 +905,14 @@ set_target_properties(
 # verifies below that the installed runtime carries exactly that one relative
 # entry.
 #
-# The scan runs on the build-tree binary, whose rpath still resolves the private
-# prefix of the dependency; the installed copy of the runtime is only written
-# afterwards. The two DDS libraries are named as search directories as well: the
-# pinned C++ binding carries no rpath of its own, so the C runtime it needs is
-# only found through its directory. This is the Linux layout ($ORIGIN, ELF
-# dependencies), which is the only platform this phase targets.
+# The scan runs on the build-tree binaries, whose rpath still resolves the
+# private prefixes of the dependencies; the installed copies are only written
+# afterwards. Every private dependency is named as a search directory, so the
+# resolution never depends on the build rpath: the pinned CycloneDDS C++ binding
+# carries no rpath of its own (its C runtime is only found through its
+# directory) and the pinned ONNX Runtime lives in a prefix of its own as well.
+# This is the Linux layout ($ORIGIN, ELF dependencies), which is the only
+# platform this phase targets.
 install(
   CODE "
 set(_irmv_libdir \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}\")
@@ -920,6 +922,7 @@ file(
               \"$<TARGET_FILE:application>\"
   DIRECTORIES \"$<TARGET_FILE_DIR:CycloneDDS-CXX::ddscxx>\"
             \"$<TARGET_FILE_DIR:CycloneDDS::ddsc>\"
+            \"${IRMV_ONNXRUNTIME_ROOT}/lib\"
   RESOLVED_DEPENDENCIES_VAR _irmv_resolved
   UNRESOLVED_DEPENDENCIES_VAR _irmv_unresolved
   PRE_EXCLUDE_REGEXES
@@ -928,6 +931,7 @@ file(
     \"^ld-linux\"
   POST_EXCLUDE_REGEXES
     \"^/lib/\" \"^/lib64/\" \"^/usr/lib/\" \"^/usr/lib64/\" \"^/usr/local/lib/\"
+  POST_INCLUDE_REGEXES \"^libonnxruntime\" \"^libddsc\"
 )
 if(_irmv_unresolved)
   message(
