@@ -372,7 +372,7 @@ on another machine.
   `policy.model_path` runs with no locomotion source (the default follows the
   configuration), which is what the shipped Fake one does, and the existing
   process entries still pass unchanged.
-* **The `Recorder` is wired and records, and a run can be read back.** The recorder, its configuration and the runtime wiring are in place: a
+* **The `Recorder` is wired, records a long run, and a run can be read back.** The recorder, its configuration and the runtime wiring are in place: a
   `telemetry.recorder` block decides whether a run records, at what rate and
   with how much handoff, the runtime builds one coherent sample per sampled tick
   and never waits for the disk, and the run's own index reports its rows, chunks
@@ -380,8 +380,34 @@ on another machine.
   2981 control ticks - exactly the configured 100 Hz on a 500 Hz loop - with no
   gaps and no failed writes, and `tools/read_record` reads a run back by time
   (20 rows in a 197 ms window of a 100 Hz run, with the gaps of a run reported
-  next to its rows). What is still owed is the ten-minute run of §11.1 with its
-  rate, drop and memory statistics, and the NPZ conversion of a run.
+  next to its rows), and the NPZ conversion is covered end to end by
+  `record_export_test` on a real four-second run.
+
+### The ten-minute recorded run (§11.1)
+
+A twelve-joint Fake deployment (`tools/make_test_model.py --fake-deployment`)
+was recorded for exactly ten minutes at 100 Hz on the 500 Hz control loop:
+
+| Measure | Value |
+|---|---|
+| wall clock | 10:00.01 (`/usr/bin/time -v`, 23.7 s user + 8.2 s system) |
+| control ticks | 299,988 in the shutdown line, 17 overruns, worst 13.0 ms |
+| recorded rows | 59,998 in 67 chunks (`chunk_0.bin` … `chunk_66.bin`) |
+| measured rate | 99.997 Hz from the stamps, 100.001 Hz from the tick stride |
+| sampling stride | exactly 5 control ticks per row, constant across the run (every chunk spans 4,496 or 2,986 ticks for its 900 or 598 rows) |
+| gaps | none: 0 missing samples, 0 write failures |
+| run size | 35.2 MB for 12 joints, 586 bytes per row |
+| peak RSS | 13.8 MB (`/usr/bin/time -v`) |
+
+The run's own `index.json` and `meta.json` carry all of it, and
+`tools/read_record` returns the same numbers for the whole run and for any
+window of it. What this does *not* measure is a machine: it is the FakeBackend,
+so the numbers describe the host loop and the recorder, never a device.
+
+What is still owed from §11.1 is the thirty-minute state-switching stability run
+with its memory, thread and handle statistics, and a recorded *application*
+run - the recorder samples the runtime, which is where the coherent snapshot
+lives.
 * **No behavioural equivalence against the training side** beyond the package
   gate: the observation vector, the model action and the resulting joint target
   have not been compared element by element against the training environment for
