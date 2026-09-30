@@ -267,6 +267,72 @@ not to the sender's `stamp_us`: a delayed packet is judged by when the runtime
 received it. A stalled producer therefore costs the session its target, not its
 session; a dead supervisor costs it the session.
 
+## External producer interface
+
+The five messages above are the contract between `robot_runtime` and its
+supervisor. An **external producer** speaks a second, independent interface with
+the *application*: it never acquires a session, never requests a mode, never
+resets and never publishes a supervision heartbeat, and the runtime never learns
+that a target came from one. The IDL is `protocol/producer.idl` (the same
+`irmv::protocol::wire` module, compiled with `execution.idl` included so the
+identity, the bounded texts, `JointCommand` and `StopReason` have exactly one
+definition), and the C++ mirror is `include/irmv/protocol/producer.hpp`.
+
+| Topic | Direction | RELIABILITY | DURABILITY | HISTORY | Resource limits | `max_blocking_time` |
+|---|---|---|---|---|---|---|
+| `irmv/v1/producer/announcement` | producer → application | RELIABLE | VOLATILE | KEEP_LAST 8 | 8 / 1 / 8 | 10 ms |
+| `irmv/v1/producer/prepare_request` | application → producer | RELIABLE | VOLATILE | KEEP_LAST 8 | 8 / 1 / 8 | 10 ms |
+| `irmv/v1/producer/prepare_result` | producer → application | RELIABLE | VOLATILE | KEEP_LAST 8 | 8 / 1 / 8 | 10 ms |
+| `irmv/v1/producer/authorization` | application → producer | RELIABLE | VOLATILE | KEEP_LAST 8 | 8 / 1 / 8 | 10 ms |
+| `irmv/v1/producer/stop` | application → producer | RELIABLE | VOLATILE | KEEP_LAST 8 | 8 / 1 / 8 | 10 ms |
+| `irmv/v1/producer/velocity_intent` | application → producer | BEST_EFFORT | VOLATILE | KEEP_LAST 1 | 1 / 1 / 1 | – |
+
+The joint-level target is not a seventh message: a producer publishes
+`JointCommand` on `irmv/v1/joint_command`, exactly like the initialization
+generator and the local policy. These six messages carry only the lifecycle
+around it.
+
+| Message | Fields |
+|---|---|
+| `ProducerAnnouncement` | `protocol_version`, `producer_process_id`, `runtime_id`, `layout_id`, `target_period_us`, `reads_robot_state`, `status`, `reason`, `detail` |
+| `PrepareRequest` | `protocol_version`, `producer_process_id`, `prepare_id`, `runtime_id`, `session_id`, `producer_id`, `epoch`, `target_period_us`, `intent` |
+| `PrepareResult` | the request's association fields, `status`, `reason`, `detail`, `first_command` |
+| `AuthorizationNotice` | `protocol_version`, `producer_process_id`, `prepare_id`, `runtime_id`, `session_id`, `producer_id`, `epoch`, `first_command_seq` |
+| `StopNotice` | `protocol_version`, `producer_process_id`, `runtime_id`, `session_id`, `producer_id`, `epoch`, `reason` |
+| `VelocityIntentMessage` | `protocol_version`, `producer_process_id`, `seq`, `forward`, `lateral`, `yaw`, `send_stamp_us`, `valid_for_us` |
+
+### Rules
+
+* **The association key** of a preparation is
+  `{producer_process_id, prepare_id, runtime_id, session_id}`. A result or a
+  notice whose key does not match the preparation the application opened belongs
+  to another run and is dropped; an equal `prepare_id` from another process
+  instance is never accepted. `prepare_id` is never zero.
+* **Ready means a frame.** A `PrepareResult` may only be `READY` or `FAILED`. A
+  `READY` carries the complete first frame that the application will put into
+  its `TRACKING` request; a `READY` without one, or with a frame the execution
+  codec refuses, is malformed. A `FAILED` carries a reason.
+* **The authorization notice follows the runtime's answer**, never leads it. It
+  is sent only after the `TRACKING` request was applied and a later state showed
+  the context, and its `epoch`/`producer_id` are the ones that request proposed
+  and the frame carried. A producer that receives it may publish frames with a
+  strictly increasing `command_seq` from the first frame's sequence on.
+* **The stop notice is a notice.** It tells a producer that its context ended so
+  it can stop computing, but it is not what withdraws the right to publish: the
+  runtime withdraws the epoch on its own when the target times out, the
+  supervisor heartbeats stop, the context is replaced or the session ends. A
+  producer that never receives a stop notice, or that ignores one, is refused by
+  the runtime all the same the moment it publishes a frame of a withdrawn epoch.
+* **The velocity intent expires.** `valid_for_us` is non-zero, and a producer
+  that sees no fresh intent inside it tracks zero. The intent travels inside the
+  `PrepareRequest` as well, so a producer prepares for the velocity it is being
+  asked to track rather than for the last one it happened to see.
+* **Identity fields are not authentication.** `producer_process_id`,
+  `producer_id` and the session identify a run so that a stale or duplicated
+  sender cannot be mistaken for the current one; they do not prove who sent a
+  sample. The default deployment trusts its DDS network, and a deployment that
+  admits untrusted participants needs sender authentication of its own.
+
 ## Faults
 
 A fault latches. The runtime commands the degraded output of the fault

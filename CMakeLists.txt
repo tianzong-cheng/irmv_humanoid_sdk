@@ -543,12 +543,22 @@ idlcxx_generate(
   FILES "${PROJECT_SOURCE_DIR}/protocol/execution.idl"
   WARNINGS no-implicit-extensibility
 )
+# The producer interface shares the execution module's types (the identity, the
+# bounded texts, JointCommand and StopReason), so it includes execution.idl
+# rather than restating them: one definition of the frame both protocols carry.
+idlcxx_generate(
+  TARGET producer_idl
+  FILES "${PROJECT_SOURCE_DIR}/protocol/producer.idl"
+  INCLUDES "${PROJECT_SOURCE_DIR}/protocol"
+  WARNINGS no-implicit-extensibility
+)
 
 add_library(
   irmv_transport
   src/transport/client_transport.cpp
   src/transport/codec.cpp
   src/transport/dds_transport.cpp
+  src/transport/producer_codec.cpp
 )
 target_compile_features(irmv_transport PUBLIC cxx_std_17)
 target_include_directories(
@@ -564,6 +574,7 @@ target_link_libraries(
     irmv_configuration
     CycloneDDS-CXX::ddscxx
     execution_idl
+    producer_idl
   PRIVATE Threads::Threads
 )
 
@@ -581,6 +592,25 @@ add_test(NAME channel_test COMMAND channel_test)
 # The bounded-channel handoff is deterministic: it never needs a peer, so it is
 # part of the core suite and runs under the sanitizers as well.
 set_tests_properties(channel_test PROPERTIES LABELS core)
+
+add_executable(producer_codec_test tests/integration/producer_codec_test.cpp)
+target_compile_features(producer_codec_test PRIVATE cxx_std_17)
+target_include_directories(
+  producer_codec_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(producer_codec_test PRIVATE irmv_transport)
+
+add_test(NAME producer_codec_test COMMAND producer_codec_test)
+set_tests_properties(
+  producer_codec_test
+  PROPERTIES
+    LABELS integration
+    TIMEOUT 60
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
 
 add_executable(dds_codec_test tests/integration/dds_codec_test.cpp)
 target_compile_features(dds_codec_test PRIVATE cxx_std_17)

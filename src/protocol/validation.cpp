@@ -88,6 +88,27 @@ bool IsValid(FaultReason value) {
   return false;
 }
 
+bool IsValid(ProducerStatus value) {
+  switch (value) {
+    case ProducerStatus::Ready:
+    case ProducerStatus::Failed:
+      return true;
+  }
+  return false;
+}
+
+bool IsValid(ProducerFailureReason value) {
+  switch (value) {
+    case ProducerFailureReason::None:
+    case ProducerFailureReason::Busy:
+    case ProducerFailureReason::Incompatible:
+    case ProducerFailureReason::PrepareFailed:
+    case ProducerFailureReason::Internal:
+      return true;
+  }
+  return false;
+}
+
 bool IsValid(StopReason value) {
   switch (value) {
     case StopReason::None:

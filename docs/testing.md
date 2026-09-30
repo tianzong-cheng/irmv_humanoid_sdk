@@ -12,14 +12,14 @@ says explicitly what no test here proves.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j2
 
-ctest --test-dir build --output-on-failure          # everything (47 tests)
+ctest --test-dir build --output-on-failure          # everything (48 tests)
 ctest --test-dir build -L core --output-on-failure  # deterministic core suite
 ctest --test-dir build -L integration --output-on-failure
 ctest --test-dir build -R integration_normal --output-on-failure
 ```
 
 The whole matrix takes about a minute and a half on a developer machine
-(`ctest -N` reports 20 core and 27 integration entries) and each integration
+(`ctest -N` reports 20 core and 28 integration entries) and each integration
 entry is bounded by its own CTest timeout (30 s for `dds_codec_test`, 180 s for
 `runtime_cli_test` and `application_cli_test`, 300 s for `application_client_test`
 and per scenario, 600 s for `application_flow_test`).
@@ -140,7 +140,7 @@ All twenty run without a peer, without a network and without a wall-clock
 deadline: they assert exact tick semantics and counter values, and the only
 wall-clock waits in `logger_test` are hang guards.
 
-## Real-DDS suite (`-L integration`, 27 tests)
+## Real-DDS suite (`-L integration`, 28 tests)
 
 ### Process-level entries
 
@@ -148,6 +148,7 @@ wall-clock waits in `logger_test` are hang guards.
 |---|---|
 | `dds_codec_test` | Against a live endpoint: the codec round trip and field-by-field equality of the core types - including the empty, unused first command of a session, stop or reset request and the rejection of an over-long or missing joint vector - codec rejection of malformed samples, that the running transport's readers and writers really carry the frozen QoS (durability, reliability, history depth and kind, resource limits, and `max_blocking_time` on the reliable channels) as read back from the endpoints, and that a peer process sees the published samples. It also proves the transport's own lane policy for heartbeats: a batch that receives a foreign sample after the owner's still hands the owner sample over first, and a lane that is full refuses what does not fit and counts it instead of displacing an older entry. |
 | `runtime_cli_test` | The process contract of `robot_runtime`: every startup rejection (missing/malformed configuration, `backend: real`, a broken scenario, unknown argument, out-of-range domain) exits non-zero with a message and without starting DDS; the normal path reaches `ZeroTorque` and exits 0 with a clean shutdown on `SIGTERM`; an unsupervised runtime keeps running; a latched fault keeps running and refuses to leave, and a hard kill is reported as such. |
+| `producer_codec_test` | The external producer interface: the six messages round-trip field by field, and every malformed one is refused whole - another protocol version, an unknown status or reason, a text count above the wire capacity, a preparation number of zero, a velocity intent with no validity period, a `READY` result without a first frame, a nested frame the execution codec refuses, and a `READY` producer that reports a failure reason at the same time. It also pins the six frozen topic names and QoS, and reads the policies back from a writer and a reader built with the frozen descriptors (a lifecycle endpoint is reliable, volatile, keep-last eight with a 10 ms blocking time; the velocity intent is best effort, volatile, keep-last one), then publishes a real `PrepareRequest` and receives it. | §6.3 |
 | `policy_package_test` | The SDK half of the ONNX deployment contract: `tools/verify_policy.py` accepts a package whose document agrees with the model it is embedded in and is numerically unchanged, and refuses a model without the contract, with the contract twice, with a document of another policy type, a document claiming another input, a document with an unsupported observation frame, a model whose weights moved, and a model saved at an ONNX IR version above the one the pinned runtime loads. The models are built in a temporary directory, so the check needs no simulator and no checked-in binary. | §3.4, §11.1 |
 | `policy_locomotion_test` | The acceptance of the local policy, end to end: a generated twelve-joint Fake deployment (a configuration and a policy ONNX whose document commands exactly those joints) is started as a real runtime and a real application, and the application is driven through its terminal from Standby into Damping, through Initializing into Ready, into Locomotion, and out through the ordered exit. It asserts that the policy was loaded from the configured path, that the runtime really entered Tracking, that holding the behaviour for far longer than the target and source-state deadlines produces neither a `LocalPolicyFailed` latch nor a runtime target timeout, and that the exit is confirmed. The model's weights are small on purpose: its first frame has to be a continuous target, and the runtime's own continuity guard - never a relaxed test configuration - is what enforces that. | §11 and §11.1 (local ONNX locomotion) |
 | `confirmation_test` | The test-only confirmation helper: a request is only proven when a later-published `Applied` result and an agreeing `RobotState` identify it, in both arrival orders, and a late `Applied` after a `Fault` never confirms anything. Pure protocol logic, no DDS. |
@@ -356,10 +357,14 @@ on another machine.
   What is still missing is the *external* producer path: selecting
   `--locomotion-source external` is refused at startup, because the lifecycle
   protocol and its supervisor are Tasks 5 and 6 and are not implemented.
-* **No external producer.** The lifecycle protocol (announcement, preparation,
-  authorization, stop notice, velocity intent), its DDS endpoints and the
-  supervisor that selects one source at a time are phase 3's Tasks 5 and 6 and
-  are not implemented; `--locomotion-source external` is refused at startup.
+* **No external producer yet.** The lifecycle *protocol* is frozen and tested -
+  `protocol/producer.idl`, `include/irmv/protocol/producer.hpp`, the codec in
+  `src/transport/producer_codec.cpp` and `producer_codec_test` cover the six
+  messages, the association key, the refusal rules and the six endpoints'
+  QoS. What is missing is the runtime side of it: the DDS transport for those
+  topics, the supervisor that selects one producer and prepares it, the example
+  process and the cross-process scenarios. `--locomotion-source external` is
+  therefore still refused at startup.
 * **No source is a legal configuration.** A deployment that configures no
   `policy.model_path` runs with no locomotion source (the default follows the
   configuration), which is what the shipped Fake one does, and the existing

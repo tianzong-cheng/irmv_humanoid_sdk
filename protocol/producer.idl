@@ -1,0 +1,148 @@
+// The external producer interface of docs/runtime-protocol.md: the lifecycle
+// messages an external policy process exchanges with the application, and the
+// velocity intent the application sends it.
+//
+// It is deliberately separate from execution.idl. The five execution messages
+// are the frozen contract between the runtime and its supervisor and they do
+// not change here; these six messages are the contract between the *application*
+// and a producer process, and the application is the only supervisor of a
+// producer: a producer never acquires a session, never requests a mode, never
+// resets and never publishes a supervision heartbeat.
+//
+// Units are the protocol's units throughout: radians, radians per second,
+// newton metres, metres per second and microseconds. Every lifecycle message
+// carries the 16 byte instance identity of the producer process that sent it,
+// and every preparation message carries a non-zero preparation number that ties
+// a result and its authorisation to one preparation.
+#include "execution.idl"
+
+module irmv {
+  module protocol {
+    module wire {
+      const unsigned long PRODUCER_PROTOCOL_VERSION = 1;
+
+      // Whether a producer is usable. A producer reports FAILED with a reason
+      // instead of staying silent: an application that never hears from its
+      // producer must not be able to tell "not ready yet" from "will never be
+      // ready".
+      enum ProducerStatus {
+        PRODUCER_READY,
+        PRODUCER_FAILED
+      };
+
+      enum ProducerFailureReason {
+        PRODUCER_FAILURE_NONE,
+        PRODUCER_FAILURE_BUSY,
+        PRODUCER_FAILURE_INCOMPATIBLE,
+        PRODUCER_FAILURE_PREPARE_FAILED,
+        PRODUCER_FAILURE_INTERNAL
+      };
+
+      // One producer process declaring itself. It names the runtime instance it
+      // observed and the layout it would command, so the application can refuse
+      // an incompatible producer before anything is prepared.
+      @final
+      @topic
+      struct ProducerAnnouncement {
+        unsigned long protocol_version;
+        Id producer_process_id;
+        Id runtime_id;
+        Text64 layout_id;
+        unsigned long target_period_us;
+        boolean reads_robot_state;
+        ProducerStatus status;
+        ProducerFailureReason reason;
+        Text256 detail;
+      };
+
+      // The body-frame velocity the producer should track, in m/s, m/s and
+      // rad/s, with the instant it was sent and how long it stays valid. The
+      // sequence increases with every message; a producer that sees no fresh
+      // intent inside the validity period tracks zero.
+      @final
+      @topic
+      struct VelocityIntentMessage {
+        unsigned long protocol_version;
+        Id producer_process_id;
+        unsigned long long seq;
+        double forward;
+        double lateral;
+        double yaw;
+        unsigned long long send_stamp_us;
+        unsigned long long valid_for_us;
+      };
+
+      // The application asking a producer to prepare one frame for a
+      // preparation number. The intent travels with it: a producer prepares for
+      // the velocity it is being asked to track, not for the last one it saw.
+      @final
+      @topic
+      struct PrepareRequest {
+        unsigned long protocol_version;
+        Id producer_process_id;
+        unsigned long long prepare_id;
+        Id runtime_id;
+        Id session_id;
+        Id producer_id;
+        unsigned long long epoch;
+        unsigned long target_period_us;
+        VelocityIntentMessage intent;
+      };
+
+      // The producer's answer: READY with the complete first frame, or FAILED
+      // with a reason. The first frame is what the application puts into the
+      // Tracking request, so it carries every joint and the identity the
+      // producer used to generate it.
+      @final
+      @topic
+      struct PrepareResult {
+        unsigned long protocol_version;
+        Id producer_process_id;
+        unsigned long long prepare_id;
+        Id runtime_id;
+        Id session_id;
+        Id producer_id;
+        unsigned long long epoch;
+        ProducerStatus status;
+        ProducerFailureReason reason;
+        Text256 detail;
+        JointCommand first_command;
+      };
+
+      // The application telling a producer that its execution context is live:
+      // the authorization the runtime granted, with the preparation it belongs
+      // to and the sequence of the first frame the runtime adopted. From here
+      // the producer publishes strictly increasing frames; the notice is not an
+      // authorization to publish anything the runtime would not accept.
+      @final
+      @topic
+      struct AuthorizationNotice {
+        unsigned long protocol_version;
+        Id producer_process_id;
+        unsigned long long prepare_id;
+        Id runtime_id;
+        Id session_id;
+        Id producer_id;
+        unsigned long long epoch;
+        unsigned long long first_command_seq;
+      };
+
+      // The application telling a producer to stop. It is a notice, never the
+      // reason a producer loses its rights: the runtime withdraws the epoch on
+      // its own, and a producer that never receives this message is still
+      // refused by the runtime the moment it publishes a frame of a withdrawn
+      // epoch.
+      @final
+      @topic
+      struct StopNotice {
+        unsigned long protocol_version;
+        Id producer_process_id;
+        Id runtime_id;
+        Id session_id;
+        Id producer_id;
+        unsigned long long epoch;
+        StopReason reason;
+      };
+    };
+  };
+};
