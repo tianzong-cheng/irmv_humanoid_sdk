@@ -6,6 +6,12 @@ the identity rules and the timing semantics are the ones the implementation and
 its real-DDS tests enforce. The IDL is `protocol/execution.idl` (module
 `irmv::protocol::wire`), the C++ mirror is `include/irmv/protocol/types.hpp`.
 
+The [external producer interface](#external-producer-interface) below is a
+second, independent contract between the *application* and a producer process,
+frozen in the same module: `protocol/producer.idl` and
+`include/irmv/protocol/producer.hpp`. It does not change any of the five
+messages or topics on this page.
+
 ## Encoding and bounds
 
 * `protocol_version` is `1`. A packet with any other value is rejected
