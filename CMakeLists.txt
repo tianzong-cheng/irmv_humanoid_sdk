@@ -524,6 +524,7 @@ add_library(
   irmv_telemetry
   src/telemetry/diagnostic_write.cpp
   src/telemetry/logger.cpp
+  src/telemetry/record_reader.cpp
   src/telemetry/recorder.cpp
 )
 target_compile_features(irmv_telemetry PUBLIC cxx_std_17)
@@ -563,6 +564,23 @@ target_link_libraries(
 )
 
 add_test(NAME recorder_test COMMAND recorder_test)
+set_tests_properties(recorder_test PROPERTIES LABELS core TIMEOUT 120)
+
+add_executable(record_reader_test tests/unit/record_reader_test.cpp)
+target_compile_features(record_reader_test PRIVATE cxx_std_17)
+target_include_directories(
+  record_reader_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(
+  record_reader_test PRIVATE irmv_telemetry Threads::Threads
+                            nlohmann_json::nlohmann_json
+)
+
+add_test(NAME record_reader_test COMMAND record_reader_test)
+set_tests_properties(record_reader_test PROPERTIES LABELS core TIMEOUT 120)
 set_tests_properties(recorder_test PROPERTIES LABELS core TIMEOUT 120)
 
 add_test(NAME logger_test COMMAND logger_test)
@@ -700,6 +718,18 @@ set_tests_properties(
     LABELS integration
     TIMEOUT 180
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
+# The read tool of a recorded run: it walks one run directory and prints what it
+# holds. It only reads - no DDS, no device - and it is installed with the two
+# processes because reading a run back is part of operating one.
+add_executable(read_record tools/read_record.cpp)
+target_compile_features(read_record PRIVATE cxx_std_17)
+target_include_directories(
+  read_record PRIVATE "${PROJECT_SOURCE_DIR}/include"
+)
+target_link_libraries(
+  read_record PRIVATE irmv_telemetry nlohmann_json::nlohmann_json
 )
 
 # The application: the supervising upper process of a separate robot_runtime.
@@ -937,6 +967,7 @@ add_custom_target(
 #
 # The test clients of this phase are never installed.
 install(TARGETS robot_runtime RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+install(TARGETS read_record RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(TARGETS application RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 
 # The configuration of the default Fake deployment and the schema that describes
