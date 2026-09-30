@@ -42,9 +42,10 @@ namespace irmv::telemetry {
 // at the default 100 Hz.
 inline constexpr std::size_t kRecordChunkRows = 900;
 
-// Capacity of the handoff queue. At 100 Hz this is roughly two seconds of
-// samples, which is far more than a healthy disk needs and small enough to stay
-// a bounded amount of memory (a sample is a few kilobytes).
+// The largest handoff this build can hold. The channel is fixed capacity, so a
+// configuration may ask for less but never for more: Start() refuses a larger
+// request with a message instead of silently imposing its own bound. At 100 Hz
+// 256 samples is roughly two seconds of a slow disk falling behind.
 inline constexpr std::size_t kRecordQueueCapacity = 256;
 
 // One run's configuration.
@@ -56,6 +57,9 @@ struct RecorderConfig {
   // rate: the runtime offers the control tick to the recorder and the
   // recorder's caller decides which ticks those are.
   std::uint32_t sample_hz{100};
+  // Samples the handoff holds. Refused by Start() when it is above the fixed
+  // capacity of this build.
+  std::size_t queue_capacity{kRecordQueueCapacity};
   // Where one run's directory is created. The directory itself must exist.
   std::filesystem::path directory;
 };

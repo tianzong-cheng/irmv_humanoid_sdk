@@ -66,12 +66,34 @@ enum class LogLevel {
 // and the logger prints. Returns "UNKNOWN" for a value outside the enum.
 const char *LogLevelName(LogLevel level) noexcept;
 
+// The run recorder's own configuration. It is separate from the logger's: the
+// two write different things at different rates into the same tree, and a
+// deployment may well want one without the other.
+struct RecorderConfig {
+  // Whether this run records at all. A disabled recorder opens no file and
+  // accepts no sample.
+  bool enabled{false};
+  // The sampling rate of the recorder, independent of the control rate: the
+  // runtime offers every control tick, and the recorder is asked for the ones
+  // that fall on this period. 100 Hz is the shipped default; the contract
+  // allows the full control rate as well.
+  std::uint32_t sample_hz{100};
+  // Capacity of the handoff between the control thread and the writer. At the
+  // sampling rate this bounds how long a slow disk may fall behind before
+  // samples are dropped - and each drop is counted and reported as a gap.
+  std::size_t queue_capacity{256};
+  // Where one directory per run is created. It must exist; the recorder never
+  // creates a path it was not told to use.
+  std::filesystem::path directory;
+};
+
 struct TelemetryConfig {
   LogLevel level{LogLevel::Info};
   std::filesystem::path directory;
   std::uint64_t rotate_bytes{0};
   std::uint32_t retained_files{0};
   std::size_t queue_capacity{0};
+  RecorderConfig recorder;
 };
 
 struct DdsConfig {

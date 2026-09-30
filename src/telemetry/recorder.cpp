@@ -120,6 +120,13 @@ bool Recorder::Impl::Prepare(const RecorderConfig &recorder_config,
                              std::string meta_json, std::string *error) {
   config = recorder_config;
   metadata = std::move(meta_json);
+  if (config.queue_capacity == 0 ||
+      config.queue_capacity > kRecordQueueCapacity) {
+    *error = "the recorder queue capacity must be 1.." +
+             std::to_string(kRecordQueueCapacity) + ", got " +
+             std::to_string(config.queue_capacity);
+    return false;
+  }
   if (config.directory.empty()) {
     *error = "the recorder has no directory";
     return false;

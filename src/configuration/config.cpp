@@ -99,7 +99,12 @@ Json CanonicalConfig(const RuntimeConfig &config) {
         {"directory", config.telemetry.directory.string()},
         {"rotate_bytes", config.telemetry.rotate_bytes},
         {"retained_files", config.telemetry.retained_files},
-        {"queue_capacity", config.telemetry.queue_capacity}}},
+        {"queue_capacity", config.telemetry.queue_capacity},
+        {"recorder",
+         {{"enabled", config.telemetry.recorder.enabled},
+          {"sample_hz", config.telemetry.recorder.sample_hz},
+          {"queue_capacity", config.telemetry.recorder.queue_capacity},
+          {"directory", config.telemetry.recorder.directory.string()}}}}},
       {"dds",
        {{"domain", config.dds.domain}, {"interface", config.dds.interface}}}};
 }
@@ -307,6 +312,51 @@ RuntimeConfig LoadConfig(const std::filesystem::path &path,
   config.telemetry.queue_capacity = static_cast<std::size_t>(
       PositiveIntegerMember(telemetry, "queue_capacity", "telemetry",
                             std::numeric_limits<std::uint32_t>::max()));
+
+  // The recorder's own section. Its directory defaults to the log directory of
+  // the same document, because a deployment that keeps one keeps the other next
+  // to it; an explicit value overrides that.
+  // The section is optional: a document that does not carry it describes a
+  // deployment that does not record, with the sample rate, queue capacity and
+  // directory the schema states as its defaults, and an explicit
+  // `{"enabled": false}` means the same thing.
+  config.telemetry.recorder.directory = config.telemetry.directory;
+  const auto recorder_entry = telemetry.find("recorder");
+  if (recorder_entry != telemetry.end()) {
+    const Json &recorder = *recorder_entry;
+    const Json &recorder_enabled =
+        Member(recorder, "enabled", "telemetry.recorder");
+    if (!recorder_enabled.is_boolean()) {
+      Fail("telemetry.recorder.enabled", "must be a boolean");
+    }
+    config.telemetry.recorder.enabled = recorder_enabled.get<bool>();
+    config.telemetry.recorder.sample_hz = static_cast<std::uint32_t>(
+        PositiveIntegerMember(recorder, "sample_hz", "telemetry.recorder",
+                              std::numeric_limits<std::uint32_t>::max()));
+    if (static_cast<double>(config.telemetry.recorder.sample_hz) >
+        config.control_hz) {
+      // A sampling rate above the control rate would ask for ticks that do not
+      // exist; the recorder's period is derived from this and the control
+      // period.
+      Fail("telemetry.recorder.sample_hz",
+           "must not exceed runtime.control_hz");
+    }
+    config.telemetry.recorder.queue_capacity = static_cast<std::size_t>(
+        PositiveIntegerMember(recorder, "queue_capacity", "telemetry.recorder",
+                              std::numeric_limits<std::uint32_t>::max()));
+    const Json &recorder_directory =
+        Member(recorder, "directory", "telemetry.recorder");
+    if (recorder_directory.is_null()) {
+      config.telemetry.recorder.directory = config.telemetry.directory;
+    } else if (recorder_directory.is_string() &&
+               !recorder_directory.get<std::string>().empty()) {
+      config.telemetry.recorder.directory =
+          recorder_directory.get<std::string>();
+    } else {
+      Fail("telemetry.recorder.directory",
+           "must be a non-empty string or null");
+    }
+  }
 
   const Json &dds = ObjectMember(document, "dds", "");
   const Json &domain = Member(dds, "domain", "dds");

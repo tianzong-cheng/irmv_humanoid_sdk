@@ -234,6 +234,12 @@ int main() {
   CHECK(config.telemetry.rotate_bytes == 1048576);
   CHECK(config.telemetry.retained_files == 3);
   CHECK(config.telemetry.queue_capacity == 1024);
+  // The recorder's own section: shipped disabled, 100 Hz, and its directory
+  // following the log directory when it is null.
+  CHECK(!config.telemetry.recorder.enabled);
+  CHECK(config.telemetry.recorder.sample_hz == 100);
+  CHECK(config.telemetry.recorder.queue_capacity == 256);
+  CHECK(config.telemetry.recorder.directory == config.telemetry.directory);
 
   // The logging level covers the full report range: every level parses, the
   // level stays part of the configuration identity, and anything unknown is

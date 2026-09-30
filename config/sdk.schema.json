@@ -397,6 +397,33 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 4294967295
+        },
+        "recorder": {
+          "type": "object",
+          "required": ["enabled", "sample_hz", "queue_capacity", "directory"],
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "$comment": "Whether this run records. A disabled recorder opens no file and accepts no sample; the shipped Fake configuration ships it disabled, because recording writes megabytes per minute and is an explicit choice."
+            },
+            "sample_hz": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000,
+              "$comment": "The recorder's own sampling rate, independent of runtime.control_hz. LoadConfig refuses a rate above the control rate, because the ticks it would ask for do not exist. 100 Hz is the shipped default and the full control rate is allowed."
+            },
+            "queue_capacity": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 256,
+              "$comment": "Samples the handoff between the control thread and the recorder's writer holds. A full queue costs the sample - counted and reported as a gap in the run - and never delays the control tick. The upper bound is this build's fixed channel capacity."
+            },
+            "directory": {
+              "type": ["string", "null"],
+              "$comment": "Where one directory per run is created; null means the log directory of the same document. The recorder never creates a path it was not told to use."
+            }
+          },
+          "$comment": "The run recorder's own section. It is optional: a document without it describes a deployment that does not record, with the defaults sample_hz 100, queue_capacity 256 and the log directory of the same document, so an absent section and an explicit enabled=false are the same deployment."
         }
       }
     },

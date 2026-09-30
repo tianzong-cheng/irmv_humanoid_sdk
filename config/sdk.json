@@ -131,7 +131,13 @@
     "directory": "logs",
     "rotate_bytes": 1048576,
     "retained_files": 3,
-    "queue_capacity": 1024
+    "queue_capacity": 1024,
+    "recorder": {
+      "enabled": false,
+      "sample_hz": 100,
+      "queue_capacity": 256,
+      "directory": null
+    }
   },
   "dds": {
     "domain": 1,
