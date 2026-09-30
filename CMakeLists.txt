@@ -501,6 +501,25 @@ set_tests_properties(
 # twelve-joint Fake deployment whose model commands exactly those joints. It is
 # the only entry that proves the whole chain - the contract, the loader, the
 # worker, the first frame, the authorization and the published target.
+# The recorded run, exported: a real runtime records for a few seconds, the
+# reader walks the run and the NPZ conversion turns it into an archive the
+# consumer can interpret without the chunk format.
+add_test(
+  NAME record_export_test
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/integration/record_export_test.py"
+    "$<TARGET_FILE:robot_runtime>"
+    "${PROJECT_SOURCE_DIR}"
+)
+set_tests_properties(
+  record_export_test
+  PROPERTIES
+    LABELS integration
+    TIMEOUT 300
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
 add_test(
   NAME policy_locomotion_test
   COMMAND
