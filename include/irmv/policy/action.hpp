@@ -87,4 +87,37 @@ bool BuildCommand(const DeploymentContract &contract,
                   protocol::Id producer_id, protocol::Sequence epoch,
                   protocol::Sequence command_seq, protocol::JointCommand *out);
 
+// The `last_action` observation of the first step of an authorization: the
+// contract's own `initial` values, in the order of the model's action list, and
+// zero for the joints the protocol allows beyond them.
+//
+// The contract names which stage the training observed and the values it
+// started from; starting from anything else - zeros, say - feeds the model an
+// observation the training environment never produced, which is why the
+// application asks the contract instead of assuming. `out` is left untouched
+// when the contract does not describe this deployment's action list.
+void ResetLastAction(const ActionContract &contract,
+                     std::array<float, protocol::kMaxJoints> *out);
+
+// The `last_action` observation of the next step: this step's action, stored in
+// the stage the contract names - the raw policy output, or the processed joint
+// position the frame was built from. Both are what the training environment
+// observed at the same point of its own step, and the two differ by the whole
+// clipping/scaling/offset pipeline, so the stage cannot be ignored.
+//
+// It returns false, leaving `*out` untouched, when the action does not have the
+// contract's count or when the processed value is not finite.
+bool LastActionFromAction(const ActionContract &contract, const float *action,
+                          std::size_t action_count,
+                          std::array<float, protocol::kMaxJoints> *out);
+
+// The processed joint position of one element of one raw action: the contract's
+// frozen pipeline applied to it in the order the contract froze. It is the
+// value both the frame's `q` and the `processed` stage of the `last_action`
+// observation are built from, so the two can never disagree. Returns false when
+// the value is not finite at any stage.
+bool ProcessActionElement(const ActionContract &contract, const float *action,
+                          std::size_t action_count, std::size_t index,
+                          double *out);
+
 }  // namespace irmv::policy

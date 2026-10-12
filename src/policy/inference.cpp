@@ -4,6 +4,47 @@
 
 namespace irmv::policy {
 
+PolicyVerdict JudgePolicyResult(const PolicyResponse &response,
+                                std::uint64_t generation,
+                                protocol::Sequence epoch,
+                                protocol::TimeUs now_us,
+                                protocol::TimeUs timeout_us,
+                                protocol::TimeUs last_submit_us) {
+  if (response.generation != generation || response.epoch != epoch ||
+      response.submitted_us != last_submit_us) {
+    // Not the step this loop is waiting for: another authorization, another
+    // epoch, or a step it already gave up on. Nothing of it may touch the
+    // current one.
+    return PolicyVerdict::Ignored;
+  }
+  if (now_us - response.submitted_us > timeout_us) {
+    // Later than the deadline the configuration gave this source. The loop
+    // latches the same fault here as the deadline does, so a result that
+    // outsprinted the worker or a deadline that fired first agree on what the
+    // outcome is.
+    return PolicyVerdict::Failed;
+  }
+  return response.ok ? PolicyVerdict::Usable : PolicyVerdict::Failed;
+}
+
+bool PolicySourceStateUsable(const PolicyResponse &response,
+                             protocol::Sequence newest_state_seq,
+                             protocol::TimeUs newest_state_stamp_us,
+                             protocol::TimeUs source_state_timeout_us) {
+  if (response.state_seq == 0 || response.state_stamp_us == 0) {
+    // A result that names no source state describes a step no state supports.
+    return false;
+  }
+  if (response.state_seq > newest_state_seq ||
+      response.state_stamp_us > newest_state_stamp_us) {
+    // Ahead of the newest state this loop has: a sequence or a stamp the
+    // runtime never published as the source of this step.
+    return false;
+  }
+  return newest_state_stamp_us - response.state_stamp_us <=
+         source_state_timeout_us;
+}
+
 InferenceWorker::InferenceWorker(const OnnxModel &model) : model_(model) {
   worker_ = std::thread([this] { Run(); });
 }
@@ -49,26 +90,34 @@ void InferenceWorker::Stop() {
 
 void InferenceWorker::Run() {
   for (;;) {
+    PolicyRequest request;
     {
+      // The take and the reset of the flag are one critical section of the same
+      // mutex Submit sets the flag under, and that is the whole point of the
+      // ordering: a submission that arrives while this thread is waking up
+      // either already published its request and finds the flag set here - so
+      // it is the one taken - or it sets the flag after this section, and the
+      // notification it sends finds the next wait either parked or about to
+      // park. Splitting the two (taking with the flag still set, clearing it
+      // afterwards) leaves a window in which that submission's flag is erased
+      // by this thread: the newest request then stays in the channel with
+      // nothing left to wake the worker for it.
       std::unique_lock<std::mutex> lock(mutex_);
       wakeup_.wait(lock, [this] { return pending_ || stopping_; });
       if (stopping_ && !pending_) {
         return;
       }
-    }
-
-    PolicyRequest request;
-    const bool taken = requests_.TryTake(request);
-    {
-      const std::lock_guard<std::mutex> lock(mutex_);
+      if (!requests_.TryTake(request)) {
+        // The flag was set by a submission whose request this take already
+        // consumed: nothing is left for this wakeup. Clearing the flag parks
+        // the thread on the next wait, and a submission that arrives after
+        // this section sets it again.
+        pending_ = false;
+        continue;
+      }
       // Cleared before the step runs, so a submission that arrives while this
       // one is being computed is not lost and is not mistaken for this one.
       pending_ = false;
-    }
-    if (!taken) {
-      // The request was superseded between the wakeup and the take: nothing is
-      // lost, the newer one is published and the loop will wake again.
-      continue;
     }
 
     PolicyResponse response;

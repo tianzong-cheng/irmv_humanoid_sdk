@@ -126,6 +126,76 @@ bool ResolveGains(const DeploymentContract &contract,
   return true;
 }
 
+bool ProcessActionElement(const ActionContract &contract, const float *action,
+                          std::size_t action_count, std::size_t index,
+                          double *out) {
+  if (out == nullptr || action == nullptr) {
+    return false;
+  }
+  const std::size_t joint_count = contract.joints.size();
+  if (action_count != joint_count || index >= joint_count ||
+      contract.order.size() != 4) {
+    return false;
+  }
+  double value = static_cast<double>(action[index]);
+  if (!std::isfinite(value)) {
+    return false;
+  }
+  for (const ActionStage stage : contract.order) {
+    value = ApplyStage(contract, stage, index, value);
+    if (!std::isfinite(value)) {
+      return false;
+    }
+  }
+  *out = value;
+  return true;
+}
+
+void ResetLastAction(const ActionContract &contract,
+                     std::array<float, protocol::kMaxJoints> *out) {
+  if (out == nullptr ||
+      contract.last_action_initial.size() != contract.joints.size()) {
+    return;
+  }
+  out->fill(0.0f);
+  for (std::size_t index = 0; index < contract.joints.size(); ++index) {
+    (*out)[index] = static_cast<float>(contract.last_action_initial[index]);
+  }
+}
+
+bool LastActionFromAction(const ActionContract &contract, const float *action,
+                          std::size_t action_count,
+                          std::array<float, protocol::kMaxJoints> *out) {
+  if (out == nullptr || action == nullptr) {
+    return false;
+  }
+  const std::size_t joint_count = contract.joints.size();
+  if (action_count != joint_count) {
+    return false;
+  }
+  if (contract.last_action_stage == LastActionStage::Raw) {
+    out->fill(0.0f);
+    for (std::size_t index = 0; index < joint_count; ++index) {
+      if (!std::isfinite(action[index])) {
+        return false;
+      }
+      (*out)[index] = action[index];
+    }
+    return true;
+  }
+  std::array<float, protocol::kMaxJoints> next{};
+  for (std::size_t index = 0; index < joint_count; ++index) {
+    double processed = 0.0;
+    if (!ProcessActionElement(contract, action, action_count, index,
+                              &processed)) {
+      return false;
+    }
+    next[index] = static_cast<float>(processed);
+  }
+  *out = next;
+  return true;
+}
+
 bool BuildCommand(const DeploymentContract &contract,
                   const JointMapping &mapping, const ResolvedGains &gains,
                   const float *action, std::size_t action_count,
@@ -158,15 +228,14 @@ bool BuildCommand(const DeploymentContract &contract,
   frame.joints.count = static_cast<std::uint32_t>(joint_count);
 
   for (std::size_t index = 0; index < joint_count; ++index) {
-    double value = static_cast<double>(action[index]);
-    if (!std::isfinite(value)) {
+    double value = 0.0;
+    // One implementation of the frozen pipeline, shared with the `processed`
+    // last_action observation: the value the frame carries and the value the
+    // next observation reads are then the same by construction and not by two
+    // copies of the same arithmetic.
+    if (!ProcessActionElement(contract.action, action, action_count, index,
+                              &value)) {
       return false;
-    }
-    for (const ActionStage stage : contract.action.order) {
-      value = ApplyStage(contract.action, stage, index, value);
-      if (!std::isfinite(value)) {
-        return false;
-      }
     }
     const std::uint32_t robot_index = mapping.action[index];
     if (robot_index >= protocol::kMaxJoints) {

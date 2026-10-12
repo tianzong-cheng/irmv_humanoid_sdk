@@ -62,6 +62,48 @@ struct PolicyResponse {
   std::array<float, protocol::kMaxJoints> action{};
 };
 
+// What one finished result means for the authorization the supervision loop
+// holds. The worker reports what the model did; only the loop knows which step
+// it is waiting for, so the judgement belongs here and not in the worker.
+enum class PolicyVerdict {
+  // A result this loop is no longer waiting for: of another authorization or
+  // epoch, or of a step it already wrote off. It drives nothing, and it is not
+  // a fault - the loop's own state has moved past it.
+  Ignored,
+  // A usable step of the authorization the loop holds: its frame may be built.
+  Usable,
+  // The step failed, or its result arrived after the deadline the configuration
+  // gave this source. The upper layer latches the local policy fault.
+  Failed,
+};
+
+// Judges one result against the step the loop is waiting for.
+//
+// `last_submit_us` is the instant the outstanding step was submitted, which
+// names it: the deadline can write a step off while the worker is still running
+// it, so a result that arrives later than `timeout_us` after its own submission
+// is not a step of this authorization any more, however well its identity
+// matches. The identity is checked whole - the local generation and the
+// authorization epoch as well as the submission instant - because a result of a
+// withdrawn authorization must never drive a frame of the current one.
+PolicyVerdict JudgePolicyResult(const PolicyResponse &response,
+                                std::uint64_t generation,
+                                protocol::Sequence epoch,
+                                protocol::TimeUs now_us,
+                                protocol::TimeUs timeout_us,
+                                protocol::TimeUs last_submit_us);
+
+// Whether the source state a result was computed from is one the runtime can
+// still accept. The frame the loop builds is stamped with that sequence and
+// stamp, and the runtime looks the sample up by them, so a state this loop
+// never observed (a sequence ahead of the newest one) or one older than the
+// runtime's own source-state window is refused here rather than sent to be
+// refused there.
+bool PolicySourceStateUsable(const PolicyResponse &response,
+                             protocol::Sequence newest_state_seq,
+                             protocol::TimeUs newest_state_stamp_us,
+                             protocol::TimeUs source_state_timeout_us);
+
 // Runs the model of one authorization on its own thread. The model must outlive
 // the worker.
 class InferenceWorker {

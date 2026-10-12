@@ -155,6 +155,116 @@ int main(int argc, char **argv) {
     worker.Stop();
   }
 
+  // The wakeup bookkeeping across a submission that lands while the previous
+  // one is still queued or running: the newest request must still be answered.
+  // Splitting the take of a request from the reset of the flag it was woken for
+  // leaves a window in which that reset erases the flag of a submission that
+  // arrived in between, and the newest request then sits in the channel with
+  // nothing left to wake the worker for it - which is what this churn drives,
+  // one round at a time, with a bounded wait so a lost wakeup fails the round
+  // instead of hanging.
+  {
+    InferenceWorker worker(*model);
+    constexpr int kChurn = 2000;
+    for (int round = 1; round <= kChurn; ++round) {
+      const auto older = static_cast<irmv::protocol::Sequence>(round * 2 - 1);
+      const auto newest = static_cast<irmv::protocol::Sequence>(round * 2);
+      const auto submitted =
+          static_cast<irmv::protocol::TimeUs>(10000 + round * 2);
+      worker.Submit(MakeRequest(1, 2, older, submitted, dimension));
+      worker.Submit(MakeRequest(1, 2, newest, submitted + 1, dimension));
+      PolicyResponse response;
+      CHECK(TakeWithin(worker, &response));
+      // Both were submitted; whichever the worker ran first may be the one
+      // collected here, so the newest is taken too.
+      if (response.state_seq != newest) {
+        CHECK(TakeWithin(worker, &response));
+      }
+      CHECK(response.state_seq == newest);
+    }
+    worker.Stop();
+    CHECK(worker.replaced() > 0);
+  }
+
+  // A result is judged against the step the loop is waiting for, and every
+  // part of that identity matters: the local generation, the authorization
+  // epoch and the submission instant that names the step. A result of a
+  // withdrawn authorization can never drive a frame of the current one, and a
+  // result that outlived its own deadline is a failure whether the loop's
+  // deadline fired first or not.
+  {
+    PolicyResponse response;
+    response.generation = 7;
+    response.epoch = 3;
+    response.state_seq = 42;
+    response.state_stamp_us = 1000;
+    response.submitted_us = 2000;
+    response.ok = true;
+    response.action_count = 3;
+
+    constexpr irmv::protocol::TimeUs kTimeout = 100000;
+    CHECK(irmv::policy::JudgePolicyResult(response, 7, 3, 2000 + kTimeout,
+                                          kTimeout, 2000) ==
+          irmv::policy::PolicyVerdict::Usable);
+    // The boundary is inclusive: a result that arrived exactly at the deadline
+    // is still a step of this authorization, one microsecond later is not.
+    CHECK(
+        irmv::policy::JudgePolicyResult(response, 7, 3, 2000, kTimeout, 2000) ==
+        irmv::policy::PolicyVerdict::Usable);
+    CHECK(irmv::policy::JudgePolicyResult(response, 7, 3, 2000 + kTimeout + 1,
+                                          kTimeout, 2000) ==
+          irmv::policy::PolicyVerdict::Failed);
+
+    // Another authorization, another epoch, another step: ignored, never a
+    // fault and never a frame.
+    CHECK(irmv::policy::JudgePolicyResult(response, 8, 3, 2000 + kTimeout,
+                                          kTimeout, 2000) ==
+          irmv::policy::PolicyVerdict::Ignored);
+    CHECK(irmv::policy::JudgePolicyResult(response, 7, 4, 2000 + kTimeout,
+                                          kTimeout, 2000) ==
+          irmv::policy::PolicyVerdict::Ignored);
+    CHECK(irmv::policy::JudgePolicyResult(response, 7, 3, 2000 + kTimeout,
+                                          kTimeout, 1500) ==
+          irmv::policy::PolicyVerdict::Ignored);
+
+    // A failed step latches the fault at the same point a late one does.
+    PolicyResponse failed = response;
+    failed.ok = false;
+    CHECK(irmv::policy::JudgePolicyResult(failed, 7, 3, 2000 + kTimeout,
+                                          kTimeout, 2000) ==
+          irmv::policy::PolicyVerdict::Failed);
+
+    // The source state: one this loop has actually observed, and not older
+    // than the runtime's own window. A result computed from a state ahead of
+    // the newest one, from no state at all, or from one the runtime would
+    // already refuse is not a frame to send.
+    //
+    // The window is inclusive, exactly like the runtime's own
+    // `now_us - generation_us > source_state_us`: a state exactly at its edge
+    // is still lookable up, one microsecond past it is not.
+    constexpr irmv::protocol::TimeUs kSourceWindow = 150000;
+    CHECK(irmv::policy::PolicySourceStateUsable(response, 100, 2000,
+                                                kSourceWindow));
+    CHECK(irmv::policy::PolicySourceStateUsable(
+        response, 100, 1000 + kSourceWindow, kSourceWindow));
+    CHECK(!irmv::policy::PolicySourceStateUsable(
+        response, 100, 1000 + kSourceWindow + 1, kSourceWindow));
+    CHECK(!irmv::policy::PolicySourceStateUsable(response, 41, 2000,
+                                                 kSourceWindow));
+    PolicyResponse no_state = response;
+    no_state.state_seq = 0;
+    CHECK(!irmv::policy::PolicySourceStateUsable(no_state, 100, 2000,
+                                                 kSourceWindow));
+    PolicyResponse no_stamp = response;
+    no_stamp.state_stamp_us = 0;
+    CHECK(!irmv::policy::PolicySourceStateUsable(no_stamp, 100, 2000,
+                                                 kSourceWindow));
+    PolicyResponse ahead_stamp = response;
+    ahead_stamp.state_stamp_us = 2001;
+    CHECK(!irmv::policy::PolicySourceStateUsable(ahead_stamp, 100, 2000,
+                                                 kSourceWindow));
+  }
+
   std::cout << "inference_test: ok\n";
   return 0;
 }

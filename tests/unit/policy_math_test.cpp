@@ -84,6 +84,19 @@ bool NearlyEqual(double left, double right) {
   return std::fabs(left - right) <= 1e-6;
 }
 
+// One replacement of a fixture document, for the cases that need a contract the
+// fixtures do not carry (another last_action stage, non-zero initial values)
+// while everything else stays the frozen document a real package would hold.
+std::string ReplaceOnce(std::string value, std::string_view from,
+                        std::string_view to) {
+  const std::size_t position = value.find(from);
+  if (position == std::string::npos) {
+    return {};
+  }
+  value.replace(position, from.size(), to);
+  return value;
+}
+
 }  // namespace
 
 int main() {
@@ -367,6 +380,89 @@ int main() {
     const std::vector<std::string> four_joints = {"a", "b", "c", "d"};
     CHECK(!ResolveGains(three_orders, mapping, four_joints, MakePolicyConfig(),
                         "", &incomplete));
+  }
+
+  // ---------------------------------------------------------------------
+  // last_action: the stage the contract names, and the values it starts from.
+  // ---------------------------------------------------------------------
+  {
+    // The two stages differ by the whole pipeline, so one action feeds two
+    // different observations. `raw` is the model's own output; `processed` is
+    // the position the frame was built from, which is the contract's offset and
+    // scale away from it.
+    const std::array<float, irmv::protocol::kMaxJoints> action = {0.8f, -0.4f};
+    std::array<float, irmv::protocol::kMaxJoints> stored{};
+
+    CHECK(irmv::policy::LastActionFromAction(two_axis.action, action.data(), 2,
+                                             &stored));
+    CHECK(NearlyEqual(stored[0], 0.8));
+    CHECK(NearlyEqual(stored[1], -0.4));
+
+    // The processed element is the pipeline in the frozen order - scale, then
+    // offset, then the (absent) clips - and it must be exactly what the frame
+    // carries for the same action, or the observation would describe a step the
+    // machine never made.
+    double processed = 0.0;
+    CHECK(irmv::policy::ProcessActionElement(two_axis.action, action.data(), 2,
+                                             0, &processed));
+    CHECK(NearlyEqual(processed, 0.8 * 0.5 + 0.1));
+    CHECK(irmv::policy::ProcessActionElement(two_axis.action, action.data(), 2,
+                                             1, &processed));
+    CHECK(NearlyEqual(processed, -0.4 * 0.5 - 0.2));
+
+    ResolvedGains gains;
+    CHECK(ResolveGains(two_axis, two_axis_mapping, kRobotTwo,
+                       MakePolicyConfig(), "", &gains));
+    const RobotState state = MakeState(2, 1000, 4);
+    JointCommand frame;
+    CHECK(BuildCommand(two_axis, two_axis_mapping, gains, action.data(), 2,
+                       state, "layout", irmv::protocol::kNoId, 1, 1, &frame));
+    // The mapping scatters left into the deployment's second joint and right
+    // into its first, so the comparison is by name: left is index 0 of the
+    // action list and index 1 of the frame.
+    CHECK(irmv::policy::ProcessActionElement(two_axis.action, action.data(), 2,
+                                             0, &processed));
+    CHECK(NearlyEqual(frame.joints.q[two_axis_mapping.action[0]], processed));
+    CHECK(irmv::policy::ProcessActionElement(two_axis.action, action.data(), 2,
+                                             1, &processed));
+    CHECK(NearlyEqual(frame.joints.q[two_axis_mapping.action[1]], processed));
+
+    // A count the contract does not describe is refused rather than partially
+    // copied: a truncated last_action would feed the model a step it never
+    // took.
+    CHECK(!irmv::policy::LastActionFromAction(two_axis.action, action.data(), 1,
+                                              &stored));
+    CHECK(!irmv::policy::ProcessActionElement(two_axis.action, action.data(), 1,
+                                              0, &processed));
+    CHECK(!irmv::policy::ProcessActionElement(two_axis.action, action.data(), 2,
+                                              2, &processed));
+
+    // The `initial` of a contract is where an authorization starts, and it is
+    // read from the contract instead of assumed: this document starts at a
+    // non-zero position, so a reset that wrote zeros would feed the model an
+    // observation the training environment never produced.
+    std::array<float, irmv::protocol::kMaxJoints> reset{};
+    reset.fill(9.0f);
+    irmv::policy::ResetLastAction(two_axis.action, &reset);
+    CHECK(NearlyEqual(reset[0], 0.0));
+    CHECK(NearlyEqual(reset[1], 0.0));
+    for (std::size_t index = 2; index < irmv::protocol::kMaxJoints; ++index) {
+      CHECK(NearlyEqual(reset[index], 0.0));
+    }
+
+    const DeploymentContract processed_contract = irmv::policy::ParseDeployment(
+        ReplaceOnce(ReplaceOnce(two_axis_text, "\"stage\": \"raw\"",
+                                "\"stage\": \"processed\""),
+                    "\"initial\": [0.0, 0.0]", "\"initial\": [0.5, -0.25]"));
+    CHECK(processed_contract.action.last_action_stage ==
+          irmv::policy::LastActionStage::Processed);
+    irmv::policy::ResetLastAction(processed_contract.action, &reset);
+    CHECK(NearlyEqual(reset[0], 0.5));
+    CHECK(NearlyEqual(reset[1], -0.25));
+    CHECK(irmv::policy::LastActionFromAction(processed_contract.action,
+                                             action.data(), 2, &stored));
+    CHECK(NearlyEqual(stored[0], 0.8 * 0.5 + 0.1));
+    CHECK(NearlyEqual(stored[1], -0.4 * 0.5 - 0.2));
   }
 
   std::cout << "policy_math_test: ok\n";
