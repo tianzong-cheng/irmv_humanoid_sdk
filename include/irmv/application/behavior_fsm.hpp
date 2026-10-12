@@ -267,9 +267,14 @@ class BehaviorFsm {
   // that a stop was begun in this very Step.
   bool StopInFlight() const;
   // Whether a Tracking state is the context this FSM authorized: the confirmed
-  // initialization/hold context, or the context the pending Tracking request
-  // proposes.
+  // initialization/hold context, the context the pending Tracking request
+  // proposes, or the context that was confirmed until that request was
+  // proposed.
   bool ExpectedTracking(const protocol::RobotState &state) const;
+  // Remembers the confirmed context before a Tracking request replaces it, and
+  // forgets it once nothing may publish it any more.
+  void RememberConfirmedTracking();
+  void DropPreviousTracking();
   bool TargetDue(protocol::TimeUs now_us) const;
   bool HeartbeatDue(protocol::TimeUs now_us) const;
 
@@ -315,6 +320,19 @@ class BehaviorFsm {
   bool tracking_active_{false};
   protocol::Id tracking_producer_{};
   protocol::Sequence tracking_epoch_{0};
+
+  // The context that was confirmed until this FSM proposed the Tracking request
+  // now pending. The runtime keeps publishing it until it applies that request,
+  // so a state of it that crossed the request on the wire must not be read as an
+  // authorization nobody asked for: without this memory, asking for a new
+  // context while the initialization hold is still the newest thing the runtime
+  // published - which is what both locomotion sources do - faults the behaviour
+  // on a perfectly legal transition. It is dropped by every path that withdraws
+  // the context (a stop, a latch, the exit, the runtime leaving tracking) and by
+  // the confirmation of the request that replaced it.
+  bool have_previous_tracking_{false};
+  protocol::Id previous_tracking_producer_{};
+  protocol::Sequence previous_tracking_epoch_{0};
 
   // A state has been observed at least once; before that, Starting waits
   // instead of calling an absent link unreachable.

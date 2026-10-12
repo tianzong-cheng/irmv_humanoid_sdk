@@ -381,9 +381,29 @@ bool BehaviorFsm::ExpectedTracking(const protocol::RobotState &state) const {
     return true;
   }
   // The context the tracking request still on its way proposes.
-  return pending_ == Pending::Tracking &&
-         state.producer_id == pending_producer_ &&
-         state.epoch == pending_epoch_;
+  if (pending_ == Pending::Tracking &&
+      state.producer_id == pending_producer_ && state.epoch == pending_epoch_) {
+    return true;
+  }
+  // The context that was live until that request was proposed: the runtime
+  // keeps publishing it until it applies the request, and a state that crossed
+  // the request on the wire is the context this behaviour itself asked for a
+  // moment ago - not an authorization nobody asked for.
+  return have_previous_tracking_ &&
+         state.producer_id == previous_tracking_producer_ &&
+         state.epoch == previous_tracking_epoch_;
+}
+
+void BehaviorFsm::RememberConfirmedTracking() {
+  have_previous_tracking_ = tracking_active_;
+  previous_tracking_producer_ = tracking_producer_;
+  previous_tracking_epoch_ = tracking_epoch_;
+}
+
+void BehaviorFsm::DropPreviousTracking() {
+  have_previous_tracking_ = false;
+  previous_tracking_producer_ = protocol::kNoId;
+  previous_tracking_epoch_ = 0;
 }
 
 void BehaviorFsm::EmergencyStop(protocol::TimeUs now_us,
@@ -580,9 +600,13 @@ BehaviorFsm::Confirmation BehaviorFsm::ApplyConfirmation(
         // frame it just authorized.
         pending_locomotion_ = false;
         state_ = BehaviorState::Locomotion;
+        // The context that was live until this request is replaced: nothing may
+        // publish it any more, so its memory goes with the confirmation.
+        DropPreviousTracking();
         return Confirmation::Applied;
       }
       state_ = BehaviorState::Initializing;
+      DropPreviousTracking();
       return Confirmation::Applied;
     case Pending::Reset:
       if (state.execution_state != protocol::ExecutionState::ZeroTorque) {
@@ -743,7 +767,11 @@ void BehaviorFsm::TryStartInitialization(protocol::TimeUs now_us,
     return;
   }
   // Neither a rejected request nor a cancelled move is restarted: the generator
-  // is rebuilt so that Start admits a new trajectory.
+  // is rebuilt so that Start admits a new trajectory. The context this FSM has
+  // confirmed until now is remembered first: the runtime keeps publishing it
+  // until it applies this request, and a state of it that crosses the request on
+  // the wire is not an authorization nobody asked for.
+  RememberConfirmedTracking();
   CancelInitialization();
   initialization_.emplace(config_);
   const protocol::Sequence epoch = client_.next_epoch();
@@ -981,6 +1009,9 @@ void BehaviorFsm::CancelLocomotion() {
   locomotion_seq_ = 0;
   locomotion_first_seq_ = 0;
   pending_locomotion_ = false;
+  // The context this behaviour held is over, so nothing may still be read as
+  // its predecessor: the memory of the replaced context dies with it.
+  DropPreviousTracking();
 }
 
 void BehaviorFsm::TryStartLocomotion(protocol::TimeUs now_us,
@@ -1000,6 +1031,11 @@ void BehaviorFsm::TryStartLocomotion(protocol::TimeUs now_us,
   }
   const protocol::Sequence epoch = client_.next_epoch();
   protocol::JointCommand first = locomotion_candidate_;
+  // The context that is live until this request is applied - the initialization
+  // hold of Ready, or the context an earlier request already replaced - is
+  // remembered first, for the same reason a move's request remembers it: the
+  // runtime keeps publishing it while the request is on its way.
+  RememberConfirmedTracking();
   // The source owns the identity the runtime authorizes: the local model is
   // this application, while an external producer is the process whose frames
   // the runtime will gate. A candidate that names no producer is this

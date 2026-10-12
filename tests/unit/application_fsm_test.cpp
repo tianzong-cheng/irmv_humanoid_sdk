@@ -2046,6 +2046,92 @@ int ExternalLocomotion() {
   return 0;
 }
 
+// The request that proposes a locomotion context while the initialization hold
+// is still live. The runtime keeps publishing the hold until it applies the
+// request, so a state that crossed the request on the wire is the context this
+// behaviour itself asked for a moment ago: reading it as an authorization
+// nobody asked for would fault a legal transition, which is what both sources
+// (the local model and an external producer) do every time they are started
+// from Ready.
+int LocomotionRequestToleratesTheReplacedContext() {
+  for (const LocomotionSource source :
+       {LocomotionSource::Local, LocomotionSource::External}) {
+    Harness h(source);
+    CHECK(ToStandby(h) == 0);
+    CHECK(ToReady(h) == 0);
+    const ExecutionRequest *hold = h.last_request_of(Operation::Tracking);
+    CHECK(hold != nullptr);
+    if (hold == nullptr) {
+      return 1;
+    }
+    const Id hold_producer = hold->producer_id;
+    const Sequence hold_epoch = hold->proposed_epoch;
+
+    static_cast<void>(h.Step(InputEvent::StartLocomotion));
+    h.fsm().OfferLocomotionCandidate(
+        LocomotionFrame(h, 0.25, 0, source == LocomotionSource::External
+                                        ? MakeId(0x70)
+                                        : kNoId),
+        h.now_us());
+    BehaviorStep step = h.Step();
+    CHECK(h.last_request_of(Operation::Tracking) != hold);
+    CHECK(step.state == BehaviorState::Ready);
+    CHECK(step.fault_cause == FaultCause::None);
+
+    // The state the runtime published before it applied the request: still the
+    // hold context, and perfectly legal.
+    h.lower.state = ExecutionState::Tracking;
+    h.lower.output = OutputAction::Tracking;
+    h.lower.producer = hold_producer;
+    h.lower.epoch = hold_epoch;
+    step = h.Step();
+    CHECK(step.state == BehaviorState::Ready);
+    CHECK(step.fault_cause == FaultCause::None);
+    CHECK(step.locomotion_armed);
+
+    // The runtime applies the request: the new context is the one that enters
+    // Locomotion.
+    const ExecutionRequest *proposal = h.last_request_of(Operation::Tracking);
+    CHECK(proposal != nullptr);
+    if (proposal == nullptr) {
+      return 1;
+    }
+    h.EnterTracking();
+    CHECK(h.Answer());
+    step = h.Step();
+    CHECK(step.state == BehaviorState::Locomotion);
+    CHECK(step.fault_cause == FaultCause::None);
+    CHECK(h.fsm().locomotion_epoch() == proposal->proposed_epoch);
+  }
+
+  // After the replacement, the context that was replaced is no longer expected:
+  // a state of it that arrives later is the stale authorization the guard
+  // exists for.
+  Harness stale(LocomotionSource::External);
+  CHECK(ToStandby(stale) == 0);
+  CHECK(ToReady(stale) == 0);
+  const ExecutionRequest *hold = stale.last_request_of(Operation::Tracking);
+  CHECK(hold != nullptr);
+  if (hold == nullptr) {
+    return 1;
+  }
+  const Id hold_producer = hold->producer_id;
+  const Sequence hold_epoch = hold->proposed_epoch;
+  static_cast<void>(stale.Step(InputEvent::StartLocomotion));
+  stale.fsm().OfferLocomotionCandidate(
+      LocomotionFrame(stale, 0.25, 0, MakeId(0x70)), stale.now_us());
+  static_cast<void>(stale.Step());
+  stale.EnterTracking();
+  CHECK(stale.Answer());
+  CHECK(stale.Step().state == BehaviorState::Locomotion);
+  stale.lower.producer = hold_producer;
+  stale.lower.epoch = hold_epoch;
+  BehaviorStep step = stale.Step();
+  CHECK(step.state == BehaviorState::Fault);
+  CHECK(step.fault_cause == FaultCause::UnexpectedContext);
+  return 0;
+}
+
 // The ordered exit from a tracking behaviour while the lower layer still
 // reports our own Tracking: the context is one this FSM authorized and the
 // Damping stop it asked for is still on the wire, so the state is expected and
@@ -2269,6 +2355,7 @@ int main() {
   failures += HeldConfirmationIsDropped();
   failures += LocomotionRequest();
   failures += ExternalLocomotion();
+  failures += LocomotionRequestToleratesTheReplacedContext();
   if (failures == 0) {
     return 0;
   }
