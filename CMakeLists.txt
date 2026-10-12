@@ -1118,6 +1118,14 @@ set_target_properties(
   application
   PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
 )
+# The example producer links the same pinned DDS libraries the application does
+# (its transport), so the installed binary resolves them from <prefix>/lib
+# exactly like the two processes and runs from a tree that was moved away from
+# its build directory.
+set_target_properties(
+  external_producer
+  PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
+)
 
 # The installed tree has to run after being moved or copied to another machine
 # and must never reference the build or source directory. Every shared library
@@ -1188,6 +1196,11 @@ file(
 file(
   RPATH_CHECK
   FILE \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/application\"
+  RPATH \"\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}\"
+)
+file(
+  RPATH_CHECK
+  FILE \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/external_producer\"
   RPATH \"\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}\"
 )
 "
