@@ -2069,9 +2069,9 @@ int LocomotionRequestToleratesTheReplacedContext() {
 
     static_cast<void>(h.Step(InputEvent::StartLocomotion));
     h.fsm().OfferLocomotionCandidate(
-        LocomotionFrame(h, 0.25, 0, source == LocomotionSource::External
-                                        ? MakeId(0x70)
-                                        : kNoId),
+        LocomotionFrame(
+            h, 0.25, 0,
+            source == LocomotionSource::External ? MakeId(0x70) : kNoId),
         h.now_us());
     BehaviorStep step = h.Step();
     CHECK(h.last_request_of(Operation::Tracking) != hold);
@@ -2104,19 +2104,74 @@ int LocomotionRequestToleratesTheReplacedContext() {
     CHECK(h.fsm().locomotion_epoch() == proposal->proposed_epoch);
   }
 
+  // A proposal the runtime refuses leaves the context it refused *for* exactly
+  // where it was, so the state of that context has to stay expected - and a
+  // second proposal, made after the refusal has already cleared this
+  // behaviour's own notion of it, must not forget it either. What the refusal
+  // costs is the hold's target stream, which is the pre-existing rule that a
+  // rejected request does not restart the move; what it may never cost is a
+  // fault on a legal state.
+  for (const LocomotionSource source :
+       {LocomotionSource::Local, LocomotionSource::External}) {
+    Harness refused(source);
+    CHECK(ToStandby(refused) == 0);
+    CHECK(ToReady(refused) == 0);
+    const ExecutionRequest *live = refused.last_request_of(Operation::Tracking);
+    CHECK(live != nullptr);
+    if (live == nullptr) {
+      return 1;
+    }
+    const Id live_producer = live->producer_id;
+    const Sequence live_epoch = live->proposed_epoch;
+
+    static_cast<void>(refused.Step(InputEvent::StartLocomotion));
+    refused.fsm().OfferLocomotionCandidate(
+        LocomotionFrame(
+            refused, 0.25, 0,
+            source == LocomotionSource::External ? MakeId(0x70) : kNoId),
+        refused.now_us());
+    static_cast<void>(refused.Step());
+    CHECK(refused.Reject(RejectReason::RequestConflict));
+    BehaviorStep refused_step = refused.Step();
+    CHECK(refused_step.state == BehaviorState::Ready);
+    CHECK(refused_step.fault_cause == FaultCause::None);
+
+    // The second proposal: a fresh candidate and the key again, which is what
+    // the loop does by itself - it re-offers the candidate the supervisor
+    // produced, so the behaviour proposes again after a refusal.
+    refused.fsm().OfferLocomotionCandidate(
+        LocomotionFrame(
+            refused, 0.3, 0,
+            source == LocomotionSource::External ? MakeId(0x70) : kNoId),
+        refused.now_us());
+    const std::size_t before = refused.sink().requests.size();
+    static_cast<void>(refused.Step(InputEvent::StartLocomotion));
+    CHECK(refused.sink().requests.size() > before);
+
+    // The runtime keeps publishing the context it never replaced.
+    refused.lower.state = ExecutionState::Tracking;
+    refused.lower.output = OutputAction::Tracking;
+    refused.lower.producer = live_producer;
+    refused.lower.epoch = live_epoch;
+    refused_step = refused.Step();
+    CHECK(refused_step.state == BehaviorState::Ready);
+    CHECK(refused_step.fault_cause == FaultCause::None);
+  }
+
   // After the replacement, the context that was replaced is no longer expected:
   // a state of it that arrives later is the stale authorization the guard
   // exists for.
   Harness stale(LocomotionSource::External);
   CHECK(ToStandby(stale) == 0);
   CHECK(ToReady(stale) == 0);
-  const ExecutionRequest *hold = stale.last_request_of(Operation::Tracking);
-  CHECK(hold != nullptr);
-  if (hold == nullptr) {
+  const ExecutionRequest *stale_hold =
+      stale.last_request_of(Operation::Tracking);
+  CHECK(stale_hold != nullptr);
+  if (stale_hold == nullptr) {
     return 1;
   }
-  const Id hold_producer = hold->producer_id;
-  const Sequence hold_epoch = hold->proposed_epoch;
+  const Id stale_producer = stale_hold->producer_id;
+  const Sequence stale_epoch = stale_hold->proposed_epoch;
   static_cast<void>(stale.Step(InputEvent::StartLocomotion));
   stale.fsm().OfferLocomotionCandidate(
       LocomotionFrame(stale, 0.25, 0, MakeId(0x70)), stale.now_us());
@@ -2124,11 +2179,11 @@ int LocomotionRequestToleratesTheReplacedContext() {
   stale.EnterTracking();
   CHECK(stale.Answer());
   CHECK(stale.Step().state == BehaviorState::Locomotion);
-  stale.lower.producer = hold_producer;
-  stale.lower.epoch = hold_epoch;
-  BehaviorStep step = stale.Step();
-  CHECK(step.state == BehaviorState::Fault);
-  CHECK(step.fault_cause == FaultCause::UnexpectedContext);
+  stale.lower.producer = stale_producer;
+  stale.lower.epoch = stale_epoch;
+  const BehaviorStep stale_step = stale.Step();
+  CHECK(stale_step.state == BehaviorState::Fault);
+  CHECK(stale_step.fault_cause == FaultCause::UnexpectedContext);
   return 0;
 }
 

@@ -54,6 +54,32 @@ def wait_for(path: Path, pattern: str, timeout_s: float) -> str:
     return text
 
 
+
+def targets_of_epoch(trace_path: Path, epoch: int) -> list:
+    """The targets of one epoch the runtime really adopted, deduplicated."""
+
+    targets = []
+    last = None
+    for line in trace_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        target = record.get("target")
+        if not record.get("target_present") or not isinstance(target, dict):
+            continue
+        if int(target.get("epoch", 0)) != epoch:
+            continue
+        identity = (target.get("epoch"), target.get("command_seq"))
+        if identity == last:
+            continue
+        last = identity
+        targets.append(target)
+    return targets
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("application")
@@ -99,14 +125,11 @@ def main() -> int:
 
 
 def run(application, runtime, producer_binary, source_root, work, failures, fail):
-    producer_log = work / "producer.log"
     runtime_log = work / "runtime.log"
     application_log = work / "application.log"
-    producer_out = producer_log.open("w", encoding="utf-8")
     runtime_out = runtime_log.open("w", encoding="utf-8")
     application_out = application_log.open("w", encoding="utf-8")
 
-    producer_process = None
     application_process = None
     runtime_process = subprocess.Popen(
         [
@@ -176,22 +199,38 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
         key("initialize")
         expect("the initialization", r"behavior=Ready runtime=Tracking ")
 
+        # The producer processes of this run, each with its own log: the happy
+        # path uses one, and the phases after it start more (a restart, a
+        # replacement, a recovery). Every one of them is killed and closed by
+        # the cleanup below, whatever the run did.
+        producers: list = []
+        producer_index = 0
+
+        def start_producer():
+            nonlocal producer_index
+            producer_index += 1
+            log = work / f"producer_{producer_index}.log"
+            log_out = log.open("w", encoding="utf-8")
+            process = subprocess.Popen(
+                [
+                    producer_binary,
+                    "--config",
+                    str(source_root / "config" / "sdk.json"),
+                    "--domain",
+                    str(DOMAIN),
+                    "--rate",
+                    "50",
+                ],
+                stdout=log_out,
+                stderr=subprocess.STDOUT,
+                cwd=work,
+            )
+            producers.append((process, log_out, log))
+            return process, log
+
         # The producer process: it announces itself, is selected, prepares
         # from the request it is given, and publishes nothing yet.
-        producer_process = subprocess.Popen(
-            [
-                producer_binary,
-                "--config",
-                str(source_root / "config" / "sdk.json"),
-                "--domain",
-                str(DOMAIN),
-                "--rate",
-                "50",
-            ],
-            stdout=producer_out,
-            stderr=subprocess.STDOUT,
-            cwd=work,
-        )
+        producer_process, producer_log = start_producer()
 
         selected = wait_for(application_log, r"producer=selected id=([0-9a-f]{32})", 20)
         matched = re.search(r"producer=selected id=([0-9a-f]{32})", selected)
@@ -322,11 +361,136 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
         if "producer=stopped" not in stopped:
             fail(f"the producer was never told to stop: {stopped[-600:]}")
 
-        key("exit")
-        expect("the ordered exit", r"application: exit stop=confirmed", 25)
-        application_process.wait(timeout=15)
-        if application_process.returncode != 0:
-            fail(f"the application exited with {application_process.returncode}")
+        # ------------------------------------------------------------------
+        # The lifecycle around the happy path: a producer that restarts, a
+        # second producer that replaces the first, and a producer that dies
+        # while its context is live. Each of them has to leave the application
+        # able to authorize again - a producer is a process, and a process is
+        # something that stops, restarts and is replaced.
+        #
+        # Every wait here is "one more than before": the happy path has already
+        # printed each of these lines once, so waiting for a pattern to *exist*
+        # would pass on the first producer's line.
+        # ------------------------------------------------------------------
+        def count_app(pattern: str) -> int:
+            return len(re.findall(pattern, app_text()))
+
+        def wait_more(note: str, pattern: str, before: int, timeout_s: float) -> str:
+            deadline = time.monotonic() + timeout_s
+            while time.monotonic() < deadline:
+                text = app_text()
+                if len(re.findall(pattern, text)) > before:
+                    return text
+                time.sleep(0.05)
+            fail(f"{note}: no new {pattern!r} within {timeout_s:.0f} s")
+            return app_text()
+
+        def wait_stop(note: str) -> None:
+            """The damping key and the transition it must produce, counted."""
+
+            before = count_app(r"behavior=Damping runtime=Damping ")
+            key("damping")
+            wait_more(note, r"behavior=Damping runtime=Damping ", before, 15)
+
+        def back_to_ready(note: str) -> None:
+            before = count_app(r"behavior=Ready runtime=Tracking ")
+            key("initialize")
+            wait_more(f"{note}: the initialization", r"behavior=Ready runtime=Tracking ",
+                      before, 25)
+
+        def authorize(note: str) -> int:
+            """The locomotion key, and the epoch it authorized (0 on failure)."""
+
+            states = count_app(r"behavior=Locomotion runtime=Tracking ")
+            notices = count_app(r"producer=authorized ")
+            key("start_locomotion")
+            text = wait_more(f"{note}: the locomotion authorization",
+                             r"behavior=Locomotion runtime=Tracking ", states, 30)
+            found = re.findall(r"producer=authorized epoch=(\d+) first_seq=(\d+)", text)
+            if len(found) != notices + 1:
+                fail(f"{note}: the producer was authorized {len(found) - notices} times")
+                return 0
+            return int(found[-1][0])
+
+        def selected_before(pattern: str) -> int:
+            return count_app(pattern)
+
+        # A producer that restarts: the process that is gone cannot authorize
+        # anything, and the one that takes its place has to register, be
+        # prepared and be authorized again.
+        selected = selected_before(r"producer=selected id=")
+        producer_process.send_signal(signal.SIGTERM)
+        producer_process.wait(timeout=10)
+        back_to_ready("the restart")
+        producer_process, producer_log = start_producer()
+        text = wait_more("the restarted producer", r"producer=selected id=", selected, 25)
+        selected_ids = re.findall(r"producer=selected id=([0-9a-f]{32})", text)
+        if selected_ids[-1] == producer_id:
+            fail("the restarted producer was selected under the old identity")
+        prepared = selected_before(r"producer=prepared ")
+        wait_more("the restarted preparation", r"producer=prepared ", prepared, 25)
+        restart_epoch = authorize("the restart")
+        if restart_epoch != 0 and restart_epoch <= epoch:
+            fail(
+                f"the restart authorized an older epoch than the first context: "
+                f"{restart_epoch} <= {epoch}"
+            )
+        wait_stop("the stop of the restart")
+
+        # Two producers at once: the second replaces the first, the first is
+        # told to stop, and the context the application authorizes belongs to
+        # the process that is actually selected.
+        replaced_log = producer_log
+        back_to_ready("the replacement")
+        selected = selected_before(r"producer=selected id=")
+        replacing_process, _ = start_producer()
+        text = wait_more("the replacing producer", r"producer=selected id=", selected, 25)
+        replacing_ids = re.findall(r"producer=selected id=([0-9a-f]{32})", text)
+        if replacing_ids[-1] in (producer_id, selected_ids[-1]):
+            fail(f"the replacing producer was selected under an identity already used: {replacing_ids[-3:]}")
+        prepared = selected_before(r"producer=prepared ")
+        wait_more("the replacing preparation", r"producer=prepared ", prepared, 25)
+        replacement_epoch = authorize("the replacement")
+        if replacement_epoch != 0 and replacement_epoch <= restart_epoch:
+            fail(
+                "the replacement authorized an older epoch than the restart: "
+                f"{replacement_epoch} <= {restart_epoch}"
+            )
+        # The context the application authorized belongs to the process that is
+        # actually selected. A replaced producer that is no longer authorized
+        # has nothing to hear in a stop notice, so the runtime's own trace - the
+        # producer of every adopted frame - is what this checks.
+        replacement_targets = targets_of_epoch(work / "trace_run1.jsonl", replacement_epoch)
+        if not replacement_targets:
+            fail("the replacement authorized a context the runtime never adopted")
+        elif any(
+            target.get("producer_id") != replacing_ids[-1]
+            for target in replacement_targets
+        ):
+            fail(
+                "the authorized context does not name the replacing producer: "
+                f"{sorted({target.get('producer_id') for target in replacement_targets})} "
+                f"!= {replacing_ids[-1]}"
+            )
+
+        # The producer dies while its context is live: the runtime falls back on
+        # its own command deadline, the application follows it without latching
+        # anything, and a fresh process can be authorized again.
+        falling = count_app(r"behavior=Damping runtime=Damping ")
+        replacing_process.send_signal(signal.SIGKILL)
+        replacing_process.wait(timeout=10)
+        fell_back = wait_more("the fallback", r"behavior=Damping runtime=Damping ",
+                              falling, 15)
+        if re.search(r"behavior=Fault", fell_back):
+            fail("the application faulted when its producer died")
+        back_to_ready("the recovery")
+        selected = selected_before(r"producer=selected id=")
+        producer_process, producer_log = start_producer()
+        wait_more("the recovered producer", r"producer=selected id=", selected, 25)
+        prepared = selected_before(r"producer=prepared ")
+        wait_more("the recovered preparation", r"producer=prepared ", prepared, 25)
+        authorize("the recovery")
+        wait_stop("the final stop")
 
         runtime_text = runtime_log.read_text(encoding="utf-8", errors="replace")
         if 'to="Tracking"' not in runtime_text:
@@ -334,7 +498,16 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
         if "FaultLatched" in runtime_text:
             fail("the runtime latched a fault")
     finally:
-        for process in (application_process, producer_process):
+        for process, log_out, _ in producers:
+            if process.poll() is None:
+                process.send_signal(signal.SIGTERM)
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=10)
+            log_out.close()
+        for process in (application_process,):
             if process is not None and process.poll() is None:
                 process.send_signal(signal.SIGTERM)
                 try:
@@ -349,9 +522,8 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
             except subprocess.TimeoutExpired:
                 runtime_process.send_signal(signal.SIGKILL)
                 runtime_process.wait(timeout=10)
-        producer_out.close()
-        runtime_out.close()
         application_out.close()
+        runtime_out.close()
 
     if failures:
         return 1

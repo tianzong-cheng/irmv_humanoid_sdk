@@ -395,7 +395,16 @@ bool BehaviorFsm::ExpectedTracking(const protocol::RobotState &state) const {
 }
 
 void BehaviorFsm::RememberConfirmedTracking() {
-  have_previous_tracking_ = tracking_active_;
+  if (!tracking_active_) {
+    // This behaviour has already given up its own notion of the confirmed
+    // context - a request the runtime refused clears it - but the runtime
+    // answers a refusal by leaving that context exactly where it was. Keeping
+    // the memory instead of overwriting it with nothing is what stops the state
+    // of a context that is still live from being read as a foreign one after a
+    // proposal that never became an authorization.
+    return;
+  }
+  have_previous_tracking_ = true;
   previous_tracking_producer_ = tracking_producer_;
   previous_tracking_epoch_ = tracking_epoch_;
 }
