@@ -562,6 +562,48 @@ target_link_libraries(
     Threads::Threads
 )
 
+# The training-side reference sample (§11.1, Task 9): the model the training
+# repository exported, and the state/command/observation/action/target it
+# recorded for four deterministic cases, compared element by element against
+# this SDK's own observation builder, model session and action pipeline. The
+# artifact lives in the adjacent training repository (or wherever
+# -DIRMV_POLICY_REFERENCE points), because a model and a recorded environment
+# are not build inputs of this one: without them the entry is not registered and
+# the configure step says so, so their absence is never a silent pass.
+set(
+  IRMV_POLICY_REFERENCE
+  "${PROJECT_SOURCE_DIR}/../irmv_humanoid_locomotion/logs/rsl_rl/irmv_flat/2026-09-08_09-56-44/exported"
+  CACHE PATH
+  "Directory holding policy.onnx and reference_sample.json from the training repository"
+)
+if(EXISTS "${IRMV_POLICY_REFERENCE}/policy.onnx"
+   AND EXISTS "${IRMV_POLICY_REFERENCE}/reference_sample.json")
+  add_test(
+    NAME policy_reference_test
+    COMMAND
+      "$<TARGET_FILE:verify_policy_sample>"
+      "${IRMV_POLICY_REFERENCE}/reference_sample.json"
+      "${IRMV_POLICY_REFERENCE}/policy.onnx"
+  )
+  set_tests_properties(
+    policy_reference_test
+    PROPERTIES
+      LABELS integration
+      TIMEOUT 120
+      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+  )
+  message(
+    STATUS
+      "irmv: the training-side reference sample of ${IRMV_POLICY_REFERENCE} is registered as policy_reference_test"
+  )
+else()
+  message(
+    STATUS
+      "irmv: no training-side reference sample in ${IRMV_POLICY_REFERENCE}; "
+      "policy_reference_test is not registered (see docs/testing.md)"
+  )
+endif()
+
 # The external producer acceptance: the real application, the real runtime and
 # the real example producer process. It is the only entry that proves the whole
 # external lifecycle - registration, preparation, the confirmation that
@@ -799,6 +841,24 @@ set_tests_properties(
 # The read tool of a recorded run: it walks one run directory and prints what it
 # holds. It only reads - no DDS, no device - and it is installed with the two
 # processes because reading a run back is part of operating one.
+# The SDK half of the training-side reference sample: one state and one velocity
+# command, pushed through this deployment's own observation builder, model and
+# action pipeline, compared element by element with the numbers the training
+# environment recorded (docs/testing.md). It needs a model and a reference
+# document, so it is a tool rather than a test of its own, and the test entry
+# below registers it when those artifacts are present.
+add_executable(verify_policy_sample tools/verify_policy_sample.cpp)
+target_compile_features(verify_policy_sample PRIVATE cxx_std_17)
+target_include_directories(
+  verify_policy_sample PRIVATE "${PROJECT_SOURCE_DIR}/include"
+)
+target_link_libraries(
+  verify_policy_sample PRIVATE irmv_policy nlohmann_json::nlohmann_json
+)
+install(
+  TARGETS verify_policy_sample RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+)
+
 add_executable(read_record tools/read_record.cpp)
 target_compile_features(read_record PRIVATE cxx_std_17)
 target_include_directories(
