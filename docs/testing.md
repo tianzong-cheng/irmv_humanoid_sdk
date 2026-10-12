@@ -12,14 +12,14 @@ says explicitly what no test here proves.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j2
 
-ctest --test-dir build --output-on-failure          # everything (56 tests)
+ctest --test-dir build --output-on-failure          # everything (57 tests)
 ctest --test-dir build -L core --output-on-failure  # deterministic core suite
 ctest --test-dir build -L integration --output-on-failure
 ctest --test-dir build -R integration_normal --output-on-failure
 ```
 
 The whole matrix takes about four minutes on a developer machine
-(`ctest -N` reports 23 core and 33 integration entries) and each integration
+(`ctest -N` reports 23 core and 34 integration entries) and each integration
 entry is bounded by its own CTest timeout (30 s for `dds_codec_test`, 180 s for
 `runtime_cli_test` and `application_cli_test`, 300 s for `application_client_test`
 and per scenario, 600 s for `application_flow_test`).
@@ -186,6 +186,7 @@ wall-clock waits in `logger_test` are hang guards.
 
 | `external_producer_test` | The external producer acceptance: the real application, the real runtime and `examples/external_producer.cpp` as three processes over real DDS. The application is driven from Damping into Ready, the producer registers, is selected and prepares a first frame, the locomotion key authorizes the context, and the producer's own stream is compared with the runtime's output trace: 104 adopted frames with strictly increasing sequences under the granted producer identity, none of them before the authorization, the target moving under a forward intent, and the stop that ends it. |
 | `application_record_test` | The application-driven recorded run (§11.1): the recorder is enabled in a copy of the shipped configuration, the real application supervises one session, and the run is read back - 381 rows at 100 Hz on the 500 Hz loop with the command in force, the feedback and the output of the same tick in every tracking row, and the authorization contexts in the run's own `sessions.json`. |
+| `policy_reference_test` | The SDK half of the training-side reference sample (§11.1): the model the training repository exported and the state/command/observation/action/target it recorded for four deterministic cases, compared element by element against this SDK's observation builder, model session and action pipeline. Registered only when the artifact is present (a configure-time variable names its directory), so its absence is a configure-time statement and not a silent pass. |
 | `application_stability_test` | The state-switching stability run (§11.1): `Standby -> Damping -> Ready` in a loop for a configurable wall-clock time, with the memory, thread and descriptor counts of both processes sampled from `/proc`. The CTest entry runs it for twenty seconds as a regression guard; the thirty minutes of the acceptance are the same driver with `--duration-s 1800`. |
 
 ### The scenario matrix
