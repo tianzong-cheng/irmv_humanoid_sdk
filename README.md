@@ -142,7 +142,7 @@ digest and the same instance. The file carries the runtime section plus the
 | `space` | emergency stop: latch `OperatorEmergencyStop`, enter `Fault`, request `Damping`. The latch is left only by an explicit Reset |
 | `d` | damping stop: `Standby`/`Initializing`/`Ready` → `Damping` |
 | `i` | initialize: `Damping` → `Initializing` (a trajectory towards `application.initialization.target_position`), then `Ready` once the target is reached and stable |
-| `l` | locomotion: from `Ready`, arm the local policy named by `application.policy.model_path`; the first frame it produces becomes the first frame of the Tracking request, and the confirmed context enters `Locomotion`. Refused from any other behaviour |
+| `l` | locomotion: from `Ready`, arm the source this run was started with - the local policy or the external producer process - and let the first frame it produces become the first frame of the Tracking request; the confirmed context enters `Locomotion`. Refused from any other behaviour |
 | `z` | zero torque: request a zero-torque stop; a confirmed `ZeroTorque` brings a non-faulted behaviour back to `Standby` |
 | `r` | reset: the only way out of a latched `Fault`, and only into `Standby`, on a confirmed fresh `ZeroTorque` |
 | `x` | exit (see below) |
@@ -154,8 +154,9 @@ The bindings live in `input.bindings` of the configuration, never in the code: a
 byte the file does not bind is inert, and `emergency_stop` must be the space
 character. `w`/`a`/`s`/`f`/`q`/`e` maintain and expire the one body-velocity
 intent (`input.intent_timeout_us`), which is the command observation the local
-policy tracks while it is in `Locomotion`; with no policy configured and no `l`
-pressed, no intent ever becomes a joint target. `start_locomotion` may stay
+policy tracks while it is in `Locomotion` and the intent the application
+publishes to an external producer; with no source selected and no `l` pressed,
+no intent ever becomes a joint target. `start_locomotion` may stay
 unbound, and is then inert like every other unbound byte.
 
 ### Status line
@@ -392,7 +393,11 @@ artifacts on failure.
 ## Documentation
 
 * `docs/runtime-protocol.md` — the frozen topics, message fields, enums, QoS
-  and the identity/session/epoch, timeout and fault semantics.
+  and the identity/session/epoch, timeout and fault semantics, plus the external
+  producer interface and the application's side of its lifecycle.
 * `docs/testing.md` — every deterministic and real-DDS test with what it
-  proves, how to run the suites, the DDS domain policy, and what this phase
-  does not cover.
+  proves, how to run the suites, the DDS domain policy, the phase-3 acceptance
+  runs with their numbers, and what this phase does not cover.
+* `docs/superpowers/plans/` — the phase plans and the per-phase handoff reports
+  (a local, untracked directory; the handoff names the commits, the evidence and
+  the remaining risks).
