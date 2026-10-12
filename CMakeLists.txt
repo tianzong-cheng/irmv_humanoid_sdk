@@ -1027,6 +1027,28 @@ set_tests_properties(
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
+# The application-driven recorded run (§11.1, Task 9): the real application
+# supervises a session that the real runtime records with the recorder enabled,
+# and the run is read back as the evidence of what the machine did - the command
+# in force in every recorded tick, the feedback and the output of that same tick,
+# and the authorization context in the run's own session table.
+add_test(
+  NAME application_record_test
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/integration/application_record_test.py"
+    "$<TARGET_FILE:application>"
+    "$<TARGET_FILE:robot_runtime>"
+    "${PROJECT_SOURCE_DIR}"
+)
+set_tests_properties(
+  application_record_test
+  PROPERTIES
+    LABELS integration
+    TIMEOUT 300
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
 # ---------------------------------------------------------------------------
 # Formatting
 # ---------------------------------------------------------------------------

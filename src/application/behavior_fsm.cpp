@@ -381,8 +381,8 @@ bool BehaviorFsm::ExpectedTracking(const protocol::RobotState &state) const {
     return true;
   }
   // The context the tracking request still on its way proposes.
-  if (pending_ == Pending::Tracking &&
-      state.producer_id == pending_producer_ && state.epoch == pending_epoch_) {
+  if (pending_ == Pending::Tracking && state.producer_id == pending_producer_ &&
+      state.epoch == pending_epoch_) {
     return true;
   }
   // The context that was live until that request was proposed: the runtime
@@ -769,8 +769,8 @@ void BehaviorFsm::TryStartInitialization(protocol::TimeUs now_us,
   // Neither a rejected request nor a cancelled move is restarted: the generator
   // is rebuilt so that Start admits a new trajectory. The context this FSM has
   // confirmed until now is remembered first: the runtime keeps publishing it
-  // until it applies this request, and a state of it that crosses the request on
-  // the wire is not an authorization nobody asked for.
+  // until it applies this request, and a state of it that crosses the request
+  // on the wire is not an authorization nobody asked for.
   RememberConfirmedTracking();
   CancelInitialization();
   initialization_.emplace(config_);
