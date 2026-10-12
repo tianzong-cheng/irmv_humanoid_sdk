@@ -323,13 +323,13 @@ class BehaviorFsm {
 
   // The context that was confirmed until this FSM proposed the Tracking request
   // now pending. The runtime keeps publishing it until it applies that request,
-  // so a state of it that crossed the request on the wire must not be read as an
-  // authorization nobody asked for: without this memory, asking for a new
+  // so a state of it that crossed the request on the wire must not be read as
+  // an authorization nobody asked for: without this memory, asking for a new
   // context while the initialization hold is still the newest thing the runtime
   // published - which is what both locomotion sources do - faults the behaviour
   // on a perfectly legal transition. It is dropped by every path that withdraws
-  // the context (a stop, a latch, the exit, the runtime leaving tracking) and by
-  // the confirmation of the request that replaced it.
+  // the context (a stop, a latch, the exit, the runtime leaving tracking) and
+  // by the confirmation of the request that replaced it.
   bool have_previous_tracking_{false};
   protocol::Id previous_tracking_producer_{};
   protocol::Sequence previous_tracking_epoch_{0};
