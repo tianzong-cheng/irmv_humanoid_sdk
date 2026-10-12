@@ -908,6 +908,10 @@ int RequestTimeoutFaults() {
     return 1;
   }
   CHECK(pending->operation == Operation::Damping);
+  // The request id is copied out before the next Step: a Step that begins
+  // another request pushes into the sink's vector, which may move it, and the
+  // pointer would dangle - which is exactly what the sanitizer run reported.
+  const Sequence pending_request_id = pending->request_id;
 
   const BehaviorStep step =
       h.Step(InputEvent::None, h.config().supervision.request_deadline_us);
@@ -919,7 +923,7 @@ int RequestTimeoutFaults() {
     return 1;
   }
   CHECK(stop->operation == Operation::Damping);
-  CHECK(stop->request_id > pending->request_id);
+  CHECK(stop->request_id > pending_request_id);
   CHECK(!step.send_command);
   return 0;
 }
