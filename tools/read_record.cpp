@@ -3,13 +3,14 @@
 //   read_record --run <run-directory> [--from-us N] [--to-us N] [--summary-only]
 //
 // One JSON object per line, in the order the run recorded them, followed by a
-// summary line that reports the metadata, the number of rows, the range they
-// span and every gap the run knows about. A gap is never hidden: a caller that
-// reads a stretch of time is told what is missing from it as well as what is
-// there.
+// summary line that reports the metadata - the units the run declared among
+// them - the number of rows, the range they span and every gap the run knows
+// about. A gap is never hidden: a caller that reads a stretch of time is told
+// what is missing from it as well as what is there.
 //
 // The tool only reads: it opens no DDS endpoint, publishes nothing and cannot
 // command a machine.
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -25,6 +26,7 @@
 namespace {
 
 using Json = nlohmann::json;
+using irmv::protocol::Id;
 using irmv::protocol::TimeUs;
 using irmv::telemetry::RecordRange;
 using irmv::telemetry::RecordReader;
@@ -33,6 +35,20 @@ using irmv::telemetry::RecordSample;
 constexpr std::string_view kUsage =
     "usage: read_record --run <run-directory> [--from-us N] [--to-us N] "
     "[--summary-only]";
+
+// A 16-byte identity as its lower-case hex form, the same rendering the log and
+// the trace use. An identity is opaque: a JSON number would neither hold all
+// sixteen bytes nor stay comparable as text, and a consumer that records which
+// producer a run's commands came from needs all of them.
+std::string IdHex(const Id &id) {
+  constexpr char kHex[] = "0123456789abcdef";
+  std::string text(2 * id.size(), '0');
+  for (std::size_t index = 0; index < id.size(); ++index) {
+    text[2 * index] = kHex[(id[index] >> 4) & 0x0f];
+    text[2 * index + 1] = kHex[id[index] & 0x0f];
+  }
+  return text;
+}
 
 // Every field of one row, so a consumer never has to know the column order of
 // the file to use it.
@@ -47,6 +63,7 @@ Json RowToJson(const RecordSample &sample) {
   row["healthy"] = sample.healthy;
   row["damping_eligible"] = sample.damping_eligible;
   row["command_present"] = sample.command_present;
+  row["producer_id"] = IdHex(sample.producer_id);
   row["epoch"] = sample.epoch;
   row["command_seq"] = sample.command_seq;
   row["source_state_seq"] = sample.source_state_seq;
@@ -56,24 +73,34 @@ Json RowToJson(const RecordSample &sample) {
   row["feedback_valid"] = sample.feedback_valid;
   row["imu_valid"] = sample.imu_valid;
   row["send_accepted"] = sample.send_accepted;
+  row["output_valid"] = sample.output_valid;
   row["joint_count"] = sample.joint_count;
   Json q = Json::array();
   Json dq = Json::array();
   Json tau_ff = Json::array();
   Json kp = Json::array();
   Json kd = Json::array();
+  Json measured_q = Json::array();
+  Json measured_dq = Json::array();
+  Json output_torque = Json::array();
   for (std::uint32_t index = 0; index < sample.joint_count; ++index) {
     q.push_back(sample.q[index]);
     dq.push_back(sample.dq[index]);
     tau_ff.push_back(sample.tau_ff[index]);
     kp.push_back(sample.kp[index]);
     kd.push_back(sample.kd[index]);
+    measured_q.push_back(sample.measured_q[index]);
+    measured_dq.push_back(sample.measured_dq[index]);
+    output_torque.push_back(sample.output_torque[index]);
   }
   row["q"] = std::move(q);
   row["dq"] = std::move(dq);
   row["tau_ff"] = std::move(tau_ff);
   row["kp"] = std::move(kp);
   row["kd"] = std::move(kd);
+  row["measured_q"] = std::move(measured_q);
+  row["measured_dq"] = std::move(measured_dq);
+  row["output_torque"] = std::move(output_torque);
   return row;
 }
 
@@ -154,6 +181,13 @@ int main(int argc, char **argv) {
   summary["sample_hz"] = reader.metadata().sample_hz;
   summary["joint_count"] = reader.metadata().joint_count;
   summary["joints"] = reader.metadata().joints;
+  // The units are the run's own names for its numbers, carried as the object
+  // the metadata declared: a column of radians that arrives without them is a
+  // number a consumer has to guess at. A run that declares none reports none
+  // rather than inventing a table.
+  if (!reader.metadata().units_json.empty()) {
+    summary["units"] = Json::parse(reader.metadata().units_json);
+  }
   summary["chunks"] = reader.chunks().size();
   summary["rows_in_range"] = range.samples.size();
   summary["truncated"] = range.truncated;
@@ -176,6 +210,36 @@ int main(int argc, char **argv) {
   }
   summary["gaps"] = std::move(gaps);
   summary["missing_samples"] = missing;
+  // The session sidecar: one entry per authorization context the runtime
+  // adopted, in arrival order. The digest is carried verbatim - the runtime
+  // writes "unknown" because it holds no model - and the reader never
+  // substitutes one.
+  Json sessions = Json::array();
+  for (const irmv::telemetry::RecordSessionEvent &event : reader.sessions()) {
+    Json entry;
+    entry["schema_version"] = event.schema_version;
+    entry["runtime_id"] = IdHex(event.runtime_id);
+    entry["session_id"] = IdHex(event.session_id);
+    entry["producer_id"] = IdHex(event.producer_id);
+    entry["epoch"] = event.epoch;
+    entry["stamp_us"] = event.stamp_us;
+    entry["state_seq"] = event.state_seq;
+    entry["joint_count"] = event.joint_count;
+    Json kp = Json::array();
+    Json kd = Json::array();
+    for (std::uint32_t index = 0;
+         index < event.joint_count && index < irmv::protocol::kMaxJoints;
+         ++index) {
+      kp.push_back(event.kp[index]);
+      kd.push_back(event.kd[index]);
+    }
+    entry["kp"] = std::move(kp);
+    entry["kd"] = std::move(kd);
+    entry["model_sha256"] = std::string(event.model_sha256.data());
+    sessions.push_back(std::move(entry));
+  }
+  summary["sessions"] = std::move(sessions);
+  summary["session_count"] = reader.sessions().size();
   std::fputs(summary.dump().c_str(), stdout);
   std::fputc('\n', stdout);
   return 0;

@@ -578,8 +578,27 @@ telemetry::RecordSample MakeRecordSample(const ExecutionFsm &fsm,
   sample.feedback_valid = feedback_valid;
   sample.imu_valid = result.state.feedback.imu.valid;
   sample.send_accepted = result.write_result.accepted;
+  sample.output_valid = result.output_valid;
   sample.joint_count = std::min<std::uint32_t>(result.state.feedback.count,
                                                protocol::kMaxJoints);
+  // The measured feedback of this very tick, in the configuration's order. It
+  // is meaningful only for the joints the feedback snapshot really carried and
+  // only while `feedback_valid` holds; the flag, not the numbers, is the
+  // contract, so a reader never reads a zero a failed read left behind as a
+  // measurement.
+  for (std::uint32_t index = 0;
+       index < result.state.feedback.count && index < protocol::kMaxJoints;
+       ++index) {
+    sample.measured_q[index] = result.state.feedback.joints[index].q;
+    sample.measured_dq[index] = result.state.feedback.joints[index].dq;
+  }
+  // The final output of this tick: the torques the output stage produced for
+  // the backend, from `TickResult::output`. `send_accepted` above is the host
+  // path's answer, not a device acknowledgement.
+  for (std::uint32_t index = 0;
+       index < result.output.count && index < sample.joint_count; ++index) {
+    sample.output_torque[index] = result.output.torque[index];
+  }
   if (fsm.has_target()) {
     const protocol::JointCommand &target = fsm.current_target();
     sample.command_present = true;
@@ -595,6 +614,35 @@ telemetry::RecordSample MakeRecordSample(const ExecutionFsm &fsm,
     sample.kd = target.joints.kd;
   }
   return sample;
+}
+
+// One session event for the recorder's side channel: the authorization context
+// this tick observes - the runtime instance and session, the producer and epoch
+// that hold it - and the gains of the first command adopted with it. It is
+// built from the state and target the tick already holds; nothing here reads a
+// device, a clock or a file, and nothing allocates.
+telemetry::RecordSessionEvent MakeSessionEvent(
+    const ExecutionFsm &fsm, const runtime::TickResult &result) {
+  telemetry::RecordSessionEvent event;
+  event.runtime_id = result.state.runtime_id;
+  event.session_id = result.state.session_id;
+  event.producer_id = result.state.producer_id;
+  event.epoch = result.state.epoch;
+  event.stamp_us = result.state.stamp_us;
+  event.state_seq = result.state.state_seq;
+  // The model digest belongs to the application, the only side that loaded a
+  // model: the runtime links no inference and has no digest to write, so it
+  // writes the literal "unknown" here rather than inventing one. A real digest
+  // travels in the application's own session record.
+  std::memcpy(event.model_sha256.data(), "unknown", sizeof("unknown"));
+  if (fsm.has_target()) {
+    const protocol::JointCommand &target = fsm.current_target();
+    event.joint_count =
+        std::min<std::uint32_t>(target.joints.count, protocol::kMaxJoints);
+    event.kp = target.joints.kp;
+    event.kd = target.joints.kd;
+  }
+  return event;
 }
 
 OutputTraceRecord MakeTraceRecord(const ExecutionFsm &fsm,
@@ -1702,17 +1750,31 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
   // are evenly spaced and its rate is the configured one rather than the
   // control rate. The stride is what the recorder needs to tell a missing
   // sample from the next recorded tick.
+  //
+  // It is a whole number because LoadConfig refuses a sampling rate that does
+  // not divide the control rate exactly: the ratio is the sample period over
+  // the control period, both in microseconds, and not a rounded ratio of the
+  // two frequencies, which is what would turn 200 Hz on a 500 Hz loop into one
+  // sample per three ticks and a run that records 166.7 Hz.
   const std::uint32_t record_ratio = [&config]() {
     if (!config.telemetry.recorder.enabled ||
         config.telemetry.recorder.sample_hz == 0) {
       return 0U;
     }
-    const auto ratio = static_cast<std::uint32_t>(
-        std::lround(config.control_hz /
-                    static_cast<double>(config.telemetry.recorder.sample_hz)));
-    return ratio == 0 ? 1U : ratio;
+    const auto sample_period_us = static_cast<std::uint64_t>(std::llround(
+        1000000.0 / static_cast<double>(config.telemetry.recorder.sample_hz)));
+    const std::uint64_t control_period_us =
+        config.control_period_us == 0 ? 1 : config.control_period_us;
+    const std::uint64_t ratio = sample_period_us / control_period_us;
+    return static_cast<std::uint32_t>(ratio == 0 ? 1 : ratio);
   }();
   std::uint32_t record_tick = 0;
+  // The authorization context the recorder's session channel last reported. The
+  // runtime emits one session event when it changes - a new producer, a new
+  // epoch, or the context ending - rather than one per tick, and the zero
+  // identity is the "no context" a run starts in.
+  protocol::Id session_producer{};
+  protocol::Sequence session_epoch = 0;
   std::unique_ptr<telemetry::Recorder> recorder;
   if (config.telemetry.recorder.enabled) {
     telemetry::RecorderConfig recorder_config;
@@ -1810,6 +1872,22 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
             recorder->TryRecord(MakeRecordSample(fsm, result, feedback_valid)));
       }
       ++record_tick;
+    }
+
+    if (recorder) {
+      // One session event per authorization context the tick observes, not one
+      // per tick: emit only when the producer or epoch changes - a context
+      // adopted, re-authorized, or ended - derived from the state the tick
+      // already published. A full session channel costs the event and is
+      // counted; the control thread never waits for it, and the call neither
+      // allocates nor throws.
+      if (result.state.producer_id != session_producer ||
+          result.state.epoch != session_epoch) {
+        session_producer = result.state.producer_id;
+        session_epoch = result.state.epoch;
+        static_cast<void>(
+            recorder->TryRecordSession(MakeSessionEvent(fsm, result)));
+      }
     }
 
     if (trace) {

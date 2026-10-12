@@ -74,6 +74,10 @@ class RecordReader {
   const RunMetadata &metadata() const { return metadata_; }
   const std::vector<ChunkInfo> &chunks() const { return chunks_; }
   const std::vector<RecordGap> &gaps() const { return gaps_; }
+  // The session events the run's `sessions.json` sidecar holds, in arrival
+  // order. A run records one per authorization context the runtime adopted; a
+  // run with no sidecar (or none adopted) reports none.
+  const std::vector<RecordSessionEvent> &sessions() const { return sessions_; }
   const std::filesystem::path &directory() const { return directory_; }
 
   // Reads the samples whose controller stamp is in `[begin_us, end_us)`. An
@@ -87,6 +91,7 @@ class RecordReader {
   RunMetadata metadata_;
   std::vector<ChunkInfo> chunks_;
   std::vector<RecordGap> gaps_;
+  std::vector<RecordSessionEvent> sessions_;
 };
 
 }  // namespace irmv::telemetry

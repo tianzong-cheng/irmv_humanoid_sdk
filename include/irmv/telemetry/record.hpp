@@ -22,7 +22,18 @@ namespace irmv::telemetry {
 
 // The version of the on-disk sample layout. A reader refuses a run of another
 // version instead of reinterpreting its bytes.
-inline constexpr std::uint32_t kRecordSchemaVersion = 1;
+//
+// 2 added the joint feedback the tick used (`measured_q`/`measured_dq`), the
+// output stage's own result (`output_valid`/`output_torque`) and the session
+// sidecar (`sessions.json`). Version 1 carried only the target and the
+// feedback's identity, so a reader could not see what the machine measured or
+// what it was asked to apply; version 1 runs are refused, never reinterpreted.
+inline constexpr std::uint32_t kRecordSchemaVersion = 2;
+
+// A SHA-256 digest rendered as 64 lower-case hex digits, plus a terminator. A
+// session event carries one as fixed storage so the control thread can push it
+// without allocating; the runtime itself always writes "unknown".
+inline constexpr std::size_t kModelDigestBytes = 65;
 
 // One tick of the run.
 struct RecordSample {
@@ -52,15 +63,21 @@ struct RecordSample {
   protocol::Sequence source_state_seq{0};
   protocol::TimeUs command_rx_us{0};
 
-  // The coherent feedback snapshot of this tick and whether it was usable.
+  // The coherent feedback snapshot of this tick and whether it was usable. The
+  // identity above is not the measurement: `measured_q`/`measured_dq` below are
+  // what the machine reported, and they are meaningful only when
+  // `feedback_valid` holds and only for the first `joint_count` joints.
   protocol::Sequence feedback_seq{0};
   protocol::TimeUs feedback_stamp_us{0};
   bool feedback_valid{false};
   bool imu_valid{false};
 
-  // Whether the host send path accepted the output of this tick. It is the host
-  // path's answer, never a device acknowledgement.
+  // The final output of this very tick and the host send path's answer to it.
+  // `send_accepted` is the host path's answer and is never a device
+  // acknowledgement; `output_torque` is the torque the output stage asked the
+  // backend to apply, not what the hardware measured.
   bool send_accepted{false};
+  bool output_valid{false};
 
   // The target that was applied, in the configuration's joint order: the first
   // `joint_count` entries of each array are meaningful.
@@ -70,6 +87,14 @@ struct RecordSample {
   std::array<double, protocol::kMaxJoints> tau_ff{};
   std::array<double, protocol::kMaxJoints> kp{};
   std::array<double, protocol::kMaxJoints> kd{};
+  // The feedback the tick actually used, in the same order. `measured_q` and
+  // `measured_dq` are the measured joint position and velocity behind
+  // `feedback_seq`, and are meaningful only while `feedback_valid` holds.
+  std::array<double, protocol::kMaxJoints> measured_q{};
+  std::array<double, protocol::kMaxJoints> measured_dq{};
+  // The torques the output stage produced for the backend this tick, meaningful
+  // only while `output_valid` holds.
+  std::array<double, protocol::kMaxJoints> output_torque{};
 
   bool operator==(const RecordSample &other) const {
     return schema_version == other.schema_version &&
@@ -89,8 +114,53 @@ struct RecordSample {
            feedback_valid == other.feedback_valid &&
            imu_valid == other.imu_valid &&
            send_accepted == other.send_accepted &&
+           output_valid == other.output_valid &&
            joint_count == other.joint_count && q == other.q && dq == other.dq &&
-           tau_ff == other.tau_ff && kp == other.kp && kd == other.kd;
+           tau_ff == other.tau_ff && kp == other.kp && kd == other.kd &&
+           measured_q == other.measured_q && measured_dq == other.measured_dq &&
+           output_torque == other.output_torque;
+  }
+};
+
+// One authorization context the runtime adopted, for the recorder's session
+// sidecar. A session is not a tick: the runtime emits one of these when the
+// context it observes changes - a new epoch, a new producer, or the context
+// ending - never once per recorded sample.
+//
+// The runtime holds no model and must not link the inference stack, so it has
+// no digest to write and never invents one: `model_sha256` carries the literal
+// "unknown". A real digest belongs to the application, the only side that
+// loaded a model, and travels in the application's own session record. The type
+// is fixed capacity and trivially copyable, so the control thread can push it
+// onto the bounded session handoff without allocating, blocking or throwing.
+struct RecordSessionEvent {
+  std::uint32_t schema_version{kRecordSchemaVersion};
+  // The runtime instance and session whose context this is, and the producer
+  // and epoch that authorized it.
+  protocol::Id runtime_id{};
+  protocol::Id session_id{};
+  protocol::Id producer_id{};
+  protocol::Sequence epoch{0};
+  // The tick the context was adopted on: its controller stamp and the sequence
+  // the runtime published it under.
+  protocol::TimeUs stamp_us{0};
+  protocol::Sequence state_seq{0};
+  // The gains of the first command adopted with this context, in the
+  // configuration's canonical joint order: the first `joint_count` entries are
+  // meaningful.
+  std::uint32_t joint_count{0};
+  std::array<double, protocol::kMaxJoints> kp{};
+  std::array<double, protocol::kMaxJoints> kd{};
+  // The model digest the application ran, or "unknown". Never derived here.
+  std::array<char, kModelDigestBytes> model_sha256{};
+
+  bool operator==(const RecordSessionEvent &other) const {
+    return schema_version == other.schema_version &&
+           runtime_id == other.runtime_id && session_id == other.session_id &&
+           producer_id == other.producer_id && epoch == other.epoch &&
+           stamp_us == other.stamp_us && state_seq == other.state_seq &&
+           joint_count == other.joint_count && kp == other.kp &&
+           kd == other.kd && model_sha256 == other.model_sha256;
   }
 };
 
@@ -125,6 +195,7 @@ struct RecordGap {
 // directory of one run and the files inside it.
 inline constexpr std::string_view kRecordMetadataFile = "meta.json";
 inline constexpr std::string_view kRecordIndexFile = "index.json";
+inline constexpr std::string_view kRecordSessionsFile = "sessions.json";
 inline constexpr std::string_view kRecordChunkPrefix = "chunk_";
 inline constexpr std::string_view kRecordChunkSuffix = ".bin";
 

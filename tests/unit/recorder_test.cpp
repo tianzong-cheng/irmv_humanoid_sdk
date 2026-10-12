@@ -6,9 +6,11 @@
 // the sample - counted and visible as a gap in the run - rather than the tick.
 #include "irmv/telemetry/recorder.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -18,6 +20,7 @@
 #include <vector>
 
 #include "irmv/telemetry/record.hpp"
+#include "irmv/telemetry/record_reader.hpp"
 #include "support/check.hpp"
 
 namespace {
@@ -27,10 +30,13 @@ using irmv::protocol::OutputAction;
 using irmv::protocol::Sequence;
 using irmv::protocol::TimeUs;
 using irmv::telemetry::kRecordChunkRows;
+using irmv::telemetry::kRecordGapSegments;
+using irmv::telemetry::kRecordQueueCapacity;
 using irmv::telemetry::Recorder;
 using irmv::telemetry::RecorderConfig;
 using irmv::telemetry::RecordGap;
 using irmv::telemetry::RecordGapReason;
+using irmv::telemetry::RecordReader;
 using irmv::telemetry::RecordSample;
 
 constexpr std::size_t kJoints = 12;
@@ -61,6 +67,42 @@ RecordSample MakeSample(Sequence state_seq) {
   return sample;
 }
 
+// One authorization context the session tests hand to the recorder: the
+// producer and epoch of the adopted context, the gains of its first command,
+// and the literal digest the runtime writes because it holds no model.
+irmv::telemetry::RecordSessionEvent MakeSessionEvent(Sequence epoch) {
+  irmv::telemetry::RecordSessionEvent event;
+  event.runtime_id[0] = 0x11;
+  event.session_id[0] = 0x22;
+  event.producer_id[0] = 0x33;
+  event.epoch = epoch;
+  event.stamp_us = 5000 + epoch * 10;
+  event.state_seq = epoch;
+  event.joint_count = 2;
+  event.kp[0] = 60.0;
+  event.kp[1] = 61.0;
+  event.kd[0] = 3.0;
+  event.kd[1] = 4.0;
+  std::memcpy(event.model_sha256.data(), "unknown", sizeof("unknown"));
+  return event;
+}
+
+// Starts a recorder whose metadata a reader can open: the joint table and count
+// must agree, because the reader checks them before handing out a row.
+bool StartRecorderForSessions(Recorder *recorder,
+                              const std::filesystem::path &directory) {
+  RecorderConfig config;
+  config.enabled = true;
+  config.sample_hz = 100;
+  config.directory = directory;
+  std::string error;
+  const std::string metadata =
+      std::string(R"({"schema_version":)") +
+      std::to_string(irmv::telemetry::kRecordSchemaVersion) +
+      R"(,"config_id":"cfg","layout_id":"lay","backend":"fake","control_hz":100.0,"sample_hz":100,"joint_count":2,"joints":["a","b"],"units":{"position":"rad"}})";
+  return recorder->Start(config, metadata, &error);
+}
+
 // A run directory that removes itself, and a metadata document good enough for
 // the recorder to write.
 std::filesystem::path MakeDirectory() {
@@ -80,7 +122,10 @@ bool StartRecorder(Recorder *recorder, const std::filesystem::path &directory,
   config.stride = stride;
   config.directory = directory;
   std::string error;
-  const std::string metadata = R"({"schema_version":1,"joints":["a","b"]})";
+  const std::string metadata =
+      std::string(R"({"schema_version":)") +
+      std::to_string(irmv::telemetry::kRecordSchemaVersion) +
+      R"(,"joints":["a","b"]})";
   const bool started = recorder->Start(config, metadata, &error);
   if (!started) {
     std::cerr << "recorder start failed: " << error << '\n';
@@ -92,7 +137,10 @@ std::uint64_t CountChunks(const std::filesystem::path &run_directory) {
   std::uint64_t count = 0;
   for (const auto &entry : std::filesystem::directory_iterator(run_directory)) {
     const std::string name = entry.path().filename().string();
-    if (name.rfind("chunk_", 0) == 0 && entry.path().extension() == ".bin") {
+    // A regular file only: a directory that happens to be named like a chunk is
+    // how a later test obstructs a rename, and it is not a written chunk.
+    if (name.rfind("chunk_", 0) == 0 && entry.path().extension() == ".bin" &&
+        std::filesystem::is_regular_file(entry.path())) {
       ++count;
     }
   }
@@ -115,6 +163,148 @@ nlohmann::json ReadIndex(const std::filesystem::path &run_directory) {
     return nlohmann::json{};
   }
   return nlohmann::json::parse(file, nullptr, false);
+}
+
+// One sample offered to a recorder and whether the handoff took it. A test that
+// asserts on refusals has to know which offers were refused: the handoff is
+// drained by a worker on its own clock, so the offers are logged and the
+// expectation is derived from what the recorder really did rather than from
+// when the worker happened to wake up.
+struct OfferRecord {
+  Sequence seq{0};
+  TimeUs stamp_us{0};
+  bool accepted{false};
+};
+
+bool Offer(Recorder *recorder, std::vector<OfferRecord> *log, Sequence seq) {
+  const RecordSample sample = MakeSample(seq);
+  const bool accepted = recorder->TryRecord(sample);
+  log->push_back(OfferRecord{seq, sample.stamp_us, accepted});
+  return accepted;
+}
+
+// Offers a sample until the handoff takes it, the way a control loop that wants
+// every sample recorded behaves: the queue is bounded and the worker drains it
+// on its own clock, so a busy handoff is room to wait for, not a loss.
+bool OfferUntilAccepted(Recorder *recorder, std::vector<OfferRecord> *log,
+                        Sequence seq) {
+  for (int attempt = 0; attempt < 500; ++attempt) {
+    if (Offer(recorder, log, seq)) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return false;
+}
+
+// Groups the refusals a test saw the way the control thread groups them: a
+// refusal extends the current stretch when it is the same sample offered again
+// or the next sample of the stride, and nothing was accepted since the stretch
+// opened; anything else starts a new stretch. The table must agree with this
+// offer by offer, which is what makes "two refusals a minute apart are two
+// losses" checkable.
+std::vector<irmv::telemetry::RecordGap> ExpectedQueueGaps(
+    const std::vector<OfferRecord> &offers, Sequence stride) {
+  std::vector<irmv::telemetry::RecordGap> gaps;
+  bool open = false;
+  for (const OfferRecord &offer : offers) {
+    if (offer.accepted) {
+      open = false;
+      continue;
+    }
+    const bool continues = open && (offer.seq == gaps.back().last_seq ||
+                                    offer.seq == gaps.back().last_seq + stride);
+    if (!continues) {
+      irmv::telemetry::RecordGap gap;
+      gap.first_seq = offer.seq;
+      gap.first_stamp_us = offer.stamp_us;
+      gap.reason = RecordGapReason::QueueFull;
+      gaps.push_back(gap);
+      open = true;
+    }
+    gaps.back().last_seq = offer.seq;
+    gaps.back().last_stamp_us = offer.stamp_us;
+  }
+  for (irmv::telemetry::RecordGap &gap : gaps) {
+    gap.dropped = (gap.last_seq - gap.first_seq) / stride + 1;
+  }
+  return gaps;
+}
+
+std::vector<irmv::telemetry::RecordGap> QueueGaps(
+    const std::vector<irmv::telemetry::RecordGap> &gaps) {
+  std::vector<irmv::telemetry::RecordGap> queue_gaps;
+  for (const irmv::telemetry::RecordGap &gap : gaps) {
+    if (gap.reason == RecordGapReason::QueueFull) {
+      queue_gaps.push_back(gap);
+    }
+  }
+  return queue_gaps;
+}
+
+RecordGapReason ReasonFromName(const std::string &name) {
+  if (name == "queue_full") {
+    return RecordGapReason::QueueFull;
+  }
+  if (name == "write_failed") {
+    return RecordGapReason::WriteFailed;
+  }
+  if (name == "stopped") {
+    return RecordGapReason::Stopped;
+  }
+  return RecordGapReason::None;
+}
+
+// The gap table as the run's own index carries it: what a reader of the files
+// sees, field by field.
+std::vector<irmv::telemetry::RecordGap> IndexGaps(const nlohmann::json &index) {
+  std::vector<irmv::telemetry::RecordGap> gaps;
+  for (const auto &entry : index["gaps"]) {
+    irmv::telemetry::RecordGap gap;
+    gap.first_seq = entry["first_seq"].get<Sequence>();
+    gap.last_seq = entry["last_seq"].get<Sequence>();
+    gap.first_stamp_us = entry["first_stamp_us"].get<TimeUs>();
+    gap.last_stamp_us = entry["last_stamp_us"].get<TimeUs>();
+    gap.dropped = entry["dropped"].get<std::uint64_t>();
+    gap.reason = ReasonFromName(entry["reason"].get<std::string>());
+    gaps.push_back(gap);
+  }
+  return gaps;
+}
+
+int CheckSameGaps(const std::vector<irmv::telemetry::RecordGap> &actual,
+                  const std::vector<irmv::telemetry::RecordGap> &expected) {
+  CHECK(actual.size() == expected.size());
+  for (std::size_t index = 0; index < expected.size(); ++index) {
+    CHECK(actual[index].first_seq == expected[index].first_seq);
+    CHECK(actual[index].last_seq == expected[index].last_seq);
+    CHECK(actual[index].first_stamp_us == expected[index].first_stamp_us);
+    CHECK(actual[index].last_stamp_us == expected[index].last_stamp_us);
+    CHECK(actual[index].dropped == expected[index].dropped);
+    CHECK(actual[index].reason == expected[index].reason);
+  }
+  return 0;
+}
+
+// No refusal may cover a sample the run recorded: one stretch of refusals
+// spanning the samples that went in fine is exactly what this table exists to
+// avoid. (A chunk that could not be written covers samples the handoff did
+// accept - those are the rows the failed write lost - so only refusals are
+// checked here.)
+int CheckRefusalGapsMissRecordedOffers(
+    const std::vector<irmv::telemetry::RecordGap> &gaps,
+    const std::vector<OfferRecord> &offers) {
+  for (const irmv::telemetry::RecordGap &gap : gaps) {
+    if (gap.reason != RecordGapReason::QueueFull) {
+      continue;
+    }
+    for (const OfferRecord &offer : offers) {
+      if (offer.accepted) {
+        CHECK(!(offer.seq >= gap.first_seq && offer.seq <= gap.last_seq));
+      }
+    }
+  }
+  return 0;
 }
 
 }  // namespace
@@ -202,10 +392,12 @@ int RecordedRun() {
   return 0;
 }
 
-// A hole in the sequence the runtime published is a gap in the run, reported
-// with its range - never smoothed over by presenting the samples around it as
-// consecutive.
-int Gaps() {
+// A jump in the sequence the runtime published is not a loss. The recorder
+// reports the samples the handoff refused, the chunks it could not write and
+// the tail it could not drain; a stretch the runtime never sampled is none of
+// those, and guessing a hole there (with a stamp range the recorder never saw)
+// would double-report real losses and invent samples.
+int SequenceJumpIsNotALoss() {
   const std::filesystem::path directory = MakeDirectory();
   Recorder recorder;
   CHECK(StartRecorder(&recorder, directory));
@@ -213,11 +405,10 @@ int Gaps() {
     CHECK(recorder.TryRecord(MakeSample(seq)));
   }
   CHECK(recorder.Stop());
+  CHECK(recorder.dropped() == 0);
+  CHECK(recorder.gaps().empty());
   const nlohmann::json index = ReadIndex(recorder.run_directory());
-  CHECK(index["gaps"].size() == 1);
-  CHECK(index["gaps"][0]["first_seq"] == 4);
-  CHECK(index["gaps"][0]["last_seq"] == 8);
-  CHECK(index["gaps"][0]["dropped"] == 5);
+  CHECK(index["gaps"].empty());
   CHECK(index["rows_recorded"] == 6);
   std::filesystem::remove_all(directory);
   return 0;
@@ -225,7 +416,7 @@ int Gaps() {
 
 // A handoff nobody drains costs the samples, not the tick: the queue is
 // bounded, the refusal is counted, and the run reports the stretch it never
-// wrote.
+// wrote - one stretch, covering exactly the refusals.
 int FullQueueIsCounted() {
   const std::filesystem::path directory = MakeDirectory();
   Recorder recorder;
@@ -233,59 +424,308 @@ int FullQueueIsCounted() {
   // The worker waits before its first drain, so a burst pushed immediately
   // fills the bounded queue and the rest is refused.
   const std::uint64_t burst = 2000;
+  std::vector<OfferRecord> offers;
   std::uint64_t accepted = 0;
   for (std::uint64_t index = 1; index <= burst; ++index) {
-    if (recorder.TryRecord(MakeSample(index))) {
+    if (Offer(&recorder, &offers, index)) {
       ++accepted;
     }
   }
   CHECK(accepted < burst);
-  CHECK(recorder.dropped() > 0);
+  CHECK(recorder.dropped() == burst - accepted);
   CHECK(recorder.Stop());
   const nlohmann::json index = ReadIndex(recorder.run_directory());
-  CHECK(!index["gaps"].empty());
   // The gap explains the loss in the sequence space, so a reader can tell it
-  // from a stretch that never existed.
-  bool saw_queue_gap = false;
-  for (const auto &gap : index["gaps"]) {
-    if (gap["reason"] == "queue_full") {
-      saw_queue_gap = true;
-      CHECK(gap["dropped"] > 0);
-    }
+  // from a stretch that never existed - and it is the stretch the recorder
+  // really refused, not a hole guessed from the rows around it.
+  const std::vector<RecordGap> expected = ExpectedQueueGaps(offers, 1);
+  CHECK(!expected.empty());
+  CHECK(CheckSameGaps(IndexGaps(index), expected) == 0);
+  CHECK(CheckSameGaps(recorder.gaps(), expected) == 0);
+  CHECK(CheckRefusalGapsMissRecordedOffers(expected, offers) == 0);
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
+// Two stretches of refusals with a closed chunk in between are two losses, each
+// with its own sequence and stamp range: one gap spanning everything between
+// them would report the samples that were written fine as missing.
+int RefusalStretches() {
+  const std::filesystem::path directory = MakeDirectory();
+  Recorder recorder;
+  CHECK(StartRecorder(&recorder, directory));
+  std::vector<OfferRecord> offers;
+  // The worker waits before its first drain, so the tail of this burst is
+  // refused: the first stretch of loss.
+  Sequence seq = 1;
+  for (int index = 0; index < 300; ++index) {
+    Offer(&recorder, &offers, seq);
+    ++seq;
   }
-  CHECK(saw_queue_gap);
+  // Wait for the handoff to be drained, then record a chunk's worth of samples
+  // the way a control loop paced by the writer's own clock would offer them:
+  // small batches with room to spare, so every one of them is recorded. The
+  // chunk that closes and is renamed into place here is what separates the two
+  // losses.
+  std::this_thread::sleep_for(std::chrono::milliseconds(70));
+  for (int batch = 0; batch < 10; ++batch) {
+    for (int index = 0; index < 100; ++index) {
+      CHECK(Offer(&recorder, &offers, seq));
+      ++seq;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(70));
+  }
+  CHECK(CountChunks(recorder.run_directory()) == 1);
+  // A second burst after the chunk was written: these refusals start again.
+  for (int index = 0; index < 300; ++index) {
+    Offer(&recorder, &offers, seq);
+    ++seq;
+  }
+  CHECK(recorder.Stop());
+
+  const std::vector<RecordGap> expected = ExpectedQueueGaps(offers, 1);
+  CHECK(expected.size() == 2);
+  // The first stretch is the tail of the first burst: the handoff took exactly
+  // its capacity.
+  CHECK(expected[0].first_seq == kRecordQueueCapacity + 1);
+  CHECK(expected[0].last_seq == 300);
+  CHECK(expected[0].dropped == 44);
+  // The second is the tail of the second burst, and the two are far apart: the
+  // samples recorded between them are not part of either loss.
+  CHECK(expected[1].first_seq == 1557);
+  CHECK(expected[1].last_seq == 1600);
+  CHECK(expected[1].dropped == 44);
+  CHECK(expected[1].first_stamp_us == MakeSample(1557).stamp_us);
+  CHECK(expected[1].last_stamp_us == MakeSample(1600).stamp_us);
+
+  const nlohmann::json index = ReadIndex(recorder.run_directory());
+  CHECK(CheckSameGaps(IndexGaps(index), expected) == 0);
+  CHECK(CheckSameGaps(recorder.gaps(), expected) == 0);
+  CHECK(CheckRefusalGapsMissRecordedOffers(expected, offers) == 0);
+  // Every accepted sample is in a chunk, and every refused one is a loss: the
+  // two stretches account for the whole difference.
+  CHECK(recorder.recorded() == 256 + 1000 + 256);
+  CHECK(index["rows_recorded"] == recorder.recorded());
+  CHECK(recorder.dropped() == 44 + 44);
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
+// A chunk that cannot be written is one loss covering exactly the rows that
+// chunk held - the rows it had already taken out of the handoff - and the run
+// keeps recording after it.
+int WriteFailureIsReported() {
+  const std::filesystem::path directory = MakeDirectory();
+  Recorder recorder;
+  CHECK(StartRecorder(&recorder, directory));
+  // A directory where the chunk's file has to go: the worker writes and flushes
+  // its temporary file, but the rename into place cannot land on a directory.
+  // That is the failure a full disk or a permission change produces, and the
+  // run's own directory survives it, so its index can still be written.
+  CHECK(std::filesystem::create_directory(recorder.run_directory() /
+                                          "chunk_0.bin"));
+  std::vector<OfferRecord> offers;
+  // A chunk and a bit, paced the way a control loop offers them - small batches
+  // with room to spare, so every offer is taken and the only loss in the run is
+  // the one the failed writes make. The first chunk closes at 900 rows and
+  // cannot be renamed into place; the rows after it are recorded, and the next
+  // write fails the same way: the run keeps going.
+  Sequence seq = 1;
+  const std::uint64_t rows = kRecordChunkRows + 300;
+  for (std::uint64_t batch = 0; batch < rows / 100; ++batch) {
+    for (std::uint64_t index = 0; index < 100; ++index) {
+      CHECK(Offer(&recorder, &offers, seq));
+      ++seq;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(70));
+  }
+  CHECK(recorder.Stop());
+  CHECK(recorder.recorded() == rows);
+  CHECK(recorder.chunks() == 0);
+  CHECK(recorder.write_failures() == 2);
+
+  const std::vector<RecordGap> gaps = recorder.gaps();
+  // One loss per failed write, each covering exactly the rows that chunk held:
+  // the rows already written are not swept in, and neither are the rows that
+  // came after.
+  CHECK(gaps.size() == 2);
+  CHECK(gaps[0].reason == RecordGapReason::WriteFailed);
+  CHECK(gaps[0].first_seq == 1);
+  CHECK(gaps[0].last_seq == kRecordChunkRows);
+  CHECK(gaps[0].dropped == kRecordChunkRows);
+  CHECK(gaps[0].first_stamp_us == MakeSample(1).stamp_us);
+  CHECK(gaps[0].last_stamp_us == MakeSample(kRecordChunkRows).stamp_us);
+  CHECK(gaps[1].reason == RecordGapReason::WriteFailed);
+  CHECK(gaps[1].first_seq == kRecordChunkRows + 1);
+  CHECK(gaps[1].last_seq == rows);
+  CHECK(gaps[1].dropped == rows - kRecordChunkRows);
+  CHECK(gaps[1].first_stamp_us == MakeSample(kRecordChunkRows + 1).stamp_us);
+  CHECK(gaps[1].last_stamp_us == MakeSample(rows).stamp_us);
+  CHECK(CheckRefusalGapsMissRecordedOffers(gaps, offers) == 0);
+
+  const nlohmann::json index = ReadIndex(recorder.run_directory());
+  CHECK(index["write_failures"] == 2);
+  CHECK(index["rows_recorded"] == 0);
+  CHECK(CheckSameGaps(IndexGaps(index), gaps) == 0);
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
+// Samples the worker could not drain before the recorder stopped were accepted
+// and never written: they are a loss with a sequence and stamp range of their
+// own, not just a number in dropped().
+int StoppedTailIsReported() {
+  const std::filesystem::path directory = MakeDirectory();
+  Recorder recorder;
+  CHECK(StartRecorder(&recorder, directory));
+  // A control loop that keeps offering samples while another thread stops the
+  // recorder: the worker drains the handoff and leaves it, and what lands
+  // behind its last take is the tail. The producer is a tight loop, so the
+  // handoff is refilled before Stop() gets to it.
+  std::atomic<bool> producing{true};
+  std::thread producer([&recorder, &producing] {
+    Sequence seq = 1;
+    while (producing.load(std::memory_order_relaxed)) {
+      recorder.TryRecord(MakeSample(seq));
+      ++seq;
+    }
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  CHECK(recorder.Stop());
+  producing.store(false, std::memory_order_relaxed);
+  producer.join();
+
+  const std::vector<RecordGap> gaps = recorder.gaps();
+  std::size_t stopped = 0;
+  for (const RecordGap &gap : gaps) {
+    if (gap.reason != RecordGapReason::Stopped) {
+      continue;
+    }
+    ++stopped;
+    // The stretch names the samples themselves: sequence and stamp, on the
+    // recorded grid.
+    CHECK(gap.last_seq >= gap.first_seq);
+    CHECK(gap.dropped == gap.last_seq - gap.first_seq + 1);
+    CHECK(gap.first_stamp_us == MakeSample(gap.first_seq).stamp_us);
+    CHECK(gap.last_stamp_us == MakeSample(gap.last_seq).stamp_us);
+    CHECK(recorder.dropped() >= gap.dropped);
+  }
+  CHECK(stopped == 1);
+
+  const nlohmann::json index = ReadIndex(recorder.run_directory());
+  CHECK(CheckSameGaps(IndexGaps(index), gaps) == 0);
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
+// gaps() and the index are one table: a caller reading the object and a reader
+// reading the files must not be able to disagree about what a run lost.
+int GapTableMatchesIndex() {
+  const std::filesystem::path directory = MakeDirectory();
+  Recorder recorder;
+  CHECK(StartRecorder(&recorder, directory));
+  // A chunk that cannot be renamed into place, then a stretch of refusals: a
+  // table with more than one reason in it.
+  CHECK(std::filesystem::create_directory(recorder.run_directory() /
+                                          "chunk_0.bin"));
+  std::vector<OfferRecord> offers;
+  Sequence seq = 1;
+  for (std::uint64_t index = 0; index < kRecordChunkRows; ++index) {
+    CHECK(OfferUntilAccepted(&recorder, &offers, seq));
+    ++seq;
+  }
+  for (int index = 0; index < 300; ++index) {
+    Offer(&recorder, &offers, seq);
+    ++seq;
+  }
+  CHECK(recorder.Stop());
+
+  const std::vector<RecordGap> gaps = recorder.gaps();
+  CHECK(gaps.size() >= 2);
+  bool saw_write_failure = false;
+  bool saw_refusal = false;
+  for (const RecordGap &gap : gaps) {
+    saw_write_failure =
+        saw_write_failure || gap.reason == RecordGapReason::WriteFailed;
+    saw_refusal = saw_refusal || gap.reason == RecordGapReason::QueueFull;
+  }
+  CHECK(saw_write_failure);
+  CHECK(saw_refusal);
+  const nlohmann::json index = ReadIndex(recorder.run_directory());
+  CHECK(CheckSameGaps(IndexGaps(index), gaps) == 0);
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
+// More separate refusal stretches than the control thread's fixed table holds:
+// the table stops growing, the loss does not go silent - the last stretch there
+// absorbs it - and no recorded sample is ever reported as missing.
+int RefusalTableOverflow() {
+  const std::filesystem::path directory = MakeDirectory();
+  Recorder recorder;
+  CHECK(StartRecorder(&recorder, directory));
+  std::vector<OfferRecord> offers;
+  // The handoff is 256 samples, so the first 256 offers here are recorded and
+  // every offer after them is refused. The refused sequences are two ticks
+  // apart, so each one is a stretch of its own: far more stretches than the
+  // table has entries.
+  Sequence seq = 1;
+  for (int index = 0; index < 500; ++index) {
+    Offer(&recorder, &offers, seq);
+    seq += 2;
+  }
+  CHECK(recorder.Stop());
+  const std::vector<RecordGap> gaps = recorder.gaps();
+  const std::vector<RecordGap> queue_gaps = QueueGaps(gaps);
+  CHECK(queue_gaps.size() == kRecordGapSegments);
+  const std::uint64_t refusals = static_cast<std::uint64_t>(
+      std::count_if(offers.begin(), offers.end(),
+                    [](const OfferRecord &offer) { return !offer.accepted; }));
+  CHECK(refusals > kRecordGapSegments);
+  // The last entry covers the newest loss - the resolution of the stretches
+  // folded into it is what is lost, not the loss itself - and every entry stays
+  // inside the stretch the refusals really happened in.
+  CHECK(queue_gaps.back().last_seq == offers.back().seq);
+  CHECK(queue_gaps.front().first_seq == offers[256].seq);
+  CHECK(CheckRefusalGapsMissRecordedOffers(gaps, offers) == 0);
+  const nlohmann::json index = ReadIndex(recorder.run_directory());
+  CHECK(CheckSameGaps(IndexGaps(index), gaps) == 0);
   std::filesystem::remove_all(directory);
   return 0;
 }
 
 // A run sampled every fifth control tick - what a 100 Hz recorder on a 500 Hz
 // control loop is - must not report a gap per row: consecutive rows differ by
-// the stride by construction, and only a jump beyond it is a missing sample.
+// the stride by construction, and a loss is only the samples the handoff really
+// refused. The stretch it reports is counted on the recorded grid: three
+// samples five ticks apart are three missing samples, not the ticks between
+// them.
 int StridedRun() {
   const std::filesystem::path directory = MakeDirectory();
   Recorder recorder;
   constexpr std::uint32_t kStride = 5;
   CHECK(StartRecorder(&recorder, directory, true, kStride));
-  // Twenty samples, each five ticks apart, and then a hole of two samples.
+  std::vector<OfferRecord> offers;
+  // The worker waits before its first drain, so a burst larger than the handoff
+  // loses its tail: three samples of the recorded grid, five ticks apart.
   Sequence seq = 1;
-  for (int index = 0; index < 20; ++index) {
-    CHECK(recorder.TryRecord(MakeSample(seq)));
-    seq += kStride;
-  }
-  const Sequence hole_start = seq;
-  seq += 2 * kStride;
-  for (int index = 0; index < 5; ++index) {
-    CHECK(recorder.TryRecord(MakeSample(seq)));
+  for (int index = 0; index < 259; ++index) {
+    Offer(&recorder, &offers, seq);
     seq += kStride;
   }
   CHECK(recorder.Stop());
+  CHECK(recorder.recorded() == kRecordQueueCapacity);
+
+  const std::vector<RecordGap> expected = ExpectedQueueGaps(offers, kStride);
+  CHECK(expected.size() == 1);
+  // The stretch names the three samples that are missing, not the ticks between
+  // them.
+  CHECK(expected[0].first_seq == 1 + 256 * kStride);
+  CHECK(expected[0].last_seq == 1 + 258 * kStride);
+  CHECK(expected[0].dropped == 3);
   const nlohmann::json index = ReadIndex(recorder.run_directory());
-  CHECK(index["rows_recorded"] == 25);
-  CHECK(index["gaps"].size() == 1);
-  // The gap names the two missing samples, not the eight ticks between them.
-  CHECK(index["gaps"][0]["first_seq"] == hole_start);
-  CHECK(index["gaps"][0]["last_seq"] == hole_start + kStride);
-  CHECK(index["gaps"][0]["dropped"] == 2);
+  CHECK(index["rows_recorded"] == kRecordQueueCapacity);
+  CHECK(CheckSameGaps(IndexGaps(index), expected) == 0);
   std::filesystem::remove_all(directory);
   return 0;
 }
@@ -304,13 +744,95 @@ int Disabled() {
   return 0;
 }
 
+// One session event written to `sessions.json` and read back field by field:
+// the sidecar carries the schema version, the producer and epoch of the adopted
+// context, its gains and the literal model digest the runtime writes.
+int SessionEventIsWritten() {
+  const std::filesystem::path directory = MakeDirectory();
+  Recorder recorder;
+  CHECK(StartRecorderForSessions(&recorder, directory));
+  CHECK(recorder.TryRecordSession(MakeSessionEvent(1)));
+  CHECK(recorder.Stop());
+  CHECK(recorder.session_dropped() == 0);
+  CHECK(recorder.sessions_written() == 1);
+
+  // The sidecar is a JSON array of objects, in arrival order.
+  std::ifstream file(recorder.run_directory() / "sessions.json");
+  CHECK(static_cast<bool>(file));
+  const nlohmann::json sessions = nlohmann::json::parse(file, nullptr, false);
+  CHECK(sessions.is_array());
+  CHECK(sessions.size() == 1);
+  CHECK(sessions[0]["schema_version"] == irmv::telemetry::kRecordSchemaVersion);
+  CHECK(sessions[0]["epoch"] == 1);
+  // The runtime holds no model, so it writes "unknown" rather than a digest it
+  // would have had to invent.
+  CHECK(sessions[0]["model_sha256"] == "unknown");
+
+  RecordReader reader;
+  std::string error;
+  CHECK(RecordReader::Open(recorder.run_directory(), &reader, &error));
+  CHECK(reader.sessions().size() == 1);
+  // Every field survives the sidecar: the context's producer and epoch, its
+  // gains, and the digest verbatim.
+  CHECK(reader.sessions()[0] == MakeSessionEvent(1));
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
+// A session channel nobody drains costs the events, not the tick: the control
+// call always returns, the loss is counted, and what the channel did accept is
+// what the sidecar and the reader report.
+int SessionChannelIsBounded() {
+  const std::filesystem::path directory = MakeDirectory();
+  Recorder recorder;
+  CHECK(StartRecorderForSessions(&recorder, directory));
+  // More contexts than the channel holds, pushed without giving the worker a
+  // chance to drain - the worker waits before its first pass, so the tail is
+  // refused. Each call still returns.
+  const std::uint64_t burst = 200;
+  std::uint64_t accepted = 0;
+  for (std::uint64_t index = 1; index <= burst; ++index) {
+    if (recorder.TryRecordSession(MakeSessionEvent(index))) {
+      ++accepted;
+    }
+  }
+  CHECK(accepted < burst);
+  CHECK(recorder.Stop());
+  // Every event is either written or counted as dropped: the channel invents no
+  // silence.
+  CHECK(accepted + recorder.session_dropped() == burst);
+  CHECK(recorder.sessions_written() == accepted);
+
+  RecordReader reader;
+  std::string error;
+  CHECK(RecordReader::Open(recorder.run_directory(), &reader, &error));
+  CHECK(reader.sessions().size() == recorder.sessions_written());
+  for (const irmv::telemetry::RecordSessionEvent &event : reader.sessions()) {
+    CHECK(std::string(event.model_sha256.data()) == "unknown");
+    CHECK(event.joint_count == 2);
+    CHECK(event.kp[0] == 60.0);
+    CHECK(event.kd[1] == 4.0);
+    CHECK(event.runtime_id[0] == 0x11);
+    CHECK(event.producer_id[0] == 0x33);
+  }
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
 int main() {
   int failures = 0;
   failures += Lifecycle();
   failures += RecordedRun();
-  failures += Gaps();
+  failures += SequenceJumpIsNotALoss();
   failures += FullQueueIsCounted();
+  failures += RefusalStretches();
+  failures += WriteFailureIsReported();
+  failures += StoppedTailIsReported();
+  failures += GapTableMatchesIndex();
+  failures += RefusalTableOverflow();
   failures += StridedRun();
+  failures += SessionEventIsWritten();
+  failures += SessionChannelIsBounded();
   failures += Disabled();
   if (failures == 0) {
     return 0;

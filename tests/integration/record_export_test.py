@@ -8,6 +8,13 @@ consumer to interpret it - every column by name, the joint table, the units, the
 schema version, the configuration and layout digests, the rates - and that a
 time window selects a subset of the same data rather than a different run.
 
+The archive also has to keep the *shape* of the numbers it carries, so each
+column is re-read and checked against the reader's own output: the 64-bit counts
+stay uint64 (a microsecond stamp above 2**53, which the Fake deployment's stamps
+are far below, is proved exactly on a row of the same shape), the flags stay
+bool, the joint columns stay float64, and the 16-byte producer identity of every
+row survives whole rather than being narrowed to a number.
+
 Nothing here touches DDS on the reading side: the tools are file readers.
 """
 
@@ -35,6 +42,7 @@ COLUMNS = (
     "healthy",
     "damping_eligible",
     "command_present",
+    "producer_id",
     "epoch",
     "command_seq",
     "source_state_seq",
@@ -44,12 +52,55 @@ COLUMNS = (
     "feedback_valid",
     "imu_valid",
     "send_accepted",
+    "output_valid",
     "q",
     "dq",
     "tau_ff",
     "kp",
     "kd",
+    "measured_q",
+    "measured_dq",
+    "output_torque",
 )
+
+# The dtype each column must keep in the archive: a 64-bit count that came back
+# as a signed or floating width has lost bits, and a flag that came back as a
+# number invites arithmetic on it.
+UINT64_COLUMNS = (
+    "stamp_us",
+    "state_seq",
+    "fault_id",
+    "epoch",
+    "command_seq",
+    "source_state_seq",
+    "command_rx_us",
+    "feedback_seq",
+    "feedback_stamp_us",
+)
+UINT32_COLUMNS = ("execution_state", "output_action", "stop_reason")
+BOOL_COLUMNS = (
+    "healthy",
+    "damping_eligible",
+    "command_present",
+    "feedback_valid",
+    "imu_valid",
+    "send_accepted",
+    "output_valid",
+)
+FLOAT_COLUMNS = (
+    "q",
+    "dq",
+    "tau_ff",
+    "kp",
+    "kd",
+    "measured_q",
+    "measured_dq",
+    "output_torque",
+)
+
+# The producer identity is 16 opaque bytes, rendered the way the reader prints
+# it: 32 lower-case hex digits, one string per row.
+PRODUCER_ID = "f00d" * 8
 
 
 def wait_for(path: Path, pattern: str, timeout_s: float) -> str:
@@ -66,6 +117,7 @@ def wait_for(path: Path, pattern: str, timeout_s: float) -> str:
 
 def main() -> int:
     runtime, source_root = sys.argv[1], Path(sys.argv[2]).resolve()
+    reader = source_root / "build" / "read_record"
     failures: list[str] = []
 
     def fail(note: str) -> None:
@@ -149,7 +201,7 @@ def main() -> int:
                 str(run),
                 str(archive_path),
                 "--reader",
-                str(source_root / "build" / "read_record"),
+                str(reader),
             ],
             capture_output=True,
             text=True,
@@ -163,18 +215,44 @@ def main() -> int:
         for column in COLUMNS:
             if column not in data:
                 fail(f"the archive has no {column} column")
+        if "units" not in data:
+            fail("the archive does not carry the run's units")
         if failures:
             return 1
 
-        for column in ("stamp_us", "state_seq", "execution_state", "send_accepted"):
+        # The dtype of every column is part of the contract a consumer relies
+        # on, not something numpy happens to infer.
+        for column in UINT64_COLUMNS:
+            if data[column].dtype != np.uint64:
+                fail(f"{column} is {data[column].dtype}, expected uint64")
+        for column in UINT32_COLUMNS:
+            if data[column].dtype != np.uint32:
+                fail(f"{column} is {data[column].dtype}, expected uint32")
+        for column in BOOL_COLUMNS:
+            if data[column].dtype != np.bool_:
+                fail(f"{column} is {data[column].dtype}, expected bool")
+        for column in FLOAT_COLUMNS:
+            if data[column].dtype != np.float64:
+                fail(f"{column} is {data[column].dtype}, expected float64")
+        if data["producer_id"].dtype.kind != "U":
+            fail(f"producer_id is {data['producer_id'].dtype}, expected a hex string")
+        # A run with no gap at all still has the gap table, and its columns must
+        # not change shape just because the table is empty.
+        for column in ("gap_first_seq", "gap_last_seq", "gap_dropped"):
+            if data[column].dtype != np.uint64:
+                fail(f"{column} is {data[column].dtype}, expected uint64")
+        if data["gap_reason"].dtype.kind != "U":
+            fail(f"gap_reason is {data['gap_reason'].dtype}, expected a text column")
+
+        for column in (*UINT64_COLUMNS, *UINT32_COLUMNS, *BOOL_COLUMNS, "producer_id"):
             if data[column].shape != (rows_written,):
                 fail(f"{column} has shape {data[column].shape}, expected ({rows_written},)")
         joints = int(data["joint_names"].shape[0])
-        for column in ("q", "dq", "tau_ff", "kp", "kd"):
+        for column in FLOAT_COLUMNS:
             if data[column].shape != (rows_written, joints):
                 fail(f"{column} has shape {data[column].shape}, expected ({rows_written}, {joints})")
 
-        if int(data["schema_version"]) != 1:
+        if int(data["schema_version"]) != 2:
             fail("the archive does not carry the schema version")
         if int(data["sample_hz"]) != 100:
             fail("the archive does not carry the sampling rate")
@@ -182,6 +260,103 @@ def main() -> int:
             fail("the archive does not carry the configuration digest")
         if len(data["joint_names"]) != joints or joints == 0:
             fail("the archive does not carry the joint table")
+
+        # The session sidecar is part of the run: every session column must be
+        # present, and its length is the number of contexts the run adopted -
+        # not the number of sample rows. The digest is text, kept verbatim.
+        for column in (
+            "session_runtime_id",
+            "session_session_id",
+            "session_producer_id",
+            "session_epoch",
+            "session_stamp_us",
+            "session_state_seq",
+            "session_joint_count",
+            "session_schema_version",
+            "session_kp",
+            "session_kd",
+            "session_model_sha256",
+        ):
+            if column not in data:
+                fail(f"the archive has no {column} column")
+
+        # The units are the run's own declaration, not a table this export
+        # derived: the metadata the run wrote for itself says where the numbers
+        # came from, and a copy that says anything else is a different claim.
+        metadata = json.loads((run / "meta.json").read_text())
+        archived_units = json.loads(str(data["units"]))
+        if archived_units != metadata["units"]:
+            fail(f"the archive units {archived_units} are not the run's {metadata['units']}")
+
+        # Every column is checked against the reader's own output row by row:
+        # the archive is a copy of a read, so a value it changed is a value it
+        # invented. The producer identity is 16 opaque bytes and the stamp is a
+        # 64-bit microsecond count, the two fields a narrower encoding could not
+        # have carried whole.
+        sys.path.insert(0, str(source_root / "tools"))
+        import record_to_npz
+
+        rows_read, run_summary = record_to_npz.read_run(reader, run, 0, None)
+        if len(rows_read) != rows_written:
+            fail(f"the reader returned {len(rows_read)} rows, expected {rows_written}")
+        else:
+            if [row["producer_id"] for row in rows_read] != list(data["producer_id"]):
+                fail("the archive does not carry the producer identity of every row")
+            if [row["stamp_us"] for row in rows_read] != [int(value) for value in data["stamp_us"]]:
+                fail("the archive stamps are not the reader's stamps")
+            # The columns a v1 run could not carry: the measured feedback and
+            # the output stage's torque. They are checked against the reader's
+            # own rows, so an archive that changed them is an archive that
+            # invented them.
+            for column in ("measured_q", "measured_dq", "output_torque"):
+                if [row[column] for row in rows_read] != [
+                    list(value) for value in data[column]
+                ]:
+                    fail(f"the archive does not carry the reader's {column} columns")
+            if [row["output_valid"] for row in rows_read] != [
+                bool(value) for value in data["output_valid"]
+            ]:
+                fail("the archive does not carry the reader's output_valid flags")
+
+            # The session table is carried whole and in order, with the digest
+            # the runtime wrote - "unknown" here, because the runtime holds no
+            # model and never invents one.
+            session_table = run_summary.get("sessions", [])
+            if len(session_table) != int(data["session_joint_count"].shape[0]):
+                fail("the archive does not carry the same number of sessions as the run")
+            if [entry["producer_id"] for entry in session_table] != list(
+                data["session_producer_id"]
+            ) or [entry["epoch"] for entry in session_table] != [
+                int(value) for value in data["session_epoch"]
+            ]:
+                fail("the archive does not carry the session producer and epoch")
+            if any(entry["model_sha256"] != "unknown" for entry in session_table):
+                fail("a session event invented a model digest")
+            if list(data["session_model_sha256"]) != [
+                entry["model_sha256"] for entry in session_table
+            ]:
+                fail("the archive does not carry the session model digest verbatim")
+
+        # The Fake deployment's stamps stay far below 2**53, where a float64
+        # would still be exact, so the guarantee is proved on a row of the same
+        # shape placed above it rather than hoped for from a short run.
+        if rows_read:
+            above_two_53 = (1 << 53) + 1
+            synthetic_row = dict(rows_read[0])
+            synthetic_row["stamp_us"] = above_two_53
+            synthetic_row["producer_id"] = PRODUCER_ID
+            synthetic_path = work / "synthetic.npz"
+            np.savez_compressed(
+                synthetic_path, **record_to_npz.to_archive([synthetic_row], run_summary)
+            )
+            synthetic = np.load(synthetic_path, allow_pickle=False)
+            if synthetic["stamp_us"].dtype != np.uint64 or int(synthetic["stamp_us"][0]) != above_two_53:
+                fail(
+                    f"a stamp above 2**53 came back as {synthetic['stamp_us'][0]!r} "
+                    f"of dtype {synthetic['stamp_us'].dtype}"
+                )
+            if str(synthetic["producer_id"][0]) != PRODUCER_ID:
+                fail(f"the producer identity came back as {str(synthetic['producer_id'][0])!r}")
 
         # A 100 Hz recording over a four second run: the row rate is the
         # configured one and not the control rate, and the spacing is even.
@@ -208,7 +383,7 @@ def main() -> int:
                 str(run),
                 str(window_path),
                 "--reader",
-                str(source_root / "build" / "read_record"),
+                str(reader),
                 "--from-us",
                 str(window_start),
                 "--to-us",
