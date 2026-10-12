@@ -79,9 +79,19 @@ bool ProducerSupervisor::Select(
     return false;
   }
 
-  const bool replacing =
-      have_producer_ &&
-      !SameId(producer_process_id_, announcement.producer_process_id);
+  if (have_producer_ &&
+      SameId(producer_process_id_, announcement.producer_process_id)) {
+    // A producer that announces itself again - a renewal while it waits for a
+    // preparation, or for an authorization - is the producer already selected.
+    // The announcement is not a new registration: rebuilding the selection here
+    // would drop the preparation or the candidate this producer is waiting on,
+    // and a producer that renews on its own schedule would then never be
+    // prepared at all.
+    failure_ = ProducerStop::None;
+    return true;
+  }
+
+  const bool replacing = have_producer_;
   if (replacing) {
     // The process that is being replaced is told to stop, and its preparation
     // and candidate belong to it and are dropped: nothing of a producer that is
@@ -163,7 +173,18 @@ ProducerOutcome ProducerSupervisor::Observe(
       !SameId(result.session_id, preparation_.session_id)) {
     return ProducerOutcome::Ignored;
   }
-  (void)now_us;
+  if (now_us >= preparation_.deadline_us) {
+    // The answer arrived after the deadline the caller gave the preparation:
+    // the frame it carries was produced for a state this deployment has long
+    // left, so it is refused here rather than handed to a caller that would
+    // have to remember to expire the preparation first. The result is not
+    // dropped silently - the preparation ends with the reason its deadline
+    // gives - and a later result of the same key finds no preparation at all.
+    preparation_ = Preparation{};
+    have_candidate_ = false;
+    failure_ = ProducerStop::PrepareTimeout;
+    return ProducerOutcome::Failed;
+  }
   preparation_.outstanding = false;
 
   if (result.status != protocol::ProducerStatus::Ready) {
@@ -201,8 +222,23 @@ ProducerOutcome ProducerSupervisor::Observe(
   return ProducerOutcome::Candidate;
 }
 
-bool ProducerSupervisor::Expired(protocol::TimeUs now_us) const {
-  return preparation_.outstanding && now_us >= preparation_.deadline_us;
+bool ProducerSupervisor::ExpirePreparation(protocol::TimeUs now_us) {
+  if (!preparation_.outstanding || now_us < preparation_.deadline_us) {
+    return false;
+  }
+  preparation_ = Preparation{};
+  have_candidate_ = false;
+  failure_ = ProducerStop::PrepareTimeout;
+  return true;
+}
+
+bool ProducerSupervisor::TakeStopNotice(protocol::StopNotice *notice) {
+  if (notice == nullptr || !stop_notice_pending_) {
+    return false;
+  }
+  *notice = stop_notice_;
+  stop_notice_pending_ = false;
+  return true;
 }
 
 protocol::AuthorizationNotice ProducerSupervisor::Authorized(

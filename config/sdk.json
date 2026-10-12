@@ -105,6 +105,10 @@
     "policy": {
       "model_path": null,
       "inference_timeout_us": 100000
+    },
+    "external_producer": {
+      "prepare_timeout_us": 1000000,
+      "registration_timeout_us": 1000000
     }
   },
   "input": {

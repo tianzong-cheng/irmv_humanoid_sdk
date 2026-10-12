@@ -339,6 +339,57 @@ around it.
   sample. The default deployment trusts its DDS network, and a deployment that
   admits untrusted participants needs sender authentication of its own.
 
+### The application's side of the lifecycle
+
+`--locomotion-source external` makes the application the party above: it opens
+the six producer endpoints, selects and prepares a producer, and asks the
+runtime for the authorization the producer will publish under. The sequence is
+fixed and each step is gated on the one before it:
+
+1. **Selection.** Every `ProducerAnnouncement` is offered to the supervisor,
+   which accepts it only when it is `READY`, carries this protocol version, this
+   layout, a `target_period_us` below `runtime.timeouts.command_us` and a
+   non-zero process identity. A second producer replaces the first, and the
+   replaced one is told to stop.
+2. **Preparation.** Once a producer is selected, a session is live and the
+   behaviour is `Ready` - the only state a locomotion authorization can be asked
+   from - the application sends one `PrepareRequest`, carrying the operator's
+   current velocity intent. A preparation that is not answered inside
+   `application.external_producer.prepare_timeout_us` is over; a result that
+   arrives after that deadline is refused on its own, so nothing depends on the
+   caller expiring the preparation first. The producer stays registered.
+3. **The candidate.** A `READY` result whose frame has this deployment's layout
+   and joint count, every value finite, non-negative gains and a
+   `source_state_seq` this deployment has actually published becomes the
+   application's candidate. It is not published: it is held as the first frame
+   of the next authorization, and it stops being usable after
+   `application.external_producer.prepare_timeout_us`, at which point the
+   application prepares again.
+4. **Authorization.** The operator's locomotion key asks the behaviour to
+   propose a `TRACKING` request; the candidate travels inside it as
+   `first_command`, under the producer identity the announcement registered. The
+   runtime applies it as it applies any other request. Only once a later state
+   showed that context does the application send the `AuthorizationNotice`, with
+   the epoch the request proposed, the producer identity it named and the
+   command sequence of the frame the request carried.
+5. **The stream.** The producer publishes the frames from that sequence on. The
+   application publishes none: the authorization has exactly one writer, and a
+   second sequence interleaved into it would be a discontinuity the runtime's
+   command gate is right to refuse.
+6. **Revocation.** A stop, a fault, the exit, or the runtime withdrawing the
+   context by itself ends the authorization: the application tells the producer
+   to stop and drops the preparation and its candidate, so nothing of a
+   withdrawn context can prepare the next one. A producer that keeps publishing
+   is refused by the runtime from the first frame of the withdrawn epoch.
+
+The application's own registration window,
+`application.external_producer.registration_timeout_us`, is a diagnostic: a
+producer that has not announced itself by then is reported once
+(`producer=missing timeout_us=...`), the loop keeps supervising its link exactly
+as before, and a producer that starts later is still selected, prepared and
+authorized. Selecting this source therefore needs no producer to be running at
+startup, and never falls back to another source.
+
 ## Faults
 
 A fault latches. The runtime commands the degraded output of the fault

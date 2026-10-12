@@ -343,6 +343,32 @@ void ReadPolicy(const Json &application, const std::string &path,
   }
 }
 
+// The external producer section. Both deadlines are host supervision of
+// another process, and the preparation in particular has to leave room for the
+// loop it paces: a preparation shorter than one target period could not produce
+// a frame that is still the first frame of an authorization by the time the
+// runtime could adopt it.
+//
+// The registration window has no relation to the preparation deadline on
+// purpose: registering happens before anything is prepared, so a producer may
+// well be given less time to announce itself than a preparation is allowed to
+// take.
+void ReadExternalProducer(const Json &application, const std::string &path,
+                          const SupervisionConfig &supervision,
+                          ExternalProducerConfig &external_producer) {
+  const Json &section = ObjectMember(application, "external_producer", path);
+  const std::string section_path = path + ".external_producer";
+  external_producer.prepare_timeout_us =
+      PositiveIntegerMember(section, "prepare_timeout_us", section_path);
+  external_producer.registration_timeout_us =
+      PositiveIntegerMember(section, "registration_timeout_us", section_path);
+  if (external_producer.prepare_timeout_us < supervision.target_period_us) {
+    Fail(section_path + ".prepare_timeout_us",
+         "must not be shorter than supervision.target_period_us: a producer "
+         "cannot answer a preparation faster than the period it targets");
+  }
+}
+
 // Canonical form of the application+input sections only. The joint maps are
 // rebuilt from the parsed arrays in robot.joints order and the bindings from
 // the action table, so key order in the file does not enter the digest and no
@@ -415,6 +441,10 @@ Json CanonicalApplication(const ApplicationConfig &config) {
                              ? Json(nullptr)
                              : Json(config.policy.model_path.string())},
           {"inference_timeout_us", config.policy.inference_timeout_us}}},
+        {"external_producer",
+         {{"prepare_timeout_us", config.external_producer.prepare_timeout_us},
+          {"registration_timeout_us",
+           config.external_producer.registration_timeout_us}}},
         {"policy_overrides", overrides}}},
       {"input",
        {{"intent_timeout_us", config.input.intent_timeout_us},
@@ -445,6 +475,8 @@ ApplicationConfig LoadApplicationConfig(const std::filesystem::path &path,
                   config.supervision);
   ReadPolicy(application, application_path, config.runtime.joint_names,
              config.policy);
+  ReadExternalProducer(application, application_path, config.supervision,
+                       config.external_producer);
   ReadInput(ObjectMember(document, "input", ""), "input", config.input);
   config.application_config_id = Sha256(CanonicalApplication(config).dump());
   return config;

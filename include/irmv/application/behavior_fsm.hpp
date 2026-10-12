@@ -4,6 +4,7 @@
 
 #include "irmv/application/initialization.hpp"
 #include "irmv/application/input_router.hpp"
+#include "irmv/application/locomotion_source.hpp"
 #include "irmv/application/robot_client.hpp"
 #include "irmv/configuration/application_config.hpp"
 #include "irmv/protocol/types.hpp"
@@ -115,9 +116,15 @@ struct BehaviorStep {
 // was not confirmed.
 class BehaviorFsm {
  public:
-  // `config` and `client` must outlive the FSM.
+  // `config` and `client` must outlive the FSM. `source` is the locomotion
+  // source of this process run, fixed for its whole life: it decides whether
+  // the frames of an authorized context are published by this behaviour (a
+  // local model, whose frames this process relays) or by the source itself (an
+  // external producer, which publishes on the execution topic under the
+  // producer identity the runtime granted).
   BehaviorFsm(const configuration::ApplicationConfig &config,
-              RobotClient &client);
+              RobotClient &client,
+              LocomotionSource source = LocomotionSource::None);
 
   BehaviorFsm(const BehaviorFsm &) = delete;
   BehaviorFsm &operator=(const BehaviorFsm &) = delete;
@@ -166,6 +173,14 @@ class BehaviorFsm {
   // applies rather than published under the current one.
   protocol::Id locomotion_producer() const;
   protocol::Sequence locomotion_epoch() const;
+
+  // The command sequence stamped on the first frame of the locomotion request
+  // this behaviour proposed: the point the runtime adopted as the start of the
+  // authorized stream. Zero while it holds no locomotion authorization. The
+  // supervision loop reports it to an external producer, which continues the
+  // stream from the next number - a producer that restarted its own numbering
+  // would publish a frame the runtime's command gate refuses.
+  protocol::Sequence locomotion_first_command_seq() const;
 
   // Starts the exit sequence: stop generating, cancel the pending request, ask
   // for Damping and wait for its confirmation for at most
@@ -264,6 +279,16 @@ class BehaviorFsm {
   // under, fixed at construction.
   protocol::Id producer_id_{};
 
+  // The locomotion source of this run, fixed for its whole life: it decides
+  // whether this behaviour publishes the frames of an authorized context or
+  // leaves that to the source itself (see the constructor).
+  const LocomotionSource locomotion_source_;
+  // How long the first frame of that source stays usable as the frame of a
+  // request: a frame of a revoked source must not turn into an authorization.
+  // The local model's own deadline and an external producer's preparation
+  // deadline are different promises, so the value follows the source.
+  const protocol::TimeUs locomotion_candidate_ttl_us_;
+
   // The initialization trajectory and the Ready hold, owned by value. The
   // generator latches its own progress and offers no cancel (Start refuses
   // while a move is in flight), so cancelling - which an ordinary stop, a
@@ -324,6 +349,10 @@ class BehaviorFsm {
   protocol::JointCommand locomotion_target_{};
   protocol::TimeUs locomotion_target_us_{0};
   protocol::Sequence locomotion_seq_{0};
+  // The sequence stamped on the first frame of the authorization, kept apart
+  // from `locomotion_seq_` because that one keeps counting on every published
+  // frame while the start of the stream stays what it was.
+  protocol::Sequence locomotion_first_seq_{0};
   // The operator asked for the locomotion behaviour and no stop has cancelled
   // it.
   bool locomotion_armed_{false};

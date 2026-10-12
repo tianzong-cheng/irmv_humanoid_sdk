@@ -11,6 +11,7 @@
 #include <string_view>
 
 #include "irmv/application/application_loop.hpp"
+#include "irmv/application/locomotion_source.hpp"
 #include "irmv/configuration/config.hpp"
 
 namespace {

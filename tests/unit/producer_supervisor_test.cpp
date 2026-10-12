@@ -179,6 +179,29 @@ int Selection() {
   // changes nothing.
   CHECK(supervisor.selected());
   CHECK(supervisor.producer_process_id() == announcement.producer_process_id);
+
+  // A renewal by the selected producer - the same process announcing itself
+  // again while it waits to be prepared - is that same selection: the
+  // preparation in flight and the candidate it produced survive it. A producer
+  // that renews on its own cadence would otherwise never be prepared, because
+  // every renewal would drop what it was waiting on.
+  ProducerSupervisor renewing(config);
+  PrepareRequest prepared;
+  CHECK(PrepareOne(&renewing, announcement, &prepared));
+  CHECK(renewing.preparing());
+  CHECK(renewing.Select(announcement));
+  CHECK(renewing.preparing());
+  CHECK(renewing.prepare_id() == prepared.prepare_id);
+  CHECK(renewing.producer_process_id() == announcement.producer_process_id);
+  const RobotState state = MakeState(10);
+  CHECK(renewing.Observe(MakeResult(announcement, prepared, 9), state,
+                         kNowUs) == ProducerOutcome::Candidate);
+  CHECK(renewing.Select(announcement));
+  CHECK(renewing.have_candidate());
+  CHECK(renewing.candidate().source_state_seq == 9);
+  // ... and it is not a replacement: no stop notice is owed for it.
+  StopNotice renewal_notice;
+  CHECK(!renewing.TakeStopNotice(&renewal_notice));
   return 0;
 }
 
@@ -250,9 +273,43 @@ int Preparation() {
   CHECK(next.prepare_id != request.prepare_id);
   CHECK(next.prepare_id > request.prepare_id);
 
-  // A preparation that is not answered inside its deadline expires, once.
-  CHECK(!supervisor.Expired(kNowUs + 1000000 - 1));
-  CHECK(supervisor.Expired(kNowUs + 1000000));
+  // A preparation that is not answered inside its deadline expires, once, and
+  // the producer stays registered.
+  CHECK(!supervisor.ExpirePreparation(kNowUs + 1000000 - 1));
+  CHECK(supervisor.ExpirePreparation(kNowUs + 1000000));
+  CHECK(!supervisor.ExpirePreparation(kNowUs + 1000000));
+  CHECK(!supervisor.preparing());
+  CHECK(supervisor.failure() == ProducerStop::PrepareTimeout);
+  CHECK(supervisor.selected());
+
+  // The answer of an expired preparation is refused by Observe itself, without
+  // anyone having expired it first: the frame it carries was produced for a
+  // state this deployment has long left, so it is not a candidate.
+  PrepareRequest stale;
+  CHECK(supervisor.Prepare(MakeId(0x70), MakeId(0x71), MakeIntent(), kNowUs,
+                           1000000, &stale));
+  const PrepareResult late = MakeResult(announcement, stale, 9);
+  CHECK(supervisor.Observe(late, state, kNowUs + 1000000) ==
+        ProducerOutcome::Failed);
+  CHECK(!supervisor.preparing());
+  CHECK(!supervisor.have_candidate());
+  CHECK(supervisor.failure() == ProducerStop::PrepareTimeout);
+  // ... and a second copy of it changes nothing, because there is no
+  // preparation left to answer.
+  CHECK(supervisor.Observe(late, state, kNowUs + 1000000 + 1) ==
+        ProducerOutcome::Ignored);
+
+  // The stop notice is handed over once and only once. Nothing above queued
+  // one, so the revocation that owes it is what this checks.
+  StopNotice notice;
+  CHECK(!supervisor.TakeStopNotice(nullptr));
+  CHECK(!supervisor.have_stop_notice());
+  static_cast<void>(supervisor.Revoke(ProducerStop::Stopped));
+  CHECK(supervisor.have_stop_notice());
+  CHECK(supervisor.TakeStopNotice(&notice));
+  CHECK(!supervisor.have_stop_notice());
+  CHECK(!supervisor.TakeStopNotice(&notice));
+  CHECK(notice.producer_id == announcement.producer_process_id);
   return 0;
 }
 

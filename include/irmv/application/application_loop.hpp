@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <optional>
 
+#include "irmv/application/locomotion_source.hpp"
 #include "irmv/protocol/types.hpp"
 
 namespace irmv::application {
@@ -53,26 +54,13 @@ inline constexpr int kExitStopUnknown = 3;
 
 // The whole invocation of the application process: the configuration to load
 // and the optional domain override of the command line. The override reaches
-// the configuration layer, exactly like the runtime's own `--domain`, so the
+// the configuration, exactly like the runtime's own `--domain`, so the
 // configuration digest the application compares against a published state is
 // the digest of the configuration actually in effect.
-// Who produces the joint targets of the locomotion behaviour. It is chosen once
-// at startup and never changes while the process runs: switching sources is a
-// stop, an initialization and a new authorization, not a hot swap.
-enum class LocomotionSource {
-  // No source at all: the operator may ask for the locomotion behaviour, but
-  // nothing is there to produce a first frame, so the behaviour keeps holding
-  // Ready. This is what a deployment without a configured model resolves to,
-  // and it is the shipped Fake configuration's own mode.
-  None,
-  // The model named by `application.policy.model_path`, run in this process.
-  Local,
-  // A producer process that registers with this application over DDS. The
-  // external lifecycle is a later phase of this plan; selecting it now is a
-  // startup error rather than a silent fall back to the model.
-  External,
-};
-
+// Who produces the joint targets of the locomotion behaviour is
+// `LocomotionSource`, in locomotion_source.hpp: the behaviour has to
+// distinguish a source that publishes its own frames from one this process
+// relays, so the enumerator is shared instead of defined here.
 struct ApplicationOptions {
   std::filesystem::path config_path;
   std::optional<std::uint32_t> dds_domain;

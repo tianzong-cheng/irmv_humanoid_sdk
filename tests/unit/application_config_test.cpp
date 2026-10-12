@@ -119,6 +119,10 @@ constexpr std::string_view kApplicationBody = R"({
       "model_path": null,
       "inference_timeout_us": 100000
     },
+    "external_producer": {
+      "prepare_timeout_us": 1000000,
+      "registration_timeout_us": 1000000
+    },
     "policy_overrides": [
       {
         "model_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -262,6 +266,13 @@ const DigestMutation kDigestMutations[] = {
     {"\"intent_timeout_us\": 500000", "\"intent_timeout_us\": 600000", true},
     {"\"repeat_guard_us\": 250000", "\"repeat_guard_us\": 300000", true},
     {"\"velocity_left\": \"a\"", "\"velocity_left\": \"g\"", true},
+    // The external producer section is part of the application digest like
+    // every other application parameter: choosing a source does not change the
+    // runtime identity, and the two deadlines are what the digest names.
+    {"\"prepare_timeout_us\": 1000000", "\"prepare_timeout_us\": 1200000",
+     false},
+    {"\"registration_timeout_us\": 1000000",
+     "\"registration_timeout_us\": 1500000", false},
 };
 
 ConfigOverrides OverrideDomain(std::uint32_t domain) {
@@ -307,6 +318,8 @@ int main() {
   CHECK(config.supervision.request_retry_us == 50000);
   CHECK(config.supervision.request_deadline_us == 1000000);
   CHECK(config.supervision.state_timeout_us == 150000);
+  CHECK(config.external_producer.prepare_timeout_us == 1000000);
+  CHECK(config.external_producer.registration_timeout_us == 1000000);
   CHECK(config.input.intent_timeout_us == 500000);
   CHECK(config.input.repeat_guard_us == 250000);
   CHECK(config.input.actions[' '] == InputAction::EmergencyStop);
@@ -388,6 +401,10 @@ int main() {
     "policy": {
       "inference_timeout_us": 100000,
       "model_path": null
+    },
+    "external_producer": {
+      "registration_timeout_us": 1000000,
+      "prepare_timeout_us": 1000000
     }
   })";
   constexpr std::string_view kReorderedBindings = R"({
@@ -466,6 +483,7 @@ int main() {
   const std::string& gains = "application.initialization.gains";
   const std::string& trajectory = "application.initialization.trajectory";
   const std::string& supervision = "application.supervision";
+  const std::string& external_producer = "application.external_producer";
   const std::string& bindings = "input.bindings";
 
   // Every joint map must cover exactly robot.joints: missing and unknown joints
@@ -550,6 +568,31 @@ int main() {
         InputAction::VelocityYawLeft);
   CHECK(unbound_velocity_config.application_config_id !=
         config.application_config_id);
+
+  // The external producer deadlines: both positive, a preparation that can
+  // outlast one target period, and a registration window that does not end
+  // before the preparation it contains.
+  CHECK(ThrowsAt(ValidApplicationAfter("\"prepare_timeout_us\": 1000000",
+                                       "\"prepare_timeout_us\": 0"),
+                 external_producer + ".prepare_timeout_us"));
+  CHECK(ThrowsAt(ValidApplicationAfter("\"registration_timeout_us\": 1000000",
+                                       "\"registration_timeout_us\": 0"),
+                 external_producer + ".registration_timeout_us"));
+  CHECK(ThrowsAt(ValidApplicationAfter("\"prepare_timeout_us\": 1000000",
+                                       "\"prepare_timeout_us\": 19999"),
+                 external_producer + ".prepare_timeout_us"));
+  // The shipped file carries the section, and so does every other document this
+  // loader accepts: a file without it is refused rather than defaulted, so a
+  // deployment can never inherit a deadline nobody wrote down.
+  const std::string without_external =
+      ReplaceOnce(std::string(kApplicationBody),
+                  ",\n    \"external_producer\": {\n"
+                  "      \"prepare_timeout_us\": 1000000,\n"
+                  "      \"registration_timeout_us\": 1000000\n"
+                  "    }",
+                  "");
+  CHECK(without_external.find("external_producer") == std::string::npos);
+  CHECK(ThrowsAt(ValidWithApplication(without_external), external_producer));
 
   // Trajectory: positive duration, positive tolerances, positive stable window
   // and a deadline beyond the duration.

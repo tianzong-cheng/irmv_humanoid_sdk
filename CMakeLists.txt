@@ -537,6 +537,63 @@ set_tests_properties(
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
+# The example external producer: a target generator the application selects,
+# prepares and authorizes, and that then publishes on the execution command
+# topic. It is an example and a test peer, and it links only the frozen protocol
+# pieces - the transport's producer and execution codecs, the configuration
+# loader and the protocol types - never irmv_application, irmv_telemetry or
+# irmv_policy, so nothing of the supervising or ONNX side reaches it and it is
+# installed next to the two processes as part of operating the deployment. Its
+# link libraries are defined later in this file, which is a plain forward
+# reference CMake resolves when it generates.
+add_executable(external_producer examples/external_producer.cpp)
+target_compile_features(external_producer PRIVATE cxx_std_17)
+target_include_directories(
+  external_producer
+  PRIVATE "${PROJECT_SOURCE_DIR}/include"
+)
+target_link_libraries(
+  external_producer
+  PRIVATE
+    irmv_transport
+    irmv_configuration
+    irmv_protocol
+    nlohmann_json::nlohmann_json
+    Threads::Threads
+)
+
+# The external producer acceptance: the real application, the real runtime and
+# the real example producer process. It is the only entry that proves the whole
+# external lifecycle - registration, preparation, the confirmation that
+# authorizes the producer, the producer's own frame stream under the identity
+# the runtime granted, and the stop that ends it - and it is a driver rather
+# than a scenario file because the scenario harness drives `runtime_client`,
+# which speaks the supervisor protocol and not a producer lifecycle.
+if(NOT TARGET external_producer)
+  message(
+    FATAL_ERROR
+      "the external producer acceptance needs the `external_producer` target "
+      "(examples/external_producer.cpp)"
+  )
+endif()
+add_test(
+  NAME external_producer_test
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/integration/external_producer_test.py"
+    "$<TARGET_FILE:application>"
+    "$<TARGET_FILE:robot_runtime>"
+    "$<TARGET_FILE:external_producer>"
+    "${PROJECT_SOURCE_DIR}"
+)
+set_tests_properties(
+  external_producer_test
+  PROPERTIES
+    LABELS integration
+    TIMEOUT 300
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
 find_package(Threads REQUIRED)
 
 add_library(
@@ -896,6 +953,7 @@ set(
   application_fault
   application_unknown
   application_overspeed
+  application_external_absent
 )
 foreach(scenario IN LISTS IRMV_INTEGRATION_SCENARIOS)
   add_test(
@@ -939,6 +997,33 @@ set_tests_properties(
   PROPERTIES
     LABELS integration
     TIMEOUT 600
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
+# The state-switching stability run: the real application and the real runtime
+# cycling through the documented behaviours (Damping, Initialize to Ready,
+# ZeroTorque back to Standby), with the memory, thread and descriptor counts of
+# both processes sampled from /proc. This entry is the short regression guard;
+# the thirty minutes of the phase-3 acceptance are the same driver with
+# `--duration-s 1800`, and docs/testing.md records the run and its numbers.
+add_test(
+  NAME application_stability_test
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/integration/application_stability_test.py"
+    "$<TARGET_FILE:application>"
+    "$<TARGET_FILE:robot_runtime>"
+    "${PROJECT_SOURCE_DIR}"
+    --duration-s 20
+    --sample-s 5
+    --domain 221
+    --work-dir "${CMAKE_CURRENT_BINARY_DIR}/stability"
+)
+set_tests_properties(
+  application_stability_test
+  PROPERTIES
+    LABELS integration
+    TIMEOUT 180
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
@@ -988,6 +1073,7 @@ add_custom_target(
 install(TARGETS robot_runtime RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(TARGETS read_record RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(TARGETS application RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+install(TARGETS external_producer RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 
 # The configuration of the default Fake deployment and the schema that describes
 # it: the schema is part of the configuration contract, not of a test.

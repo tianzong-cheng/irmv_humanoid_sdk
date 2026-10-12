@@ -33,6 +33,7 @@ using irmv::application::ClientSink;
 using irmv::application::ClientView;
 using irmv::application::FaultCause;
 using irmv::application::InputEvent;
+using irmv::application::LocomotionSource;
 using irmv::application::RequestOutcome;
 using irmv::application::RobotClient;
 using irmv::configuration::ApplicationConfig;
@@ -121,10 +122,10 @@ struct LowerState {
 // over it, the FSM, and the runtime the cases drive.
 class Harness {
  public:
-  Harness()
+  explicit Harness(LocomotionSource source = LocomotionSource::None)
       : config_(LoadApplicationConfig("config/sdk.json")),
         client_(sink_, config_, MakeId(0x10)),
-        fsm_(config_, client_) {}
+        fsm_(config_, client_, source) {}
 
   const ApplicationConfig &config() const { return config_; }
   RobotClient &client() { return client_; }
@@ -1917,6 +1918,134 @@ int LocomotionRequest() {
   return 0;
 }
 
+// The external locomotion source. The frame it proposes belongs to the producer
+// process the runtime will gate - not to this application - the first sequence
+// the runtime adopted is reported for the notice that tells the producer where
+// to continue, and this behaviour publishes no frame of that context at all,
+// because the producer publishes the stream itself.
+int ExternalLocomotion() {
+  Harness h(LocomotionSource::External);
+  CHECK(ToStandby(h) == 0);
+  CHECK(ToReady(h) == 0);
+  const std::size_t requests = h.sink().requests.size();
+
+  // A prepared frame that names the producer process: the supervisor stamps the
+  // identity it registered, and the behaviour authorizes exactly that one.
+  const Id external_producer = MakeId(0x70);
+  CHECK(h.Step(InputEvent::StartLocomotion).locomotion_armed);
+  h.fsm().OfferLocomotionCandidate(
+      LocomotionFrame(h, 0.25, 0, external_producer), h.now_us());
+  BehaviorStep step = h.Step();
+  CHECK(h.sink().requests.size() == requests + 1);
+  const ExecutionRequest *request = h.last_request();
+  if (request == nullptr) {
+    return 1;
+  }
+  CHECK(request->operation == Operation::Tracking);
+  CHECK(request->producer_id == external_producer);
+  CHECK(request->first_command.producer_id == external_producer);
+  CHECK(request->first_command.epoch == request->proposed_epoch);
+  CHECK(request->first_command.command_seq == 1);
+  // The sequence the producer is told to continue from.
+  CHECK(h.fsm().locomotion_first_command_seq() == 1);
+
+  // The runtime applied the context under the producer the request named.
+  h.EnterTracking();
+  CHECK(h.Answer());
+  step = h.Step();
+  CHECK(step.state == BehaviorState::Locomotion);
+  CHECK(h.fsm().locomotion_producer() == external_producer);
+  CHECK(h.fsm().locomotion_first_command_seq() == 1);
+
+  // Not one frame of it leaves this process. The producer publishes the stream
+  // itself, under the identity the runtime granted, and a second sequence
+  // interleaved into it is exactly the discontinuity the runtime's command gate
+  // refuses.
+  const std::size_t commands = h.sink().commands.size();
+  for (int tick = 0; tick < 40; ++tick) {
+    step = h.Step(InputEvent::None, h.config().supervision.target_period_us);
+    CHECK(step.state == BehaviorState::Locomotion);
+    CHECK(step.locomotion_armed);
+    CHECK(!step.send_command);
+  }
+  CHECK(h.sink().commands.size() == commands);
+
+  // The same authorization under the local source does publish: the difference
+  // is the source, never the context.
+  {
+    Harness local;
+    CHECK(ToStandby(local) == 0);
+    CHECK(ToReady(local) == 0);
+    static_cast<void>(local.Step(InputEvent::StartLocomotion));
+    local.fsm().OfferLocomotionCandidate(LocomotionFrame(local, 0.25, 0, kNoId),
+                                         local.now_us());
+    const ExecutionRequest *local_request = nullptr;
+    static_cast<void>(local.Step());
+    local_request = local.last_request();
+    CHECK(local_request != nullptr);
+    local.EnterTracking();
+    CHECK(local.Answer());
+    CHECK(local.Step().state == BehaviorState::Locomotion);
+    local.fsm().OfferLocomotionTarget(
+        LocomotionFrame(local, 0.5, local.fsm().locomotion_epoch(),
+                        local.fsm().locomotion_producer()),
+        local.now_us());
+    BehaviorStep local_step = local.Step(
+        InputEvent::None, local.config().supervision.target_period_us);
+    CHECK(local_step.send_command);
+    CHECK(local_step.command.joints.q[0] == 0.5);
+  }
+
+  // A first frame of an external source is usable for the preparation deadline,
+  // which is a deadline of the producer and not of the local model: the same
+  // frame is refused under the local source and proposed under this one.
+  {
+    Harness external(LocomotionSource::External);
+    CHECK(ToStandby(external) == 0);
+    CHECK(ToReady(external) == 0);
+    const std::size_t before = external.sink().requests.size();
+    static_cast<void>(external.Step(InputEvent::StartLocomotion));
+    external.fsm().OfferLocomotionCandidate(
+        LocomotionFrame(external, 0.25, 0, external_producer),
+        external.now_us());
+    const TimeUs older_than_the_model = 200000;  // 200 ms
+    BehaviorStep external_step =
+        external.Step(InputEvent::None, older_than_the_model);
+    CHECK(external.config().policy.inference_timeout_us < older_than_the_model);
+    CHECK(external.config().external_producer.prepare_timeout_us >
+          older_than_the_model);
+    CHECK(external.sink().requests.size() == before + 1);
+    CHECK(external_step.state == BehaviorState::Ready);
+
+    Harness starved(LocomotionSource::External);
+    CHECK(ToStandby(starved) == 0);
+    CHECK(ToReady(starved) == 0);
+    const std::size_t starved_before = starved.sink().requests.size();
+    static_cast<void>(starved.Step(InputEvent::StartLocomotion));
+    starved.fsm().OfferLocomotionCandidate(
+        LocomotionFrame(starved, 0.25, 0, external_producer), starved.now_us());
+    BehaviorStep starved_step =
+        starved.Step(InputEvent::None,
+                     starved.config().external_producer.prepare_timeout_us + 1);
+    CHECK(starved.sink().requests.size() == starved_before);
+    CHECK(starved_step.state == BehaviorState::Ready);
+  }
+
+  // The runtime leaving the context on its own - a producer that stopped
+  // publishing, a withdrawn authorization - ends the source here as well, so
+  // the loop can revoke it and nothing of it prepares the next authorization.
+  h.lower.state = ExecutionState::Damping;
+  h.lower.output = OutputAction::Damping;
+  h.lower.producer = kNoId;
+  h.lower.epoch = 0;
+  step = h.Step();
+  CHECK(step.state == BehaviorState::Damping);
+  CHECK(!step.locomotion_armed);
+  CHECK(h.fsm().locomotion_epoch() == 0);
+  CHECK(h.fsm().locomotion_first_command_seq() == 0);
+  return 0;
+}
+
 // The ordered exit from a tracking behaviour while the lower layer still
 // reports our own Tracking: the context is one this FSM authorized and the
 // Damping stop it asked for is still on the wire, so the state is expected and
@@ -2139,6 +2268,7 @@ int main() {
   failures += ResetConfirmationWaitsForTheState();
   failures += HeldConfirmationIsDropped();
   failures += LocomotionRequest();
+  failures += ExternalLocomotion();
   if (failures == 0) {
     return 0;
   }

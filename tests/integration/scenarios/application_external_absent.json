@@ -1,0 +1,117 @@
+{
+  "name": "application_external_absent",
+  "description": "The external locomotion source of a deployment that has no producer process running. Selecting it is no longer a startup refusal: the application starts, supervises its link exactly as in every other mode, reports once - after the configured registration window - that the configured source has nobody to run it, and keeps supervising afterwards, so a producer that starts later is still selected. The operator may still walk Standby -> Damping -> Ready; asking for the locomotion behaviour arms a source that has produced no first frame, so the behaviour keeps holding Ready instead of authorizing anything, and the ordered exit is the one confirmed stop as always.",
+  "domain": 228,
+  "runtime": {
+    "config": "config/sdk.json",
+    "fake_scenario": "tests/support/fake_static.json",
+    "output_trace": "trace_run%d.jsonl"
+  },
+  "application": {
+    "args": ["--locomotion-source", "external"]
+  },
+  "steps": [
+    {
+      "action": "start_runtime"
+    },
+    {
+      "action": "wait_log",
+      "pattern": "state=\"ZeroTorque\"",
+      "timeout_s": 15
+    },
+    {
+      "action": "start_application"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "policy=none source=external",
+      "timeout_s": 15,
+      "note": "the mode starts instead of being refused at startup"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Standby runtime=ZeroTorque",
+      "timeout_s": 15
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "producer=missing timeout_us=1000000",
+      "timeout_s": 10,
+      "note": "the registration window of the shipped Fake configuration elapsed"
+    },
+    {
+      "action": "application_keys",
+      "keys": "d"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Damping runtime=Damping",
+      "timeout_s": 10
+    },
+    {
+      "action": "application_keys",
+      "keys": "i"
+    },
+    {
+      "action": "wait_application_log",
+      "pattern": "behavior=Ready runtime=Tracking",
+      "timeout_s": 15,
+      "note": "the loop still supervises a link without a producer"
+    },
+    {
+      "action": "application_keys",
+      "keys": "l"
+    },
+    {
+      "action": "sleep_ms",
+      "ms": 500,
+      "note": "an armed source with no first frame proposes nothing"
+    },
+    {
+      "action": "stop_application",
+      "keys": "x",
+      "timeout_s": 20,
+      "expect_code": 0
+    },
+    {
+      "action": "stop_runtime",
+      "signal": "SIGTERM",
+      "timeout_s": 10,
+      "expect_clean": true
+    }
+  ],
+  "checks": [
+    {
+      "check": "log_sequence",
+      "params": {
+        "file": "application_run1.log",
+        "sequence": [
+          "policy=none source=external",
+          "behavior=Standby runtime=ZeroTorque",
+          "producer=missing timeout_us=1000000",
+          "behavior=Damping runtime=Damping",
+          "behavior=Ready runtime=Tracking",
+          "application: exit stop=confirmed"
+        ],
+        "forbid": [
+          "is not implemented",
+          "behavior=Locomotion",
+          "behavior=Fault",
+          "cause=LocalPolicyFailed",
+          "producer=selected"
+        ]
+      }
+    },
+    {
+      "check": "log_sequence",
+      "params": {
+        "file": "runtime_run1.log",
+        "sequence": [
+          "SessionAcquired",
+          "to=\"ZeroTorque\" stop=\"Requested\""
+        ],
+        "forbid": ["FaultLatched", "CommandTimeout", "SourceStateTimeout"]
+      }
+    }
+  ]
+}

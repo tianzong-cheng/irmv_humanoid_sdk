@@ -341,6 +341,21 @@ RuntimeConfig LoadConfig(const std::filesystem::path &path,
       Fail("telemetry.recorder.sample_hz",
            "must not exceed runtime.control_hz");
     }
+    // The recorder samples a whole number of control ticks, so the two rates
+    // have to divide each other exactly. A rate that would need a fraction of a
+    // tick - 200 Hz on a 500 Hz loop is one sample per 2.5 ticks - is refused
+    // here instead of being rounded into a run that records another rate than
+    // the one the file declares, with the requested sampling phase drifting
+    // against the loop.
+    const auto sample_period_us = static_cast<protocol::TimeUs>(
+        std::llround(1'000'000.0 /
+                     static_cast<double>(config.telemetry.recorder.sample_hz)));
+    if (sample_period_us == 0 ||
+        sample_period_us % config.control_period_us != 0) {
+      Fail("telemetry.recorder.sample_hz",
+           "must divide runtime.control_hz exactly: the recorder samples a "
+           "whole number of control ticks");
+    }
     config.telemetry.recorder.queue_capacity = static_cast<std::size_t>(
         PositiveIntegerMember(recorder, "queue_capacity", "telemetry.recorder",
                               std::numeric_limits<std::uint32_t>::max()));

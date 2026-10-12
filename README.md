@@ -234,12 +234,16 @@ demonstration values for the fake deployment and are **not bench-approved**.
 
 ### What these phases do not ship
 
-No ONNX policy, no external producer lifecycle, no `Recorder`, no real backend,
-and no way to enter `Locomotion`: an entry attempt reports unavailable and the
-behaviour stays in `Ready`. Velocity intents are tracked and expired, but nothing
-consumes them. The upper layer never re-implements a lower-layer safety rule: the
-runtime's limits, watchdogs, fault rules and damping stay independent of whether
-the application runs at all.
+No trained policy of its own and no real backend. The shipped configuration
+carries no model (`application.policy.model_path` is null) and every process
+runs the Fake backend, so a `Locomotion` behaviour needs a locomotion source
+chosen at startup: the local model the configuration points at, or an external
+producer process. The run recorder is shipped but disabled in the shipped
+configuration. Nothing here is a validated machine limit - every gain, tolerance
+and limit is a nominal training or demonstration value - and the phase-4 bench
+acceptance is still owed. The upper layer never re-implements a lower-layer
+safety rule: the runtime's limits, watchdogs, fault rules and damping stay
+independent of whether the application runs at all.
 
 
 ## The policy model contract (phase 3, in progress)
@@ -267,9 +271,12 @@ configuration: a configured `model_path` selects the local model, and a
 configuration without one - the shipped Fake deployment - runs with no source at
 all, exactly as the earlier phases did, so pressing `l` arms nothing and the
 behaviour keeps holding `Ready`. `--locomotion-source local` demands a model
-path and fails at startup without one; `external` is refused because the
-producer lifecycle is not implemented yet; `none` states the no-source case
-explicitly.
+path and fails at startup without one. `--locomotion-source external` runs the
+producer lifecycle of `docs/runtime-protocol.md` - a separate producer process
+registers, is prepared, and is authorized after the runtime applied the context
+this application asked for - and `none` states the no-source case explicitly.
+No mode is a hot swap: changing the source is a stop, an initialization and a
+new authorization, which is the next section.
 
 `tools/verify_policy.py` is the gate between the training export and this
 deployment: it checks the model with the ONNX checker, refuses a model whose
@@ -279,6 +286,42 @@ written, and compares the outputs of the two files on a fixed input. The
 training side writes that document from the instantiated environment; see
 `docs/testing.md` for the contract the recorded run produced and for what is
 still missing before a `Locomotion` behaviour drives the machine.
+
+## Run an external producer (phase 3)
+
+The other locomotion source is a *producer process*: the application selects it,
+asks it to prepare a first frame, asks the runtime to authorize the context that
+frame belongs to, and tells it when that context ends. Nothing of the
+preparation reaches the execution topic, and the frames of the authorized
+context are published by the producer itself - the application publishes none of
+them, so the authorization has exactly one writer. The lifecycle, the six
+endpoints and their QoS are frozen in `docs/runtime-protocol.md`.
+
+```bash
+# one shell: the runtime, as always
+robot_runtime --config config/sdk.json --domain 1
+# a second shell: the application, with the producer source
+application --config config/sdk.json --domain 1 --locomotion-source external
+# a third shell: the example producer, installed next to the two processes
+external_producer --config config/sdk.json --domain 1 --rate 50
+```
+
+Then the documented path: `d` (Damping), `i` (Initialize) to `Ready`, and `l`.
+The application reports `producer=selected`, then `producer=prepared` once the
+first frame is in hand, and `producer=authorized` when the runtime applied the
+context; the producer reports `producer=publishing` per frame from the sequence
+the request carried on. `d` ends the context and tells the producer to stop.
+
+A producer that is not running yet is not a startup error: the application
+supervises its link as always, reports `producer=missing timeout_us=...` once
+after `application.external_producer.registration_timeout_us`, and selects a
+producer that starts later.
+
+`examples/external_producer.cpp` is an example and a test peer, not a machine
+program: the gains, amplitudes and tolerances it uses are demonstration values
+of the Fake deployment and are not a validated machine limit. It is also the
+peer of the external acceptance test, which drives the whole lifecycle through
+the real application, the real runtime and this process over real DDS.
 
 ## Install
 

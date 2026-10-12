@@ -111,10 +111,21 @@ class ProducerSupervisor {
   // True when a preparation is outstanding.
   bool preparing() const { return preparation_.outstanding; }
 
-  // Gives up on an outstanding preparation that was not answered inside its
-  // deadline. Returns true when it just expired, so the caller can report the
-  // cause once.
-  bool Expired(protocol::TimeUs now_us) const;
+  // Gives up on an outstanding preparation that the producer did not answer
+  // inside its deadline, and returns true when it had just expired, so the
+  // caller can report the cause once. The producer stays registered: a slow
+  // producer is not made to announce itself again, and the next preparation is
+  // simply a new request.
+  //
+  // A caller does not have to call this for the frames of an expired
+  // preparation to be refused: Observe applies the same deadline to every
+  // result it is handed, so correctness never depends on the order in which the
+  // two are called.
+  bool ExpirePreparation(protocol::TimeUs now_us);
+
+  // Takes the stop notice the supervisor owes a producer, if any, and clears
+  // it. The caller is what publishes it; the notice itself decides nothing.
+  bool TakeStopNotice(protocol::StopNotice *notice);
 
   // The notice to send once the runtime applied the context the candidate was
   // offered for. It carries the preparation the candidate belongs to and the

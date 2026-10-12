@@ -805,7 +805,17 @@ def build_application_arguments(ctx):
     if not config_path.exists():
         raise Failure("the application needs the configuration the runtime "
                       "generated; start the runtime first")
-    return ["--config", str(config_path), "--domain", str(ctx.domain)]
+    # The invocation itself: `args` carries what the scenario wants the
+    # application started with - `--locomotion-source external` being the case
+    # that exists - and nothing the harness derives, so a scenario can never
+    # contradict the configuration the runtime was given.
+    extra = settings.get("args", [])
+    if not isinstance(extra, list) or not all(
+        isinstance(argument, str) for argument in extra
+    ):
+        raise Failure("the application args of %s must be a list of strings"
+                      % ctx.scenario["name"])
+    return ["--config", str(config_path), "--domain", str(ctx.domain)] + extra
 
 
 def start_runtime(ctx):

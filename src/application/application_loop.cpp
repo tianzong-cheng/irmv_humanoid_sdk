@@ -18,6 +18,7 @@
 
 #include "irmv/application/behavior_fsm.hpp"
 #include "irmv/application/input_router.hpp"
+#include "irmv/application/producer_supervisor.hpp"
 #include "irmv/application/robot_client.hpp"
 #include "irmv/configuration/application_config.hpp"
 #include "irmv/policy/action.hpp"
@@ -25,6 +26,7 @@
 #include "irmv/policy/observation.hpp"
 #include "irmv/policy/onnx_model.hpp"
 #include "irmv/transport/client_transport.hpp"
+#include "irmv/transport/producer_transport.hpp"
 
 namespace irmv::application {
 
@@ -191,6 +193,42 @@ const char *RejectName(protocol::RejectReason reason) {
       return "QueueFull";
   }
   return "-";
+}
+
+// ---------------------------------------------------------------------------
+// The external producer source
+// ---------------------------------------------------------------------------
+
+// Why a producer stopped being the selected one, as the line reports it.
+const char *ProducerStopName(ProducerStop stop) {
+  switch (stop) {
+    case ProducerStop::None:
+      return "-";
+    case ProducerStop::Stopped:
+      return "Stopped";
+    case ProducerStop::PrepareFailed:
+      return "PrepareFailed";
+    case ProducerStop::PrepareTimeout:
+      return "PrepareTimeout";
+    case ProducerStop::Replaced:
+      return "Replaced";
+    case ProducerStop::Incompatible:
+      return "Incompatible";
+  }
+  return "-";
+}
+
+// The lower-case hexadecimal rendering of one protocol identity. The operator
+// compares these lines with the producer's own log and with the runtime's
+// trace, both of which name the same bytes the same way.
+std::array<char, 33> IdText(const protocol::Id &id) {
+  static constexpr char kDigits[] = "0123456789abcdef";
+  std::array<char, 33> text{};
+  for (std::size_t index = 0; index < id.size(); ++index) {
+    text[index * 2] = kDigits[id[index] >> 4];
+    text[index * 2 + 1] = kDigits[id[index] & 0x0F];
+  }
+  return text;
 }
 
 // ---------------------------------------------------------------------------
@@ -433,9 +471,18 @@ int RunApplication(const ApplicationOptions &options,
   // The identity, the client, the behaviour and the input router, in that
   // order: the client is the only writer of the protocol, the behaviour is the
   // only decision maker, and the router is the only reader of the keyboard.
+  //
+  // The source of this run is decided before the behaviour exists: what the
+  // operator asked for, or - with no explicit request - the local model this
+  // configuration carries. A deployment that configures no model therefore runs
+  // without a locomotion source, exactly as it did before this phase, instead
+  // of refusing to start.
+  const LocomotionSource source = options.locomotion_source.value_or(
+      config.policy.model_path.empty() ? LocomotionSource::None
+                                       : LocomotionSource::Local);
   SinkAdapter sink(transport);
   RobotClient client(sink, config, MakeSupervisorId());
-  BehaviorFsm fsm(config, client);
+  BehaviorFsm fsm(config, client, source);
   InputRouter router(config);
 
   // The local policy source: its model, the gains its frames are sent with and
@@ -445,13 +492,6 @@ int RunApplication(const ApplicationOptions &options,
   std::unique_ptr<policy::OnnxModel> model;
   std::unique_ptr<policy::InferenceWorker> worker;
   policy::ResolvedGains gains;
-  // The source of this run: what the operator asked for, or - with no explicit
-  // request - the local model this configuration carries. A deployment that
-  // configures no model therefore runs without a locomotion source, exactly as
-  // it did before this phase, instead of refusing to start.
-  const LocomotionSource source = options.locomotion_source.value_or(
-      config.policy.model_path.empty() ? LocomotionSource::None
-                                       : LocomotionSource::Local);
   if (source == LocomotionSource::Local) {
     if (config.policy.model_path.empty()) {
       std::fprintf(stderr,
@@ -520,15 +560,34 @@ int RunApplication(const ApplicationOptions &options,
           record.applied_kd);
     }
     std::fflush(stdout);
-  } else if (source == LocomotionSource::External) {
-    // The external lifecycle is not implemented: selecting it is an explicit
-    // startup refusal, never a silent fall back on the model.
-    std::fprintf(stderr,
-                 "application: --locomotion-source external is not implemented"
-                 " in this build\n");
-    transport.Stop();
-    return kExitStartupError;
-  } else {
+  }
+  // The external source: a producer process that registers over DDS. The
+  // transport of that interface exists only in this mode, so a local or
+  // sourceless run opens no producer endpoint at all. A producer that never
+  // arrives is not a startup error: the application supervises its link as
+  // always and reports that the configured source has nobody to run it.
+  ProducerSupervisor supervisor(config);
+  std::unique_ptr<transport::ProducerTransport> producer_transport;
+  if (source == LocomotionSource::External) {
+    producer_transport = std::make_unique<transport::ProducerTransport>(config);
+    try {
+      producer_transport->Start();
+    } catch (const std::exception &error) {
+      std::fprintf(stderr,
+                   "application: the producer transport did not start: %s\n",
+                   error.what());
+      transport.Stop();
+      return kExitStartupError;
+    }
+    std::printf(
+        "[application] policy=none source=external prepare_timeout_us=%llu "
+        "registration_timeout_us=%llu\n",
+        static_cast<unsigned long long>(
+            config.external_producer.prepare_timeout_us),
+        static_cast<unsigned long long>(
+            config.external_producer.registration_timeout_us));
+    std::fflush(stdout);
+  } else if (source == LocomotionSource::None) {
     std::printf("[application] policy=none source=none\n");
     std::fflush(stdout);
   }
@@ -543,6 +602,22 @@ int RunApplication(const ApplicationOptions &options,
   bool submitted_once = false;
   protocol::TimeUs last_submit_us = 0;
   std::array<float, protocol::kMaxJoints> last_action{};
+
+  // The external source's own state across iterations: when this loop started
+  // waiting for a producer, when the candidate it holds was produced, the last
+  // velocity intent it published, whether the report of a producer that never
+  // arrived was already made, and the authorization edge the notice follows.
+  protocol::TimeUs producer_wait_start_us = 0;
+  bool have_candidate_us = false;
+  protocol::TimeUs candidate_us = 0;
+  bool have_intent = false;
+  policy::VelocityCommand last_intent;
+  protocol::Sequence intent_seq = 0;
+  protocol::TimeUs last_intent_us = 0;
+  bool registration_reported = false;
+  bool authorized_previously = false;
+  bool supervised_armed_previously = false;
+  protocol::Id announced_producer = protocol::kNoId;
 
   const protocol::TimeUs period_us = LoopPeriodUs(config);
   const int poll_timeout_ms = PollTimeoutMs(period_us);
@@ -643,7 +718,7 @@ int RunApplication(const ApplicationOptions &options,
     if (worker) {
       if (!behavior.locomotion_armed && armed_previously) {
         // The authorization ended: every result still on its way belongs to it,
-        // the next one starts from the contract's initial action, and the
+        // the next one starts from the contract's own initial action, and the
         // generation makes the identity of the two unmistakable.
         ++generation;
         policy::PolicyResponse withdrawn;
@@ -651,7 +726,7 @@ int RunApplication(const ApplicationOptions &options,
         }
         result_outstanding = false;
         submitted_once = false;
-        last_action.fill(0.0f);
+        policy::ResetLastAction(model->contract().action, &last_action);
       }
       armed_previously = behavior.locomotion_armed;
       const bool generating = behavior.locomotion_armed &&
@@ -690,47 +765,257 @@ int RunApplication(const ApplicationOptions &options,
       if (result_outstanding &&
           decision_now - last_submit_us > config.policy.inference_timeout_us) {
         // No result inside the deadline the configuration gave this source.
+        // The step is written off here, and the deadline below is what makes
+        // the result of it - which the worker may still be computing - a value
+        // that drives nothing instead of a frame.
         result_outstanding = false;
         fsm.LatchLocalPolicyFault(decision_now);
       }
       policy::PolicyResponse response;
       if (worker->TryTake(&response)) {
-        result_outstanding = false;
-        if (response.generation != generation) {
-          // A result of an authorization that was withdrawn while it ran: it
-          // drives nothing, and the current generation is unaffected.
-        } else if (!response.ok) {
-          fsm.LatchLocalPolicyFault(decision_now);
-        } else if (view.state_known) {
-          // The action of this step is what the observation of the next one
-          // carries, in the stage the contract names.
-          for (std::uint32_t index = 0;
-               index < response.action_count && index < protocol::kMaxJoints;
-               ++index) {
-            last_action[index] = response.action[index];
-          }
-          // The frame is stamped with the state the action was computed from -
-          // not with the newest one the loop happens to hold - because that
-          // sequence is what the runtime checks the target's source age
-          // against.
-          protocol::RobotState source = view.state;
-          source.state_seq = response.state_seq;
-          protocol::JointCommand frame;
-          if (!policy::BuildCommand(
-                  model->contract(), model->mapping(), gains,
-                  response.action.data(), response.action_count, source,
-                  config.layout_id(), fsm.locomotion_producer(),
-                  fsm.locomotion_epoch(), 0, &frame)) {
-            fsm.LatchLocalPolicyFault(decision_now);
-          } else if (behavior.state == BehaviorState::Ready) {
-            // Not authorized yet: the frame is the candidate the behaviour
-            // turns into the first frame of its request, and nothing of it is
-            // published before that request is confirmed.
-            fsm.OfferLocomotionCandidate(frame, decision_now);
-          } else if (behavior.state == BehaviorState::Locomotion) {
-            fsm.OfferLocomotionTarget(frame, decision_now);
-          }
+        // The result of the step this loop is waiting for is the only one that
+        // may reopen the lane or drive a frame. The identity is checked whole -
+        // the submission instant that names the step, the local generation, the
+        // authorization epoch - and so are the response deadline and the source
+        // state it was computed from: a result of a withdrawn authorization, of
+        // a step this loop already wrote off as late, or of a state the runtime
+        // would no longer accept is dropped here, before it can touch
+        // `last_action` or become a candidate.
+        const bool current =
+            result_outstanding && response.submitted_us == last_submit_us;
+        if (current) {
+          result_outstanding = false;
         }
+        switch (policy::JudgePolicyResult(
+            response, generation, fsm.locomotion_epoch(), decision_now,
+            config.policy.inference_timeout_us, last_submit_us)) {
+          case policy::PolicyVerdict::Ignored:
+            // A result of another authorization or of another step: it drives
+            // nothing, and the current generation is unaffected.
+            break;
+          case policy::PolicyVerdict::Failed:
+            fsm.LatchLocalPolicyFault(decision_now);
+            break;
+          case policy::PolicyVerdict::Usable:
+            if (!view.state_known || !view.state_fresh) {
+              break;
+            }
+            if (!policy::PolicySourceStateUsable(
+                    response, view.state.state_seq, view.state.stamp_us,
+                    config.runtime.timeouts.source_state_us)) {
+              // The state the action was computed from is not one the runtime
+              // can still look the target up against.
+              fsm.LatchLocalPolicyFault(decision_now);
+              break;
+            }
+            {
+              // The frame is stamped with the state the action was computed
+              // from - not with the newest one the loop happens to hold -
+              // because that sequence is what the runtime checks the target's
+              // source age against.
+              protocol::RobotState source = view.state;
+              source.state_seq = response.state_seq;
+              source.stamp_us = response.state_stamp_us;
+              protocol::JointCommand frame;
+              // The action of this step is what the observation of the next one
+              // carries, in the stage the contract names, and the same step is
+              // what the frame carries: both come from one action, so neither
+              // can describe a step the other does not.
+              if (!policy::BuildCommand(
+                      model->contract(), model->mapping(), gains,
+                      response.action.data(), response.action_count, source,
+                      config.layout_id(), fsm.locomotion_producer(),
+                      fsm.locomotion_epoch(), 0, &frame)) {
+                fsm.LatchLocalPolicyFault(decision_now);
+              } else if (!policy::LastActionFromAction(
+                             model->contract().action, response.action.data(),
+                             response.action_count, &last_action)) {
+                fsm.LatchLocalPolicyFault(decision_now);
+              } else if (behavior.state == BehaviorState::Ready) {
+                // Not authorized yet: the frame is the candidate the behaviour
+                // turns into the first frame of its request, and nothing of it
+                // is published before that request is confirmed.
+                fsm.OfferLocomotionCandidate(frame, decision_now);
+              } else if (behavior.state == BehaviorState::Locomotion) {
+                fsm.OfferLocomotionTarget(frame, decision_now);
+              }
+            }
+            break;
+        }
+      }
+    }
+
+    // (5c) The external producer source. The behaviour above decided whether a
+    // source is wanted and the runtime is the only thing that authorizes an
+    // execution context; this is the one place that talks to a producer
+    // process. It selects the producer that announced itself, asks it to
+    // prepare a first frame, offers the frame it produced to the behaviour as
+    // the candidate of the next authorization, tells it when that
+    // authorization became live, keeps it supplied with the operator's velocity
+    // intent, and tells it to stop when the authorization ends.
+    //
+    // Nothing of a preparation reaches the execution topic: the frame a
+    // producer prepared travels inside the Tracking request, which is the
+    // runtime's decision, and only the producer of an authorized context
+    // publishes a frame stream - which is why the behaviour publishes none in
+    // this mode.
+    if (producer_transport) {
+      if (producer_wait_start_us == 0) {
+        producer_wait_start_us = decision_now;
+      }
+      const transport::ProducerEvents &producer_events =
+          producer_transport->TakeEvents();
+      for (std::size_t index = 0; index < producer_events.announcement_count;
+           ++index) {
+        const protocol::ProducerAnnouncement &announcement =
+            producer_events.announcements[index];
+        if (!supervisor.Select(announcement)) {
+          // An announcement this deployment cannot use: another protocol
+          // version, another layout, another target period or a producer that
+          // is not ready. Nothing is prepared for it, so nothing of it can
+          // become a target.
+          continue;
+        }
+        if (!(announcement.producer_process_id == announced_producer)) {
+          announced_producer = announcement.producer_process_id;
+          const std::array<char, 33> producer_text =
+              IdText(announcement.producer_process_id);
+          std::printf(
+              "[application] producer=selected id=%s period_us=%llu\n",
+              producer_text.data(),
+              static_cast<unsigned long long>(announcement.target_period_us));
+          std::fflush(stdout);
+        }
+      }
+      for (std::size_t index = 0; index < producer_events.prepare_result_count;
+           ++index) {
+        const ProducerOutcome outcome = supervisor.Observe(
+            producer_events.prepare_results[index], view.state, decision_now);
+        if (outcome == ProducerOutcome::Candidate) {
+          fsm.OfferLocomotionCandidate(supervisor.candidate(), decision_now);
+          have_candidate_us = true;
+          candidate_us = decision_now;
+          std::printf("[application] producer=prepared prepare_id=%llu\n",
+                      static_cast<unsigned long long>(supervisor.prepare_id()));
+          std::fflush(stdout);
+        } else if (outcome == ProducerOutcome::Failed) {
+          have_candidate_us = false;
+          std::printf("[application] producer=failed reason=%s\n",
+                      ProducerStopName(supervisor.failure()));
+          std::fflush(stdout);
+        }
+      }
+      protocol::StopNotice stop_notice;
+      if (supervisor.TakeStopNotice(&stop_notice)) {
+        static_cast<void>(producer_transport->PublishStop(stop_notice));
+      }
+      if (supervisor.ExpirePreparation(decision_now)) {
+        // A preparation the producer did not answer inside its deadline: the
+        // frame of it is not a first frame any more. The producer stays
+        // registered, and the next preparation is a new request.
+        have_candidate_us = false;
+        std::printf("[application] producer=failed reason=%s\n",
+                    ProducerStopName(supervisor.failure()));
+        std::fflush(stdout);
+      }
+
+      // The velocity intent the producer should track, at this source's own
+      // cadence: the newest one the operator holds, republished when it changes
+      // and otherwise once per target period, so the producer never has to
+      // guess whether a stale intent still holds. An intent the router expired
+      // is a zero command like any other, and it is published the same way.
+      const VelocityIntent &intent = router.velocity_intent();
+      policy::VelocityCommand current_intent;
+      current_intent.forward = intent.forward;
+      current_intent.lateral = intent.lateral;
+      current_intent.yaw = intent.yaw;
+      const bool intent_changed =
+          !have_intent || current_intent.forward != last_intent.forward ||
+          current_intent.lateral != last_intent.lateral ||
+          current_intent.yaw != last_intent.yaw;
+      protocol::VelocityIntentMessage intent_message;
+      intent_message.producer_process_id = supervisor.producer_process_id();
+      intent_message.seq = intent_seq + 1;
+      intent_message.forward = current_intent.forward;
+      intent_message.lateral = current_intent.lateral;
+      intent_message.yaw = current_intent.yaw;
+      intent_message.send_stamp_us = decision_now;
+      intent_message.valid_for_us = config.input.intent_timeout_us;
+      if (supervisor.selected() &&
+          (intent_changed || decision_now - last_intent_us >=
+                                 config.supervision.target_period_us)) {
+        static_cast<void>(
+            producer_transport->PublishVelocityIntent(intent_message));
+        have_intent = true;
+        last_intent = current_intent;
+        last_intent_us = decision_now;
+        intent_seq = intent_message.seq;
+      }
+
+      // One preparation at a time, and only from the state a locomotion
+      // authorization can be asked from. A candidate that is already usable is
+      // not replaced; one that outlived the preparation deadline is not a first
+      // frame any more, so a new preparation takes its place.
+      const bool candidate_usable =
+          have_candidate_us && decision_now - candidate_us <=
+                                   config.external_producer.prepare_timeout_us;
+      if (supervisor.selected() && view.session_owned &&
+          behavior.state == BehaviorState::Ready && !supervisor.preparing() &&
+          !candidate_usable) {
+        protocol::PrepareRequest request;
+        if (supervisor.Prepare(client.runtime_id(), client.session_id(),
+                               intent_message, decision_now,
+                               config.external_producer.prepare_timeout_us,
+                               &request)) {
+          // A request the outbound lane refuses is a preparation the producer
+          // never hears of; its deadline is what ends it, and the transport
+          // counts the loss.
+          static_cast<void>(producer_transport->PublishPrepareRequest(request));
+          have_candidate_us = false;
+        }
+      }
+
+      // The runtime applied the context this request asked for: the producer
+      // may publish. The notice carries the identity the runtime granted and
+      // the sequence of the first frame the request carried, so the producer
+      // continues the one stream instead of restarting a numbering of its own
+      // that the runtime's command gate would refuse.
+      const bool authorized = behavior.state == BehaviorState::Locomotion;
+      if (authorized && !authorized_previously) {
+        const protocol::AuthorizationNotice notice = supervisor.Authorized(
+            client.runtime_id(), client.session_id(), supervisor.producer_id(),
+            fsm.locomotion_epoch(), fsm.locomotion_first_command_seq());
+        static_cast<void>(producer_transport->PublishAuthorization(notice));
+        std::printf(
+            "[application] producer=authorized epoch=%llu first_seq=%llu\n",
+            static_cast<unsigned long long>(notice.epoch),
+            static_cast<unsigned long long>(notice.first_command_seq));
+        std::fflush(stdout);
+      }
+      authorized_previously = authorized;
+
+      // The authorization ended - a stop, a fault, the exit, or the runtime
+      // withdrawing the context on its own: the producer is told to stop, and
+      // the preparation and its candidate are dropped so that nothing of a
+      // withdrawn context can prepare the next one.
+      if (!behavior.locomotion_armed && supervised_armed_previously) {
+        static_cast<void>(supervisor.Revoke(ProducerStop::Stopped));
+        have_candidate_us = false;
+      }
+      supervised_armed_previously = behavior.locomotion_armed;
+
+      // A producer that never announced itself inside the configured window:
+      // reported once, and never fatal. The loop keeps supervising the link, so
+      // a producer that starts later is still selected, prepared and
+      // authorized.
+      if (!supervisor.selected() && !registration_reported &&
+          decision_now - producer_wait_start_us >=
+              config.external_producer.registration_timeout_us) {
+        registration_reported = true;
+        std::printf("[application] producer=missing timeout_us=%llu\n",
+                    static_cast<unsigned long long>(
+                        config.external_producer.registration_timeout_us));
+        std::fflush(stdout);
       }
     }
 
@@ -789,6 +1074,20 @@ int RunApplication(const ApplicationOptions &options,
       // own watchdog owns the link this process leaves behind.
       if (worker) {
         worker->Stop();
+      }
+      if (producer_transport) {
+        // The producer is told the context is over before the endpoint that
+        // tells it is closed. It is a notice, not a revocation: the runtime
+        // withdrew the epoch on its own when the ordered stop was applied. The
+        // revocation is asked for here as well, because an exit that completed
+        // in the same iteration the authorization ended may not have reached
+        // the block that does it on the way.
+        static_cast<void>(supervisor.Revoke(ProducerStop::Stopped));
+        protocol::StopNotice stop_notice;
+        if (supervisor.TakeStopNotice(&stop_notice)) {
+          static_cast<void>(producer_transport->PublishStop(stop_notice));
+        }
+        producer_transport->Stop();
       }
       transport.Stop();
       return exit_code;

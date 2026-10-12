@@ -57,8 +57,15 @@ bool SameDigests(const configuration::ApplicationConfig &config,
 }  // namespace
 
 BehaviorFsm::BehaviorFsm(const configuration::ApplicationConfig &config,
-                         RobotClient &client)
-    : config_(config), client_(client), producer_id_(BehaviorProducerId()) {}
+                         RobotClient &client, LocomotionSource source)
+    : config_(config),
+      client_(client),
+      producer_id_(BehaviorProducerId()),
+      locomotion_source_(source),
+      locomotion_candidate_ttl_us_(
+          source == LocomotionSource::External
+              ? config.external_producer.prepare_timeout_us
+              : config.policy.inference_timeout_us) {}
 
 BehaviorStep BehaviorFsm::Step(protocol::TimeUs now_us, InputEvent event,
                                const ClientView &view) {
@@ -215,6 +222,11 @@ void BehaviorFsm::FreshStateAndFaults(protocol::TimeUs now_us,
     // rejected. Standby is the upper state whose lower mapping is ZeroTorque,
     // and Damping the one whose lower mapping is Damping.
     CancelInitialization();
+    // The authorization is over, and that includes the locomotion source: the
+    // frames of a context the runtime no longer holds belong to nothing, and an
+    // external producer must be told to stop instead of being left publishing
+    // into a withdrawn epoch.
+    CancelLocomotion();
     client_.AbandonRequest();
     pending_ = Pending::None;
     state_ = view.state.execution_state == protocol::ExecutionState::ZeroTorque
@@ -818,6 +830,16 @@ void BehaviorFsm::TryReset(protocol::TimeUs now_us, const ClientView &view) {
 void BehaviorFsm::EmitTarget(protocol::TimeUs now_us, const ClientView &view,
                              BehaviorStep *out) {
   if (state_ == BehaviorState::Locomotion) {
+    if (locomotion_source_ == LocomotionSource::External) {
+      // The external producer publishes the frames of the context it prepared
+      // itself, on the execution topic and under the producer identity the
+      // runtime granted. This behaviour republishing the first frame - which is
+      // all it would ever have, because no other frame of that source reaches
+      // this process - would interleave a second sequence into one stream, and
+      // the runtime's command gate is right to refuse that as a discontinuity.
+      // The authorization has exactly one writer, and it is not this process.
+      return;
+    }
     // The locomotion source is the generator, and this behaviour only decides
     // when its newest frame leaves. A frame is published only while the source
     // is still fresh - a stop, a fault or a late result withdraws it - and only
@@ -944,6 +966,12 @@ protocol::Sequence BehaviorFsm::locomotion_epoch() const {
              : 0;
 }
 
+protocol::Sequence BehaviorFsm::locomotion_first_command_seq() const {
+  return pending_locomotion_ || state_ == BehaviorState::Locomotion
+             ? locomotion_first_seq_
+             : 0;
+}
+
 void BehaviorFsm::CancelLocomotion() {
   have_locomotion_candidate_ = false;
   have_locomotion_target_ = false;
@@ -951,6 +979,7 @@ void BehaviorFsm::CancelLocomotion() {
   locomotion_target_us_ = 0;
   locomotion_armed_ = false;
   locomotion_seq_ = 0;
+  locomotion_first_seq_ = 0;
   pending_locomotion_ = false;
 }
 
@@ -959,9 +988,9 @@ void BehaviorFsm::TryStartLocomotion(protocol::TimeUs now_us,
   if (!have_locomotion_candidate_) {
     return;
   }
-  if (now_us - locomotion_candidate_us_ > config_.policy.inference_timeout_us) {
-    // The first frame is older than the local source's own deadline: it is the
-    // first frame of nothing any more. The supervision loop latches the fault;
+  if (now_us - locomotion_candidate_us_ > locomotion_candidate_ttl_us_) {
+    // The first frame is older than the source's own deadline: it is the first
+    // frame of nothing any more. The supervision loop latches the fault;
     // proposing it here would authorize a frame no state still supports.
     return;
   }
@@ -971,14 +1000,18 @@ void BehaviorFsm::TryStartLocomotion(protocol::TimeUs now_us,
   }
   const protocol::Sequence epoch = client_.next_epoch();
   protocol::JointCommand first = locomotion_candidate_;
-  // The behaviour owns the identity of the source it authorizes: the producer
-  // is this application and the epoch is the one the request proposes, so the
+  // The source owns the identity the runtime authorizes: the local model is
+  // this application, while an external producer is the process whose frames
+  // the runtime will gate. A candidate that names no producer is this
+  // application's own, and the epoch is the one the request proposes, so the
   // frame and the request that carries it can never disagree.
-  first.producer_id = producer_id_;
+  const protocol::Id source_producer =
+      first.producer_id != protocol::kNoId ? first.producer_id : producer_id_;
+  first.producer_id = source_producer;
   first.epoch = epoch;
   first.command_seq = ++locomotion_seq_;
-  if (!client_.BeginRequest(protocol::Operation::Tracking, now_us, producer_id_,
-                            &first)) {
+  if (!client_.BeginRequest(protocol::Operation::Tracking, now_us,
+                            source_producer, &first)) {
     return;
   }
   if (client_.pending_proposed_epoch() != epoch) {
@@ -989,13 +1022,14 @@ void BehaviorFsm::TryStartLocomotion(protocol::TimeUs now_us,
     return;
   }
   tracking_active_ = true;
-  tracking_producer_ = producer_id_;
+  tracking_producer_ = source_producer;
   tracking_epoch_ = epoch;
   pending_ = Pending::Tracking;
   pending_operation_ = protocol::Operation::Tracking;
-  pending_producer_ = producer_id_;
+  pending_producer_ = source_producer;
   pending_epoch_ = epoch;
   pending_locomotion_ = true;
+  locomotion_first_seq_ = first.command_seq;
   // The first frame travelled inside the request and stays the current target
   // until the loop offers the next one, so the authorization is never left
   // without the frame it just adopted.

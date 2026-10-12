@@ -241,6 +241,35 @@ int main() {
   CHECK(config.telemetry.recorder.queue_capacity == 256);
   CHECK(config.telemetry.recorder.directory == config.telemetry.directory);
 
+  // The recorder samples a whole number of control ticks, so a rate that does
+  // not divide the control rate is refused instead of being rounded into a run
+  // that declares one rate and records another. 200 Hz on this 500 Hz document
+  // is the case that used to become one sample per three ticks - 166.7 Hz -
+  // and 100, 250 and 500 Hz are the ones that fit exactly.
+  //
+  // The recorder section is optional in the document (the checks above read
+  // the defaults of a file that carries none), so each case writes the section
+  // it is about.
+  const auto with_recorder = [](const std::string &sample_hz) {
+    return ReplaceOnce(ValidConfig(), "\"queue_capacity\": 1024},",
+                       "\"queue_capacity\": 1024, \"recorder\": {\"enabled\": "
+                       "true, \"sample_hz\": " +
+                           sample_hz +
+                           ", \"queue_capacity\": 256, \"directory\": null}},");
+  };
+  CHECK(!with_recorder("100").empty());
+  CHECK(ThrowsAt(with_recorder("200"), "telemetry.recorder.sample_hz"));
+  CHECK(ThrowsAt(with_recorder("1000"), "telemetry.recorder.sample_hz"));
+  const std::pair<const char *, std::uint32_t> dividing_rates[] = {
+      {"100", 100}, {"250", 250}, {"500", 500}};
+  for (const auto &rate : dividing_rates) {
+    const TemporaryConfig dividing(with_recorder(rate.first));
+    const auto dividing_config = LoadConfig(dividing.path());
+    CHECK(dividing_config.telemetry.recorder.enabled);
+    CHECK(dividing_config.telemetry.recorder.sample_hz == rate.second);
+    CHECK(dividing_config.config_id != config.config_id);
+  }
+
   // The logging level covers the full report range: every level parses, the
   // level stays part of the configuration identity, and anything unknown is
   // still rejected.

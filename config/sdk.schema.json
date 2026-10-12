@@ -202,7 +202,12 @@
     },
     "application": {
       "type": "object",
-      "required": ["initialization", "supervision", "policy"],
+      "required": [
+        "initialization",
+        "supervision",
+        "policy",
+        "external_producer"
+      ],
       "properties": {
         "initialization": {
           "type": "object",
@@ -295,6 +300,21 @@
             "$ref": "#/$defs/policyOverrideSet"
           },
           "$comment": "Optional. Each entry records the differences agreed for exactly one model, matched by the complete SHA-256 of the model file and then by joint name; nothing here relaxes a runtime boundary."
+        },
+        "external_producer": {
+          "type": "object",
+          "required": ["prepare_timeout_us", "registration_timeout_us"],
+          "properties": {
+            "prepare_timeout_us": {
+              "$ref": "#/$defs/positiveTimeUs",
+              "$comment": "microseconds; deadline of one preparation of the external producer, and the age a prepared first frame may reach before it stops being the first frame of an authorization. LoadApplicationConfig requires it to be at least supervision.target_period_us."
+            },
+            "registration_timeout_us": {
+              "$ref": "#/$defs/positiveTimeUs",
+              "$comment": "microseconds; how long the application waits for a producer to announce itself before it reports that the external source has nobody to run it. Diagnostics only: a producer that starts later is still selected."
+            }
+          },
+          "$comment": "Deadlines of the external locomotion source. They are meaningless to a deployment that runs the local model or no source at all, but they are read from every file so that choosing a source never changes the meaning of the configuration."
         }
       }
     },
@@ -410,7 +430,7 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 1000000,
-              "$comment": "The recorder's own sampling rate, independent of runtime.control_hz. LoadConfig refuses a rate above the control rate, because the ticks it would ask for do not exist. 100 Hz is the shipped default and the full control rate is allowed."
+              "$comment": "The recorder's own sampling rate, independent of runtime.control_hz. LoadConfig refuses a rate above the control rate, because the ticks it would ask for do not exist, and a rate that does not divide it exactly: the recorder samples a whole number of control ticks, so 200 Hz on a 500 Hz loop is refused instead of being rounded into a run that records 166.7 Hz under a 200 Hz label. 100 Hz is the shipped default and the full control rate is allowed."
             },
             "queue_capacity": {
               "type": "integer",

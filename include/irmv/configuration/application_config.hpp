@@ -126,6 +126,24 @@ struct PolicyConfig {
   std::vector<PolicyOverrides> overrides;
 };
 
+// The two deadlines of the external locomotion source. Both are host-side
+// supervision of a producer process, not runtime parameters: the runtime only
+// ever sees the Tracking request the behaviour sends once a producer's first
+// frame was accepted.
+struct ExternalProducerConfig {
+  // Deadline of one preparation: a producer that does not answer a
+  // preparation inside this age failed it. It is also the age a prepared first
+  // frame may reach before it stops being the first frame of an authorization
+  // - a frame produced for a state the machine has left is not a target.
+  protocol::TimeUs prepare_timeout_us{0};
+  // How long this application waits for any producer to announce itself before
+  // it reports that the configured source has nobody to run it. The wait is
+  // not fatal: a producer that starts later is still selected, prepared and
+  // authorized, so a slow start of a helper process is a diagnostic and never
+  // a refusal to supervise.
+  protocol::TimeUs registration_timeout_us{0};
+};
+
 // The whole application configuration: the runtime snapshot plus the
 // application and input sections of the same file.
 struct ApplicationConfig {
@@ -140,6 +158,7 @@ struct ApplicationConfig {
   SupervisionConfig supervision;
   InputConfig input;
   PolicyConfig policy;
+  ExternalProducerConfig external_producer;
 
   const std::vector<std::string> &joint_names() const {
     return runtime.joint_names;
