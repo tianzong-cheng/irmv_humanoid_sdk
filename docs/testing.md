@@ -129,7 +129,7 @@ manual runs and is never used by CTest.
 | `robot_client_test` | The official supervisor client as a pure function of the states, results and times it is handed: one request at a time, the retry cadence and the final deadline, a rejection resolving immediately, an `Applied` only confirming against a state published at or after it (both arrival orders, and a terminal refusal after a contradicting state), a reordered, repeated or zero `state_seq` within one runtime instance ignored whole before it can touch the snapshot, the receive age or the session - while a new instance rebuilds the baseline and a legal next frame still witnesses an answer -, the independent lease and instance/session loss, target publication gated on a live session, the epoch proposal never repeating a value, and an abandoned request never resuming. | phase-2 client contract |
 | `application_loop_time_test` | The supervision loop's decision instant: it is never earlier than the newest receive stamp of the transport batch the iteration acts on (a newer stamp wins, an older one keeps the clock read after the drain, equal instants agree, and neither end of the unsigned range wraps). This is the structural replacement for the microsecond race that let a legal state be fresh for the client and stale for the initializer. | phase-2 loop contract |
 | `application_initialization_test` | The initialization trajectory against the runtime's own formula: the first frame stays inside the continuity bounds and the target velocity limits, a plan the runtime would refuse is refused before anything is sent, completion requires the position and velocity tolerances over the whole stability window and is bounded by the deadline: a move past `trajectory.deadline_us` fails, latches and emits nothing, while a window that completed exactly on the deadline is still `Ready`, and the Ready hold keeps publishing fresh frames or reports the sample unusable without failing. It drives a real `ExecutionFsm` through the runtime fixture, so the generator and the lower layer agree on the same numbers. | phase-2 initialization …
-| `application_fsm_test` | The behaviour FSM and the serial supervision order as a pure function over a real `RobotClient` and a recording sink: the full path with its confirmations, the emergency stop latching and preempting, the exit path, `UnexpectedContext` and `RuntimeRestarted` latching, the timeout causes, the Reset clearing the latch only into `Standby` on a fresh `ZeroTorque`, and `StartLocomotion()` refusing without changing `Ready`. | phase-2 behaviour contract |
+| `application_fsm_test` | The behaviour FSM and the serial supervision order as a pure function over a real `RobotClient` and a recording sink: the full path with its confirmations, the emergency stop latching and preempting, the exit path, `UnexpectedContext` and `RuntimeRestarted` latching, the timeout causes, the Reset clearing the latch only into `Standby` on a fresh `ZeroTorque`, the locomotion source arming from `Ready` and entering `Locomotion` only on the context the runtime granted, a frame of another epoch never published, a late result latching `LocalPolicyFailed`, the source identity taken from the candidate (an external producer is not this application), and the replaced context staying expected while a request is in flight. | phase-2 behaviour contract |
 | `producer_supervisor_test` | The external producer supervisor, as a pure decision component: a producer is selected only when it reports itself Ready with this deployment's layout and a period inside the runtime's own target deadline (another version, a failed status, an empty process identity, another layout and a period of zero are all refused), the producer is authorized under its own process identity, one preparation is outstanding at a time with a number that never repeats, a reply of another process, another preparation or another session is ignored rather than applied, the next preparation never reuses a number, a candidate frame must have this deployment's layout and joint count with finite values and non-negative gains, a frame generated from a state this deployment never published is a failure, a replacement drops the previous producer's preparation and candidate and queues its stop notice, the authorization notice names the preparation and the granted identity, a revocation clears both and names the context, the producer stays registered for the next authorization, and `Forget` makes a restarted process register again. | §6.3 |
 | `input_router_test` | The keyboard router: one press is one semantic event, the repeat guard a terminal without key-up needs, the batch priority (emergency stop first, velocity intent last), and the single body-velocity intent with its deadline. | phase-2 input contract |
 
@@ -137,13 +137,13 @@ manual runs and is never used by CTest.
 | `deployment_schema_contract_test` | The same two fixtures against `schema/onnx-deployment-v1.schema.json`: the document that the C++ parser accepts must also satisfy the schema, a value the schema pins must be refused when changed, an undeclared field must be refused, and the frozen facts (the six term positions with their name, unit and frame, the four action stages, the nullable digest pattern, the non-negative gain) must be spelled out in the schema exactly as the parser implements them. | §3.4 |
 | `policy_math_test` | The two pure transformations against the frozen fixtures: the observation is the six contracted segments in order, with the command, the gravity projected into the base frame from roll and pitch, the base angular velocity, the two joint terms in *their own* orders with their own references and the previous action; a term's clip is applied before its scale; an invalid IMU snapshot, a joint count that disagrees, an invalid joint sample and a non-finite value are refused. The action applies the frozen pipeline (wrapper clip, scale, offset, term clip) and scatters the result into the deployment's canonical order with the resolved gains; a wrong action count, a non-finite action and a state of another joint count are refused. The gain merge applies only the override set whose complete digest matches, records the model value and the applied value of every difference, and refuses a model that does not command every configured joint. | §3.1-3.3 |
 | `onnx_model_test` | The model loader against ten generated models: the valid one loads with its contract, mapping and digest, and one inference returns a finite action; a model with no contract, another schema version, an input width or output name the graph contradicts, a dynamic width, two inputs, an unknown joint or a non-finite output is refused, as is a file that does not exist and a model whose observation is of the wrong width. The fixtures are generated from the frozen document, so no binary blob is checked in. | §3.4, review focus 1 |
-| `inference_test` | The inference worker: a new worker runs nothing until something is submitted, one request produces one response that carries the identity of its request (generation, epoch, state sequence and stamp, submission instant), a burst of submissions never blocks and is compressed rather than queued (every accepted request is either replaced or run, and replaced ones are counted), and a model that cannot answer produces a failed step rather than a silent zero action. `Stop()` is idempotent and joins. | §3.4, §8.4 |
+| `inference_test` | The inference worker: a new worker runs nothing until something is submitted, one request produces one response that carries the identity of its request (generation, epoch, state sequence and stamp, submission instant), a burst of submissions never blocks and is compressed rather than queued (every accepted request is either replaced or run, and replaced ones are counted), a model that cannot answer produces a failed step rather than a silent zero action, and the judgement of one result is pinned at its boundaries (`JudgePolicyResult`: the whole step identity, the deadline inclusive at the edge and failing one microsecond past it; `PolicySourceStateUsable`: a sequence ahead of the newest state, a zero sequence or stamp, and a source exactly at the runtime's window and one microsecond past it). `Stop()` is idempotent and joins. | §3.4, §8.4 |
 
 All twenty-three run without a peer, without a network and without a wall-clock
 deadline: they assert exact tick semantics and counter values, and the only
 wall-clock waits in `logger_test` are hang guards.
 
-## Real-DDS suite (`-L integration`, 29 tests)
+## Real-DDS suite (`-L integration`, 32 tests)
 
 ### Process-level entries
 
@@ -159,6 +159,10 @@ wall-clock waits in `logger_test` are hang guards.
 | `application_cli_test` | The process contract of `application` against a real runtime: every startup rejection (missing/malformed configuration, unknown argument, out-of-range domain) exits with the usage or configuration code and message before DDS exists; the normal exit and the signalled exit are the same confirmed ordered stop (`stop=confirmed state=Damping`, exit 0); a latched lower fault is reported as Fault and leaves with `stop=unknown lower=Fault`, exit 3, without claiming a stop; an unreachable lower leaves with `stop=unknown lower=Unknown`, exit 3, inside its bound; the terminal is restored on every exit path; and a lost input device is the same bounded exit. |
 | `application_client_test` | The official client against a real standalone runtime, driven by hand: the same transport and request/answer rules the application ships, with the arrival order of an answer and its witness state made deterministic, so a confirmation in both orders, a session takeover, a stop preempting a pending request and the epoch watermark are proven against the real lower layer rather than only against a recording sink. |
 | `application_flow_test` | The cross-process phase acceptance: a runtime replaced under a running application (the upper reports `Fault`, binds the new instance and never returns to a tracking behaviour by itself), a `SIGSTOP`/`SIGCONT` of the runtime (the upper reports `Unknown` inside the state window plus slack, latches its own `Fault` and stays latched while the runtime keeps running), a `SIGSTOP`ped application (the runtime falls back on its own command timeout, measured from its own log) and a `SIGKILL`ed application (the runtime expires the supervisor lease, proven by its own event and by the all-zero session of its per-tick trace), a normal application exit with the runtime surviving (run through the harness on `application_normal`), the phase invariant that no run ever shows `behavior=Locomotion` (recorded as the third-phase boundary, not as a pass), and that every case claimed its own domain and left no process behind. |
+
+| `external_producer_test` | The external producer acceptance: the real application, the real runtime and `examples/external_producer.cpp` as three processes over real DDS. The application is driven from Damping into Ready, the producer registers, is selected and prepares a first frame, the locomotion key authorizes the context, and the producer's own stream is compared with the runtime's output trace: 104 adopted frames with strictly increasing sequences under the granted producer identity, none of them before the authorization, the target moving under a forward intent, and the stop that ends it. |
+| `application_record_test` | The application-driven recorded run (§11.1): the recorder is enabled in a copy of the shipped configuration, the real application supervises one session, and the run is read back - 381 rows at 100 Hz on the 500 Hz loop with the command in force, the feedback and the output of the same tick in every tracking row, and the authorization contexts in the run's own `sessions.json`. |
+| `application_stability_test` | The state-switching stability run (§11.1): `Standby -> Damping -> Ready` in a loop for a configurable wall-clock time, with the memory, thread and descriptor counts of both processes sampled from `/proc`. The CTest entry runs it for twenty seconds as a regression guard; the thirty minutes of the acceptance are the same driver with `--duration-s 1800`. |
 
 ### The scenario matrix
 
@@ -248,7 +252,7 @@ host**. They are not a hard real-time proof and this phase does not claim one:
 no test here demonstrates a bounded worst-case latency under load, and none is
 run on the target hardware.
 
-## Phase 3 so far: the ONNX deployment contract
+## Phase 3: the ONNX deployment contract
 
 The policy model, its contract and the runtime that reads it are in place and
 verified against the model the training side really exported. What is *not* in
@@ -319,11 +323,29 @@ the gains land on the joints the document names).
 * The pinned ONNX Runtime dependency (1.22.0 by URL and archive SHA-256, with a
   provenance manifest and an offline prefix override) and the model loader.
 * The observation and action transformations and the gain merge
-  (`policy_math_test`).
+  (`policy_math_test`); the `last_action` observation follows the contract's
+  stage and starts from its `initial` values, and the value the frame carries
+  and the value the next observation reads come from one implementation of the
+  frozen pipeline.
 * The inference worker on its own thread with a bounded keep-last-1 handoff
-  (`inference_test`).
+  (`inference_test`), and the judgement of one result as pure functions: the
+  identity of the step (submission instant, local generation, authorization
+  epoch), its own deadline, and the source state it was computed from.
+* The `Locomotion` behaviour end to end on the local model
+  (`policy_locomotion_test`).
+* The external producer lifecycle: the six frozen endpoints, the supervisor,
+  the example process and the whole exchange driven by the supervision loop -
+  selection, preparation, the authorization after the runtime applied the
+  context, the producer's own frame stream, the intent lane and the revocation
+  (`integration_application_external_absent` for the mode with nobody to run
+  it, `external_producer_test` for the stream itself).
+* The recorder and the run reader: one coherent sample per sampled tick with the
+  measured feedback and the final output of that tick, per-stretch gaps, a
+  `sessions.json` sidecar for the authorization contexts, time-range reading and
+  the NPZ export (`recorder_test`, `record_reader_test`, `record_export_test`).
 * `ldd build/robot_runtime` names no ONNX Runtime: the lower process still loads
-  nothing but its own configuration.
+  nothing but its own configuration. `ldd build/external_producer` names none
+  either.
 
 ### The installed tree
 
@@ -351,37 +373,34 @@ on another machine.
 
 ### What is not in place yet
 
-* **`Locomotion` is entered, driven by the local policy.**
-  `InputEvent::StartLocomotion` (`l`) arms the source from Ready, the first
-  frame the loop offers becomes the first frame of the Tracking request, the
-  confirmed context enters Locomotion, and the frames the worker produces are
-  published at the target cadence - see `policy_locomotion_test` for the
-  end-to-end acceptance and `application_fsm_test` for the rules (a frame of
-  another epoch is never published, a late result latches `LocalPolicyFailed`).
-  What is still missing is the *external* producer path: selecting
-  `--locomotion-source external` is refused at startup, because the lifecycle
-  protocol and its supervisor are Tasks 5 and 6 and are not implemented.
-* **No external producer yet.** The protocol, its codec, its transport and the
-  supervisor are in place and tested (`protocol/producer.idl`,
-  `producer_codec_test`, `producer_supervisor_test`), but the supervision loop
-  does not yet drive any of them: no producer is selected, prepared or
-  authorized at runtime, no example process exists, and no cross-process
-  scenario exercises the external path. `--locomotion-source external` is
-  therefore still refused at startup.
-* **No source is a legal configuration.** A deployment that configures no
-  `policy.model_path` runs with no locomotion source (the default follows the
-  configuration), which is what the shipped Fake one does, and the existing
-  process entries still pass unchanged.
-* **The `Recorder` is wired, records a long run, and a run can be read back.** The recorder, its configuration and the runtime wiring are in place: a
-  `telemetry.recorder` block decides whether a run records, at what rate and
-  with how much handoff, the runtime builds one coherent sample per sampled tick
-  and never waits for the disk, and the run's own index reports its rows, chunks
-  and gaps. A six-second smoke run of the Fake deployment records 597 rows over
-  2981 control ticks - exactly the configured 100 Hz on a 500 Hz loop - with no
-  gaps and no failed writes, and `tools/read_record` reads a run back by time
-  (20 rows in a 197 ms window of a 100 Hz run, with the gaps of a run reported
-  next to its rows), and the NPZ conversion is covered end to end by
-  `record_export_test` on a real four-second run.
+* **A trained policy of a real run, and behavioural equivalence against the
+  training side.** The model this phase was accepted against is the one the
+  training repository exported from a real checkpoint (its contract, digest and
+  provenance are in the section above), but the *element-wise* comparison of the
+  training environment's observation vector, the model's action and the
+  resulting joint target against the SDK's for the same state and the same
+  velocity command is generated by
+  `scripts/rsl_rl/reference_sample.py` in `irmv_humanoid_locomotion` and checked
+  here by `tools/verify_policy_sample.py`; see "The training-side reference
+  sample" below for what it proved and what it did not.
+* **Any bench or machine validation.** Every gain, tolerance and limit in this
+  contract is a nominal training or demonstration value; nothing here is a
+  validated machine limit, and the phase-4 bench acceptance is still owed.
+* **A no-source deployment is still a legal configuration.** A deployment that
+  configures no `policy.model_path` and selects no source runs with no
+  locomotion source at all, which is what the shipped Fake one does: pressing
+  `l` arms nothing and the behaviour keeps holding `Ready`.
+* **The upper layer's hold can lose a race against the runtime's own target
+  deadline, and the run below measures how often.** While a stop is pending the
+  behaviour publishes no further target on purpose - a frame published then would
+  belong to the authorization the stop is withdrawing - so the only thing
+  keeping the tracking context alive is the runtime's `command_us` deadline. If
+  the stop is not applied inside that window, the runtime leaves `Tracking` on
+  its own (`stop=CommandTimeout`), the behaviour follows the lower layer into
+  `Damping`, and the operator sees `Damping` where a `ZeroTorque` press would
+  normally land in `Standby`. Nothing faults, nothing moves, and the operator
+  recovers by pressing the key again; the run below reports the rate, and the
+  finding is recorded as an open risk rather than a fixed defect.
 
 ### The ten-minute recorded run (§11.1)
 
@@ -407,15 +426,149 @@ so the numbers describe the host loop and the recorder, never a device.
 What is still owed from §11.1 is the thirty-minute state-switching stability run
 with its memory, thread and handle statistics, and a recorded *application*
 run - the recorder samples the runtime, which is where the coherent snapshot
-lives.
-* **No behavioural equivalence against the training side** beyond the package
-  gate: the observation vector, the model action and the resulting joint target
-  have not been compared element by element against the training environment for
-  the same state and intent. The C++ check above proves the pipeline runs and
-  agrees with its own contract, not that it reproduces the training numbers.
-* **No bench validation.** Every gain, tolerance and limit in this contract is a
-  nominal training value; nothing here is a validated machine limit, and the
-  phase-4 bench acceptance is still owed.
+lives. Both are now in place; the two subsections below record them.
+
+### The thirty-minute state-switching run (§11.1)
+
+`tests/integration/application_stability_test.py` walks the documented path -
+`d` (Damping), `i` (Initialize) to `Ready`, `z` (ZeroTorque) back to `Standby` -
+and waits for the behaviour it asked for before asking for the next, sampling
+the memory, thread and descriptor counts of both processes from `/proc` as it
+goes. The CTest entry runs it for twenty seconds as a regression guard; the
+acceptance run is the same driver with `--duration-s 1800`.
+
+A two-hundred-second run with the shipped configuration and an otherwise idle
+host, tracing the runtime's per-tick output for the analysis:
+
+| Measure | Value |
+|---|---|
+| wall clock | 200.3 s (`--duration-s 200`) |
+| rounds | 300, no key re-asked |
+| runtime-deadline stops | `CommandTimeout` 0, `SourceStateTimeout` 0 |
+| faults | none (`behavior=Fault` never appeared) |
+| application | RSS 12.8 -> 14.6 MB, threads 8 flat, descriptors 8 flat |
+| runtime | RSS 11.7 -> 11.8 MB, threads 10 flat, descriptors 10 flat |
+| adopted targets | 297 contexts, 8 to 32 frames each, largest gap between two frames of one context 16 ticks (32 ms) against a `command_us` of 100 ms |
+
+The last row is the one worth stating: every context that was authorized
+received its next frame well inside the runtime's own target deadline, so the
+runtime never had to fall back on it. The counts that *can* end a context are
+reported rather than failed on, because `CommandTimeout` is a legal runtime
+fallback; an earlier run of the same driver on a heavily loaded host (the whole
+tree was being rebuilt beside it) reported 21 of them in 265 rounds, which is
+what the race described under "What is not in place yet" costs when the host
+cannot keep the schedule. Nothing faulted, nothing moved, and every round
+completed.
+
+### The application-driven recorded run (§11.1)
+
+`tests/integration/application_record_test.py` turns the recorder on in a copy
+of the shipped configuration, supervises one session with the real application
+(`Standby -> Damping -> Initializing -> Ready -> hold -> Damping -> exit`) and
+reads the run back:
+
+| Measure | Value |
+|---|---|
+| rows | 381 at 100 Hz on the 500 Hz control loop, schema version 2 |
+| authorized window | 266 tracking rows, one producer identity and one non-zero epoch |
+| per row | the command in force (identity, epoch, sequence, source state), the feedback of that tick and the output it produced, all valid and host-accepted |
+| session table | 4 events in `sessions.json`, one per authorization context, with the epoch, the producer, the gains and the model digest written as `unknown` |
+
+The run's rows and its session table join on `{producer_id, epoch}`, which is
+what makes a recorded stretch traceable to the context that produced it.
+
+### The external producer acceptance (Task 6)
+
+`tests/integration/external_producer_test.py` runs the real application, the
+real runtime and `examples/external_producer.cpp` as three processes over real
+DDS and drives the documented path through the application's terminal:
+
+```bash
+# what the test does, by hand
+robot_runtime --config config/sdk.json --domain 229 &
+application  --config config/sdk.json --domain 229 --locomotion-source external &
+external_producer --config config/sdk.json --domain 229 --rate 50 &
+# d -> Damping, i -> Ready (the loop selects and prepares the producer),
+# l -> the authorization, w -> a forward intent, d -> the stop, x -> the exit
+```
+
+What it asserts, and what the run observed:
+
+| Measure | Value |
+|---|---|
+| lifecycle | `producer=announced`, `selected`, `preparing`, `prepared`, `authorized epoch=3 first_seq=1`, `publishing seq=2..104`, `stopped` |
+| frames before the authorization | none, asserted from the producer's log and from the runtime's trace |
+| contexts adopted by the runtime | epoch 2 (the initialization hold, 40 frames) and epoch 3 (the producer, 104 frames) |
+| the producer's stream | 104 adopted frames, sequences 1..104 strictly increasing, every one under the granted producer identity, and every one the producer logged itself |
+| the walk | 26 distinct targets on the first joint, 0.00 .. 0.05 rad, inside the configuration's continuity delta |
+| after the stop | the producer is told to stop, publishes nothing more, and the ordered exit is confirmed |
+
+The frames the test compares are read from the *runtime's* output trace, not
+from the command topic: a frame the producer published but nobody accepted -
+which is exactly what a missing routing identity produces - cannot appear in it,
+and did not, before the defect below was fixed.
+
+### The installed tree runs the external lifecycle
+
+`cmake --install build --prefix <tmp>` produces the four binaries, the pinned
+CycloneDDS pair, the pinned ONNX Runtime and the configuration under
+`<prefix>/etc/irmv`. Verified after this phase:
+
+* the installed `application`, `robot_runtime` and `external_producer`, started
+  from a directory that is neither the source nor the build tree, complete the
+  whole external lifecycle - registration, preparation, the authorization, the
+  producer's frame stream and the stop (`external_producer_test` driven with the
+  installed binaries);
+* every installed binary's only rpath entry is the relative one, which the
+  install rules check with `file(RPATH_CHECK)` - including `external_producer`,
+  which failed to load its DDS libraries from `<prefix>/bin` before that entry
+  was corrected;
+* `ldd` resolves ONNX Runtime through `<prefix>/bin/../lib` for the application
+  only: the runtime, the producer and the record reader name none.
+
+## Defects found and fixed by the phase-3 review
+
+The review of the phase-3 delivery listed twelve items. Each one is closed here
+with the evidence that closes it; the two that are not defects of the code - the
+training-side comparison and the bench validation - are recorded as gates, not
+as passes.
+
+| # | Item | Fix and evidence |
+|---|---|---|
+| P0 | The external producer was never wired: `--locomotion-source external` was a startup refusal | The supervision loop opens the six producer endpoints in that mode and drives the whole exchange; `examples/external_producer.cpp` is a real producer process; `integration_application_external_absent` drives the mode with nobody to run it, `external_producer_test` drives registration, preparation, the authorization, the producer's own stream (cross-checked against the runtime's output trace) and the stop |
+| P0 | Task 9's acceptance evidence was missing | This section, the recorded run and the stability run below |
+| P1 | A local inference result was checked against its `generation` only, and a result of a step already written off as late could still drive a frame | `JudgePolicyResult` (identity whole, deadline of the result itself) and `PolicySourceStateUsable` (a state the runtime can still look the target up against, inclusive window like the runtime's own), both pure functions with unit tests, wired into the loop before it touches `last_action` or a candidate |
+| P1 | The inference worker could lose a wakeup | The take of a request and the reset of the flag it was woken for are one critical section of the mutex `Submit` sets the flag under; a churn test submits into that window |
+| P1 | Recorder gaps were inaccurate: a failed chunk write discarded accepted rows silently, and queue refusals were merged into one gap over the whole run | Every loss is now its own segment with a real sequence and stamp range - per refusal stretch, per failed chunk write, and the tail at `Stop()` - in `Recorder::gaps()` and the index alike |
+| P1 | A truncated chunk could be read out as rows whose missing joint columns defaulted to zero | A truncation inside the column-major joint columns returns no rows and reports the truncation; a truncation inside the fixed per-row fields still returns the complete rows before it |
+| P1 | The record did not carry a complete snapshot, and no policy session | Schema version 2 adds the measured feedback and the final output of the same tick; the runtime records one event per authorization context on its own bounded channel, with the model digest written as the literal `unknown` |
+| P2 | The `last_action` contract was accepted by the parser and ignored by the application | `ResetLastAction` starts an authorization from the contract's `initial` values and `LastActionFromAction` stores each step in the stage the contract names, with numeric tests for both stages |
+| P2 | `Observe` ignored the instant it was given, so an expired preparation reply could still become a candidate | The deadline is applied inside `Observe` itself; a caller no longer has to expire the preparation first, and `ExpirePreparation` remains the way a caller reports it |
+| P2 | A recorder sampling rate that did not divide the control rate was rounded, so a run recorded another rate than the one it declared | `LoadConfig` refuses the combination (200 Hz on a 500 Hz loop), and the runtime derives the stride from the two periods instead of rounding their ratio |
+| P2 | The NPZ archive lost the run's units and the per-row producer identity, and narrowed microsecond stamps to float64 | The reader prints both, the archive carries them (the identity losslessly, the stamps as `uint64`), and the export test re-reads every column against the reader's own output, including a stamp above 2**53 |
+| P2 | The application could not be configured for the external producer at all | `application.external_producer.{prepare_timeout_us,registration_timeout_us}` are configuration like any other, validated and digested |
+
+Two further defects were found by the new acceptance runs rather than by the
+review, and both are fixed and pinned:
+
+1. **A locomotion request faulted the behaviour on a legal state.** Asking for a
+   new context while the previous one was still live - which is what both
+   sources do from `Ready` - read the runtime's own state, published before it
+   applied the request, as an authorization nobody asked for, and latched
+   `UnexpectedContext`; the external acceptance could not reach its
+   authorization at all. The FSM now remembers the context it had confirmed
+   until it proposes the request and accepts it while the request is pending,
+   dropping the memory on every path that withdraws the context.
+   `LocomotionRequestToleratesTheReplacedContext` pins both halves.
+2. **The example producer published into a context it did not name.** Its frames
+   carried the producer, the epoch, the sequence and the source state but
+   neither the runtime identity nor the session, so the runtime's command gate
+   dropped every one of them as a foreign sample: the context kept the first
+   frame of the application's request, its source aged out, and the runtime
+   ended it with `SourceStateTimeout` while the producer was logging a healthy
+   stream. The acceptance reads the runtime's own trace of adopted targets, so a
+   frame nobody accepted cannot pass; it failed before the fix and passes after
+   it.
 
 ## What is not covered
 
