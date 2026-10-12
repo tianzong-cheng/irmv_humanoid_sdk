@@ -196,10 +196,17 @@ for `Damping`, and the application waits for the `Result` **and** a fresh
 `application.supervision.request_deadline_us`, whichever comes first:
 
 ```text
+application: loop iterations=N overruns=M worst_gap_us=X period_us=P
 application: exit stop=confirmed state=Damping   # the stop was proven, exit 0
 application: exit stop=unknown lower=Fault       # the runtime was already in Fault, exit 3
 application: exit stop=unknown lower=Unknown     # the stop was never proven, exit 3
 ```
+
+The first line is the loop's own pacing, printed before the exit line the way
+the runtime prints `overruns` and its worst overrun in the clean-shutdown line:
+an iteration counts as an overrun when it started more than two loop periods
+after the one before it - it skipped a whole turn - and the worst gap is what a
+supervision stall looks like from this side.
 
 Exit codes: `0` a confirmed stop, `1` a configuration or startup error (the
 hardware was never commanded - a startup that failed at the transport can

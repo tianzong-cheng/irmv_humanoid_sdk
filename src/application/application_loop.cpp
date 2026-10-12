@@ -628,6 +628,17 @@ int RunApplication(const ApplicationOptions &options,
   protocol::TimeUs next_status_us = 0;
   bool input_lost = false;
 
+  // The loop's own pacing, counted the way the runtime counts its ticks: an
+  // iteration is an overrun when it started more than two loop periods after
+  // the one before it, and the worst gap is what tells an operator whether the
+  // process kept its schedule. The runtime prints the same numbers in its
+  // shutdown line; without them on this side, a supervision stall can only be
+  // guessed at from a lease that expired.
+  std::uint64_t iterations = 0;
+  std::uint64_t overruns = 0;
+  protocol::TimeUs worst_gap_us = 0;
+  protocol::TimeUs previous_start_us = 0;
+
   while (true) {
     // Two instants per iteration, both from the one monotonic host clock and
     // both named for what they time. `input_now` is read before the terminal
@@ -673,6 +684,20 @@ int RunApplication(const ApplicationOptions &options,
     }
     const protocol::TimeUs decision_now =
         DecisionInstant(MonotonicUs(), newest_rx_us);
+    ++iterations;
+    if (previous_start_us != 0) {
+      const protocol::TimeUs gap = decision_now - previous_start_us;
+      if (gap > worst_gap_us) {
+        worst_gap_us = gap;
+      }
+      // An overrun is an iteration that skipped at least one whole turn of the
+      // loop: the wait that paces it is one period long, so a gap of one period
+      // is the cadence itself and not a late iteration.
+      if (gap > 2 * period_us) {
+        ++overruns;
+      }
+    }
+    previous_start_us = decision_now;
     router.Tick(decision_now);
 
     // (3) Exactly one poll per iteration: the outcome it reports is edge
@@ -1061,6 +1086,15 @@ int RunApplication(const ApplicationOptions &options,
       const char *lower = behavior.runtime_state_known
                               ? StateName(behavior.runtime_state)
                               : "Unknown";
+      // The loop's own pacing first, the way the runtime prints its ticks and
+      // overruns in the clean-shutdown line, then the outcome of the exit.
+      std::printf(
+          "application: loop iterations=%llu overruns=%llu worst_gap_us=%llu "
+          "period_us=%llu\n",
+          static_cast<unsigned long long>(iterations),
+          static_cast<unsigned long long>(overruns),
+          static_cast<unsigned long long>(worst_gap_us),
+          static_cast<unsigned long long>(period_us));
       int exit_code = kExitStopUnknown;
       if (behavior.exit_stop_confirmed) {
         std::printf("application: exit stop=confirmed state=%s\n", lower);

@@ -411,6 +411,20 @@ on another machine.
   configures no `policy.model_path` and selects no source runs with no
   locomotion source at all, which is what the shipped Fake one does: pressing
   `l` arms nothing and the behaviour keeps holding `Ready`.
+* **The upper layer can stall for longer than the runtime's lease.** One of the
+  acceptance runs ended with `RuntimeUnreachable stop=SupervisorTimeout` after
+  1708 rounds: a stall of the application's supervision path longer than
+  `supervisor_us` (300 ms) stops the heartbeats, the runtime expires the session
+  and the application follows it into `Fault`. Nothing moves and nothing is
+  unsafe - the runtime stops tracking on its own deadline first - but a run then
+  ends early. The application now reports its own pacing (`iterations`,
+  `overruns`, `worst_gap_us`, `period_us`) on exit, and a fifteen-minute probe
+  with it printed `worst_gap_us=42418` against a `period_us` of 20000 and no
+  fault at all: over 47,521 iterations the loop never stalled for even a tenth
+  of the lease. The stall that ended the longer run is therefore either rarer
+  than one in twenty minutes or on the transport side rather than the loop's,
+  and the next long run's own numbers are what will say which - this is an open
+  question, not a closed one.
 * **The upper layer's hold can lose a race against the runtime's own target
   deadline, and the run below measures how often.** While a stop is pending the
   behaviour publishes no further target on purpose - a frame published then would
@@ -475,11 +489,31 @@ The last row is the one worth stating: every context that was authorized
 received its next frame well inside the runtime's own target deadline, so the
 runtime never had to fall back on it. The counts that *can* end a context are
 reported rather than failed on, because `CommandTimeout` is a legal runtime
-fallback; an earlier run of the same driver on a heavily loaded host (the whole
-tree was being rebuilt beside it) reported 21 of them in 265 rounds, which is
-what the race described under "What is not in place yet" costs when the host
-cannot keep the schedule. Nothing faulted, nothing moved, and every round
-completed.
+fallback.
+
+The acceptance run itself - `--duration-s 1800` - reached 1708 rounds in
+19.6 minutes and then stopped on a fault instead of finishing:
+
+| Measure | Value |
+|---|---|
+| wall clock | 1178.7 s, 1708 rounds, 3 keys re-asked |
+| runtime-deadline stops | `CommandTimeout` 21, `SourceStateTimeout` 0 |
+| the fault | `cause=RuntimeUnreachable stop=SupervisorTimeout`: the runtime expired the supervision lease, and the application followed it into `Fault`/`Damping` |
+| application | RSS 12.9 -> 14.9 MB, threads 8 flat, descriptors 8 flat |
+| runtime | RSS 11.4 -> 11.7 MB, threads 9 flat, descriptors 9 flat |
+| result | the run ended early; nothing unsafe happened - the runtime stopped tracking on its own deadline and the application damped |
+
+That fault is a *measurement*, not a safety event, and it is the honest end of
+this run: the runtime's lease lasts `runtime.safety.timeouts.supervisor_us`
+(300 ms) without a heartbeat, and the application's own state window is
+`supervision.state_timeout_us` (150 ms), so a single stall of the application's
+supervision path longer than 300 ms expires the lease and ends the session.
+Nothing in the run suggests a leak or a drift - memory, threads and descriptors
+are flat over 1708 rounds and 19.6 minutes - and the two hundred-second run
+above on an idle host never saw one. The application now prints the same pacing
+numbers the runtime prints (`application: loop iterations=N overruns=M
+worst_gap_us=X period_us=P`), so the next such run names the stall instead of
+leaving it to be inferred from the lease that expired.
 
 ### The application-driven recorded run (§11.1)
 
