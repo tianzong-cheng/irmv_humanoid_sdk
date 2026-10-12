@@ -1181,9 +1181,14 @@ set_target_properties(
 # The example producer links the same pinned DDS libraries the application does
 # (its transport), so the installed binary resolves them from <prefix>/lib
 # exactly like the two processes and runs from a tree that was moved away from
-# its build directory.
+# its build directory. The reference-sample tool links ONNX Runtime for the same
+# reason the application does, and needs the same entry.
 set_target_properties(
   external_producer
+  PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
+)
+set_target_properties(
+  verify_policy_sample
   PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
 )
 
@@ -1261,6 +1266,11 @@ file(
 file(
   RPATH_CHECK
   FILE \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/external_producer\"
+  RPATH \"\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}\"
+)
+file(
+  RPATH_CHECK
+  FILE \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/verify_policy_sample\"
   RPATH \"\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}\"
 )
 "
