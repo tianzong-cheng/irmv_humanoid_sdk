@@ -597,7 +597,7 @@ class ExternalProducer {
     // The frame is built with the identity this process generated it under.
     // The authorization is stamped by the application, so the epoch and the
     // command sequence stay zero here.
-    FillTarget(&result.first_command, own_id_, 0, 0, now_us);
+    FillTarget(&result.first_command, 0, 0, now_us);
 
     wire::PrepareResult sample;
     producer_codec::ToWire(result, sample);
@@ -628,6 +628,13 @@ class ExternalProducer {
     authorized_ = true;
     grant_epoch_ = notice.epoch;
     grant_producer_ = notice.producer_id;
+    // The routing identity of the context: the runtime's command gate drops a
+    // frame whose runtime, session or epoch does not name the context it
+    // granted, and these two are the notice's - a producer that published
+    // frames without them would be publishing into nothing, silently, which is
+    // exactly what the runtime's target deadline would then report.
+    grant_runtime_id_ = notice.runtime_id;
+    grant_session_id_ = notice.session_id;
     // The runtime adopted the application's first frame at first_command_seq;
     // this stream continues it, so numbering restarts at the one after it
     // rather than at one of its own.
@@ -701,8 +708,7 @@ class ExternalProducer {
     }
     next_publish_us_ = now_us + period_us_;
     JointCommand frame;
-    FillTarget(&frame, grant_producer_, grant_epoch_, next_command_seq_,
-               now_us);
+    FillTarget(&frame, grant_epoch_, next_command_seq_, now_us);
     wire::JointCommand sample;
     codec::ToWire(frame, sample);
     if (TryWrite(command_writer_, sample)) {
@@ -717,10 +723,20 @@ class ExternalProducer {
   // frame is clamped to the configuration's continuity delta and target
   // velocity limit, so consecutive frames stay inside the guards the runtime
   // applies to them anyway, and no value is ever non-finite.
-  void FillTarget(JointCommand *frame, const Id &producer_id, Sequence epoch,
-                  Sequence command_seq, TimeUs now_us) {
+  void FillTarget(JointCommand *frame, Sequence epoch, Sequence command_seq,
+                  TimeUs now_us) {
     const std::size_t count = config_.joint_count();
-    frame->producer_id = producer_id;
+    // The whole routing identity the runtime's command gate checks: the
+    // context it granted is named by the runtime, the session, the producer and
+    // the epoch together, and any one of them missing makes every frame of this
+    // stream an ignored sample.
+    // A prepared first frame is not published - it travels inside the
+    // application's Tracking request, which completes its routing identity - so
+    // it names no context yet: the identity below is the one the runtime
+    // granted, and it is this process's own before there is one.
+    frame->runtime_id = authorized_ ? grant_runtime_id_ : kNoId;
+    frame->session_id = authorized_ ? grant_session_id_ : kNoId;
+    frame->producer_id = authorized_ ? grant_producer_ : own_id_;
     frame->epoch = epoch;
     frame->command_seq = command_seq;
     frame->source_state_seq = state_seq_;
@@ -870,6 +886,8 @@ class ExternalProducer {
   Sequence last_prepare_id_{0};
   bool authorized_{false};
   Id grant_producer_{};
+  Id grant_runtime_id_{};
+  Id grant_session_id_{};
   Sequence grant_epoch_{0};
   Sequence next_command_seq_{0};
 
