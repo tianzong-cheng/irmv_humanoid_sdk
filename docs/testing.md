@@ -596,11 +596,29 @@ robot_runtime: clean shutdown: ... ticks=754528 overruns=31 worst_overrun_us=867
 
 Every link counter an operator would want is zero except the state lane's
 superseded count, which is the design: the application consumes a fraction of
-the runtime's 500 Hz state stream and always holds the newest. So the stall is
-rare enough that a healthy twenty-five-minute run does not see it, the two runs
-together bracket what it is not (neither control loop, no lane the application
-can see refusing a sample), and the counters that would name it the next time
-are printed. That is where this stands: the cause is narrowed to the delivery
+the runtime's 500 Hz state stream and always holds the newest.
+
+A third attempt then reproduced the stall in 5.4 minutes with every counter
+printed, and that run closes the question of *where* it is lost:
+
+| Measure, from the run that faulted | Value |
+|---|---|
+| application pacing | `iterations=16143 overruns=0 worst_gap_us=22612 worst_rx_us=113 worst_tx_us=27 period_us=20000` |
+| application link | `results_dropped=0 states_dropped=16488 requests_dropped=0 commands_dropped=0 heartbeats_dropped=0 inbound_rejected=0 read_failures=0` |
+| runtime | `ticks=162184 overruns=2 worst_overrun_us=1087 heartbeat_dropped=0` |
+
+The application's control loop never stalled beyond 22.6 ms, its sends never
+cost more than 27 microseconds, and **none** of its lanes refused a sample; the
+runtime never missed a deadline by more than a millisecond and dropped no
+heartbeat it received. The samples were handed to the transport and lost inside
+it: the app→runtime direction (heartbeats and targets) was silent while the
+runtime→app direction kept the application's state fresh, and no counter on
+either side of the wire is the one that loses them. That is a property of the
+`BEST_EFFORT` heartbeat lane - CycloneDDS may discard a sample silently and
+neither process can observe it - and the fix is a deliberate change to the
+frozen table in `docs/runtime-protocol.md` (a reliable heartbeat lane, or a
+heartbeat published from a thread that cannot be starved), which is why the
+stall is diagnosed rather than patched in this round. That is where this stands: the cause is narrowed to the delivery
 path, both processes' schedules are excluded with their own numbers, and the fix
 - the heartbeat lane's reliability, a deliberate change to the table in
 `docs/runtime-protocol.md` - is *not* made in this round. The heartbeats travel on a
