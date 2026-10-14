@@ -269,6 +269,11 @@ void DdsTransport::Impl::ReadHeartbeats() {
           runtime::Received<protocol::SupervisorHeartbeat>{value, rx_us});
       if (!stored) {
         owner.dropped_heartbeats_.fetch_add(1, std::memory_order_relaxed);
+      } else {
+        owner.heartbeats_read_.fetch_add(1, std::memory_order_relaxed);
+        owner.last_read_heartbeat_seq_.store(value.heartbeat_seq,
+                                             std::memory_order_relaxed);
+        owner.last_read_heartbeat_us_.store(rx_us, std::memory_order_relaxed);
       }
     }
   }
@@ -425,6 +430,18 @@ std::uint64_t DdsTransport::dropped_command_count() const {
 
 std::uint64_t DdsTransport::dropped_heartbeat_count() const {
   return dropped_heartbeats_.load(std::memory_order_relaxed);
+}
+
+std::uint64_t DdsTransport::heartbeats_read_count() const {
+  return heartbeats_read_.load(std::memory_order_relaxed);
+}
+
+protocol::Sequence DdsTransport::last_read_heartbeat_seq() const {
+  return last_read_heartbeat_seq_.load(std::memory_order_relaxed);
+}
+
+protocol::TimeUs DdsTransport::last_read_heartbeat_us() const {
+  return last_read_heartbeat_us_.load(std::memory_order_relaxed);
 }
 
 std::uint64_t DdsTransport::inbound_rejected_count() const {

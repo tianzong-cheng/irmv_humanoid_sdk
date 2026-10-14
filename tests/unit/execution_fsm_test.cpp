@@ -27,6 +27,7 @@ using irmv::protocol::Sequence;
 using irmv::protocol::StopReason;
 using irmv::protocol::TimeUs;
 using irmv::runtime::EventCode;
+using irmv::runtime::HeartbeatReject;
 using irmv::runtime::RuntimeEvent;
 using irmv::runtime::TickResult;
 using irmv::test::FixtureResult;
@@ -626,16 +627,35 @@ int CheckSupervisionLease() {
 
   // Fresh heartbeats and fresh commands keep tracking alive well past both the
   // command and the source-state timeout.
+  const std::uint64_t accepted_after_tracking =
+      f.fsm().heartbeats_accepted_count();
+  const std::uint64_t rejected_after_tracking =
+      f.fsm().heartbeats_rejected_count();
   f.Advance(4 * f.config.timeouts.command_us);
   CHECK(f.state().execution_state == kTracking);
   CHECK(f.state().session_id == session);
   CHECK(f.state().epoch == epoch);
+  // The fresh owner heartbeats refreshed the lease, and the last acceptance is
+  // the tick that just ran, so the age of that acceptance is zero.
+  CHECK(f.fsm().heartbeats_accepted_count() > accepted_after_tracking);
+  CHECK(f.fsm().last_accepted_heartbeat_seq() > 0);
+  CHECK(f.now_us() - f.fsm().last_accepted_heartbeat_us() == 0);
 
   // Repeating an already accepted heartbeat sequence never refreshes the lease,
   // so the session expires exactly supervisor_us after the last accepted one.
+  // The rejection is counted under its own reason while acceptance stands
+  // still.
+  const std::uint64_t accepted_before_repeat =
+      f.fsm().heartbeats_accepted_count();
+  const std::uint64_t stale_before =
+      f.fsm().heartbeat_rejection_count(HeartbeatReject::StaleSequence);
   f.SetHeartbeatSequence(1);
   f.Advance(50 * f.ControlPeriodUs());
   CHECK(f.state().execution_state == kTracking);
+  CHECK(f.fsm().heartbeats_accepted_count() == accepted_before_repeat);
+  CHECK(f.fsm().heartbeat_rejection_count(HeartbeatReject::StaleSequence) >
+        stale_before);
+  CHECK(f.fsm().heartbeats_rejected_count() > rejected_after_tracking);
   const std::size_t ticks = TicksUntil(f, kDamping, 400);
   CHECK(ticks == 101);
   CHECK(f.state().session_id == irmv::protocol::kNoId);
@@ -657,12 +677,18 @@ int CheckSupervisionLease() {
   stale_heartbeat.supervisor_id = irmv::test::FixtureSupervisorId();
   stale_heartbeat.heartbeat_seq = 1000;
   stale_heartbeat.stamp_us = f.now_us();
+  const std::uint64_t session_rejects =
+      f.fsm().heartbeat_rejection_count(HeartbeatReject::SessionId);
   f.QueueRawHeartbeat(stale_heartbeat);
   ExecutionRequest stale = f.MakeRequest(Operation::Damping);
   stale.session_id = session;
   const FixtureResult stale_result = f.Send(stale, true);
   CHECK(stale_result.rejected());
   CHECK(stale_result.reason == RejectReason::WrongSession);
+  // The heartbeat for the expired session names an id the machine no longer
+  // holds, so it is counted as a session rejection and refreshes nothing.
+  CHECK(f.fsm().heartbeat_rejection_count(HeartbeatReject::SessionId) >
+        session_rejects);
   CHECK(f.state().session_id == irmv::protocol::kNoId);
   CHECK(f.state().execution_state == kDamping);
   return 0;
@@ -1516,13 +1542,20 @@ int CheckHeartbeatSupervisorOwnership() {
   foreign.supervisor_id = irmv::test::FixtureOtherSupervisorId();
   foreign.heartbeat_seq = 99'999;
   foreign.stamp_us = f.now_us();
+  const std::uint64_t foreign_before =
+      f.fsm().heartbeat_rejection_count(HeartbeatReject::SupervisorId);
+  const std::uint64_t accepted_before = f.fsm().heartbeats_accepted_count();
   f.QueueRawHeartbeat(foreign);
 
   // A foreign heartbeat with the right session and a much larger sequence
   // refreshes nothing: the lease still lapses supervisor_us after the last
-  // owner heartbeat, not after the foreign one.
+  // owner heartbeat, not after the foreign one. The refusal is counted as a
+  // supervisor rejection and acceptance does not move.
   const std::size_t ticks = TicksUntil(f, kDamping, 400);
   CHECK(ticks == 51);
+  CHECK(f.fsm().heartbeat_rejection_count(HeartbeatReject::SupervisorId) >
+        foreign_before);
+  CHECK(f.fsm().heartbeats_accepted_count() == accepted_before);
   CHECK(f.state().execution_state == kDamping);
   CHECK(f.state().stop_reason == StopReason::SupervisorTimeout);
   CHECK(f.state().session_id == irmv::protocol::kNoId);

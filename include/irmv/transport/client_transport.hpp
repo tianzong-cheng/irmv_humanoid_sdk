@@ -144,6 +144,21 @@ class ClientTransport {
   // Heartbeats dropped because the heartbeat lane was full when the sample was
   // handed over, or because the transport was not running.
   std::uint64_t dropped_heartbeat_count() const;
+  // Heartbeats the control thread accepted into the heartbeat lane; together
+  // with dropped_heartbeat_count() this is the generation side of the chain.
+  std::uint64_t heartbeats_queued_count() const;
+  // Sequence of the newest heartbeat the control thread queued, 0 while none
+  // was queued.
+  protocol::Sequence last_queued_heartbeat_seq() const;
+  // Heartbeats actually handed to the DDS heartbeat writer in the transport
+  // thread. A queued heartbeat the writer refused is counted in
+  // dropped_heartbeat_count() instead, so queued minus published is the write
+  // path's own loss and the two halves of this side are separable.
+  std::uint64_t heartbeats_published_count() const;
+  // Sequence of the newest heartbeat the transport thread wrote.
+  protocol::Sequence last_published_heartbeat_seq() const;
+  // Host monotonic stamp of that write, 0 while none was published.
+  protocol::TimeUs last_published_heartbeat_us() const;
   // Inbound samples that failed FromWire validation and were discarded whole.
   std::uint64_t inbound_rejected_count() const;
   // Reads that failed and ended the transport loop, counted separately so that
@@ -197,6 +212,11 @@ class ClientTransport {
   std::atomic<std::uint64_t> dropped_requests_{0};
   std::atomic<std::uint64_t> dropped_commands_{0};
   std::atomic<std::uint64_t> dropped_heartbeats_{0};
+  std::atomic<std::uint64_t> heartbeats_queued_{0};
+  std::atomic<std::uint64_t> last_queued_heartbeat_seq_{0};
+  std::atomic<std::uint64_t> heartbeats_published_{0};
+  std::atomic<std::uint64_t> last_published_heartbeat_seq_{0};
+  std::atomic<std::uint64_t> last_published_heartbeat_us_{0};
   std::atomic<std::uint64_t> inbound_rejected_{0};
   std::atomic<std::uint64_t> inbound_read_failures_{0};
 };

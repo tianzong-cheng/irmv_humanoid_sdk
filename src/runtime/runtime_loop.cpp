@@ -917,8 +917,10 @@ void LogStartup(telemetry::Logger &logger,
 
 // Maps one tick result into the log. Events are structural and rare, so the
 // whole batch is logged; the fields carry the protocol enumerations the tick
-// reported, never a rendered number.
-void LogTickEvents(telemetry::Logger &logger, const TickResult &result) {
+// reported, never a rendered number. The state machine is read only for the
+// lease-expiry line, which must name the silence that ended the lease.
+void LogTickEvents(telemetry::Logger &logger, const ExecutionFsm &fsm,
+                   const TickResult &result) {
   const std::uint32_t count =
       std::min<std::uint32_t>(result.event_count, kEventCapacity);
   for (std::uint32_t index = 0; index < count; ++index) {
@@ -939,6 +941,18 @@ void LogTickEvents(telemetry::Logger &logger, const TickResult &result) {
     }
     if (ReportsOutputAction(event.code)) {
       record.Field("action", OutputActionName(result.state.output_action));
+    }
+    if (event.code == EventCode::SupervisorTimeout) {
+      // The lease's own line names the silence: the sequence of the last
+      // heartbeat the machine accepted and how long ago it accepted it when the
+      // lease expired. The stamp is not cleared on expiry, so both survive to
+      // this line.
+      const protocol::TimeUs accepted_us = fsm.last_accepted_heartbeat_us();
+      record.UintField("last_heartbeat_seq", fsm.last_accepted_heartbeat_seq());
+      record.UintField("heartbeat_age_us",
+                       accepted_us == 0 ? 0
+                                        : static_cast<std::uint64_t>(
+                                              event.stamp_us - accepted_us));
     }
     logger.TryLog(record.event());
   }
@@ -974,6 +988,18 @@ void LogSummary(telemetry::Logger &logger, std::string_view message,
   record.UintField("log_dropped", log_dropped);
   record.UintField("fsm_dropped", counters.fsm_dropped);
   record.UintField("transport_dropped", TransportDropped(transport));
+  // The heartbeat chain, one field per step: what the transport read from DDS,
+  // what the machine accepted and discarded, and how long ago it accepted the
+  // last one. A silence is read straight off the age.
+  record.UintField("heartbeats_read", transport.heartbeats_read_count());
+  record.UintField("heartbeats_accepted", fsm.heartbeats_accepted_count());
+  record.UintField("heartbeats_rejected", fsm.heartbeats_rejected_count());
+  record.UintField("last_heartbeat_seq", fsm.last_accepted_heartbeat_seq());
+  const protocol::TimeUs accepted_us = fsm.last_accepted_heartbeat_us();
+  record.UintField("heartbeat_age_us",
+                   accepted_us == 0
+                       ? 0
+                       : static_cast<std::uint64_t>(stamp_us - accepted_us));
   logger.TryLog(record.event());
 }
 
@@ -982,16 +1008,22 @@ void LogSummary(telemetry::Logger &logger, std::string_view message,
 // itself is bounded: a full pipe must not turn the shutdown into a wait, so it
 // is rendered on the stack and written through the bounded diagnostic writer.
 void ReportCleanStop(const telemetry::Logger &logger,
-                     const LoopCounters &counters,
+                     const LoopCounters &counters, const ExecutionFsm &fsm,
                      const transport::DdsTransport &transport,
-                     const OutputTrace::Counters &trace) {
-  std::array<char, 512> line{};
+                     const OutputTrace::Counters &trace,
+                     protocol::TimeUs stamp_us) {
+  const protocol::TimeUs accepted_us = fsm.last_accepted_heartbeat_us();
+  const std::uint64_t heartbeat_age_us =
+      accepted_us == 0 ? 0 : static_cast<std::uint64_t>(stamp_us - accepted_us);
+  std::array<char, 1024> line{};
   const int length = std::snprintf(
       line.data(), line.size(),
       "robot_runtime: clean shutdown: state=ZeroTorque ticks=%llu "
       "overruns=%llu worst_overrun_us=%llu written=%llu undrained=%llu "
       "dropped=%llu filtered=%llu errors=%llu transport_dropped=%llu "
       "request_dropped=%llu command_dropped=%llu heartbeat_dropped=%llu "
+      "heartbeats_read=%llu heartbeats_accepted=%llu heartbeats_rejected=%llu "
+      "last_heartbeat_seq=%llu heartbeat_age_us=%llu "
       "trace_active=%d trace_written=%llu trace_dropped=%llu "
       "trace_failures=%llu\n",
       static_cast<unsigned long long>(counters.ticks),
@@ -1006,7 +1038,12 @@ void ReportCleanStop(const telemetry::Logger &logger,
       static_cast<unsigned long long>(transport.dropped_request_count()),
       static_cast<unsigned long long>(transport.dropped_command_count()),
       static_cast<unsigned long long>(transport.dropped_heartbeat_count()),
-      trace.active ? 1 : 0, static_cast<unsigned long long>(trace.recorded),
+      static_cast<unsigned long long>(transport.heartbeats_read_count()),
+      static_cast<unsigned long long>(fsm.heartbeats_accepted_count()),
+      static_cast<unsigned long long>(fsm.heartbeats_rejected_count()),
+      static_cast<unsigned long long>(fsm.last_accepted_heartbeat_seq()),
+      static_cast<unsigned long long>(heartbeat_age_us), trace.active ? 1 : 0,
+      static_cast<unsigned long long>(trace.recorded),
       static_cast<unsigned long long>(trace.dropped),
       static_cast<unsigned long long>(trace.write_failures));
   if (length <= 0) {
@@ -1855,7 +1892,7 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
     ++counters.ticks;
     counters.fsm_dropped =
         result.dropped_result_count + result.dropped_event_count;
-    LogTickEvents(logger, result);
+    LogTickEvents(logger, fsm, result);
 
     if (recorder && record_ratio != 0) {
       if (record_tick % record_ratio == 0) {
@@ -1927,8 +1964,8 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
         static_cast<void>(recorder->Stop());
         recorder.reset();
       }
-      ReportCleanStop(logger, counters, transport,
-                      trace ? trace->counters() : OutputTrace::Counters{});
+      ReportCleanStop(logger, counters, fsm, transport,
+                      trace ? trace->counters() : OutputTrace::Counters{}, now);
       trace.reset();
       backend.Close();
       return kExitOk;

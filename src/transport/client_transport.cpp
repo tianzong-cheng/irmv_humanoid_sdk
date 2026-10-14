@@ -217,12 +217,20 @@ void ClientTransport::Impl::WriteOutbound() {
   }
 
   // The heartbeat lane is FIFO and drained until empty, so every heartbeat the
-  // state machine still has to judge reaches it in receive order.
+  // state machine still has to judge reaches it in receive order. A heartbeat
+  // the writer accepted is a published one, and the newest of them carries the
+  // sequence and the monotonic stamp that tie this side to the runtime's.
   protocol::SupervisorHeartbeat heartbeat;
   while (owner.heartbeats_.TryPop(heartbeat)) {
     wire::SupervisorHeartbeat wire_heartbeat;
     codec::ToWire(heartbeat, wire_heartbeat);
-    TryWrite(heartbeat_writer, wire_heartbeat, owner.dropped_heartbeats_);
+    if (TryWrite(heartbeat_writer, wire_heartbeat, owner.dropped_heartbeats_)) {
+      owner.heartbeats_published_.fetch_add(1, std::memory_order_relaxed);
+      owner.last_published_heartbeat_seq_.store(heartbeat.heartbeat_seq,
+                                                std::memory_order_relaxed);
+      owner.last_published_heartbeat_us_.store(NowUs(),
+                                               std::memory_order_relaxed);
+    }
   }
 }
 
@@ -334,6 +342,9 @@ bool ClientTransport::PublishHeartbeat(
     dropped_heartbeats_.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
+  heartbeats_queued_.fetch_add(1, std::memory_order_relaxed);
+  last_queued_heartbeat_seq_.store(heartbeat.heartbeat_seq,
+                                   std::memory_order_relaxed);
   return true;
 }
 
@@ -378,6 +389,26 @@ std::uint64_t ClientTransport::dropped_command_count() const {
 
 std::uint64_t ClientTransport::dropped_heartbeat_count() const {
   return dropped_heartbeats_.load(std::memory_order_relaxed);
+}
+
+std::uint64_t ClientTransport::heartbeats_queued_count() const {
+  return heartbeats_queued_.load(std::memory_order_relaxed);
+}
+
+protocol::Sequence ClientTransport::last_queued_heartbeat_seq() const {
+  return last_queued_heartbeat_seq_.load(std::memory_order_relaxed);
+}
+
+std::uint64_t ClientTransport::heartbeats_published_count() const {
+  return heartbeats_published_.load(std::memory_order_relaxed);
+}
+
+protocol::Sequence ClientTransport::last_published_heartbeat_seq() const {
+  return last_published_heartbeat_seq_.load(std::memory_order_relaxed);
+}
+
+protocol::TimeUs ClientTransport::last_published_heartbeat_us() const {
+  return last_published_heartbeat_us_.load(std::memory_order_relaxed);
 }
 
 std::uint64_t ClientTransport::inbound_rejected_count() const {

@@ -16,12 +16,14 @@
 namespace irmv::telemetry {
 
 // Structured fields one event may carry. The array is part of the event, so
-// building and enqueueing an event never allocates.
-inline constexpr std::size_t kMaxLogFields = 8;
+// building and enqueueing an event never allocates. Sixteen covers the widest
+// record the runtime builds - the periodic status line carries the state, the
+// drop and overrun accounting and the heartbeat chain at once.
+inline constexpr std::size_t kMaxLogFields = 16;
 
 // Longest line the default sink builds, on the worker stack. It fits any event
 // that respects the fixed string capacities, including the worst case that
-// escapes every byte of a 256-byte message and eight fields into four bytes.
+// escapes every byte of a 256-byte message and sixteen fields into four bytes.
 inline constexpr std::size_t kMaxLogLine = 16 * 1024;
 
 // Bounded time Stop() gives the worker to drain the queue before it reports

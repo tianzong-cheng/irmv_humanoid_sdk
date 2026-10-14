@@ -121,6 +121,10 @@ class RuntimeFixture {
 
   const protocol::RobotState &state() const { return last_tick_.state; }
 
+  // Read-only view of the state machine, for tests that assert its own
+  // heartbeat-chain evidence. Nothing outside a test reads the FSM directly.
+  const ExecutionFsm &fsm() const { return fsm_; }
+
   const FixtureResult &last_result() const { return last_result_; }
 
   const TickResult &last_tick() const { return last_tick_; }

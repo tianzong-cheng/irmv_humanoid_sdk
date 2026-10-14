@@ -973,11 +973,12 @@ int main(int argc, char **argv) {
     return kExitUsage;
   }
 
-  // 20..209, derived from the process id so parallel runs stay apart. The file
-  // on disk carries another domain, so the override is what both processes
-  // share.
+  // 80..99, derived from the process id so parallel runs stay apart: the whole
+  // integration suite runs under ctest -j, and every test class owns its own
+  // band (see docs/testing.md, "Which DDS domain each test owns"). The file on
+  // disk carries another domain, so the override is what both processes share.
   const std::uint32_t domain =
-      20 + (static_cast<std::uint32_t>(::getpid()) % 190);
+      80 + (static_cast<std::uint32_t>(::getpid()) % 20);
   const fs::path workspace =
       fs::temp_directory_path() /
       ("irmv-application-client-" + std::to_string(::getpid()));
@@ -1119,6 +1120,36 @@ int main(int argc, char **argv) {
                  "restart: the new session can refresh its lease") &&
            ok;
     }
+
+    // The application half of the heartbeat chain: a heartbeat the control
+    // thread queued reaches the transport thread's writer, the two halves of
+    // this side are separable, and the published accessors name the newest one.
+    // The write happens on the transport thread, so the wait is bounded.
+    const auto publish_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (transport.heartbeats_published_count() <
+               transport.heartbeats_queued_count() &&
+           std::chrono::steady_clock::now() < publish_deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ok = Check(fx, transport.heartbeats_queued_count() > 0,
+               "heartbeat chain: the client queued at least one heartbeat") &&
+         ok;
+    ok = Check(fx,
+               transport.heartbeats_published_count() ==
+                   transport.heartbeats_queued_count(),
+               "heartbeat chain: every queued heartbeat reached the writer") &&
+         ok;
+    ok =
+        Check(fx,
+              transport.last_published_heartbeat_seq() ==
+                      transport.last_queued_heartbeat_seq() &&
+                  transport.last_published_heartbeat_seq() > 0,
+              "heartbeat chain: the published sequence is the newest queued") &&
+        ok;
+    ok = Check(fx, transport.last_published_heartbeat_us() > 0,
+               "heartbeat chain: the published write carries a stamp") &&
+         ok;
 
     transport.Stop();
     ok = Check(fx, !transport.started(), "transport: stopped") && ok;

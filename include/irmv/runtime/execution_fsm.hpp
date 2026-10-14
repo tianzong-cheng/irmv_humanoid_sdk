@@ -26,6 +26,19 @@ namespace irmv::runtime {
 //
 // The FSM stores a const reference to the immutable configuration snapshot; the
 // referenced config must outlive the FSM. All other state is fixed storage.
+//
+// Why ProcessHeartbeats discarded one heartbeat. One counter per reason lets
+// the runtime's logs tell a version-skewed or foreign peer apart from a plain
+// replay of an already accepted sequence, which one aggregate count cannot.
+enum class HeartbeatReject : std::size_t {
+  ProtocolVersion = 0,
+  RuntimeId,
+  SessionId,
+  SupervisorId,
+  StaleSequence,
+};
+inline constexpr std::size_t kHeartbeatRejectCount = 5;
+
 class ExecutionFsm {
  public:
   ExecutionFsm(const configuration::RuntimeConfig &config,
@@ -71,6 +84,39 @@ class ExecutionFsm {
 
   protocol::TimeUs target_rx_us() const {
     return gate_.last_valid_command_rx_us();
+  }
+
+  // ---- heartbeat chain (supervision lease) -------------------------------
+  //
+  // The FSM end of the chain: what one Tick's ProcessHeartbeats did with the
+  // batch the transport read. The sequence and the monotonic tick stamp of the
+  // last accepted heartbeat tie this end to the transport's own counters. The
+  // control path reads none of them; the runtime prints them on its status and
+  // fault lines.
+
+  // Heartbeats that passed every identity check and carried a strictly newer
+  // sequence, thereby refreshing the lease.
+  std::uint64_t heartbeats_accepted_count() const {
+    return heartbeats_accepted_;
+  }
+
+  // Heartbeats the loop discarded, over every reason below.
+  std::uint64_t heartbeats_rejected_count() const;
+
+  // Discarded heartbeats of one reason.
+  std::uint64_t heartbeat_rejection_count(HeartbeatReject reason) const;
+
+  // Sequence of the newest accepted heartbeat, 0 while none was accepted.
+  protocol::Sequence last_accepted_heartbeat_seq() const {
+    return last_accepted_heartbeat_seq_;
+  }
+
+  // Tick time when the lease was last refreshed by an accepted heartbeat, 0
+  // while none was accepted. Unlike the internal lease stamp this is not
+  // cleared when the session expires, so the SupervisorTimeout line can report
+  // the silence that ended the lease.
+  protocol::TimeUs last_accepted_heartbeat_us() const {
+    return last_accepted_heartbeat_us_;
   }
 
  private:
@@ -129,6 +175,9 @@ class ExecutionFsm {
   void ProcessRequests(TickScope &scope, const TickInput &input);
 
   void ProcessHeartbeats(TickScope &scope, const TickInput &input);
+
+  // Counts one discarded heartbeat under its reason.
+  void RejectHeartbeat(HeartbeatReject reason);
 
   // Falls back to Damping when the accepted target expired while tracking.
   void ExpireTracking(TickScope &scope);
@@ -339,6 +388,15 @@ class ExecutionFsm {
   protocol::TimeUs last_heartbeat_rx_us_{0};
   protocol::Sequence last_heartbeat_seq_{0};
   bool heartbeat_seen_{false};
+
+  // Heartbeat-chain evidence of ProcessHeartbeats: cumulative counts, the
+  // newest accepted sequence and the tick time of that acceptance. The last two
+  // are deliberately not cleared by ExpireSession, so the SupervisorTimeout
+  // line can name the sequence and the silence that ended the lease.
+  std::uint64_t heartbeats_accepted_{0};
+  std::array<std::uint64_t, kHeartbeatRejectCount> heartbeat_rejections_{};
+  protocol::Sequence last_accepted_heartbeat_seq_{0};
+  protocol::TimeUs last_accepted_heartbeat_us_{0};
 
   protocol::Id producer_id_{};
   protocol::Sequence epoch_{0};

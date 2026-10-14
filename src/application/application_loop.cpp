@@ -1230,10 +1230,20 @@ int RunApplication(const ApplicationOptions &options,
       // no control loop caused is what these show - a lane that refused a
       // sample, a sample that failed validation, a read that ended a loop. The
       // application is the only place they exist; the runtime prints its own.
+      // The heartbeat chain, application side: what this process generated,
+      // what it enqueued, and what its transport thread really handed to the
+      // DDS writer - the three steps between the supervision loop and the
+      // wire. Together with the runtime's read/accepted/rejected counts and
+      // the lease's age in its own status line, they say which step a silence
+      // belongs to; the loop's own gap says nothing about the write, because
+      // the write happens on the transport thread.
       std::printf(
           "application: link results_dropped=%llu states_dropped=%llu "
           "requests_dropped=%llu commands_dropped=%llu heartbeats_dropped=%llu "
-          "inbound_rejected=%llu read_failures=%llu\n",
+          "inbound_rejected=%llu read_failures=%llu heartbeats_queued=%llu "
+          "heartbeats_published=%llu last_queued_seq=%llu "
+          "last_published_seq=%llu "
+          "last_published_us=%llu\n",
           static_cast<unsigned long long>(transport.dropped_result_count()),
           static_cast<unsigned long long>(transport.dropped_state_count()),
           static_cast<unsigned long long>(transport.dropped_request_count()),
@@ -1241,7 +1251,16 @@ int RunApplication(const ApplicationOptions &options,
           static_cast<unsigned long long>(transport.dropped_heartbeat_count()),
           static_cast<unsigned long long>(transport.inbound_rejected_count()),
           static_cast<unsigned long long>(
-              transport.inbound_read_failure_count()));
+              transport.inbound_read_failure_count()),
+          static_cast<unsigned long long>(transport.heartbeats_queued_count()),
+          static_cast<unsigned long long>(
+              transport.heartbeats_published_count()),
+          static_cast<unsigned long long>(
+              transport.last_queued_heartbeat_seq()),
+          static_cast<unsigned long long>(
+              transport.last_published_heartbeat_seq()),
+          static_cast<unsigned long long>(
+              transport.last_published_heartbeat_us()));
       int exit_code = kExitStopUnknown;
       if (behavior.exit_stop_confirmed) {
         std::printf("application: exit stop=confirmed state=%s\n", lower);

@@ -181,32 +181,57 @@ void ExecutionFsm::ProcessHeartbeats(TickScope &scope, const TickInput &input) {
         input.heartbeats[index];
     const protocol::SupervisorHeartbeat &heartbeat = packet.value;
     if (heartbeat.protocol_version != protocol::kProtocolVersion) {
+      RejectHeartbeat(HeartbeatReject::ProtocolVersion);
       continue;
     }
     if (heartbeat.runtime_id != runtime_id_) {
+      RejectHeartbeat(HeartbeatReject::RuntimeId);
       continue;
     }
     if (session_id_ == protocol::kNoId || heartbeat.session_id != session_id_) {
+      RejectHeartbeat(HeartbeatReject::SessionId);
       continue;
     }
     // A peer that only observes the published session id cannot extend a lease
     // it does not own.
     if (heartbeat.supervisor_id != session_supervisor_id_) {
+      RejectHeartbeat(HeartbeatReject::SupervisorId);
       continue;
     }
     // Only a strictly newer heartbeat refreshes the lease: a repeated or
     // reordered packet must not extend it.
     if (heartbeat_seen_ && heartbeat.heartbeat_seq <= last_heartbeat_seq_) {
+      RejectHeartbeat(HeartbeatReject::StaleSequence);
       continue;
     }
     heartbeat_seen_ = true;
     last_heartbeat_seq_ = heartbeat.heartbeat_seq;
     last_heartbeat_rx_us_ = packet.rx_us;
+    ++heartbeats_accepted_;
+    last_accepted_heartbeat_seq_ = heartbeat.heartbeat_seq;
+    last_accepted_heartbeat_us_ = scope.now_us;
   }
 
   if (session_id_ != protocol::kNoId && !LeaseValid(scope.now_us)) {
     ExpireSession(scope);
   }
+}
+
+void ExecutionFsm::RejectHeartbeat(HeartbeatReject reason) {
+  ++heartbeat_rejections_[static_cast<std::size_t>(reason)];
+}
+
+std::uint64_t ExecutionFsm::heartbeats_rejected_count() const {
+  std::uint64_t total = 0;
+  for (const std::uint64_t count : heartbeat_rejections_) {
+    total += count;
+  }
+  return total;
+}
+
+std::uint64_t ExecutionFsm::heartbeat_rejection_count(
+    HeartbeatReject reason) const {
+  return heartbeat_rejections_[static_cast<std::size_t>(reason)];
 }
 
 void ExecutionFsm::ExpireTracking(TickScope &scope) {

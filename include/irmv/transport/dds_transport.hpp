@@ -135,6 +135,15 @@ class DdsTransport {
   // Supervisor heartbeats dropped because the heartbeat lane was full when the
   // sample was received.
   std::uint64_t dropped_heartbeat_count() const;
+  // Valid heartbeat samples taken from DDS and handed to the heartbeat lane, so
+  // the state machine could judge them. Read here minus accepted by the machine
+  // is the batch that never refreshed a lease, and both sides key it by the
+  // heartbeat sequence.
+  std::uint64_t heartbeats_read_count() const;
+  // Sequence of the newest heartbeat handed to the lane, 0 while none was read.
+  protocol::Sequence last_read_heartbeat_seq() const;
+  // Host monotonic receive stamp of that sample, 0 while none was read.
+  protocol::TimeUs last_read_heartbeat_us() const;
   // Inbound samples that failed FromWire validation and were discarded whole.
   std::uint64_t inbound_rejected_count() const;
   // Reads that failed and ended the transport loop, counted separately so that
@@ -190,6 +199,9 @@ class DdsTransport {
   std::atomic<std::uint64_t> dropped_requests_{0};
   std::atomic<std::uint64_t> dropped_commands_{0};
   std::atomic<std::uint64_t> dropped_heartbeats_{0};
+  std::atomic<std::uint64_t> heartbeats_read_{0};
+  std::atomic<std::uint64_t> last_read_heartbeat_seq_{0};
+  std::atomic<std::uint64_t> last_read_heartbeat_us_{0};
   std::atomic<std::uint64_t> inbound_rejected_{0};
   std::atomic<std::uint64_t> inbound_read_failures_{0};
 };
