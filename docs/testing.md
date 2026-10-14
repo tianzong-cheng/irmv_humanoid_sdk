@@ -688,11 +688,27 @@ processes flat:
 
 That is the acceptance the phase owed, run before the lease's underflow was
 found and fixed: five long runs, three ending on the lease and two completing,
-and the completed one is the acceptance. The fix has its own verification - the
-targeted regression above fails without it and passes with it - and the long
-re-run after the fix is recorded in this same section's table when it lands. A
-green run on its own never retired the intermittency, which is why the mechanism
-was hunted to a line of arithmetic rather than accepted as rare. A third proposal - publishing the heartbeat from a thread of its own -
+and the completed one is the acceptance.
+
+The fix carries two kinds of evidence, because a green long run alone cannot
+retire a race. The first is the targeted regression, measured for repeatability
+on both builds - with the clamp removed the test fails **50 times out of 50**,
+with it **0 out of 50** - which is what makes it a fix rather than a hope. The
+second is the long run after it, on the same configuration and the same host:
+
+| Measure, from the run after the fix | Value |
+|---|---|
+| rounds / wall clock | 168 in 1800.9 s, `Locomotion` in every round |
+| `SupervisorTimeout` in the runtime's log | **0** |
+| runtime-deadline stops | `command=0`, `source_state=0` |
+| application | `iterations=89780 overruns=1 worst_gap_us=44394`; `heartbeats_queued=29647 heartbeats_published=29647`, all drops zero, `worst_heartbeat_gap_us=80216`, `heartbeats_late=0` |
+| runtime | `ticks=900450 overruns=4 worst_overrun_us=2487`; `heartbeats_read=29647 accepted=29647 rejected=0`, `worst_accepted_heartbeat_gap_us=84052`, `heartbeats_late_count=0` |
+| resources | written per sample to `resources.tsv` in the run's own directory (15 samples, application RSS 30.3 -> 33.2 MB, 22 threads and 8 descriptors flat; runtime 12.5 -> 12.9 MB, 9 and 9 flat) |
+
+The run is the confirmation, not the proof: the proof is the 50/50 versus 0/50
+above and the invariant the clamp establishes (a watermark never later than the
+tick that stored it, so the unsigned subtraction cannot underflow on any later
+tick). A third proposal - publishing the heartbeat from a thread of its own -
 is withdrawn before it starts, because the specification
 (`docs/superpowers/specs/references/refactor-report.md`) has the supervision
 loop send the heartbeat only after it has completed its checks, and a second
