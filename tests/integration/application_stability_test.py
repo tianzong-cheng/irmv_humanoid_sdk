@@ -146,6 +146,12 @@ def main() -> int:
         print(f"application_stability_test: {note}", file=sys.stderr, flush=True)
 
     runtime_out = runtime_log.open("w", encoding="utf-8")
+    # The resource samples as a file beside the logs, so the curves can be
+    # recomputed from the run's own directory instead of only from the driver's
+    # summary: one line per sample, named by the column it holds.
+    resource_log = (work / "resources.tsv").open("w", encoding="utf-8")
+    resource_log.write("sample\tprocess\trss_kb\tthreads\tfds\n")
+    resource_log.flush()
     application_out = application_log.open("w", encoding="utf-8")
     runtime_arguments = [
         runtime_binary,
@@ -288,10 +294,23 @@ def main() -> int:
             if now >= next_sample:
                 stats_application.append(sample_stats(application_process.pid))
                 stats_runtime.append(sample_stats(runtime_process.pid))
+                for label, stats in (("application", stats_application[-1]),
+                                     ("runtime", stats_runtime[-1])):
+                    resource_log.write(
+                        f"{len(stats_application)}\t{label}\t"
+                        f"{stats['rss_kb']}\t{stats['threads']}\t"
+                        f"{stats['fds']}\n")
+                resource_log.flush()
                 next_sample = now + args.sample_s
 
         stats_application.append(sample_stats(application_process.pid))
         stats_runtime.append(sample_stats(runtime_process.pid))
+        for label, stats in (("application", stats_application[-1]),
+                             ("runtime", stats_runtime[-1])):
+            resource_log.write(
+                f"{len(stats_application)}\t{label}\t"
+                f"{stats['rss_kb']}\t{stats['threads']}\t{stats['fds']}\n")
+        resource_log.flush()
 
         text = application_log.read_text(encoding="utf-8", errors="replace")
         for pattern in (
@@ -337,6 +356,7 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 runtime_process.kill()
                 runtime_process.wait(timeout=10)
+        resource_log.close()
         runtime_out.close()
         application_out.close()
 
