@@ -103,7 +103,10 @@ std::uint32_t Domain() {
     return static_cast<std::uint32_t>(
         std::strtoul(override_domain, nullptr, 10));
   }
-  return 221;
+  // This test's own band (see docs/testing.md, "Which DDS domain each test
+  // owns"): a fixed domain inside the scenario allocator's range would be taken
+  // from under a parallel scenario.
+  return 110;
 }
 
 // The same interface binding the running transport uses, so a machine with a

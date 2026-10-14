@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 
 # 20..209, derived from the process id so parallel test runs stay apart.
-DOMAIN = 20 + (os.getpid() % 190)
+DOMAIN = 20 + (os.getpid() % 60)
 # The configuration on disk carries a different domain; --domain must override
 # it, which the startup line proves.
 CONFIG_DOMAIN = 7

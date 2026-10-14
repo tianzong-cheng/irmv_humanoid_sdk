@@ -30,7 +30,7 @@ import tempfile
 import time
 from pathlib import Path
 
-DOMAIN = 229
+DOMAIN = 153
 KEYS = {
     "damping": b"d",
     "initialize": b"i",

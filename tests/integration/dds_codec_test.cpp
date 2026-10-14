@@ -62,7 +62,10 @@ using irmv::transport::EndpointQos;
 constexpr const char *kFixtureConfigPath = "config/sdk.json";
 
 // Domains stay below 230: the default RTPS port mapping overflows above that.
-constexpr std::uint32_t kDefaultDomain = 42;
+// The base of this test's own band (100..109, four attempts): every test class
+// owns a band so a parallel ctest run cannot put two participants on one domain
+// (see docs/testing.md, "Which DDS domain each test owns").
+constexpr std::uint32_t kDefaultDomain = 100;
 constexpr std::uint32_t kDomainAttempts = 4;
 
 constexpr Sequence kAcquireRequestId = 0x1122334455ULL;

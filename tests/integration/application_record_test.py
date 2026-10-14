@@ -35,7 +35,7 @@ import tempfile
 import time
 from pathlib import Path
 
-DOMAIN = 226
+DOMAIN = 151
 RECORD_HOLD_S = 2.0
 KEYS = {"damping": b"d", "initialize": b"i", "exit": b"x"}
 

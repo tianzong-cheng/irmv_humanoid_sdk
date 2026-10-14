@@ -29,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 
-DOMAIN = 228
+DOMAIN = 150
 RECORD_SECONDS = 4
 
 COLUMNS = (

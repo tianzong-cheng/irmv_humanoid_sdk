@@ -1060,6 +1060,9 @@ foreach(scenario IN LISTS IRMV_INTEGRATION_SCENARIOS)
       --client "$<TARGET_FILE:runtime_client>"
       --application "$<TARGET_FILE:application>"
       --source "${PROJECT_SOURCE_DIR}"
+      # The runner isolates each scenario under <work-dir>/<scenario> and
+      # claims its domain lock one level up, in the shared parent, which is
+      # where every scenario looks for it (choose_domain's default).
       --work-dir "${CMAKE_CURRENT_BINARY_DIR}/integration"
   )
   set_tests_properties(
