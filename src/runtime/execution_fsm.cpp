@@ -219,7 +219,18 @@ void ExecutionFsm::ProcessHeartbeats(TickScope &scope, const TickInput &input) {
     }
     heartbeat_seen_ = true;
     last_heartbeat_seq_ = heartbeat.heartbeat_seq;
-    last_heartbeat_rx_us_ = packet.rx_us;
+    // The watermark is never later than the tick that stored it, because the
+    // lease is judged with an unsigned `now_us - last_heartbeat_rx_us_` on
+    // every tick: a stamp ahead of the tick's clock underflows that subtraction
+    // into an immediate expiry, and the session would die in the very tick that
+    // accepted the heartbeat which proves the supervisor alive. It can happen
+    // without anything being wrong: the control tick takes its clock first and
+    // drains the transport lanes afterwards, so the transport thread can read
+    // and stamp a heartbeat between the two. A future stamp is that race, not a
+    // broken peer, so it is recorded as this tick's instant rather than
+    // trusted.
+    last_heartbeat_rx_us_ =
+        packet.rx_us > scope.now_us ? scope.now_us : packet.rx_us;
     ++heartbeats_accepted_;
     last_accepted_heartbeat_seq_ = heartbeat.heartbeat_seq;
     last_accepted_heartbeat_us_ = scope.now_us;

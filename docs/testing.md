@@ -686,11 +686,13 @@ processes flat:
 | runtime | `ticks=900266 overruns=1 worst_overrun_us=646`, `heartbeats_read=29629 accepted=29629 rejected=0`, `worst_accepted_heartbeat_gap_us=74247`, `heartbeats_late_count=0` |
 | resources | application RSS 30.2 -> 33.1 MB, 22 threads and 8 descriptors flat; runtime 12.4 -> 12.8 MB, 9 and 9 flat |
 
-That is the acceptance the phase owed, and it is one run out of five long ones:
-the other four ended on the lease three times and passed once, so the
-intermittency is real and unfixed, and a green thirty-minute run does not retire
-it. It is a run that happens to miss the fault, not a fault that is gone, and
-the record now names what decided if a later run hits it again. A third proposal - publishing the heartbeat from a thread of its own -
+That is the acceptance the phase owed, run before the lease's underflow was
+found and fixed: five long runs, three ending on the lease and two completing,
+and the completed one is the acceptance. The fix has its own verification - the
+targeted regression above fails without it and passes with it - and the long
+re-run after the fix is recorded in this same section's table when it lands. A
+green run on its own never retired the intermittency, which is why the mechanism
+was hunted to a line of arithmetic rather than accepted as rare. A third proposal - publishing the heartbeat from a thread of its own -
 is withdrawn before it starts, because the specification
 (`docs/superpowers/specs/references/refactor-report.md`) has the supervision
 loop send the heartbeat only after it has completed its checks, and a second
@@ -726,16 +728,28 @@ may claim for a scenario running beside it. With the bands in place the parallel
 suite is green: `ctest -j2` ran all 58 entries in 96.3 seconds with no failure,
 which is the first parallel pass this branch has had.
 
-It is also not rare: of four long runs on this branch, three ended on it (at
-19.6, 8.7 and 5.4 minutes) and one twenty-five-minute run completed. A lease that expires in three of four
-long runs is a defect of the acceptance rather than a curiosity, and while it
-stands the phase's acceptance is *not* met. That is where this stands: the cause is narrowed to the delivery
-path, both processes' schedules are excluded with their own numbers, and the fix
-- the heartbeat lane's reliability, a deliberate change to the table in
-`docs/runtime-protocol.md` - is *not* made in this round. The heartbeats travel on a
-`BEST_EFFORT` lane, which is what makes a silent loss possible at all; the
-protocol table in `docs/runtime-protocol.md` is where that would change, and it
-is a deliberate contract change rather than a repair.
+It is also not rare: of five long runs on this branch three ended on it (at
+19.6, 8.7 and 5.4 minutes) and two completed (twenty-five and thirty minutes),
+which is what made it worth chasing to the line rather than living with.
+
+**The cause is named, and it is not the transport.** The runtime's control tick
+takes its clock first and drains the transport lanes afterwards, so the transport
+thread can read and stamp a heartbeat *between* the two: the judging tick then
+sees an `rx_us` later than its own `now_us`, and the lease - which is an unsigned
+`now_us - last_heartbeat_rx_us_` on every tick - underflows into an immediate
+expiry. The session dies in the very tick that accepted the heartbeat proving the
+supervisor alive, which is the shape the failing records showed (a fresh sequence
+beside `heartbeat_age_us="0"`, no loss on any lane, a cadence of 71 ms against a
+300 ms lease). `CheckHeartbeatStampedAfterTheTick` reproduces it with the existing
+fixture - it fails without the fix and passes with it - and the fix clamps the
+watermark to the tick that stores it, so the invariant the unsigned subtraction
+needs holds: the watermark is never later than the tick that wrote it. A
+legitimate expiry still exercises the same path (`integration_supervisor_paused`
+stops the supervisor and the lease expires as it should).
+
+The `BEST_EFFORT` attribution this section carried earlier is withdrawn: no lane
+lost a sample, the protocol table is unchanged, and no reliability change was
+needed.
 
 ### The application-driven recorded run (§11.1)
 

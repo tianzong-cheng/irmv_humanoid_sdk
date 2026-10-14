@@ -618,6 +618,34 @@ int CheckSessionTakeover() {
 
 int CheckSupervisionLease();
 
+// A heartbeat whose read stamp is later than the tick that judges it must not
+// expire the lease. The runtime's control tick takes its clock first and drains
+// the transport lanes afterwards, so the transport thread can stamp a heartbeat
+// between the two - `rx_us` ahead of the `now_us` the tick will use. The lease
+// is judged with an unsigned `now_us - watermark`, which underflowed on such a
+// stamp into an immediate expiry: the session died in the very tick that
+// accepted the heartbeat proving the supervisor alive, which is the shape a
+// long run reported (`SupervisorTimeout` with a fresh sequence and
+// `heartbeat_age_us="0"`).
+int CheckHeartbeatStampedAfterTheTick() {
+  RuntimeFixture ahead;
+  ahead.BootToZeroTorque();
+  ahead.Acquire();
+  CHECK(ahead.Request(Operation::Damping).applied());
+  CHECK(ahead.StartTracking().applied());
+  // The fixture's own cadence would put a fresh heartbeat beside this one and
+  // leave the stale-sequence check to reject mine, so the one heartbeat of this
+  // tick is the one with the impossible stamp.
+  ahead.SetHeartbeatEnabled(false);
+  // A stamp the tick cannot have reached yet: ten control periods ahead of the
+  // clock this fixture will advance by one.
+  ahead.QueueHeartbeat(0, ahead.now_us() + 10 * ahead.ControlPeriodUs());
+  ahead.Advance(ahead.ControlPeriodUs());
+  CHECK(ahead.fsm().heartbeats_accepted_count() > 0);
+  CHECK(ahead.state().execution_state == kTracking);
+  return 0;
+}
+
 int CheckSupervisionLease() {
   RuntimeFixture f;
   f.BootToZeroTorque();
@@ -2437,6 +2465,7 @@ int main() {
   CHECK(CheckFaultBeatsRequestInSameTick() == 0);
   CHECK(CheckSessionTakeover() == 0);
   CHECK(CheckSupervisionLease() == 0);
+  CHECK(CheckHeartbeatStampedAfterTheTick() == 0);
   CHECK(CheckCommandTimeout() == 0);
   CHECK(CheckSourceStateTimeout() == 0);
   CHECK(CheckContinuityGuards() == 0);
