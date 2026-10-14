@@ -145,7 +145,7 @@ manual runs and is never used by CTest.
 | `command_gate_test` | The command gate: sequence monotonicity, queue wait followed by the transport receive stamp as the validity origin, repeated sequences not refreshing the deadline, the source-state index window (unknown, ignored, stale, fresh), the command and source-state deadlines measured per tick with no new packet, the independent supervisor lease, and that a rejected owner frame refreshes nothing. | "per-tick timeout with no new packet, old packets do not feed the watchdog, source-state window and independent supervisor lease", "single-source authorization" |
 | `execution_fsm_test` | The state machine: every legal and rejected transition, boot grace/deadline rules with the per-input observation history (an observed joint or required IMU that goes missing faults inside the grace window, a never-observed one keeps waiting to the deadline), the full normal path, write failure, request idempotency and conflicts, stop ordering and the authorization watermark (including a stop that does not change the state), session takeover and lease expiry, a heartbeat batch that mixes the owner's sample with a foreign or reordered one refreshing the lease, first-frame continuity, foreign packets, fault output degradation latching to zero torque, the recovery window with an explicit Reset, epoch exhaustion, the session's supervisor binding, same-tick stop ownership, a guarded same-producer epoch change, and the runtime's own trusted stop. | "all legal and rejected transitions, boot grace/deadline, explicit Reset", "pure feedforward, PD + feedforward with the total torque limit", "request retry/different payload/out-of-order, atomic first-frame and gain switch, stop preemption", "fault first-tick output, damping disqualification degrades permanently to zero torque" |
 | `recorder_test` | The run recorder: a recorder that was never started accepts nothing and creates nothing, while a started one creates exactly one run directory with its metadata and refuses a directory that does not exist; a paced run of 910 samples is written as one full chunk and one remainder, every chunk renamed into place with no partial file left behind, and the index reports the rows, the joint count and each chunk's sequence and time range; a deliberate hole in the published sequence becomes a gap with its exact range; a burst that fills the bounded handoff costs the refused samples, which are counted *and* reported as a gap of their own, because the worker never saw them and they could not show up as a hole between two samples it did write; stopping twice is harmless and keeps naming the run. | §8.2, §8.4 |
-| `record_reader_test` | The read side of a recorded run, on bytes the *recorder* really produced rather than on a fixture: a run read whole returns the metadata it declares and every field of every row, a time range returns exactly the rows inside it and reports the gap that overlaps it on the recorded grid (with a stride of five, two missing samples are reported as two, not as the eight ticks between them), an empty range is an empty answer and not an error, a chunk that was cut short is reported as a truncation with the rows it did hold, and a run of another schema version is refused whole instead of reinterpreted. | §8.2, §8.4 |
+| `record_reader_test` | The read side of a recorded run, on bytes the *recorder* really produced rather than on a fixture: a run read whole returns the metadata it declares and every field of every row, a time range returns exactly the rows inside it and reports the gap that overlaps it on the recorded grid (with a stride of five, two missing samples are reported as two, not as the eight ticks between them), an empty range is an empty answer and not an error, a chunk that was cut short is reported as a truncation with the rows it did hold, one byte flipped inside a chunk's payload is reported as corruption (not as a truncation) with none of that chunk's rows returned while the intact chunks beside it are still read, one byte flipped in the chunk's length field is reported the same way, and a run of another schema version is refused whole instead of reinterpreted. | §8.2, §8.4 |
 | `logger_test` | The bounded asynchronous logger: queue bound and drop accounting, level filtering, FIFO order, the drain on stop, an event racing with the stop, the 256-byte message bound, rotation of the default sink, the formatted line and the error path - plus the bounded diagnostic writer the sink and the exit path share, against a pipe the test fills itself. | §8 (bounded telemetry) |
 | `channel_test` | The bounded handoff between the control thread and the transport thread: FIFO order, capacity, the untouched state of a refused push, the keep-last-1 handoff of the latest-value channels (a published value is replaced and counted only while no consumer holds it, and a taken one is never counted as a loss), a separate stop lane, and two-thread stress on both shapes whose payloads each carry their own generator, so a torn or overwritten copy fails the test. This is the entry that is also run under ThreadSanitizer; the eviction race it used to hide was found that way. | §2 (thread model), §4 (lane separation) |
 | `config_schema_contract_test` | The shipped `config/sdk.schema.json` against the shipped `config/sdk.json`, the custom `irmv-joint-name` format (non-empty, at most 64 **UTF-8 bytes**), and that standard JSON Schema validity and the loader's own checks agree. | "the configuration is executable and versioned" |
@@ -366,8 +366,27 @@ the gains land on the joints the document names).
   it, `external_producer_test` for the stream itself).
 * The recorder and the run reader: one coherent sample per sampled tick with the
   measured feedback and the final output of that tick, per-stretch gaps, a
-  `sessions.json` sidecar for the authorization contexts, time-range reading and
-  the NPZ export (`recorder_test`, `record_reader_test`, `record_export_test`).
+  versioned columnar chunk carrying an explicit payload length and a CRC-32 over
+  its header and its payload, so a chunk corrupted in place is refused by name
+  instead of being read as rows, a `sessions.json` sidecar for the authorization
+  contexts, time-range reading and the NPZ export (`recorder_test`,
+  `record_reader_test`, `record_export_test`).
+* The session record: what produced the context a run was recorded under. The
+  runtime records *that* a session was authorized - its instance, session,
+  producer, epoch and the gains of the first command it adopted - and it records
+  the model digest as `unknown`, because the runtime never reads a deployment
+  contract and links no inference. The model, its contract and the gains the
+  operator overrode are facts only the application holds, so the application
+  writes them itself, one JSON object per confirmed locomotion context, to
+  `<telemetry.recorder.directory>/policy_sessions.jsonl`, and every line carries
+  the same `{runtime_id, session_id, producer_process_id, epoch}` the runtime
+  uses. A local context carries the model's file digest, its path and I/O names,
+  the digest of the `irmv.deployment` document it declared, and one row per
+  overridden gain with both sides of the difference; an external one carries the
+  producer process the runtime gated and the gains its first frame declared.
+  `policy_locomotion_test` and `external_producer_test` each drive a real run
+  with the recorder on and check the sidecar against the runtime's own per-tick
+  trace, so the join is checked against what the runtime published.
 * `ldd build/robot_runtime` names no ONNX Runtime: the lower process still loads
   nothing but its own configuration. `ldd build/external_producer` names none
   either.
@@ -503,17 +522,71 @@ The acceptance run itself - `--duration-s 1800` - reached 1708 rounds in
 | runtime | RSS 11.4 -> 11.7 MB, threads 9 flat, descriptors 9 flat |
 | result | the run ended early; nothing unsafe happened - the runtime stopped tracking on its own deadline and the application damped |
 
-That fault is a *measurement*, not a safety event, and it is the honest end of
-this run: the runtime's lease lasts `runtime.safety.timeouts.supervisor_us`
-(300 ms) without a heartbeat, and the application's own state window is
-`supervision.state_timeout_us` (150 ms), so a single stall of the application's
-supervision path longer than 300 ms expires the lease and ends the session.
-Nothing in the run suggests a leak or a drift - memory, threads and descriptors
-are flat over 1708 rounds and 19.6 minutes - and the two hundred-second run
-above on an idle host never saw one. The application now prints the same pacing
-numbers the runtime prints (`application: loop iterations=N overruns=M
-worst_gap_us=X period_us=P`), so the next such run names the stall instead of
-leaving it to be inferred from the lease that expired.
+That fault is a *measurement*, not a safety event: the runtime's lease lasts
+`runtime.safety.timeouts.supervisor_us` (300 ms) without a heartbeat, and the
+application's own state window is `supervision.state_timeout_us` (150 ms), so a
+stall of the application longer than 300 ms expires the lease and ends the
+session. Nothing in the run suggests a leak or a drift - memory, threads and
+descriptors are flat over 1708 rounds and 19.6 minutes - and the two
+hundred-second run above on an idle host never saw one.
+
+The run's own logs say which side stalled, and they say it was not the runtime:
+
+| Evidence, from the same run | Value |
+|---|---|
+| the runtime's shutdown line | `ticks=589339 overruns=3 worst_overrun_us=799` |
+| the runtime's heartbeat lane | `heartbeat_dropped=0` |
+| the runtime's supervision | `SupervisorTimeout {from="Tracking" to="Damping"}` at tick 574296 |
+| the application, first | `behavior=Fault runtime=Unknown ... session=lost fresh=no` |
+
+The runtime never missed its own 2 ms deadline by more than 799 microseconds in
+589,339 ticks and dropped no heartbeat it received, so it kept publishing states
+and checking its lease on time, while the application stopped consuming states
+(its own 150 ms window lapsed first) and stopped sending heartbeats. The stall
+was on the application's side of the link, and the loop now names it: the exit
+line reports `iterations`, `overruns`, `worst_gap_us` and the two halves of the
+transport, `worst_rx_us` (draining the inbound lanes) and `worst_tx_us` (the
+sends the behaviour asked for), so a gap far larger than both of them is a stall
+of the thread itself rather than of the link.
+
+A fifteen-minute probe with those numbers - the same driver, the shipped
+configuration, an idle host - printed
+`iterations=47521 overruns=... worst_gap_us=42418 period_us=20000` and no fault
+at all: over 47,521 iterations the loop never came within a tenth of the
+runtime's 300 ms lease.
+
+The acceptance was then re-run for thirty minutes with a *policy context in
+every round* - `application_stability_test.py --locomotion`, against a generated
+twelve-joint Fake deployment whose model commands exactly those joints, so the
+run walks `Standby <-> Damping <-> Ready <-> Locomotion` - and it reproduced the
+stall at 8.7 minutes, this time with both processes measuring themselves:
+
+| Measure, from that run | Value |
+|---|---|
+| rounds | 38 in 520.1 s, 45 re-asked keys, `Locomotion` in every round |
+| runtime-deadline stops before the fault | `command=0`, `source_state=0` |
+| the fault | `cause=RuntimeUnreachable stop=SupervisorTimeout` |
+| application pacing | `iterations=25913 overruns=1 worst_gap_us=46030 worst_rx_us=143 worst_tx_us=29 period_us=20000` |
+| application resources | RSS 30.4 -> 32.1 MB, threads 22 flat, descriptors 8 flat |
+| runtime | RSS 11.3 -> 11.4 MB, threads 9 flat, descriptors 9 flat; `ticks=260056 overruns=1 worst_overrun_us=626 heartbeat_dropped=0` |
+
+Both control loops kept their schedules: the application's worst iteration gap
+was 46 ms - six times under the lease - and its inbound drain and sends never
+cost more than 143 and 29 microseconds, while the runtime never missed its own
+2 ms deadline by more than 626 microseconds in 260,056 ticks and dropped no
+heartbeat it received. The link between two healthy processes still went silent
+for longer than 300 ms, which is a fact about the delivery path and not about
+either loop: the application now also prints the link's own counters
+(`application: link results_dropped=... states_dropped=... requests_dropped=...
+commands_dropped=... heartbeats_dropped=... inbound_rejected=... read_failures=...`)
+- the samples a lane refused, the samples that failed validation and the reads
+that ended a loop - so the next occurrence says whether a lane lost the samples
+between them. That is where this stands: the cause is narrowed to the delivery
+path, both processes' schedules are excluded with their own numbers, and the
+counters that name the last step are in place. The heartbeats travel on a
+`BEST_EFFORT` lane, which is what makes a silent loss possible at all; the
+protocol table in `docs/runtime-protocol.md` is where that would change, and it
+is a deliberate contract change rather than a repair.
 
 ### The application-driven recorded run (§11.1)
 
@@ -560,7 +633,27 @@ What it asserts, and what the run observed:
 | the walk | 26 distinct targets on the first joint, 0.00 .. 0.05 rad, inside the configuration's continuity delta |
 | the replacement | the context that was authorized after the replacement names the *replacing* producer in the runtime's trace |
 | the producer's death | the runtime falls back on its own command deadline, the application follows it into `Damping` without latching anything, and a new producer is prepared and authorized afterwards |
+| a registration during a live context | the process that announces itself while a context is authorized is *not* selected while it lives (three seconds of its 500 ms cadence, no new `producer=selected`, no frame of it published), the live context keeps adopting the selected producer's frames, it is *not* selected while the application is damping either, and it is selected, prepared and authorized once the application is idle in `Ready` again |
 | faults | none for the whole run |
+
+Two rules keep the selection and the authorization the same process, and the
+last two rows are what hold them:
+
+* A registration is taken while the application is idle in `Ready`. A process
+  that announces itself at any other time is ignored, not lost: it announces
+  itself again on its own cadence, and the `Ready` that follows a context is
+  when it is taken. Without this, a process that started at the wrong moment
+  would take the selection away from the producer the runtime is gating, and the
+  replaced one - whose frames the live context is made of - would be told to
+  stop mid-motion.
+* The supervisor refuses a replacement while a preparation or a candidate of the
+  selected producer is in flight. The frame it produced is the first frame the
+  next Tracking request may carry, and the runtime gates the context it
+  authorizes against the process whose frame it adopted; a replacement in that
+  window would leave the authorization naming one process and the notice that
+  tells a producer to publish naming another. The notice itself is built from
+  the identity the behaviour stamped on the request, not from whichever producer
+  happens to be selected when the context is confirmed.
 
 The frames the test compares are read from the *runtime's* output trace, not
 from the command topic: a frame the producer published but nobody accepted -
@@ -583,9 +676,9 @@ drives it to four deterministic states and writes
 | Field | Value |
 |---|---|
 | artifact | `logs/rsl_rl/irmv_flat/2026-09-08_09-56-44/exported/reference_sample.json` |
-| artifact SHA-256 | `38f50f1031284f15a9f2631a8c8bfbcc3db422c9b775be8f14efb8a6bcc7e44f` |
-| model | `policy.onnx`, SHA-256 `0dea6741905a0531ca91f9b83423503d358de6f6325e54495e8cce12cde0e97d`, ONNX IR 8 |
-| provenance | checkpoint `model_2999.pt`, training commit `05f83c9`, env-config digest, asset revision, IsaacLab 0.54.2, torch 2.7.0+cu128, onnx 1.22.0 |
+| artifact SHA-256 | `c33619c2375892a8bfcb28fe40a9e45b45170a35853230a6de4abc95a902aecb` |
+| model | `policy.onnx`, SHA-256 `e6f08b1c940a2c7bfe6b5ce3dad0f128ad6150f2e21469a6a6ab2040fad55914`, ONNX IR 8 |
+| provenance | checkpoint `model_2999.pt`, training commit `a479346`, working tree dirty with diff `db31fef1...`, env-config digest, asset revision, IsaacLab 0.54.2, torch 2.7.0+cu128, onnx 1.22.0 |
 | samples | `stand_zero`, `forward_half`, `turn_left`, `forward_turn`, each with the raw state, the velocity command, the `last_action` the training observed, and the four expected vectors |
 | pipeline | scale 0.5, the resolved default pose as offset, both clips absent, `last_action.stage = raw` |
 
@@ -603,13 +696,33 @@ file through the SDK's `OnnxModel`, builds the frame with `BuildCommand`, and
 compares all three vectors element by element:
 
 ```
-verify_policy_sample: model=0dea6741905a0531ca91f9b83423503d358de6f6325e54495e8cce12cde0e97d samples=4 tolerance=1e-05
+verify_policy_sample: model=e6f08b1c940a2c7bfe6b5ce3dad0f128ad6150f2e21469a6a6ab2040fad55914 samples=4 tolerance=1e-05
+verify_policy_sample: training task=Irmv-Flat-v0 seed=42 commit=a479346002a119105915b48c2d9174b4be9359e5 dirty=true diff=db31fef10df711ada3f9a209fad726947fdb70f75bf852717078b6c7a8699831 checkpoint=logs/rsl_rl/irmv_flat/2026-09-08_09-56-44/model_2999.pt
 verify_policy_sample: stand_zero     observation=3.725e-09 action=3.725e-08 target=2.980e-08 ok
 verify_policy_sample: forward_half   observation=0.000e+00 action=0.000e+00 target=1.490e-08 ok
 verify_policy_sample: turn_left      observation=9.313e-10 action=5.960e-08 target=2.980e-08 ok
 verify_policy_sample: forward_turn   observation=3.725e-09 action=1.192e-07 target=6.706e-08 ok
 verify_policy_sample: every vector matches within 1e-05
 ```
+
+The digest check is not decoration: the sample names the bytes it was generated
+from, and a sample whose digest is not the file beside it is refused before a
+single vector is compared. That is what happened when the model was re-exported
+the day after the sample was written - four vectors still matched within 1e-5,
+and the run was *not* an acceptance, because nothing said the two were the same
+artifact. The sample was regenerated from the running environment against the
+model that is actually there, which is the only fix that makes the comparison
+mean anything; editing the recorded digest would have turned an identity failure
+into a silent one.
+
+The regeneration also records the *tree* the numbers came from, because the
+numbers are only reproducible from the environment that produced them: the
+working tree was being edited while the sample was generated (the actuator gains
+of the simulated robot), so `training_repo_dirty` is true and
+`training_repo_diff_sha256` names the diff. That is the environment the model
+was exported from, and the hash is what makes it identifiable; the commit alone
+would have claimed the clean revision. `verify_policy_sample` prints that line
+with the numbers it proves.
 
 The residuals are float32 rounding, which is the whole claim the comparison can
 make: the SDK's observation, the model's action and the resulting joint position

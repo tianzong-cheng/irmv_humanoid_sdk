@@ -314,6 +314,15 @@ around it.
   notice whose key does not match the preparation the application opened belongs
   to another run and is dropped; an equal `prepare_id` from another process
   instance is never accepted. `prepare_id` is never zero.
+* **A registration is taken while the application is idle in `Ready`.** A
+  process that announces itself while a locomotion context exists - preparing,
+  prepared, authorized or damping out of one - is ignored rather than accepted:
+  the frames of a live context belong to the process whose frame the runtime
+  adopted, and replacing it would tell that process to stop mid-context. The
+  announcement is not lost, because a producer announces itself on its own
+  cadence and is taken from the `Ready` that follows. The supervisor refuses the
+  replacement itself while a preparation or a candidate of the selected producer
+  is in flight, so the rule holds whatever the caller does.
 * **Ready means a frame.** A `PrepareResult` may only be `READY` or `FAILED`. A
   `READY` carries the complete first frame that the application will put into
   its `TRACKING` request; a `READY` without one, or with a frame the execution

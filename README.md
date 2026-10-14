@@ -196,7 +196,8 @@ for `Damping`, and the application waits for the `Result` **and** a fresh
 `application.supervision.request_deadline_us`, whichever comes first:
 
 ```text
-application: loop iterations=N overruns=M worst_gap_us=X period_us=P
+application: loop iterations=N overruns=M worst_gap_us=X worst_rx_us=R worst_tx_us=T period_us=P
+application: link results_dropped=A states_dropped=B requests_dropped=C commands_dropped=D heartbeats_dropped=E inbound_rejected=F read_failures=G
 application: exit stop=confirmed state=Damping   # the stop was proven, exit 0
 application: exit stop=unknown lower=Fault       # the runtime was already in Fault, exit 3
 application: exit stop=unknown lower=Unknown     # the stop was never proven, exit 3
@@ -206,7 +207,15 @@ The first line is the loop's own pacing, printed before the exit line the way
 the runtime prints `overruns` and its worst overrun in the clean-shutdown line:
 an iteration counts as an overrun when it started more than two loop periods
 after the one before it - it skipped a whole turn - and the worst gap is what a
-supervision stall looks like from this side.
+supervision stall looks like from this side. The one after it splits that stall
+into the two halves of the transport: the worst time the thread spent draining
+the inbound lanes (`worst_rx_us`) and the worst time it spent in the sends the
+behaviour asked for (`worst_tx_us`). A gap far larger than both of them is a
+stall of the thread itself, not of the link, and the line after it is the link's
+own evidence: the samples a lane refused, the samples that failed validation, and
+the reads that ended a loop. A silence on the wire with a healthy gap and empty
+link counters is neither process stalling - it is a lane that lost samples
+between two processes that were both on time.
 
 Exit codes: `0` a confirmed stop, `1` a configuration or startup error (the
 hardware was never commanded - a startup that failed at the transport can
@@ -285,6 +294,18 @@ registers, is prepared, and is authorized after the runtime applied the context
 this application asked for - and `none` states the no-source case explicitly.
 No mode is a hot swap: changing the source is a stop, an initialization and a
 new authorization, which is the next section.
+
+A recorded run carries a second file beside the samples: on every confirmed
+locomotion context the application appends one line to
+`<telemetry.recorder.directory>/policy_sessions.jsonl` with the identity the
+runtime granted the context (`runtime_id`, `session_id`, `producer_process_id`,
+`epoch`) and what produced it - for a local model, its digest, its path, its I/O
+names, the digest of the `irmv.deployment` document it declared and one row per
+gain the operator overrode, with the model's value and the value that was sent;
+for an external producer, the process the runtime gated and the gains its first
+frame declared. The runtime's own `sessions.json` cannot carry that: the runtime
+never reads a deployment contract and links no inference, so it names the model
+`unknown` and the application's file is what a reader joins it to.
 
 `tools/verify_policy.py` is the gate between the training export and this
 deployment: it checks the model with the ONNX checker, refuses a model whose
