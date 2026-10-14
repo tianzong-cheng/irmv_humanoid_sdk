@@ -1150,6 +1150,9 @@ int main(int argc, char **argv) {
     ok = Check(fx, transport.last_published_heartbeat_us() > 0,
                "heartbeat chain: the published write carries a stamp") &&
          ok;
+    ok = Check(fx, transport.worst_heartbeat_gap_us() > 0,
+               "heartbeat chain: the queued cadence is measured") &&
+         ok;
 
     transport.Stop();
     ok = Check(fx, !transport.started(), "transport: stopped") && ok;

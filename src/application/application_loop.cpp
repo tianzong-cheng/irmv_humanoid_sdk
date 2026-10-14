@@ -1242,8 +1242,8 @@ int RunApplication(const ApplicationOptions &options,
           "requests_dropped=%llu commands_dropped=%llu heartbeats_dropped=%llu "
           "inbound_rejected=%llu read_failures=%llu heartbeats_queued=%llu "
           "heartbeats_published=%llu last_queued_seq=%llu "
-          "last_published_seq=%llu "
-          "last_published_us=%llu\n",
+          "last_published_seq=%llu last_published_us=%llu "
+          "worst_heartbeat_gap_us=%llu heartbeats_late=%llu\n",
           static_cast<unsigned long long>(transport.dropped_result_count()),
           static_cast<unsigned long long>(transport.dropped_state_count()),
           static_cast<unsigned long long>(transport.dropped_request_count()),
@@ -1260,7 +1260,9 @@ int RunApplication(const ApplicationOptions &options,
           static_cast<unsigned long long>(
               transport.last_published_heartbeat_seq()),
           static_cast<unsigned long long>(
-              transport.last_published_heartbeat_us()));
+              transport.last_published_heartbeat_us()),
+          static_cast<unsigned long long>(transport.worst_heartbeat_gap_us()),
+          static_cast<unsigned long long>(transport.heartbeats_late_count()));
       int exit_code = kExitStopUnknown;
       if (behavior.exit_stop_confirmed) {
         std::printf("application: exit stop=confirmed state=%s\n", lower);

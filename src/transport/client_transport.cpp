@@ -342,6 +342,22 @@ bool ClientTransport::PublishHeartbeat(
     dropped_heartbeats_.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
+  // The queue accepted the send, so this is the supervision loop's own cadence:
+  // measure the interval from the previous accepted send on the same clock. The
+  // first send of the run has no predecessor and no interval.
+  const protocol::TimeUs now_us = NowUs();
+  const protocol::TimeUs previous_us =
+      last_queued_heartbeat_us_.exchange(now_us, std::memory_order_relaxed);
+  if (previous_us != 0) {
+    const protocol::TimeUs gap_us = now_us - previous_us;
+    if (gap_us > worst_heartbeat_gap_us_.load(std::memory_order_relaxed)) {
+      worst_heartbeat_gap_us_.store(gap_us, std::memory_order_relaxed);
+    }
+    const protocol::TimeUs period_us = config_.supervision.heartbeat_period_us;
+    if (period_us != 0 && gap_us > 2 * period_us) {
+      heartbeats_late_.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
   heartbeats_queued_.fetch_add(1, std::memory_order_relaxed);
   last_queued_heartbeat_seq_.store(heartbeat.heartbeat_seq,
                                    std::memory_order_relaxed);
@@ -409,6 +425,14 @@ protocol::Sequence ClientTransport::last_published_heartbeat_seq() const {
 
 protocol::TimeUs ClientTransport::last_published_heartbeat_us() const {
   return last_published_heartbeat_us_.load(std::memory_order_relaxed);
+}
+
+protocol::TimeUs ClientTransport::worst_heartbeat_gap_us() const {
+  return worst_heartbeat_gap_us_.load(std::memory_order_relaxed);
+}
+
+std::uint64_t ClientTransport::heartbeats_late_count() const {
+  return heartbeats_late_.load(std::memory_order_relaxed);
 }
 
 std::uint64_t ClientTransport::inbound_rejected_count() const {

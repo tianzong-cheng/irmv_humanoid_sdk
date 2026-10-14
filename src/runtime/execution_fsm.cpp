@@ -204,6 +204,19 @@ void ExecutionFsm::ProcessHeartbeats(TickScope &scope, const TickInput &input) {
       RejectHeartbeat(HeartbeatReject::StaleSequence);
       continue;
     }
+    // Cadence of this session's accepted heartbeats, on the tick clock. The
+    // first heartbeat of a session has no predecessor of the same session,
+    // which is what heartbeat_seen_ records until here.
+    if (heartbeat_seen_) {
+      const protocol::TimeUs gap_us =
+          scope.now_us - last_accepted_heartbeat_us_;
+      if (gap_us > worst_accepted_heartbeat_gap_us_) {
+        worst_accepted_heartbeat_gap_us_ = gap_us;
+      }
+      if (gap_us > config_.timeouts.supervisor_us / 2) {
+        ++heartbeats_late_;
+      }
+    }
     heartbeat_seen_ = true;
     last_heartbeat_seq_ = heartbeat.heartbeat_seq;
     last_heartbeat_rx_us_ = packet.rx_us;

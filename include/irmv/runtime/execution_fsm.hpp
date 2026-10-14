@@ -119,6 +119,21 @@ class ExecutionFsm {
     return last_accepted_heartbeat_us_;
   }
 
+  // Longest interval between two consecutive accepted heartbeats of one
+  // session, on the tick clock, 0 until a session accepts a second heartbeat.
+  protocol::TimeUs worst_accepted_heartbeat_gap_us() const {
+    return worst_accepted_heartbeat_gap_us_;
+  }
+
+  // Accepted intervals above the runtime's late threshold. The runtime never
+  // parses the application's heartbeat_period_us, and an interval that reaches
+  // the lease expires the session, so it can never be observed between two
+  // accepted heartbeats of one session; half the lease is therefore the
+  // tightest cadence budget the machine can prove from the configuration it
+  // holds, and a gap beyond it is a heartbeat that arrived too late to be
+  // routine.
+  std::uint64_t heartbeats_late_count() const { return heartbeats_late_; }
+
  private:
   // Per-tick data shared with the per-state implementations in
   // src/runtime/states/*.cpp.
@@ -397,6 +412,8 @@ class ExecutionFsm {
   std::array<std::uint64_t, kHeartbeatRejectCount> heartbeat_rejections_{};
   protocol::Sequence last_accepted_heartbeat_seq_{0};
   protocol::TimeUs last_accepted_heartbeat_us_{0};
+  protocol::TimeUs worst_accepted_heartbeat_gap_us_{0};
+  std::uint64_t heartbeats_late_{0};
 
   protocol::Id producer_id_{};
   protocol::Sequence epoch_{0};

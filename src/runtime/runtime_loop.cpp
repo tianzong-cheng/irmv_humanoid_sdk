@@ -1000,6 +1000,12 @@ void LogSummary(telemetry::Logger &logger, std::string_view message,
                    accepted_us == 0
                        ? 0
                        : static_cast<std::uint64_t>(stamp_us - accepted_us));
+  // The cadence, so a hole is a number rather than something inferred from a
+  // summary count: the worst tick-to-tick interval between accepted heartbeats
+  // and how many of them the runtime judged late.
+  record.UintField("worst_accepted_heartbeat_gap_us",
+                   fsm.worst_accepted_heartbeat_gap_us());
+  record.UintField("heartbeats_late_count", fsm.heartbeats_late_count());
   logger.TryLog(record.event());
 }
 
@@ -1024,6 +1030,7 @@ void ReportCleanStop(const telemetry::Logger &logger,
       "request_dropped=%llu command_dropped=%llu heartbeat_dropped=%llu "
       "heartbeats_read=%llu heartbeats_accepted=%llu heartbeats_rejected=%llu "
       "last_heartbeat_seq=%llu heartbeat_age_us=%llu "
+      "worst_accepted_heartbeat_gap_us=%llu heartbeats_late_count=%llu "
       "trace_active=%d trace_written=%llu trace_dropped=%llu "
       "trace_failures=%llu\n",
       static_cast<unsigned long long>(counters.ticks),
@@ -1042,8 +1049,10 @@ void ReportCleanStop(const telemetry::Logger &logger,
       static_cast<unsigned long long>(fsm.heartbeats_accepted_count()),
       static_cast<unsigned long long>(fsm.heartbeats_rejected_count()),
       static_cast<unsigned long long>(fsm.last_accepted_heartbeat_seq()),
-      static_cast<unsigned long long>(heartbeat_age_us), trace.active ? 1 : 0,
-      static_cast<unsigned long long>(trace.recorded),
+      static_cast<unsigned long long>(heartbeat_age_us),
+      static_cast<unsigned long long>(fsm.worst_accepted_heartbeat_gap_us()),
+      static_cast<unsigned long long>(fsm.heartbeats_late_count()),
+      trace.active ? 1 : 0, static_cast<unsigned long long>(trace.recorded),
       static_cast<unsigned long long>(trace.dropped),
       static_cast<unsigned long long>(trace.write_failures));
   if (length <= 0) {

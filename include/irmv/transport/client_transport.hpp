@@ -159,6 +159,17 @@ class ClientTransport {
   protocol::Sequence last_published_heartbeat_seq() const;
   // Host monotonic stamp of that write, 0 while none was published.
   protocol::TimeUs last_published_heartbeat_us() const;
+  // Cadence of the supervision loop's sends, measured on the host monotonic
+  // clock at the moment PublishHeartbeat accepted each one. The loop's own
+  // iteration gap cannot express this: a stretch in which the loop runs but the
+  // send decision is never taken shows up here and nowhere else. Longest
+  // interval between two consecutive queued heartbeats, 0 until a second
+  // heartbeat is queued.
+  protocol::TimeUs worst_heartbeat_gap_us() const;
+  // Queued heartbeats whose interval from the previous one exceeded twice the
+  // configured supervision.heartbeat_period_us, the cadence the lease is sized
+  // for.
+  std::uint64_t heartbeats_late_count() const;
   // Inbound samples that failed FromWire validation and were discarded whole.
   std::uint64_t inbound_rejected_count() const;
   // Reads that failed and ended the transport loop, counted separately so that
@@ -217,6 +228,11 @@ class ClientTransport {
   std::atomic<std::uint64_t> heartbeats_published_{0};
   std::atomic<std::uint64_t> last_published_heartbeat_seq_{0};
   std::atomic<std::uint64_t> last_published_heartbeat_us_{0};
+  // Cadence of queued heartbeats. The control thread is the only writer;
+  // atomics keep it observable from a test or an exit line on another thread.
+  std::atomic<std::uint64_t> last_queued_heartbeat_us_{0};
+  std::atomic<std::uint64_t> worst_heartbeat_gap_us_{0};
+  std::atomic<std::uint64_t> heartbeats_late_{0};
   std::atomic<std::uint64_t> inbound_rejected_{0};
   std::atomic<std::uint64_t> inbound_read_failures_{0};
 };

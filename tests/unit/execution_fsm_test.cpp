@@ -1563,6 +1563,54 @@ int CheckHeartbeatSupervisorOwnership() {
   return 0;
 }
 
+// The cadence of accepted heartbeats: a gap longer than the machine's late
+// threshold moves the worst-case interval and the late count, while a gap
+// inside it moves neither. The runtime does not parse the application's
+// heartbeat period, so its threshold is half the lease - the tightest budget it
+// can prove - and the test feeds a gap on each side of it.
+int CheckHeartbeatCadence() {
+  RuntimeFixture f;
+  f.BootToZeroTorque();
+  f.Acquire();
+  CHECK(f.state().session_id != irmv::protocol::kNoId);
+  CHECK(f.state().execution_state == kZeroTorque);
+  // From here the automatic feed is off: only the heartbeats this test queues
+  // are judged, each on its own tick.
+  f.SetHeartbeatEnabled(false);
+
+  const TimeUs late_threshold_us = f.config.timeouts.supervisor_us / 2;
+
+  // The first heartbeat of the session only starts the cadence: it has no
+  // predecessor of the same session, so no interval is recorded.
+  f.QueueHeartbeat();
+  f.Step();
+  CHECK(f.fsm().worst_accepted_heartbeat_gap_us() == 0);
+  CHECK(f.fsm().heartbeats_late_count() == 0);
+
+  // A gap beyond the threshold is one late interval and the new worst case,
+  // while the lease itself (the session) survives it.
+  const TimeUs first_us = f.now_us();
+  const TimeUs gap_us = late_threshold_us + 5 * f.ControlPeriodUs();
+  f.Advance(gap_us);
+  CHECK(f.state().session_id != irmv::protocol::kNoId);
+  f.QueueHeartbeat();
+  f.Step();
+  CHECK(f.now_us() - first_us == gap_us);
+  CHECK(f.fsm().worst_accepted_heartbeat_gap_us() == gap_us);
+  CHECK(f.fsm().heartbeats_late_count() == 1);
+
+  // A gap inside the threshold moves neither number.
+  const TimeUs worst_before = f.fsm().worst_accepted_heartbeat_gap_us();
+  const std::uint64_t late_before = f.fsm().heartbeats_late_count();
+  f.Advance(10 * f.ControlPeriodUs());
+  f.QueueHeartbeat();
+  f.Step();
+  CHECK(f.state().session_id != irmv::protocol::kNoId);
+  CHECK(f.fsm().worst_accepted_heartbeat_gap_us() == worst_before);
+  CHECK(f.fsm().heartbeats_late_count() == late_before);
+  return 0;
+}
+
 // A receive batch that mixes an owner heartbeat with one the state machine has
 // to discard must still refresh the lease: the entries of a batch are judged in
 // receive order, and a foreign or reordered sample never costs the owner
@@ -2406,6 +2454,7 @@ int main() {
   CHECK(CheckForeignSupervisorIsNotTheOwnersReplay() == 0);
   CHECK(CheckAcquireRequiresEmptySession() == 0);
   CHECK(CheckHeartbeatSupervisorOwnership() == 0);
+  CHECK(CheckHeartbeatCadence() == 0);
   CHECK(CheckMixedHeartbeatBatchRefreshesLease() == 0);
   CHECK(CheckResetWithFreshSafetyObservation() == 0);
   CHECK(CheckTakeoverDoesNotInheritStagedAnswer() == 0);
