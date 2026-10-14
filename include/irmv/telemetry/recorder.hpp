@@ -28,9 +28,13 @@
 // it can see from its side. A chunk is written under a temporary name and
 // renamed into place only once it is complete, so a run that ends abruptly has
 // an identifiable tail rather than a half-written block a reader would have to
-// guess about. Every column of a chunk is contiguous, and the joint columns are
-// `rows * joint_count` wide rather than `rows * kMaxJoints`, so a twelve-joint
-// deployment does not pay for the sixty-four the protocol allows.
+// guess about. A chunk also carries an explicit payload length and a CRC-32
+// over its own header and over its payload, so a reader can tell a chunk that
+// was corrupted in place from one that was cut short and refuse the former
+// instead of reading its rows. Every column of a chunk is contiguous, and the
+// joint columns are `rows * joint_count` wide rather than `rows * kMaxJoints`,
+// so a twelve-joint deployment does not pay for the sixty-four the protocol
+// allows.
 //
 // The run's loss table is the one thing the worker cannot finish alone: samples
 // can still be sitting in the handoff when the worker is done, and only Stop()

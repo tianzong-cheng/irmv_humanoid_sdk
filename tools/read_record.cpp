@@ -1,6 +1,7 @@
 // read_record: walk a recorded run and print what it holds, or a range of it.
 //
-//   read_record --run <run-directory> [--from-us N] [--to-us N] [--summary-only]
+//   read_record --run <run-directory> [--from-us N] [--to-us N]
+//   [--summary-only]
 //
 // One JSON object per line, in the order the run recorded them, followed by a
 // summary line that reports the metadata - the units the run declared among
@@ -15,11 +16,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
 #include <vector>
-
-#include <nlohmann/json.hpp>
 
 #include "irmv/telemetry/record_reader.hpp"
 
@@ -140,8 +140,7 @@ int main(int argc, char **argv) {
       summary_only = true;
     } else {
       std::fprintf(stderr, "read_record: unknown argument %s\n%.*s\n",
-                   argv[index], static_cast<int>(kUsage.size()),
-                   kUsage.data());
+                   argv[index], static_cast<int>(kUsage.size()), kUsage.data());
       return 2;
     }
   }
@@ -191,6 +190,14 @@ int main(int argc, char **argv) {
   summary["chunks"] = reader.chunks().size();
   summary["rows_in_range"] = range.samples.size();
   summary["truncated"] = range.truncated;
+  // A corrupt chunk is reported as itself rather than folded into the
+  // truncation flag: a caller has to be able to tell a run that was cut short
+  // from a run whose bytes no longer match what was written, and the error
+  // names the file and the check that failed.
+  summary["corrupt"] = range.corrupt;
+  if (!range.error.empty()) {
+    summary["error"] = range.error;
+  }
   if (!range.samples.empty()) {
     summary["first_stamp_us"] = range.samples.front().stamp_us;
     summary["last_stamp_us"] = range.samples.back().stamp_us;

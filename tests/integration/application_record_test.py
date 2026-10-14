@@ -209,8 +209,10 @@ def run(source_root, application_binary, runtime_binary, read_record, work,
         fail(f"read_record failed: {summary.stderr.strip()}")
         return 1
     summary_json = json.loads(summary.stdout.splitlines()[-1])
-    if summary_json["schema_version"] != 2:
-        fail(f"the run declares schema {summary_json['schema_version']}, expected 2")
+    if summary_json["schema_version"] != 3:
+        fail(f"the run declares schema {summary_json['schema_version']}, expected 3")
+    if summary_json["corrupt"]:
+        fail(f"the intact run reports a corrupt chunk: {summary_json.get('error', '')}")
     if summary_json["rows_in_range"] <= 0:
         fail("the run recorded no rows")
     if summary_json["sample_hz"] != 100 or summary_json["control_hz"] != 500:

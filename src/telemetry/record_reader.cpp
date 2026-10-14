@@ -13,8 +13,6 @@ namespace {
 
 using Json = nlohmann::json;
 
-constexpr char kChunkMagic[8] = {'I', 'R', 'M', 'V', 'C', 'H', '0', '1'};
-
 // A cursor over the raw bytes of one chunk. It never reads past the end: a
 // short file is reported, not read into.
 class Cursor {
@@ -139,33 +137,55 @@ void IdFromHex(const std::string &text, protocol::Id *id) {
 }
 
 // One chunk decoded into rows. The columns are read in the order the writer
-// wrote them; a chunk that does not hold exactly the bytes its header promises
-// is a truncation and is reported through `complete` false. What is returned as
-// rows depends on where the truncation fell: a truncation among the fixed-width
-// per-row fields leaves every earlier row whole, so those rows are returned; a
-// truncation inside the column-major joint columns leaves no whole row, so none
-// is returned.
+// wrote them, but only after the chunk has proved itself: the header's checksum
+// and the payload's checksum are verified first, and their verdict is reported
+// through `corrupt`. A chunk that does not hold exactly the bytes its header
+// promises is a truncation, reported through `complete` false, never a byte
+// that was corrupted in place. What is returned as rows depends on where the
+// truncation fell: a truncation among the fixed-width per-row fields leaves
+// every earlier row whole, so those rows are returned; a truncation inside the
+// column-major joint columns leaves no whole row, so none is returned. A
+// corrupt chunk is never decoded at all - a flipped byte would otherwise become
+// a value the run never recorded, which is exactly what the checksums exist to
+// prevent - and it is the caller that learns, by name, which file was refused.
 bool DecodeChunk(const std::vector<std::uint8_t> &bytes,
                  const RunMetadata &metadata, std::vector<RecordSample> *rows,
-                 bool *complete, std::string *error) {
+                 bool *complete, bool *corrupt, std::string *error) {
   *complete = false;
+  *corrupt = false;
   error->clear();
-  if (bytes.size() < sizeof(kChunkMagic) ||
-      std::memcmp(bytes.data(), kChunkMagic, sizeof(kChunkMagic)) != 0) {
+  if (bytes.size() < sizeof(kChunkMagic)) {
+    // Too short to even hold the magic: a truncation, not corruption.
     return false;
   }
-  Cursor cursor(bytes, sizeof(kChunkMagic));
+  if (std::memcmp(bytes.data(), kChunkMagic, sizeof(kChunkMagic)) != 0) {
+    // A file that does not start with the magic is not a chunk this build
+    // wrote; it is named corrupt rather than parsed as one.
+    *corrupt = true;
+    *error = "the chunk does not start with the chunk magic";
+    return false;
+  }
+  if (bytes.size() < kChunkHeaderBytes) {
+    // The header itself is cut short: nothing to check a length or a checksum
+    // against, so this is a truncation.
+    return false;
+  }
+  Cursor header(bytes, sizeof(kChunkMagic));
   std::uint32_t schema_version = 0;
   std::uint32_t joint_count = 0;
   std::uint32_t row_count = 0;
+  std::uint32_t payload_length = 0;
   std::uint64_t first_stamp = 0;
   std::uint64_t last_stamp = 0;
   std::uint64_t first_seq = 0;
   std::uint64_t last_seq = 0;
-  if (!cursor.U32(&schema_version) || !cursor.U32(&joint_count) ||
-      !cursor.U32(&row_count) || !cursor.U64(&first_stamp) ||
-      !cursor.U64(&last_stamp) || !cursor.U64(&first_seq) ||
-      !cursor.U64(&last_seq)) {
+  std::uint32_t payload_crc = 0;
+  std::uint32_t header_crc = 0;
+  if (!header.U32(&schema_version) || !header.U32(&joint_count) ||
+      !header.U32(&row_count) || !header.U32(&payload_length) ||
+      !header.U64(&first_stamp) || !header.U64(&last_stamp) ||
+      !header.U64(&first_seq) || !header.U64(&last_seq) ||
+      !header.U32(&payload_crc) || !header.U32(&header_crc)) {
     return false;
   }
   // The version is checked before a single row is parsed, so a chunk of another
@@ -178,10 +198,45 @@ bool DecodeChunk(const std::vector<std::uint8_t> &bytes,
              std::to_string(metadata.schema_version);
     return false;
   }
+  // The header's own checksum is verified before any structural field is
+  // trusted. It covers the payload length, so a length corrupted in place is
+  // named here as corruption instead of being read as a file that was cut
+  // short - the two demand different answers from a reader.
+  if (header_crc != ChunkCrc32(bytes.data(), kChunkHeaderCrcOffset)) {
+    *corrupt = true;
+    *error = "the chunk header checksum did not match";
+    return false;
+  }
   if (joint_count != metadata.joint_count) {
     // A chunk of another layout is not this run's data.
     return false;
   }
+  if (payload_length != ChunkPayloadBytes(row_count, joint_count)) {
+    // A header whose length cannot hold its own rows is corrupt, and reading it
+    // would mean trusting a number the chunk's own checksum already vouched for
+    // against the layout this schema fixes.
+    *corrupt = true;
+    *error = "the chunk declares a payload length its rows cannot hold";
+    return false;
+  }
+  const std::size_t payload_bytes = bytes.size() - kChunkHeaderBytes;
+  if (payload_bytes > payload_length) {
+    // More bytes than the header describes: the file is not this chunk.
+    *corrupt = true;
+    *error = "the chunk holds more bytes than its header declares";
+    return false;
+  }
+  const bool whole = payload_bytes == payload_length;
+  if (whole && payload_crc != ChunkCrc32(bytes.data() + kChunkHeaderBytes,
+                                         payload_length)) {
+    // The header and the length are intact but the rows are not: the one case
+    // the length alone cannot catch, and the one that must never be read out as
+    // data.
+    *corrupt = true;
+    *error = "the chunk payload checksum did not match";
+    return false;
+  }
+  Cursor cursor(bytes, kChunkHeaderBytes);
   std::vector<RecordSample> decoded;
   decoded.reserve(row_count);
   for (std::uint32_t index = 0; index < row_count; ++index) {
@@ -290,7 +345,10 @@ bool DecodeChunk(const std::vector<std::uint8_t> &bytes,
       }
     }
   }
-  *complete = true;
+  // `whole` is the length's verdict, not the CRC's: a short file whose rows
+  // happen to decode is still reported as not the whole chunk, so a caller sees
+  // that what follows is missing rather than believing it read the run.
+  *complete = whole;
   *rows = std::move(decoded);
   return true;
 }
@@ -477,11 +535,22 @@ bool RecordReader::ReadRange(protocol::TimeUs begin_us, protocol::TimeUs end_us,
     }
     std::vector<RecordSample> rows;
     bool complete = false;
+    bool corrupt = false;
     std::string decode_error;
-    if (!DecodeChunk(bytes, metadata_, &rows, &complete, &decode_error)) {
-      result.truncated = true;
+    if (!DecodeChunk(bytes, metadata_, &rows, &complete, &corrupt,
+                     &decode_error)) {
+      if (corrupt) {
+        // A chunk whose checksum did not match is corrupt, not a truncation:
+        // it contributes no rows and is named, but `truncated` is left alone so
+        // a caller can tell a short run from a damaged one. The intact chunks
+        // around it are still read.
+        result.corrupt = true;
+      } else {
+        result.truncated = true;
+      }
       // A chunk of another schema version is named with the version it
-      // declares; a chunk that is simply short has no message of its own.
+      // declares; a chunk that is simply short or corrupt has no message of its
+      // own beyond the one the decoder wrote.
       if (result.error.empty() && !decode_error.empty()) {
         result.error = chunk.file + ": " + decode_error;
       }

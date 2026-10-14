@@ -252,8 +252,14 @@ def main() -> int:
             if data[column].shape != (rows_written, joints):
                 fail(f"{column} has shape {data[column].shape}, expected ({rows_written}, {joints})")
 
-        if int(data["schema_version"]) != 2:
+        if int(data["schema_version"]) != 3:
             fail("the archive does not carry the schema version")
+        # The recorded run is intact, so the two damage flags are false: a run
+        # that was never cut short and never corrupted says so.
+        if bool(data["truncated"]):
+            fail("the archive marks an intact run as truncated")
+        if bool(data["corrupt"]):
+            fail("the archive marks an intact run as corrupt")
         if int(data["sample_hz"]) != 100:
             fail("the archive does not carry the sampling rate")
         if str(data["config_id"]) == "":

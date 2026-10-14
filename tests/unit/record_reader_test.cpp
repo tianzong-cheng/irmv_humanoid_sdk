@@ -39,13 +39,19 @@ constexpr TimeUs kStampStepUs = 10000;
 
 // The byte layout of a chunk, from the writer's column order, so a test can cut
 // one in a chosen section rather than at an arbitrary offset. A chunk is the
-// eight-byte magic, then the schema version, joint count and row count as u32
-// and the first and last stamp and sequence as u64; then the fixed-width
-// per-row fields; then the column-major joint columns, five columns of
+// eight-byte magic, then the schema version, joint count, row count and payload
+// length as u32, the first and last stamp and sequence as u64, the payload and
+// header CRC-32s as u32 - a 64-byte header - then the fixed-width per-row
+// fields, then the column-major joint columns, eight columns of
 // `rows * joint_count` doubles.
-constexpr std::size_t kChunkHeaderBytes = sizeof("IRMVCH01") - 1 +
-                                          3 * sizeof(std::uint32_t) +
-                                          4 * sizeof(std::uint64_t);
+constexpr std::size_t kChunkHeaderBytes =
+    sizeof("IRMVCH01") - 1 + 4 * sizeof(std::uint32_t) +
+    4 * sizeof(std::uint64_t) + 2 * sizeof(std::uint32_t);
+// The payload-length field's offset in the header, the byte a corruption test
+// edits to prove a wrong length is named as corruption rather than read as a
+// short file.
+constexpr std::uint64_t kChunkLengthOffset =
+    sizeof("IRMVCH01") - 1 + 3 * sizeof(std::uint32_t);
 constexpr std::size_t kFixedRowBytes =
     2 * sizeof(std::uint64_t) + 3 * sizeof(std::uint32_t) +
     sizeof(std::uint64_t) + 7 * sizeof(std::uint8_t) + irmv::protocol::kIdSize +
@@ -103,6 +109,53 @@ std::filesystem::path MakeDirectory() {
       ("irmv-reader-test-" + std::to_string(now));
   std::filesystem::create_directory(directory);
   return directory;
+}
+
+// Flips exactly one byte of a file in place: the smallest edit a torn write, a
+// bad sector or a stray edit makes, and the edit a length and a checksum exist
+// to catch. The byte is only inverted; no offset moves, so a reader that still
+// returns a row from the file has trusted bytes the run never wrote.
+bool FlipByte(const std::filesystem::path &path, std::uint64_t offset) {
+  std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out);
+  if (!file) {
+    return false;
+  }
+  file.seekg(static_cast<std::streamoff>(offset));
+  char value = 0;
+  file.read(&value, 1);
+  if (!file) {
+    return false;
+  }
+  value = static_cast<char>(static_cast<unsigned char>(value) ^ 0xFFU);
+  file.seekp(static_cast<std::streamoff>(offset));
+  file.write(&value, 1);
+  return file.good();
+}
+
+// The rows of every chunk but `broken`, which is what a reader must still
+// return when one chunk is refused: the run is bigger than the damaged file.
+std::size_t RowsOutsideChunk(const irmv::telemetry::RecordReader &reader,
+                             std::size_t broken) {
+  std::size_t rows = 0;
+  for (std::size_t index = 0; index < reader.chunks().size(); ++index) {
+    if (index != broken) {
+      rows += reader.chunks()[index].rows;
+    }
+  }
+  return rows;
+}
+
+// Whether any sample of `range` falls inside the damaged chunk's own time span,
+// which is where a row built from its corrupted bytes would have to land.
+bool TookRowsFromChunk(const irmv::telemetry::RecordRange &range,
+                       const irmv::telemetry::ChunkInfo &chunk) {
+  for (const RecordSample &sample : range.samples) {
+    if (sample.stamp_us >= chunk.first_stamp_us &&
+        sample.stamp_us <= chunk.last_stamp_us) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // Writes a run of `count` samples with the given stride. The samples whose
@@ -355,6 +408,105 @@ int JointTruncatedChunk() {
   return 0;
 }
 
+// A byte flipped inside a chunk's payload is reported as corruption, and the
+// damaged chunk contributes no rows: the intact chunks around it are still
+// returned, and the range is not called a truncation - a cut file and a
+// corrupted file call for different answers.
+int CorruptPayload() {
+  const std::filesystem::path directory = MakeDirectory();
+  std::filesystem::path run;
+  const int count =
+      2 * static_cast<int>(irmv::telemetry::kRecordChunkRows) + 10;
+  CHECK(WriteRun(directory, count, 0, 0, nullptr, &run));
+  RecordReader reader;
+  std::string error;
+  CHECK(RecordReader::Open(run, &reader, &error));
+  CHECK(reader.chunks().size() == 3);
+
+  const irmv::telemetry::ChunkInfo broken = reader.chunks().front();
+  const std::filesystem::path chunk = run / broken.file;
+  // The first byte of the first row's first applied-target value, in the
+  // column-major joint columns: a reader that trusted it would hand out a joint
+  // target this run never stored.
+  CHECK(FlipByte(chunk, kChunkHeaderBytes + kFixedRowBytes));
+
+  RecordRange range;
+  CHECK(reader.ReadRange(0, ~0ULL, &range));
+  CHECK(range.ok);
+  CHECK(range.corrupt);
+  CHECK(!range.truncated);
+  CHECK(range.error.find(broken.file) != std::string::npos);
+  CHECK(range.error.find("checksum") != std::string::npos);
+  // Every intact chunk is read whole, and not one row comes from the damaged
+  // one: its rows are absent rather than present with a value its bytes never
+  // held.
+  CHECK(range.samples.size() == RowsOutsideChunk(reader, 0));
+  CHECK(!TookRowsFromChunk(range, broken));
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
+// A byte flipped in the header's length field is corruption too, never a short
+// file: the header's own checksum covers the length, so a reader cannot mistake
+// a wrong length for a truncated payload and return the rows on either side of
+// an offset that was never written.
+int CorruptLength() {
+  const std::filesystem::path directory = MakeDirectory();
+  std::filesystem::path run;
+  const int count =
+      2 * static_cast<int>(irmv::telemetry::kRecordChunkRows) + 10;
+  CHECK(WriteRun(directory, count, 0, 0, nullptr, &run));
+  RecordReader reader;
+  std::string error;
+  CHECK(RecordReader::Open(run, &reader, &error));
+  CHECK(reader.chunks().size() == 3);
+
+  const irmv::telemetry::ChunkInfo broken = reader.chunks().front();
+  const std::filesystem::path chunk = run / broken.file;
+  CHECK(FlipByte(chunk, kChunkLengthOffset));
+
+  RecordRange range;
+  CHECK(reader.ReadRange(0, ~0ULL, &range));
+  CHECK(range.ok);
+  CHECK(range.corrupt);
+  CHECK(!range.truncated);
+  CHECK(range.error.find(broken.file) != std::string::npos);
+  CHECK(range.error.find("header checksum") != std::string::npos);
+  CHECK(range.samples.size() == RowsOutsideChunk(reader, 0));
+  CHECK(!TookRowsFromChunk(range, broken));
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
+// An intact run reads back exactly what was written - every field of every row,
+// across several chunks - with neither damage flag set: the length and the
+// checksums a v3 writer adds change not one value a reader returns.
+int IntactRunUnchanged() {
+  const std::filesystem::path directory = MakeDirectory();
+  std::vector<RecordSample> written;
+  std::filesystem::path run;
+  const int count =
+      2 * static_cast<int>(irmv::telemetry::kRecordChunkRows) + 10;
+  CHECK(WriteRun(directory, count, 0, 0, &written, &run));
+  RecordReader reader;
+  std::string error;
+  CHECK(RecordReader::Open(run, &reader, &error));
+  CHECK(reader.chunks().size() == 3);
+
+  RecordRange range;
+  CHECK(reader.ReadRange(0, ~0ULL, &range));
+  CHECK(range.ok);
+  CHECK(!range.truncated);
+  CHECK(!range.corrupt);
+  CHECK(range.error.empty());
+  CHECK(range.samples.size() == written.size());
+  for (std::size_t index = 0; index < written.size(); ++index) {
+    CHECK(range.samples[index] == written[index]);
+  }
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
 // A run of another schema version is refused whole rather than reinterpreted,
 // and the message names the version so an operator sees which side must move.
 int UnknownVersion() {
@@ -373,7 +525,7 @@ int UnknownVersion() {
 }
 
 // A v1 run - the schema before this build - is refused by name, never read with
-// the v2 layout: its bytes mean something else, and its chunk has fewer flags
+// the v3 layout: its bytes mean something else, and its chunk has fewer flags
 // and fewer columns, so decoding it would misalign every field.
 int VersionOneRun() {
   const std::filesystem::path directory = MakeDirectory();
@@ -386,7 +538,7 @@ int VersionOneRun() {
   std::string error;
   CHECK(!RecordReader::Open(run, &reader, &error));
   // The refusal names both the version the run declares and the one this build
-  // implements; it never assumes the bytes are v2.
+  // implements; it never assumes the bytes are v3.
   CHECK(error.find("1") != std::string::npos);
   CHECK(error.find(std::to_string(irmv::telemetry::kRecordSchemaVersion)) !=
         std::string::npos);
@@ -395,7 +547,7 @@ int VersionOneRun() {
 }
 
 // A chunk that declares another schema version is refused with that version in
-// the message, and yields no rows - rather than being decoded with the v2
+// the message, and yields no rows - rather than being decoded with the v3
 // layout, which would silently misalign every field after the header.
 int VersionOneChunk() {
   const std::filesystem::path directory = MakeDirectory();
@@ -429,6 +581,9 @@ int main() {
   failures += RangeRead();
   failures += TruncatedChunk();
   failures += JointTruncatedChunk();
+  failures += CorruptPayload();
+  failures += CorruptLength();
+  failures += IntactRunUnchanged();
   failures += UnknownVersion();
   failures += VersionOneRun();
   failures += VersionOneChunk();

@@ -23,7 +23,10 @@
 // metadata before a row is handed out: an unknown version, a chunk that is
 // short, over-long or of another joint count, and a chunk that was never
 // renamed into place (a `.part` file) are refused or reported as a truncation
-// instead of being reinterpreted.
+// instead of being reinterpreted. Every chunk's header checksum and payload
+// checksum are verified as it is read, so a chunk that was corrupted in place
+// is reported as corrupt - named, with none of its rows returned - and never
+// silently decoded into data the run never recorded.
 namespace irmv::telemetry {
 
 // What one run declares about itself.
@@ -62,6 +65,11 @@ struct RecordRange {
   // True when a chunk was short or a file was missing: the samples it did yield
   // are in `samples`, and what follows is not the whole run.
   bool truncated{false};
+  // True when a chunk failed its length or checksum check: `error` names the
+  // file and why, and not one row of that chunk is in `samples`. It is not
+  // `truncated` - a damaged chunk and a short file call for different answers -
+  // and the intact chunks around it are still read.
+  bool corrupt{false};
 };
 
 class RecordReader {

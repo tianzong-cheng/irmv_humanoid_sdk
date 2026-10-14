@@ -11,8 +11,9 @@ a run contains.
 What the archive preserves, because a consumer needs all of it to interpret the
 numbers: every column by name, the joint names in the order the joint columns
 use, the units, the schema version, the configuration and layout digests, the
-sampling and control rates, and the gap table - a run's missing samples are part
-of its data, not a footnote.
+sampling and control rates, the truncation and corruption flags the reader set,
+and the gap table - a run's missing samples are part of its data, not a
+footnote.
 
 The dtype of a column is part of that contract rather than something numpy
 infers. A stamp, a sequence number or a gap count is a 64-bit unsigned count and
@@ -175,6 +176,10 @@ def to_archive(rows, summary) -> dict:
     arrays["layout_id"] = np.array(summary["layout_id"])
     arrays["backend"] = np.array(summary["backend"])
     arrays["truncated"] = np.bool_(summary["truncated"])
+    # A corrupt chunk is carried as its own column rather than folded into the
+    # truncation flag: an archive that says "short" when it means "damaged"
+    # tells a consumer the wrong thing about the rows it holds.
+    arrays["corrupt"] = np.bool_(summary["corrupt"])
 
     gaps = summary["gaps"]
     arrays["gap_first_seq"] = np.array([gap["first_seq"] for gap in gaps], dtype=np.uint64)

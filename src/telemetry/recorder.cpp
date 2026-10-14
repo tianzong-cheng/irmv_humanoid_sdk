@@ -19,10 +19,6 @@ namespace {
 
 using Json = nlohmann::json;
 
-// The magic of a chunk file: a reader refuses a file that does not start with
-// it instead of reading whatever the bytes happen to mean.
-constexpr char kChunkMagic[8] = {'I', 'R', 'M', 'V', 'C', 'H', '0', '1'};
-
 // Column order of a chunk, fixed by the schema version. The joint columns are
 // `rows * joint_count` wide: a deployment with twelve joints does not pay for
 // the sixty-four the protocol allows. Version 2 writes eight columns - the
@@ -246,81 +242,98 @@ void Recorder::Impl::WriteChunk() {
     return;
   }
   const std::uint32_t rows = static_cast<std::uint32_t>(buffer.size());
-  std::vector<std::uint8_t> bytes;
-  bytes.reserve(64 + rows * (121 + 8 * joint_count * 8));
-  AppendBytes(&bytes, reinterpret_cast<const std::uint8_t *>(kChunkMagic),
-              sizeof(kChunkMagic));
-  AppendU32(&bytes, kRecordSchemaVersion);
-  AppendU32(&bytes, joint_count);
-  AppendU32(&bytes, rows);
-  AppendU64(&bytes, buffer.front().stamp_us);
-  AppendU64(&bytes, buffer.back().stamp_us);
-  AppendU64(&bytes, buffer.front().state_seq);
-  AppendU64(&bytes, buffer.back().state_seq);
+  // The payload - the fixed-width per-row fields and then the column-major
+  // joint columns - is built on its own so the header written below can carry
+  // its exact length and checksum before a byte of it reaches the file. A
+  // reader then tells a chunk whose bytes were corrupted from one that was cut
+  // short without trusting either.
+  std::vector<std::uint8_t> payload;
+  payload.reserve(ChunkPayloadBytes(rows, joint_count));
 
   for (const RecordSample &sample : buffer) {
-    AppendU64(&bytes, sample.stamp_us);
-    AppendU64(&bytes, sample.state_seq);
-    AppendU32(&bytes, static_cast<std::uint32_t>(sample.execution_state));
-    AppendU32(&bytes, static_cast<std::uint32_t>(sample.output_action));
-    AppendU32(&bytes, static_cast<std::uint32_t>(sample.stop_reason));
-    AppendU64(&bytes, sample.fault_id);
-    AppendU8(&bytes, sample.healthy ? 1U : 0U);
-    AppendU8(&bytes, sample.damping_eligible ? 1U : 0U);
-    AppendU8(&bytes, sample.command_present ? 1U : 0U);
-    AppendU8(&bytes, sample.feedback_valid ? 1U : 0U);
-    AppendU8(&bytes, sample.imu_valid ? 1U : 0U);
-    AppendU8(&bytes, sample.send_accepted ? 1U : 0U);
-    AppendU8(&bytes, sample.output_valid ? 1U : 0U);
-    AppendBytes(&bytes, sample.producer_id.data(), sample.producer_id.size());
-    AppendU64(&bytes, sample.epoch);
-    AppendU64(&bytes, sample.command_seq);
-    AppendU64(&bytes, sample.source_state_seq);
-    AppendU64(&bytes, sample.command_rx_us);
-    AppendU64(&bytes, sample.feedback_seq);
-    AppendU64(&bytes, sample.feedback_stamp_us);
+    AppendU64(&payload, sample.stamp_us);
+    AppendU64(&payload, sample.state_seq);
+    AppendU32(&payload, static_cast<std::uint32_t>(sample.execution_state));
+    AppendU32(&payload, static_cast<std::uint32_t>(sample.output_action));
+    AppendU32(&payload, static_cast<std::uint32_t>(sample.stop_reason));
+    AppendU64(&payload, sample.fault_id);
+    AppendU8(&payload, sample.healthy ? 1U : 0U);
+    AppendU8(&payload, sample.damping_eligible ? 1U : 0U);
+    AppendU8(&payload, sample.command_present ? 1U : 0U);
+    AppendU8(&payload, sample.feedback_valid ? 1U : 0U);
+    AppendU8(&payload, sample.imu_valid ? 1U : 0U);
+    AppendU8(&payload, sample.send_accepted ? 1U : 0U);
+    AppendU8(&payload, sample.output_valid ? 1U : 0U);
+    AppendBytes(&payload, sample.producer_id.data(), sample.producer_id.size());
+    AppendU64(&payload, sample.epoch);
+    AppendU64(&payload, sample.command_seq);
+    AppendU64(&payload, sample.source_state_seq);
+    AppendU64(&payload, sample.command_rx_us);
+    AppendU64(&payload, sample.feedback_seq);
+    AppendU64(&payload, sample.feedback_stamp_us);
   }
   // The joint columns, one column at a time and only as wide as the run needs.
   for (const RecordSample &sample : buffer) {
     for (std::uint32_t joint = 0; joint < joint_count; ++joint) {
-      AppendDouble(&bytes, sample.q[joint]);
+      AppendDouble(&payload, sample.q[joint]);
     }
   }
   for (const RecordSample &sample : buffer) {
     for (std::uint32_t joint = 0; joint < joint_count; ++joint) {
-      AppendDouble(&bytes, sample.dq[joint]);
+      AppendDouble(&payload, sample.dq[joint]);
     }
   }
   for (const RecordSample &sample : buffer) {
     for (std::uint32_t joint = 0; joint < joint_count; ++joint) {
-      AppendDouble(&bytes, sample.tau_ff[joint]);
+      AppendDouble(&payload, sample.tau_ff[joint]);
     }
   }
   for (const RecordSample &sample : buffer) {
     for (std::uint32_t joint = 0; joint < joint_count; ++joint) {
-      AppendDouble(&bytes, sample.kp[joint]);
+      AppendDouble(&payload, sample.kp[joint]);
     }
   }
   for (const RecordSample &sample : buffer) {
     for (std::uint32_t joint = 0; joint < joint_count; ++joint) {
-      AppendDouble(&bytes, sample.kd[joint]);
+      AppendDouble(&payload, sample.kd[joint]);
     }
   }
   for (const RecordSample &sample : buffer) {
     for (std::uint32_t joint = 0; joint < joint_count; ++joint) {
-      AppendDouble(&bytes, sample.measured_q[joint]);
+      AppendDouble(&payload, sample.measured_q[joint]);
     }
   }
   for (const RecordSample &sample : buffer) {
     for (std::uint32_t joint = 0; joint < joint_count; ++joint) {
-      AppendDouble(&bytes, sample.measured_dq[joint]);
+      AppendDouble(&payload, sample.measured_dq[joint]);
     }
   }
   for (const RecordSample &sample : buffer) {
     for (std::uint32_t joint = 0; joint < joint_count; ++joint) {
-      AppendDouble(&bytes, sample.output_torque[joint]);
+      AppendDouble(&payload, sample.output_torque[joint]);
     }
   }
+
+  // The header is assembled after the payload it describes, so its length and
+  // checksum fields hold real values rather than being patched in afterwards.
+  // The header's own checksum covers everything written above it - the length
+  // among them - so a chunk whose length field was corrupted in place fails the
+  // header check and is named as corrupt instead of being read as a short file.
+  std::vector<std::uint8_t> chunk;
+  chunk.reserve(kChunkHeaderBytes + payload.size());
+  AppendBytes(&chunk, reinterpret_cast<const std::uint8_t *>(kChunkMagic),
+              sizeof(kChunkMagic));
+  AppendU32(&chunk, kRecordSchemaVersion);
+  AppendU32(&chunk, joint_count);
+  AppendU32(&chunk, rows);
+  AppendU32(&chunk, static_cast<std::uint32_t>(payload.size()));
+  AppendU64(&chunk, buffer.front().stamp_us);
+  AppendU64(&chunk, buffer.back().stamp_us);
+  AppendU64(&chunk, buffer.front().state_seq);
+  AppendU64(&chunk, buffer.back().state_seq);
+  AppendU32(&chunk, ChunkCrc32(payload.data(), payload.size()));
+  AppendU32(&chunk, ChunkCrc32(chunk.data(), chunk.size()));
+  AppendBytes(&chunk, payload.data(), payload.size());
 
   const std::string name =
       std::string(kRecordChunkPrefix) + std::to_string(chunks.size()) + ".bin";
@@ -337,8 +350,8 @@ void Recorder::Impl::WriteChunk() {
       DropChunk(RecordGapReason::WriteFailed);
       return;
     }
-    file.write(reinterpret_cast<const char *>(bytes.data()),
-               static_cast<std::streamsize>(bytes.size()));
+    file.write(reinterpret_cast<const char *>(chunk.data()),
+               static_cast<std::streamsize>(chunk.size()));
     file.flush();
     if (!file.good()) {
       ++write_failures;

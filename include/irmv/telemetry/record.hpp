@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string_view>
 
@@ -23,12 +24,19 @@ namespace irmv::telemetry {
 // The version of the on-disk sample layout. A reader refuses a run of another
 // version instead of reinterpreting its bytes.
 //
+// 3 gave every chunk an explicit payload length and a CRC-32 over its own
+// header and over its payload, so a chunk that was corrupted in place - a torn
+// write, a bad sector, a stray edit - is named as corrupt and contributes no
+// rows. Version 2 wrote the same columns but no length and no checksum, so a
+// chunk whose length happened to match was decoded as valid data whatever its
+// bytes held; version 2 runs are refused, never reinterpreted.
+//
 // 2 added the joint feedback the tick used (`measured_q`/`measured_dq`), the
 // output stage's own result (`output_valid`/`output_torque`) and the session
 // sidecar (`sessions.json`). Version 1 carried only the target and the
 // feedback's identity, so a reader could not see what the machine measured or
 // what it was asked to apply; version 1 runs are refused, never reinterpreted.
-inline constexpr std::uint32_t kRecordSchemaVersion = 2;
+inline constexpr std::uint32_t kRecordSchemaVersion = 3;
 
 // A SHA-256 digest rendered as 64 lower-case hex digits, plus a terminator. A
 // session event carries one as fixed storage so the control thread can push it
@@ -190,6 +198,76 @@ struct RecordGap {
   std::uint64_t dropped{0};
   RecordGapReason reason{RecordGapReason::None};
 };
+
+// One chunk file as it lies on disk. The layout is fixed by the schema version
+// and shared by the writer and every reader, so both sides agree on where a
+// field is rather than each holding its own copy of the offsets.
+//
+// A chunk is a fixed header, then the payload: the fixed-width per-row fields,
+// then the column-major joint columns. The header carries the payload's exact
+// length and two CRC-32 checksums, so a reader can tell a corrupt chunk from a
+// truncated one before it trusts a single row:
+//
+//   offset  size  field
+//   0       8     magic (`kChunkMagic`)
+//   8       4     schema version (u32)
+//   12      4     joint count (u32)
+//   16      4     row count (u32)
+//   20      4     payload length in bytes (u32)
+//   24      8     first stamp (u64)
+//   32      8     last stamp (u64)
+//   40      8     first state sequence (u64)
+//   48      8     last state sequence (u64)
+//   56      4     CRC-32 of the payload (u32)
+//   60      4     CRC-32 of the header's first 60 bytes (u32)
+//
+// The header checksum covers the length field and every other structural field,
+// which is what lets a corrupt length be named as corruption instead of being
+// mistaken for a short file: a file cut short by a crash cannot have a valid
+// header checksum over a wrong length, and a file whose length was edited
+// cannot either. The payload checksum covers the rows; a chunk whose bytes no
+// longer match the checksum they were written with contributes no rows.
+inline constexpr char kChunkMagic[8] = {'I', 'R', 'M', 'V', 'C', 'H', '0', '1'};
+// The fixed header's size, the payload's checksum offset and the header's own
+// checksum offset. The payload follows the header.
+inline constexpr std::size_t kChunkHeaderBytes = 64;
+inline constexpr std::size_t kChunkPayloadCrcOffset = 56;
+inline constexpr std::size_t kChunkHeaderCrcOffset = 60;
+// The fixed-width part of one row, before the column-major joint columns: two
+// u64, three u32, a u64, seven flag bytes, the producer identity and six u64.
+inline constexpr std::size_t kChunkFixedRowBytes =
+    2 * sizeof(std::uint64_t) + 3 * sizeof(std::uint32_t) +
+    sizeof(std::uint64_t) + 7 * sizeof(std::uint8_t) + protocol::kIdSize +
+    6 * sizeof(std::uint64_t);
+
+// The payload length a chunk of `rows` rows and `joint_count` joints must
+// declare: the fixed-width rows plus eight column-major double columns of
+// `rows * joint_count` values. A header that declares another length cannot
+// describe those rows, and the reader refuses it rather than reading past it.
+inline constexpr std::uint64_t ChunkPayloadBytes(std::uint32_t rows,
+                                                 std::uint32_t joint_count) {
+  return static_cast<std::uint64_t>(rows) * kChunkFixedRowBytes +
+         8 * static_cast<std::uint64_t>(rows) * joint_count * sizeof(double);
+}
+
+// The CRC-32 of the buffer (the IEEE 802.3 polynomial, reflected). A chunk
+// carries one over its payload and one over its header, so a reader can tell
+// corruption in place from a file that was cut short. It is table-free on
+// purpose: a chunk is checksummed once as it is written and once as it is read,
+// so a static table would buy microseconds at the cost of a shared mutable
+// state that a control-side caller must not have.
+inline std::uint32_t ChunkCrc32(const std::uint8_t *bytes,
+                                std::size_t size) noexcept {
+  std::uint32_t crc = 0xFFFFFFFFU;
+  for (std::size_t index = 0; index < size; ++index) {
+    crc ^= bytes[index];
+    for (int bit = 0; bit < 8; ++bit) {
+      const std::uint32_t mask = 0U - (crc & 1U);
+      crc = (crc >> 1) ^ (0xEDB88320U & mask);
+    }
+  }
+  return ~crc;
+}
 
 // The name of a level of a run that a reader can find without a clock: the
 // directory of one run and the files inside it.
