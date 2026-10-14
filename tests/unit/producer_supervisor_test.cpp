@@ -382,6 +382,13 @@ int Usability() {
 
 // A second producer replaces the first: the replaced one is told to stop, and
 // nothing of its work survives.
+//
+// Whether a replacement may be offered at all is the caller's decision - the
+// supervision loop takes a registration only while the application is idle in
+// Ready with nothing armed, and drops the candidate the behaviour held for the
+// replaced producer - so this pins what the supervisor itself owes the caller:
+// the new selection, the stop notice for the old one, and no survivor of the
+// old one's preparation or candidate.
 int Replacement() {
   const ApplicationConfig &config = Config();
   ProducerSupervisor supervisor(config);

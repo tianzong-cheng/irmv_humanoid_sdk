@@ -153,6 +153,13 @@ class BehaviorFsm {
   void OfferLocomotionCandidate(const protocol::JointCommand &frame,
                                 protocol::TimeUs now_us);
 
+  // Drops the candidate without touching anything else. The supervision loop
+  // calls it when the selection the candidate was offered for is gone: the
+  // frame carries the process that produced it, and a frame of a process that
+  // is no longer selected must not become the first frame of a request the
+  // runtime would gate against another one.
+  void DropLocomotionCandidate();
+
   // Offers the newest frame of an authorized locomotion source. The behaviour
   // publishes the freshest one at the target cadence while it is in Locomotion,
   // and refuses to publish a frame that belongs to another producer or epoch

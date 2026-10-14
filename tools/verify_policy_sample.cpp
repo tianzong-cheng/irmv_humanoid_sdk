@@ -267,6 +267,21 @@ int main(int argc, char **argv) {
   }
   std::printf("verify_policy_sample: model=%s samples=%zu tolerance=%g\n",
               model_sha256.c_str(), samples.size(), tolerance);
+  // The tree the sample came from, printed with the numbers it proves: a
+  // document generated while that tree was being edited records the hash of its
+  // own diff, and the commit alone would name the wrong revision.
+  const Json &training_meta = document.value("training", Json::object());
+  std::printf(
+      "verify_policy_sample: training task=%s seed=%lld commit=%s dirty=%s "
+      "diff=%s checkpoint=%s\n",
+      training_meta.value("task", std::string("unknown")).c_str(),
+      static_cast<long long>(training_meta.value("seed", 0)),
+      training_meta.value("training_repo_commit", std::string("unknown"))
+          .c_str(),
+      training_meta.value("training_repo_dirty", false) ? "true" : "false",
+      training_meta.value("training_repo_diff_sha256", std::string("-"))
+          .c_str(),
+      training_meta.value("checkpoint", std::string("unknown")).c_str());
   for (const Json &sample : samples) {
     const std::string name = sample.value("name", std::string("?"));
     Comparison comparison;

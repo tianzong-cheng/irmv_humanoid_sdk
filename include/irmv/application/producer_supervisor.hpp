@@ -70,7 +70,10 @@ class ProducerSupervisor {
   // selected. A second producer replaces the first: the replaced one's
   // preparation and candidate are dropped - a frame it produced belongs to a
   // process that is no longer selected - and the caller sends the stop notice
-  // the supervisor returns.
+  // the supervisor returns. Deciding when a registration may be offered at all
+  // is the caller's: the supervision loop offers one only while the application
+  // is idle in Ready with no locomotion authorization armed, and drops the
+  // candidate the behaviour held for the replaced producer.
   //
   // The producer is authorized under its own process identity, so the id the
   // frames carry is traceable to the process that sent them and no entropy is

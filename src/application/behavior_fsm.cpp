@@ -980,6 +980,15 @@ void BehaviorFsm::OfferLocomotionCandidate(const protocol::JointCommand &frame,
   have_locomotion_candidate_ = true;
 }
 
+void BehaviorFsm::DropLocomotionCandidate() {
+  if (!have_locomotion_candidate_) {
+    return;
+  }
+  have_locomotion_candidate_ = false;
+  locomotion_candidate_us_ = 0;
+  locomotion_candidate_ = protocol::JointCommand{};
+}
+
 void BehaviorFsm::OfferLocomotionTarget(const protocol::JointCommand &frame,
                                         protocol::TimeUs now_us) {
   locomotion_target_ = frame;

@@ -59,6 +59,12 @@ class OnnxModel {
   const DeploymentContract &contract() const;
   const JointMapping &mapping() const;
   const std::string &sha256() const;
+  // The digest of the `irmv.deployment` document the model carries, as the
+  // bytes of that document. The model's file digest names the artifact, which
+  // is what an override set is keyed to; this names the contract the artifact
+  // declares, which is what a recorded run is joined to when the artifact
+  // itself is rebuilt without changing what it says.
+  const std::string &contract_sha256() const;
 
   // Runs one inference on an assembled observation and hands back the raw
   // model output. It returns false - leaving `action` and `action_count`

@@ -145,6 +145,7 @@ struct OnnxModel::Impl {
                        std::string(kDeploymentMetadataKey) + " document");
     }
 
+    contract_sha256 = configuration::Sha256(std::string_view(document.get()));
     contract = ParseDeployment(std::string_view(document.get()));
     if (contract.input.name != input_name ||
         contract.input.dimension != static_cast<std::uint32_t>(input_width)) {
@@ -172,6 +173,7 @@ struct OnnxModel::Impl {
   }
 
   std::string sha256;
+  std::string contract_sha256;
   Ort::Session session{nullptr};
   DeploymentContract contract;
   JointMapping mapping;
@@ -208,6 +210,10 @@ const DeploymentContract &OnnxModel::contract() const {
 const JointMapping &OnnxModel::mapping() const { return impl_->mapping; }
 
 const std::string &OnnxModel::sha256() const { return impl_->sha256; }
+
+const std::string &OnnxModel::contract_sha256() const {
+  return impl_->contract_sha256;
+}
 
 bool OnnxModel::Run(const Observation &observation,
                     std::array<float, protocol::kMaxJoints> *action,

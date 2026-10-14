@@ -1919,6 +1919,22 @@ int LocomotionRequest() {
                     stale.config().policy.inference_timeout_us + 1);
   CHECK(stale.sink().requests.size() == stale_requests);
   CHECK(stale.fsm().state() == BehaviorState::Ready);
+
+  // A candidate is dropped with the selection it was offered for: the frame it
+  // carries names the producer process the runtime would have gated, so a
+  // candidate of a process that is no longer selected must not become the first
+  // frame of a request. Dropping it leaves the rest of the behaviour alone.
+  Harness dropped(LocomotionSource::External);
+  CHECK(ToStandby(dropped) == 0);
+  CHECK(ToReady(dropped) == 0);
+  const std::size_t dropped_requests = dropped.sink().requests.size();
+  static_cast<void>(dropped.Step(InputEvent::StartLocomotion));
+  dropped.fsm().OfferLocomotionCandidate(
+      LocomotionFrame(dropped, 0.25, 0, MakeId(0x71)), dropped.now_us());
+  dropped.fsm().DropLocomotionCandidate();
+  step = dropped.Step(InputEvent::None, 1);
+  CHECK(dropped.sink().requests.size() == dropped_requests);
+  CHECK(dropped.fsm().state() == BehaviorState::Ready);
   return 0;
 }
 

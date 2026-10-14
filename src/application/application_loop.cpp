@@ -18,6 +18,7 @@
 
 #include "irmv/application/behavior_fsm.hpp"
 #include "irmv/application/input_router.hpp"
+#include "irmv/application/policy_session_record.hpp"
 #include "irmv/application/producer_supervisor.hpp"
 #include "irmv/application/robot_client.hpp"
 #include "irmv/configuration/application_config.hpp"
@@ -448,6 +449,44 @@ int LoadConfiguration(const ApplicationOptions &options,
 
 }  // namespace
 
+// One line of the session sidecar, written the moment a locomotion context is
+// confirmed - the point at which the model, the gains and the identity the
+// runtime granted are all known at once. An external context is recorded from
+// the first frame the runtime adopted, because the source declared the gains of
+// that frame and this application overrode none of them.
+void RecordPolicySession(application::PolicySessionRecorder *recorder,
+                         LocomotionSource source, const RobotClient &client,
+                         const BehaviorFsm &fsm,
+                         const policy::ResolvedGains &resolved_gains,
+                         const policy::OnnxModel *model,
+                         const configuration::ApplicationConfig &config,
+                         const protocol::JointCommand &first_frame) {
+  if (recorder == nullptr) {
+    return;
+  }
+  application::PolicySessionEvent event;
+  event.runtime_id = client.runtime_id();
+  event.session_id = client.session_id();
+  event.epoch = fsm.locomotion_epoch();
+  event.external = source == LocomotionSource::External;
+  if (event.external) {
+    event.producer_process_id = fsm.locomotion_producer();
+    application::FillFrameGains(first_frame, config.joint_names(),
+                                &event.gains);
+  } else if (model != nullptr) {
+    event.model_sha256 = model->sha256();
+    event.model_path = config.policy.model_path;
+    event.model_input = model->contract().input.name;
+    event.model_output = model->contract().output.name;
+    event.contract_sha256 = model->contract_sha256();
+    application::FillGainOverrides(resolved_gains, &event.gains);
+  }
+  if (!recorder->TryRecord(event)) {
+    std::fprintf(stderr, "application: session record dropped\n");
+    std::fflush(stderr);
+  }
+}
+
 int RunApplication(const ApplicationOptions &options,
                    const std::atomic<bool> &stop_requested) {
   configuration::ApplicationConfig config;
@@ -592,6 +631,28 @@ int RunApplication(const ApplicationOptions &options,
     std::fflush(stdout);
   }
 
+  // The session sidecar: one line per confirmed locomotion context, carrying
+  // the model that was armed and the gains this deployment applied - facts the
+  // runtime's own session event cannot know, because the runtime never reads
+  // the deployment contract. It follows the recorder's own switch, so a run
+  // that records no samples writes no sidecar either, and it lands in the
+  // directory the recorder was configured with - beside the run directories it
+  // writes - so a reader finds the two records of one context by the identity
+  // they share rather than by where they were put.
+  std::unique_ptr<application::PolicySessionRecorder> session_recorder;
+  if (config.runtime.telemetry.recorder.enabled) {
+    session_recorder = std::make_unique<application::PolicySessionRecorder>(
+        config.runtime.telemetry.recorder.directory.string());
+    if (!session_recorder->started()) {
+      // A sidecar that cannot be written does not stop the run: the samples are
+      // the recording, and this is the note that says why the model a run
+      // belongs to is missing from it.
+      std::fprintf(stderr, "application: session record unavailable: %s\n",
+                   session_recorder->error().c_str());
+      std::fflush(stderr);
+    }
+  }
+
   // The local source's own state across iterations: the authorization
   // generation that drops a result of a withdrawn stop, the previous arming
   // (so the transition out of it can be detected), whether a result is on its
@@ -617,6 +678,10 @@ int RunApplication(const ApplicationOptions &options,
   bool registration_reported = false;
   bool authorized_previously = false;
   bool supervised_armed_previously = false;
+  // The locomotion context the previous iteration observed, for either source:
+  // the session record is written on the transition into one, and the local
+  // source has no authorization notice to hang that off.
+  bool locomotion_previously = false;
   protocol::Id announced_producer = protocol::kNoId;
 
   const protocol::TimeUs period_us = LoopPeriodUs(config);
@@ -638,6 +703,13 @@ int RunApplication(const ApplicationOptions &options,
   std::uint64_t overruns = 0;
   protocol::TimeUs worst_gap_us = 0;
   protocol::TimeUs previous_start_us = 0;
+  // The two halves of the transport as this thread sees them: draining the
+  // inbound lanes, and the sends the behaviour asked for. They are measured
+  // apart from the loop's own gap because a stall of either one is a stall of
+  // the process, and the runtime's supervision deadline does not care which of
+  // them it was - while an operator deciding what to fix does.
+  protocol::TimeUs worst_rx_us = 0;
+  protocol::TimeUs worst_tx_us = 0;
 
   while (true) {
     // Two instants per iteration, both from the one monotonic host clock and
@@ -703,7 +775,12 @@ int RunApplication(const ApplicationOptions &options,
     // (3) Exactly one poll per iteration: the outcome it reports is edge
     // triggered, and the behaviour consumes the serial of this poll for its
     // own outcome handling.
+    const protocol::TimeUs poll_start_us = MonotonicUs();
     const ClientView view = client.Poll(decision_now);
+    const protocol::TimeUs poll_us = MonotonicUs() - poll_start_us;
+    if (poll_us > worst_rx_us) {
+      worst_rx_us = poll_us;
+    }
 
     // The signal is not a keystroke and never a control path of its own: it
     // asks for the same ordered exit the exit key does.
@@ -716,6 +793,7 @@ int RunApplication(const ApplicationOptions &options,
     // because a Step's target belongs to the iteration that produced it.
     BehaviorStep behavior{};
     bool initialization_refused = false;
+    protocol::TimeUs sends_us = 0;
     for (;;) {
       const InputEvent event = router.TakeEvent();
       behavior = fsm.Step(decision_now, event, view);
@@ -723,14 +801,21 @@ int RunApplication(const ApplicationOptions &options,
         initialization_refused = true;
       }
       if (behavior.send_command) {
+        const protocol::TimeUs send_start_us = MonotonicUs();
         static_cast<void>(client.SendCommand(&behavior.command, decision_now));
+        sends_us += MonotonicUs() - send_start_us;
       }
       if (behavior.send_heartbeat) {
+        const protocol::TimeUs send_start_us = MonotonicUs();
         static_cast<void>(client.SendHeartbeat(decision_now));
+        sends_us += MonotonicUs() - send_start_us;
       }
       if (behavior.exit_ready || event == InputEvent::None) {
         break;
       }
+    }
+    if (sends_us > worst_tx_us) {
+      worst_tx_us = sends_us;
     }
 
     // (5b) The local policy source. The behaviour above decided whether it is
@@ -894,12 +979,38 @@ int RunApplication(const ApplicationOptions &options,
            ++index) {
         const protocol::ProducerAnnouncement &announcement =
             producer_events.announcements[index];
+        // A registration is taken only while the application is idle: Ready,
+        // with no locomotion authorization armed or in flight. That is the
+        // state a context is asked from, so a new process cannot take anything
+        // away from a producer whose frames a live context is made of - the
+        // runtime gates a context against the process whose frame it adopted,
+        // and replacing that process mid-context would tell it to stop while
+        // the machine is still following it. A producer that is not accepted
+        // announces itself again on its own cadence, so this delays a selection
+        // instead of losing one.
+        if (behavior.state != BehaviorState::Ready ||
+            behavior.locomotion_armed) {
+          continue;
+        }
+        const bool was_selected = supervisor.selected();
+        const protocol::Id selected_producer = supervisor.producer_process_id();
         if (!supervisor.Select(announcement)) {
           // An announcement this deployment cannot use: another protocol
           // version, another layout, another target period or a producer that
           // is not ready. Nothing is prepared for it, so nothing of it can
           // become a target.
           continue;
+        }
+        if (was_selected &&
+            !(selected_producer == announcement.producer_process_id)) {
+          // The selection moved from one process to another: a candidate the
+          // behaviour still holds was produced by the process that is no longer
+          // selected, and the first frame of the next request must name the
+          // process whose frames the runtime will gate. The candidate goes with
+          // the selection it was offered for, and the new producer is prepared
+          // for the context the operator asks for next.
+          fsm.DropLocomotionCandidate();
+          have_candidate_us = false;
         }
         if (!(announcement.producer_process_id == announced_producer)) {
           announced_producer = announcement.producer_process_id;
@@ -1004,11 +1115,15 @@ int RunApplication(const ApplicationOptions &options,
       // may publish. The notice carries the identity the runtime granted and
       // the sequence of the first frame the request carried, so the producer
       // continues the one stream instead of restarting a numbering of its own
-      // that the runtime's command gate would refuse.
+      // that the runtime's command gate would refuse. The identity is the one
+      // the behaviour stamped on the request - the process whose frame the
+      // runtime adopted - and not the producer that happens to be selected
+      // now: a notice that named another process would authorize a stream the
+      // runtime refuses.
       const bool authorized = behavior.state == BehaviorState::Locomotion;
       if (authorized && !authorized_previously) {
         const protocol::AuthorizationNotice notice = supervisor.Authorized(
-            client.runtime_id(), client.session_id(), supervisor.producer_id(),
+            client.runtime_id(), client.session_id(), fsm.locomotion_producer(),
             fsm.locomotion_epoch(), fsm.locomotion_first_command_seq());
         static_cast<void>(producer_transport->PublishAuthorization(notice));
         std::printf(
@@ -1043,6 +1158,19 @@ int RunApplication(const ApplicationOptions &options,
         std::fflush(stdout);
       }
     }
+
+    // (5c) The session record: one line per confirmed locomotion context,
+    // whichever source produced it. The local source publishes its own stream
+    // and the external one hands the stream to a producer, but what produced
+    // the context - the model and the gains, or the process and the gains its
+    // first frame declared - is the same record, and this is the iteration in
+    // which the runtime applied the request and the identity it granted is
+    // known.
+    if (behavior.state == BehaviorState::Locomotion && !locomotion_previously) {
+      RecordPolicySession(session_recorder.get(), source, client, fsm, gains,
+                          model.get(), config, supervisor.candidate());
+    }
+    locomotion_previously = behavior.state == BehaviorState::Locomotion;
 
     // (6) The display: on every change, and at most every status interval
     // otherwise.
@@ -1090,11 +1218,30 @@ int RunApplication(const ApplicationOptions &options,
       // overruns in the clean-shutdown line, then the outcome of the exit.
       std::printf(
           "application: loop iterations=%llu overruns=%llu worst_gap_us=%llu "
-          "period_us=%llu\n",
+          "worst_rx_us=%llu worst_tx_us=%llu period_us=%llu\n",
           static_cast<unsigned long long>(iterations),
           static_cast<unsigned long long>(overruns),
           static_cast<unsigned long long>(worst_gap_us),
+          static_cast<unsigned long long>(worst_rx_us),
+          static_cast<unsigned long long>(worst_tx_us),
           static_cast<unsigned long long>(period_us));
+      // The link's own counters, printed beside the loop's pacing: a stall of
+      // the processes is what the pacing shows, and a silence on the wire that
+      // no control loop caused is what these show - a lane that refused a
+      // sample, a sample that failed validation, a read that ended a loop. The
+      // application is the only place they exist; the runtime prints its own.
+      std::printf(
+          "application: link results_dropped=%llu states_dropped=%llu "
+          "requests_dropped=%llu commands_dropped=%llu heartbeats_dropped=%llu "
+          "inbound_rejected=%llu read_failures=%llu\n",
+          static_cast<unsigned long long>(transport.dropped_result_count()),
+          static_cast<unsigned long long>(transport.dropped_state_count()),
+          static_cast<unsigned long long>(transport.dropped_request_count()),
+          static_cast<unsigned long long>(transport.dropped_command_count()),
+          static_cast<unsigned long long>(transport.dropped_heartbeat_count()),
+          static_cast<unsigned long long>(transport.inbound_rejected_count()),
+          static_cast<unsigned long long>(
+              transport.inbound_read_failure_count()));
       int exit_code = kExitStopUnknown;
       if (behavior.exit_stop_confirmed) {
         std::printf("application: exit stop=confirmed state=%s\n", lower);

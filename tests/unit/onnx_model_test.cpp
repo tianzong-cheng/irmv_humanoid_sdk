@@ -72,6 +72,13 @@ int main(int argc, char **argv) {
   CHECK(model->sha256().size() == 64);
   CHECK(model->sha256().find_first_not_of("0123456789abcdef") ==
         std::string::npos);
+  // The contract digest names the document the model carries, not the file: a
+  // recorded run is joined to it when the artifact is rebuilt, and it must not
+  // be a second name for the artifact's own bytes.
+  CHECK(model->contract_sha256().size() == 64);
+  CHECK(model->contract_sha256().find_first_not_of("0123456789abcdef") ==
+        std::string::npos);
+  CHECK(model->contract_sha256() != model->sha256());
 
   // One inference on the all-zero observation the contract describes.
   Observation observation;

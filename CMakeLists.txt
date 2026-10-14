@@ -168,6 +168,7 @@ add_library(
   src/application/behavior_fsm.cpp
   src/application/initialization.cpp
   src/application/input_router.cpp
+  src/application/policy_session_record.cpp
   src/application/producer_supervisor.cpp
   src/application/robot_client.cpp
 )
@@ -179,9 +180,16 @@ target_include_directories(
     "$<INSTALL_INTERFACE:include>"
 )
 # The application side of the frozen protocol is deliberately DDS-free: it
-# talks to a transport through ClientSink, so this library links the protocol
-# and the configuration and nothing else.
-target_link_libraries(irmv_application PUBLIC irmv_protocol irmv_configuration)
+# talks to a transport through ClientSink. It links the protocol and the
+# configuration, plus the thread runtime and JSON writer of the policy session
+# sidecar. It never links irmv_policy: the session record copies the policy
+# layer's header-only gain type and calls no policy symbol, so ONNX Runtime
+# stays out of this library and out of the lower process.
+target_link_libraries(
+  irmv_application
+  PUBLIC irmv_protocol irmv_configuration
+  PRIVATE Threads::Threads nlohmann_json::nlohmann_json
+)
 
 add_executable(robot_client_test tests/unit/robot_client_test.cpp)
 target_compile_features(robot_client_test PRIVATE cxx_std_17)
@@ -263,6 +271,32 @@ target_link_libraries(producer_supervisor_test PRIVATE irmv_application)
 add_test(NAME producer_supervisor_test COMMAND producer_supervisor_test)
 set_tests_properties(
   producer_supervisor_test
+  PROPERTIES
+    LABELS core
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
+# The application-side policy session record. It links the application library
+# for the recorder and the JSON library to parse the sidecar back; no DDS, no
+# real clock and no model take part.
+add_executable(
+  policy_session_record_test tests/unit/policy_session_record_test.cpp
+)
+target_compile_features(policy_session_record_test PRIVATE cxx_std_17)
+target_include_directories(
+  policy_session_record_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(
+  policy_session_record_test
+  PRIVATE irmv_application Threads::Threads nlohmann_json::nlohmann_json
+)
+
+add_test(NAME policy_session_record_test COMMAND policy_session_record_test)
+set_tests_properties(
+  policy_session_record_test
   PROPERTIES
     LABELS core
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
