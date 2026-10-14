@@ -581,9 +581,29 @@ either loop: the application now also prints the link's own counters
 commands_dropped=... heartbeats_dropped=... inbound_rejected=... read_failures=...`)
 - the samples a lane refused, the samples that failed validation and the reads
 that ended a loop - so the next occurrence says whether a lane lost the samples
-between them. That is where this stands: the cause is narrowed to the delivery
-path, both processes' schedules are excluded with their own numbers, and the
-counters that name the last step are in place. The heartbeats travel on a
+between them.
+
+The same run, repeated for twenty-five minutes with the counters in place,
+completed without a fault - 141 rounds with `Locomotion` in every one, no
+runtime-deadline stop, memory, threads and descriptors flat on both sides -
+and closed with
+
+```
+application: loop iterations=75532 overruns=1 worst_gap_us=40111 worst_rx_us=157 worst_tx_us=139 period_us=20000
+application: link results_dropped=0 states_dropped=76834 requests_dropped=0 commands_dropped=0 heartbeats_dropped=0 inbound_rejected=0 read_failures=0
+robot_runtime: clean shutdown: ... ticks=754528 overruns=31 worst_overrun_us=8676 ... heartbeat_dropped=0
+```
+
+Every link counter an operator would want is zero except the state lane's
+superseded count, which is the design: the application consumes a fraction of
+the runtime's 500 Hz state stream and always holds the newest. So the stall is
+rare enough that a healthy twenty-five-minute run does not see it, the two runs
+together bracket what it is not (neither control loop, no lane the application
+can see refusing a sample), and the counters that would name it the next time
+are printed. That is where this stands: the cause is narrowed to the delivery
+path, both processes' schedules are excluded with their own numbers, and the fix
+- the heartbeat lane's reliability, a deliberate change to the table in
+`docs/runtime-protocol.md` - is *not* made in this round. The heartbeats travel on a
 `BEST_EFFORT` lane, which is what makes a silent loss possible at all; the
 protocol table in `docs/runtime-protocol.md` is where that would change, and it
 is a deliberate contract change rather than a repair.
