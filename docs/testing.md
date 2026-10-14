@@ -618,7 +618,11 @@ either side of the wire is the one that loses them. That is a property of the
 neither process can observe it - and the fix is a deliberate change to the
 frozen table in `docs/runtime-protocol.md` (a reliable heartbeat lane, or a
 heartbeat published from a thread that cannot be starved), which is why the
-stall is diagnosed rather than patched in this round. That is where this stands: the cause is narrowed to the delivery
+stall is diagnosed rather than patched in this round. It is also not rare: of
+four long runs on this branch, three ended on it (at 19.6, 8.7 and 5.4 minutes)
+and one twenty-five-minute run completed. A lease that expires in three of four
+long runs is a defect of the acceptance rather than a curiosity, and while it
+stands the phase's acceptance is *not* met. That is where this stands: the cause is narrowed to the delivery
 path, both processes' schedules are excluded with their own numbers, and the fix
 - the heartbeat lane's reliability, a deliberate change to the table in
 `docs/runtime-protocol.md` - is *not* made in this round. The heartbeats travel on a
