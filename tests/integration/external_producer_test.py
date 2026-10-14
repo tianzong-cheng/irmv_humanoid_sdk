@@ -130,12 +130,29 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
     runtime_out = runtime_log.open("w", encoding="utf-8")
     application_out = application_log.open("w", encoding="utf-8")
 
+    # The recorder on, in this run's own directory: the external lifecycle is
+    # also what the session sidecar has to describe - one line per authorized
+    # context, carrying the producer process the runtime gated and the gains its
+    # frames declared, joined to the runtime's own session record by the
+    # identity they share.
+    runs_directory = work / "runs"
+    runs_directory.mkdir(parents=True, exist_ok=True)
+    document = json.loads((source_root / "config" / "sdk.json").read_text())
+    document["telemetry"]["recorder"] = {
+        "enabled": True,
+        "sample_hz": 100,
+        "queue_capacity": 256,
+        "directory": str(runs_directory),
+    }
+    config_path = work / "sdk.json"
+    config_path.write_text(json.dumps(document, indent=2) + "\n")
+
     application_process = None
     runtime_process = subprocess.Popen(
         [
             runtime,
             "--config",
-            str(source_root / "config" / "sdk.json"),
+            str(config_path),
             "--domain",
             str(DOMAIN),
             "--fake-scenario",
@@ -159,7 +176,7 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
             [
                 application,
                 "--config",
-                str(source_root / "config" / "sdk.json"),
+                str(config_path),
                 "--domain",
                 str(DOMAIN),
                 "--locomotion-source",
@@ -215,7 +232,7 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
                 [
                     producer_binary,
                     "--config",
-                    str(source_root / "config" / "sdk.json"),
+                    str(config_path),
                     "--domain",
                     str(DOMAIN),
                     "--rate",
@@ -473,6 +490,73 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
                 f"!= {replacing_ids[-1]}"
             )
 
+        # A process that announces itself while a context is authorized must not
+        # take the selection from the producer the runtime is gating: the frame
+        # the runtime adopted names one process, and the notice that tells a
+        # producer to publish has to name the same one. It is not lost either -
+        # it announces itself every 500 ms on its own - it is taken once the
+        # context has ended and the application is idle in Ready again.
+        deferred_process, deferred_log = start_producer()
+        live_selections = count_app(r"producer=selected id=")
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            if count_app(r"producer=selected id=") > live_selections:
+                fail(
+                    "a producer that announced itself during a live context took "
+                    "the selection from the producer the runtime was gating"
+                )
+            time.sleep(0.05)
+        live_targets = targets_of_epoch(work / "trace_run1.jsonl", replacement_epoch)
+        if not live_targets:
+            fail("the live context stopped being adopted while it was live")
+        elif any(target.get("producer_id") != replacing_ids[-1] for target in live_targets):
+            fail(
+                "the live context started adopting frames of another producer: "
+                f"{sorted({target.get('producer_id') for target in live_targets})}"
+            )
+        if re.search(
+            r"producer=publishing",
+            deferred_log.read_text(encoding="utf-8", errors="replace"),
+        ):
+            fail("a producer that was never authorized published a frame")
+
+        # The stop ends the context, and the selection stays where it is while
+        # the application is not idle in Ready: a registration is taken from the
+        # state a locomotion context is asked from, not from the damping that
+        # follows one.
+        wait_stop("the stop before the deferred registration")
+        parked = count_app(r"producer=selected id=")
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if count_app(r"producer=selected id=") > parked:
+                fail("a producer was selected while the application was damping")
+            time.sleep(0.05)
+
+        back_to_ready("the deferred registration")
+        text = wait_more("the deferred producer", r"producer=selected id=", parked, 25)
+        deferred_ids = re.findall(r"producer=selected id=([0-9a-f]{32})", text)
+        if deferred_ids[-1] in (producer_id, selected_ids[-1], replacing_ids[-1]):
+            fail(
+                "the deferred producer was selected under an identity already used: "
+                f"{deferred_ids[-3:]}"
+            )
+        prepared = selected_before(r"producer=prepared ")
+        wait_more("the deferred preparation", r"producer=prepared ", prepared, 25)
+        deferred_epoch = authorize("the deferred registration")
+        if deferred_epoch != 0 and deferred_epoch <= replacement_epoch:
+            fail(
+                "the deferred registration authorized an older epoch than the "
+                f"replacement: {deferred_epoch} <= {replacement_epoch}"
+            )
+        wait_stop("the stop of the deferred registration")
+        # The notice follows the revocation by one iteration of the application's
+        # loop. The example producer stays alive after it - a killed process is
+        # a different case, and this one is told to stop - so the notice is what
+        # its own log has to show.
+        stopped = wait_for(deferred_log, r"producer=stopped", 10)
+        if "producer=stopped" not in stopped:
+            fail(f"the deferred producer was never told to stop: {stopped[-400:]}")
+
         # The producer dies while its context is live: the runtime falls back on
         # its own command deadline, the application follows it without latching
         # anything, and a fresh process can be authorized again.
@@ -524,6 +608,65 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
                 runtime_process.wait(timeout=10)
         application_out.close()
         runtime_out.close()
+
+    # The session sidecar. The recorder was on for this run, so every
+    # authorized context has to have a line of its own - carrying the
+    # producer process the runtime gated and the gains its frames declared -
+    # and every line has to join the runtime's own session record by the
+    # identity the two share. This is what a run's recording is joined to
+    # the source that produced it; the runtime's record cannot say it, since
+    # the runtime never reads a deployment contract.
+    sidecar = work / "runs" / "policy_sessions.jsonl"
+    if not sidecar.is_file():
+        fail("the session sidecar was not written")
+    else:
+        events = [
+            json.loads(line)
+            for line in sidecar.read_text(encoding="utf-8", errors="replace").splitlines()
+            if line.strip()
+        ]
+        if len(events) < 4:
+            fail(f"the sidecar holds {len(events)} session(s), not one per authorized context")
+        # The runtime's own per-tick trace is where the identity of an adopted
+        # context is written while the run happens, so the join is checked
+        # against what the runtime published rather than against a file only a
+        # clean shutdown produces.
+        trace_rows = [
+            json.loads(line)
+            for line in (work / "trace_run1.jsonl")
+            .read_text(encoding="utf-8", errors="replace")
+            .splitlines()
+            if line.strip()
+        ]
+        # A trace row carries the identity only while a context is published:
+        # the ones before the handover name neither.
+        joined = {
+            (row["session_id"], int(row["epoch"]), row["producer_id"])
+            for row in trace_rows
+            if "session_id" in row and "epoch" in row and "producer_id" in row
+        }
+        names = {joint["name"] for joint in document["robot"]["joints"]}
+        for event in events:
+            if event.get("schema") != "irmv.policy_session" or event.get("version") != 1:
+                fail(f"a sidecar line is not this schema: {event.get('schema')} v{event.get('version')}")
+            if event.get("source") != "external":
+                fail(f"an external run recorded source={event.get('source')}")
+            key = (event["session_id"], int(event["epoch"]), event["producer_process_id"])
+            if key not in joined:
+                fail(
+                    f"the session record {key} is not joined to any runtime session; "
+                    f"the recorder directory holds {sorted(path.name for path in (work / 'runs').iterdir())} "
+                    f"and the runtime recorded {sorted(joined)}; the run holds "
+                    f"{sorted(path.name for run in (work / 'runs').glob('run_*') for path in run.iterdir())}"
+                )
+            gains = event.get("gains") or []
+            if len(gains) != 2 * len(names):
+                fail(f"the external session recorded {len(gains)} gain rows, not two per joint")
+            for row in gains:
+                if row["gain"] not in ("kp", "kd") or row["joint"] not in names:
+                    fail(f"a gain row names {row['joint']}.{row['gain']}")
+                if row["model"] != row["effective"]:
+                    fail("this application overrode a gain of an external source")
 
     if failures:
         return 1

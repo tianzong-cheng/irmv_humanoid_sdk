@@ -18,6 +18,7 @@ are the fake deployment's demonstration values.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import signal
 import subprocess
@@ -78,6 +79,26 @@ def main() -> int:
             print(f"policy_locomotion_test: the deployment was not generated: {generated.stderr}")
             return 1
 
+        # The recorder on, and one experimental gain override keyed to this
+        # model's own digest: the run is then also the evidence that a recorded
+        # context is joined to the model that produced it and to the gains this
+        # deployment actually sent, which is what the runtime's own session
+        # record cannot say - it never reads a deployment contract.
+        model_sha256 = hashlib.sha256((work / "policy.onnx").read_bytes()).hexdigest()
+        document = json.loads((work / "sdk.json").read_text(encoding="utf-8"))
+        document["telemetry"]["recorder"] = {
+            "enabled": True,
+            "sample_hz": 100,
+            "queue_capacity": 256,
+            "directory": str(work / "runs"),
+        }
+        overridden_joint = document["robot"]["joints"][0]["name"]
+        document["application"]["policy_overrides"] = [
+            {"model_sha256": model_sha256, "joints": {overridden_joint: {"kp": 60.0}}}
+        ]
+        (work / "sdk.json").write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        (work / "runs").mkdir(parents=True, exist_ok=True)
+
         config = work / "sdk.json"
         runtime_log = work / "runtime.log"
         application_log = work / "application.log"
@@ -93,6 +114,8 @@ def main() -> int:
                 str(DOMAIN),
                 "--fake-scenario",
                 str(work / "fake_scenario.json"),
+                "--output-trace",
+                str(work / "trace_run1.jsonl"),
             ],
             stdout=runtime_out,
             stderr=subprocess.STDOUT,
@@ -171,6 +194,67 @@ def main() -> int:
                     runtime_process.wait(timeout=10)
             runtime_out.close()
             application_out.close()
+
+        # The session sidecar: one line for the context this run
+        # authorized, carrying the model that was armed, the contract it
+        # declared, the one gain this deployment overrode and the identity
+        # it shares with the runtime's own session record.
+        sidecar = work / "runs" / "policy_sessions.jsonl"
+        if not sidecar.is_file():
+            fail("the session sidecar was not written")
+        else:
+            events = [
+                json.loads(line)
+                for line in sidecar.read_text(encoding="utf-8", errors="replace").splitlines()
+                if line.strip()
+            ]
+            if len(events) != 1:
+                fail(f"the sidecar holds {len(events)} session(s), not one for the one context")
+            else:
+                event = events[0]
+                if event.get("schema") != "irmv.policy_session" or event.get("version") != 1:
+                    fail(f"the sidecar line is {event.get('schema')} v{event.get('version')}")
+                if event.get("source") != "local":
+                    fail(f"a local run recorded source={event.get('source')}")
+                model = event.get("model") or {}
+                if model.get("sha256") != model_sha256:
+                    fail(f"the session names model {model.get('sha256')}, not {model_sha256}")
+                if model.get("path") != str((work / "policy.onnx").resolve()):
+                    fail(f"the session names the model at {model.get('path')}")
+                if model.get("input") != "obs" or model.get("output") != "actions":
+                    fail("the session does not name the model's own I/O")
+                if len(model.get("contract_sha256") or "") != 64:
+                    fail("the session does not name the deployment contract it was joined to")
+                gains = event.get("gains") or []
+                if len(gains) != 1 or gains[0].get("joint") != overridden_joint:
+                    fail(f"the session recorded {gains}, not the one overridden gain")
+                elif gains[0].get("gain") != "kp" or gains[0].get("effective") != 60.0:
+                    fail(f"the overridden gain is recorded as {gains[0]}")
+                elif gains[0].get("model") == gains[0].get("effective"):
+                    fail("the session does not record both sides of the override")
+                # The runtime's own per-tick trace is where the identity of an
+                # adopted context is written while the run happens.
+                trace_rows = [
+                    json.loads(line)
+                    for line in (work / "trace_run1.jsonl")
+                    .read_text(encoding="utf-8", errors="replace")
+                    .splitlines()
+                    if line.strip()
+                ]
+                # A trace row carries the identity only while a context is
+                # published: the ones before the handover name neither.
+                joined = {
+                    (row["session_id"], int(row["epoch"]))
+                    for row in trace_rows
+                    if "session_id" in row and "epoch" in row
+                }
+                if (event["session_id"], int(event["epoch"])) not in joined:
+                    fail(
+                        "the session record is not joined to any runtime session: "
+                        f"{(event['session_id'], event['epoch'])} not in {sorted(joined)}; "
+                        f"the recorder directory holds "
+                        f"{sorted(path.name for path in (work / 'runs').iterdir())}"
+                    )
 
     if failures:
         return 1

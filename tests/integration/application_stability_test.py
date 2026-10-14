@@ -27,12 +27,29 @@ import sys
 import time
 from pathlib import Path
 
-KEYS = {"damping": b"d", "initialize": b"i", "zero_torque": b"z", "exit": b"x"}
+KEYS = {
+    "damping": b"d",
+    "initialize": b"i",
+    "locomotion": b"l",
+    "zero_torque": b"z",
+    "exit": b"x",
+}
 
-# The behaviours each key asks for, in the order a round walks them.
+# The behaviours each key asks for, in the order a round walks them. The
+# locomotion round is the same walk with a policy context in the middle, which
+# is what a long run has to include: it is the only state where a source
+# publishes a stream of its own, and the state the acceptance statistics are
+# about.
 ROUND = (
     ("damping", r"behavior=Damping runtime=Damping "),
     ("initialize", r"behavior=Ready runtime=Tracking "),
+    ("zero_torque", r"behavior=Standby runtime=ZeroTorque "),
+)
+ROUND_LOCOMOTION = (
+    ("damping", r"behavior=Damping runtime=Damping "),
+    ("initialize", r"behavior=Ready runtime=Tracking "),
+    ("locomotion", r"behavior=Locomotion runtime=Tracking "),
+    ("damping", r"behavior=Damping runtime=Damping "),
     ("zero_torque", r"behavior=Standby runtime=ZeroTorque "),
 )
 
@@ -84,6 +101,19 @@ def main() -> int:
     )
     parser.add_argument("--work-dir", type=Path, default=None)
     parser.add_argument(
+        "--fake-scenario",
+        type=Path,
+        default=None,
+        help="the scenario the runtime replays (default: the shipped one); a "
+        "generated deployment carries its own beside its configuration",
+    )
+    parser.add_argument(
+        "--locomotion",
+        action="store_true",
+        help="walk a policy context in every round, which needs a configuration "
+        "whose policy.model_path names a model this deployment can load",
+    )
+    parser.add_argument(
         "--trace",
         action="store_true",
         help="record the runtime's per-tick output trace in the work directory",
@@ -124,7 +154,11 @@ def main() -> int:
         "--domain",
         str(args.domain),
         "--fake-scenario",
-        str(source_root / "tests" / "support" / "fake_static.json"),
+        str(
+            args.fake_scenario.resolve()
+            if args.fake_scenario
+            else source_root / "tests" / "support" / "fake_static.json"
+        ),
     ]
     if args.trace:
         runtime_arguments += ["--output-trace", str(work / "trace_run1.jsonl")]
@@ -208,8 +242,9 @@ def main() -> int:
         expect("the handover", r"behavior=Standby runtime=ZeroTorque ")
 
         next_sample = started
+        round_keys = ROUND_LOCOMOTION if args.locomotion else ROUND
         while time.monotonic() - started < args.duration_s and not failures:
-            for name, pattern in ROUND:
+            for name, pattern in round_keys:
                 # An operator who sees no transition asks again, and that is what
                 # this does: a key that produced nothing (a stalled request, a
                 # request the runtime refused, a transition that raced the
@@ -311,8 +346,13 @@ def main() -> int:
     print(summarise("runtime", stats_runtime))
     if failures:
         return 1
+    states = (
+        "Standby <-> Damping <-> Ready <-> Locomotion"
+        if args.locomotion
+        else "Standby <-> Damping <-> Ready"
+    )
     print(
-        "application_stability_test: Standby <-> Damping <-> Ready for "
+        f"application_stability_test: {states} for "
         f"{cycles} round(s), no fault, memory/thread/descriptor counts above"
     )
     return 0
