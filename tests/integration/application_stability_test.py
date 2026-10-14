@@ -276,6 +276,14 @@ def main() -> int:
                                 encoding="utf-8", errors="replace")[-600:]
                         )
             cycles += 1
+            # One line per round, so an acceptance record carries the state the
+            # round reached and when, not only the totals at the end.
+            print(
+                f"application_stability_test: round={cycles} "
+                f"t={time.monotonic() - started:.1f}s "
+                f"state={pattern.split()[0]} key={name}",
+                flush=True,
+            )
             now = time.monotonic()
             if now >= next_sample:
                 stats_application.append(sample_stats(application_process.pid))
@@ -292,6 +300,15 @@ def main() -> int:
         ):
             if re.search(pattern, text):
                 fail(f"the run reported {pattern}")
+        # Every supervision timeout the runtime logged, with the sequence it
+        # last accepted and the age it expired at: that pair is the measurement
+        # the acceptance is read from when a run ends on the lease.
+        runtime_text = (work / "runtime.log").read_text(
+            encoding="utf-8", errors="replace")
+        for line in runtime_text.splitlines():
+            if "SupervisorTimeout" in line:
+                print(f"application_stability_test: {line.strip()}", flush=True)
+
         # The runtime's own target deadlines are counted, not failed on: a
         # `CommandTimeout` is the runtime's legal fallback when the upper layer
         # stops publishing its target - which is exactly what a pending stop

@@ -55,14 +55,18 @@ inline std::string InterfaceConfig(const std::string &interface) {
 
 // A reliable writer can refuse a sample when its history is full and the
 // blocking time expires. The sample is counted instead of being lost silently,
-// and the transport thread keeps running.
+// and the transport thread keeps running. The return value tells the one caller
+// that needs the distinction - the heartbeat writer, whose publication is its
+// own chain step - everything else ignores it.
 template <typename Writer, typename Sample>
-void TryWrite(Writer &writer, const Sample &sample,
+bool TryWrite(Writer &writer, const Sample &sample,
               std::atomic<std::uint64_t> &dropped) {
   try {
     writer.write(sample);
+    return true;
   } catch (const std::exception &) {
     dropped.fetch_add(1, std::memory_order_relaxed);
+    return false;
   }
 }
 

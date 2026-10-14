@@ -613,14 +613,71 @@ runtime never missed a deadline by more than a millisecond and dropped no
 heartbeat it received. The samples were handed to the transport and lost inside
 it: the app→runtime direction (heartbeats and targets) was silent while the
 runtime→app direction kept the application's state fresh, and no counter on
-either side of the wire is the one that loses them. That is a property of the
-`BEST_EFFORT` heartbeat lane - CycloneDDS may discard a sample silently and
-neither process can observe it - and the fix is a deliberate change to the
-frozen table in `docs/runtime-protocol.md` (a reliable heartbeat lane, or a
-heartbeat published from a thread that cannot be starved), which is why the
-stall is diagnosed rather than patched in this round. It is also not rare: of
-four long runs on this branch, three ended on it (at 19.6, 8.7 and 5.4 minutes)
-and one twenty-five-minute run completed. A lease that expires in three of four
+either side of the wire is the one that loses them. What those counters *do not* cover is the rest of the chain, and a review was
+right to say so: the application's send timing measures the enqueue into its own
+lane, while the DDS write happens on the client transport's own thread; the
+runtime's `heartbeat_dropped` counts only a refusal *after* a sample was read;
+and the state machine can ignore a heartbeat whose identity or sequence does not
+fit without any counter moving. So an earlier version of this paragraph read the
+run as proof of the `BEST_EFFORT` lane, and that is withdrawn: the steps that
+*lose* a heartbeat - the client transport's DDS write, the wire, the state
+machine's acceptance - were not measured, and a heartbeat can disappear at any
+of them.
+
+The measurement that separates them is now in place, keyed by `heartbeat_seq`
+and a monotonic stamp:
+
+| Step | Where it is counted, and what it prints |
+|---|---|
+| application generated and enqueued | `ClientTransport::heartbeats_queued_count()`, `last_queued_heartbeat_seq()` |
+| client transport dequeued and written to DDS | `heartbeats_published_count()`, `last_published_heartbeat_seq()`, `last_published_heartbeat_us()` - the write happens on the transport's own thread, which is exactly why the loop's gap and its send timing could not see it |
+| runtime read from DDS | `DdsTransport::heartbeats_read_count()`, `last_read_heartbeat_seq()`, `last_read_heartbeat_us()` |
+| state machine accepted or rejected | `ExecutionFsm::heartbeats_accepted_count()`, `heartbeats_rejected_count()`, `heartbeat_rejection_count(reason)` per reason (protocol version, runtime id, session id, supervisor id, stale sequence), `last_accepted_heartbeat_seq()`, `last_accepted_heartbeat_us()` |
+| the lease | `heartbeat_age_us` in the runtime's periodic status record, its shutdown line, and in the `SupervisorTimeout` record itself, which now carries the last accepted sequence and the age it expired at |
+
+The application prints its half in the `application: link ...` line at exit and
+the runtime prints its half every status interval, at shutdown and on the expiry
+itself: `SupervisorTimeout {..., last_heartbeat_seq="1",
+heartbeat_age_us="300006"}` is a real line from a faulted run, and the age it
+reports is the 300 ms lease. The fix waits for that evidence: neither the lane's
+reliability nor any other change is made on the earlier reading. A third proposal - publishing the heartbeat from a thread of its own -
+is withdrawn before it starts, because the specification
+(`docs/superpowers/specs/references/refactor-report.md`) has the supervision
+loop send the heartbeat only after it has completed its checks, and a second
+publisher would weaken exactly that ordering.
+
+A parallel `ctest -j2` also failed one scenario, and the workspace it left
+behind said why: `integration_application_external_absent` ran on DDS domain
+228, and so does `record_export_test` - which was running at the same time. The
+scenario runner picks a domain by *probing* RTPS ports and then claiming a lock
+in the shared parent, so it excludes other *scenarios*; a test with a hardcoded
+domain takes no lock and cannot be probed before it has started, so the probe
+found 228 free and the scenario's own runtime then met the other test's runtime
+and its supervisor. The application reported exactly that
+(`reject=SessionBusy`, `cause=RuntimeRestarted`) while the runtime it believed in
+was a fresh, healthy participant of another test.
+
+Every test class now owns its own band of the domain space, and the scenario
+allocator keeps 190..229 with its locks:
+
+| Band | Owner |
+|---|---|
+| 1..19 | `application_cli_test` (derived from the process id) |
+| 20..79 | `runtime_cli_test` (derived from the process id) |
+| 80..99 | `application_client_test` (derived from the process id) |
+| 100..109 | `dds_codec_test` (base 100, four attempts) |
+| 110 | `producer_codec_test` |
+| 150..153 | `record_export_test`, `application_record_test`, `policy_locomotion_test`, `external_producer_test` |
+| 190..229 | the scenario suite, allocated by `tools/run_integration.py` with one lock file per domain |
+| 230 | `application_stability_test` |
+
+A fixed domain inside 190..229 is therefore a bug: it is a domain the allocator
+may claim for a scenario running beside it. With the bands in place the parallel
+suite is green: `ctest -j2` ran all 58 entries in 96.3 seconds with no failure,
+which is the first parallel pass this branch has had.
+
+It is also not rare: of four long runs on this branch, three ended on it (at
+19.6, 8.7 and 5.4 minutes) and one twenty-five-minute run completed. A lease that expires in three of four
 long runs is a defect of the acceptance rather than a curiosity, and while it
 stands the phase's acceptance is *not* met. That is where this stands: the cause is narrowed to the delivery
 path, both processes' schedules are excluded with their own numbers, and the fix
