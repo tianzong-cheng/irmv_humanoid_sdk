@@ -655,12 +655,22 @@ as much as a positive one: nothing is lost **anywhere** in the chain.
 Every heartbeat the application generated was queued, written to DDS, read and
 accepted by the runtime, and the last sequence on both ends is the same one -
 so the queue, the wire and the state machine's identity checks are excluded, and
-the `BEST_EFFORT` lane is not where the 300 ms went. What remains is the
-*cadence*: a stretch in which no heartbeat was generated at all while the loop
-kept iterating, which the loop's own gap cannot see (it measures iterations, not
-heartbeats). The measurement that names it - the worst interval between two
-consecutive heartbeats, on the application's side and on the runtime's, with a
-late count on each - is the next step, and the fix waits for it. A third proposal - publishing the heartbeat from a thread of its own -
+the `BEST_EFFORT` lane is not where the 300 ms went.
+
+The cadence was measured next, and it is clean too: over that run the longest
+interval between two heartbeats the application queued was 70.2 ms, the longest
+between two the runtime accepted was 74.3 ms, and neither side counted a single
+late interval - both far inside the 300 ms lease. So no heartbeat was lost, none
+was late, and the lease still expired. What the faulting run's own record shows
+is a contradiction *inside one tick*: it names a fresh sequence and
+`heartbeat_age_us="0"`, i.e. the machine accepted a heartbeat in the very tick
+that judged the lease expired. The record now carries what decided rather than
+what was left behind - the read stamp the lease is judged against, its age, and
+the tick that judged it, captured before the expiry clears the session (a
+legitimate expiry prints `lease_age_us="300004"`) - so the next run that fails
+says whether the watermark was genuinely 300 ms old despite accepted heartbeats
+every 74 ms, or whether the check and the acceptance disagree. The fix waits for
+that; nothing in the runtime's lease is changed on the current evidence. A third proposal - publishing the heartbeat from a thread of its own -
 is withdrawn before it starts, because the specification
 (`docs/superpowers/specs/references/refactor-report.md`) has the supervision
 loop send the heartbeat only after it has completed its checks, and a second

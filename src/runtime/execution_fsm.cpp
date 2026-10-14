@@ -226,6 +226,12 @@ void ExecutionFsm::ProcessHeartbeats(TickScope &scope, const TickInput &input) {
   }
 
   if (session_id_ != protocol::kNoId && !LeaseValid(scope.now_us)) {
+    // The two stamps the lease was judged against, kept before the expiry
+    // clears the session: the record is written after it, so reading the fields
+    // there reports the cleared values instead of the ones that decided.
+    expired_lease_rx_us_ = last_heartbeat_rx_us_;
+    expired_lease_accepted_us_ = last_accepted_heartbeat_us_;
+    expired_lease_tick_us_ = scope.now_us;
     ExpireSession(scope);
   }
 }

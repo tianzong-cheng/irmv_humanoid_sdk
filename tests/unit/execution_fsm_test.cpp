@@ -616,6 +616,8 @@ int CheckSessionTakeover() {
 
 // ---- (i) supervision lease ----------------------------------------------
 
+int CheckSupervisionLease();
+
 int CheckSupervisionLease() {
   RuntimeFixture f;
   f.BootToZeroTorque();

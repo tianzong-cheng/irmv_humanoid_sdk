@@ -119,6 +119,17 @@ class ExecutionFsm {
     return last_accepted_heartbeat_us_;
   }
 
+  // The two stamps the lease was judged against when it was found invalid, and
+  // the tick that judged it: captured before the expiry clears the session, so
+  // the record can report what decided rather than what was left behind.
+  protocol::TimeUs expired_lease_rx_us() const { return expired_lease_rx_us_; }
+  protocol::TimeUs expired_lease_accepted_us() const {
+    return expired_lease_accepted_us_;
+  }
+  protocol::TimeUs expired_lease_tick_us() const {
+    return expired_lease_tick_us_;
+  }
+
   // Longest interval between two consecutive accepted heartbeats of one
   // session, on the tick clock, 0 until a session accepts a second heartbeat.
   protocol::TimeUs worst_accepted_heartbeat_gap_us() const {
@@ -412,6 +423,9 @@ class ExecutionFsm {
   std::array<std::uint64_t, kHeartbeatRejectCount> heartbeat_rejections_{};
   protocol::Sequence last_accepted_heartbeat_seq_{0};
   protocol::TimeUs last_accepted_heartbeat_us_{0};
+  protocol::TimeUs expired_lease_rx_us_{0};
+  protocol::TimeUs expired_lease_accepted_us_{0};
+  protocol::TimeUs expired_lease_tick_us_{0};
   protocol::TimeUs worst_accepted_heartbeat_gap_us_{0};
   std::uint64_t heartbeats_late_{0};
 

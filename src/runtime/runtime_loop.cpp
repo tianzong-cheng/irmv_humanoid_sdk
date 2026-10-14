@@ -944,15 +944,27 @@ void LogTickEvents(telemetry::Logger &logger, const ExecutionFsm &fsm,
     }
     if (event.code == EventCode::SupervisorTimeout) {
       // The lease's own line names the silence: the sequence of the last
-      // heartbeat the machine accepted and how long ago it accepted it when the
-      // lease expired. The stamp is not cleared on expiry, so both survive to
-      // this line.
+      // heartbeat the machine accepted, how long ago it accepted it, and the
+      // two stamps the lease was judged against - captured before the expiry
+      // cleared the session, which is why they are read through the expiry
+      // accessors and not from the live fields. A lease that expires while the
+      // acceptance is fresh and the watermark is not (or the other way round)
+      // says which of the two decided.
       const protocol::TimeUs accepted_us = fsm.last_accepted_heartbeat_us();
+      const protocol::TimeUs lease_us = fsm.expired_lease_rx_us();
+      const protocol::TimeUs tick_us = fsm.expired_lease_tick_us();
       record.UintField("last_heartbeat_seq", fsm.last_accepted_heartbeat_seq());
       record.UintField("heartbeat_age_us",
                        accepted_us == 0 ? 0
                                         : static_cast<std::uint64_t>(
                                               event.stamp_us - accepted_us));
+      record.UintField("lease_rx_us", lease_us);
+      record.UintField("lease_age_us",
+                       lease_us == 0 || tick_us < lease_us
+                           ? 0
+                           : static_cast<std::uint64_t>(tick_us - lease_us));
+      record.UintField("expiry_tick_us", tick_us);
+      record.UintField("expiry_stamp_us", event.stamp_us);
     }
     logger.TryLog(record.event());
   }
