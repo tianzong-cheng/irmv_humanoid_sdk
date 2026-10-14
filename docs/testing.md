@@ -639,8 +639,28 @@ The application prints its half in the `application: link ...` line at exit and
 the runtime prints its half every status interval, at shutdown and on the expiry
 itself: `SupervisorTimeout {..., last_heartbeat_seq="1",
 heartbeat_age_us="300006"}` is a real line from a faulted run, and the age it
-reports is the 300 ms lease. The fix waits for that evidence: neither the lane's
-reliability nor any other change is made on the earlier reading. A third proposal - publishing the heartbeat from a thread of its own -
+reports is the 300 ms lease.
+
+The first acceptance run with the chain in place ended on the lease after 85
+rounds and 1045 seconds, and it answered the question negatively, which is worth
+as much as a positive one: nothing is lost **anywhere** in the chain.
+
+| Step, from that run | Value |
+|---|---|
+| application queued / published | `heartbeats_queued=17256 heartbeats_published=17256` |
+| application dropped / last sequence | `heartbeats_dropped=0`, `last_queued_seq=2419`, `last_published_seq=2419` |
+| runtime read / accepted / rejected | `heartbeats_read=17256 heartbeats_accepted=17256 heartbeats_rejected=0`, `last_heartbeat_seq="2419"` |
+| application loop | `iterations=52211 overruns=1 worst_gap_us=44403 period_us=20000` |
+
+Every heartbeat the application generated was queued, written to DDS, read and
+accepted by the runtime, and the last sequence on both ends is the same one -
+so the queue, the wire and the state machine's identity checks are excluded, and
+the `BEST_EFFORT` lane is not where the 300 ms went. What remains is the
+*cadence*: a stretch in which no heartbeat was generated at all while the loop
+kept iterating, which the loop's own gap cannot see (it measures iterations, not
+heartbeats). The measurement that names it - the worst interval between two
+consecutive heartbeats, on the application's side and on the runtime's, with a
+late count on each - is the next step, and the fix waits for it. A third proposal - publishing the heartbeat from a thread of its own -
 is withdrawn before it starts, because the specification
 (`docs/superpowers/specs/references/refactor-report.md`) has the supervision
 loop send the heartbeat only after it has completed its checks, and a second
