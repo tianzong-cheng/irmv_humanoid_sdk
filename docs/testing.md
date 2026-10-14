@@ -670,7 +670,27 @@ the tick that judged it, captured before the expiry clears the session (a
 legitimate expiry prints `lease_age_us="300004"`) - so the next run that fails
 says whether the watermark was genuinely 300 ms old despite accepted heartbeats
 every 74 ms, or whether the check and the acceptance disagree. The fix waits for
-that; nothing in the runtime's lease is changed on the current evidence. A third proposal - publishing the heartbeat from a thread of its own -
+that; nothing in the runtime's lease is changed on the current evidence.
+
+The acceptance itself has now been met once, in full: the same driver with
+`--locomotion`, run for 1800 seconds with the lease stamps in the record,
+completed **168 rounds in 1800.6 s with `Locomotion` in every round, no fault,
+and no `SupervisorTimeout` line anywhere in the runtime's log**, with both
+processes flat:
+
+| Measure, from the completed run | Value |
+|---|---|
+| rounds / wall clock | 168 in 1800.6 s, `Locomotion` in every round |
+| runtime-deadline stops | `command=0`, `source_state=0` |
+| application pacing and link | `iterations=89712 overruns=2 worst_gap_us=46326 worst_rx_us=147 worst_tx_us=127`; `heartbeats_queued=29629 heartbeats_published=29629`, all drop counters zero, `worst_heartbeat_gap_us=71148`, `heartbeats_late=0` |
+| runtime | `ticks=900266 overruns=1 worst_overrun_us=646`, `heartbeats_read=29629 accepted=29629 rejected=0`, `worst_accepted_heartbeat_gap_us=74247`, `heartbeats_late_count=0` |
+| resources | application RSS 30.2 -> 33.1 MB, 22 threads and 8 descriptors flat; runtime 12.4 -> 12.8 MB, 9 and 9 flat |
+
+That is the acceptance the phase owed, and it is one run out of five long ones:
+the other four ended on the lease three times and passed once, so the
+intermittency is real and unfixed, and a green thirty-minute run does not retire
+it. It is a run that happens to miss the fault, not a fault that is gone, and
+the record now names what decided if a later run hits it again. A third proposal - publishing the heartbeat from a thread of its own -
 is withdrawn before it starts, because the specification
 (`docs/superpowers/specs/references/refactor-report.md`) has the supervision
 loop send the heartbeat only after it has completed its checks, and a second
