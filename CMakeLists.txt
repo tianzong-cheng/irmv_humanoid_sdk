@@ -97,6 +97,25 @@ set_tests_properties(
   WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
+add_executable(hardware_config_test tests/unit/hardware_config_test.cpp)
+target_compile_features(hardware_config_test PRIVATE cxx_std_17)
+target_include_directories(
+  hardware_config_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(
+  hardware_config_test PRIVATE irmv_configuration
+                             nlohmann_json::nlohmann_json
+)
+
+add_test(NAME hardware_config_test COMMAND hardware_config_test)
+set_tests_properties(
+  hardware_config_test PROPERTIES LABELS core
+  WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
 add_executable(application_config_test tests/unit/application_config_test.cpp)
 target_compile_features(application_config_test PRIVATE cxx_std_17)
 target_include_directories(

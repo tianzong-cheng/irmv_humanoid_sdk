@@ -1,9 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://irmv.example/schema/runtime-sdk-v1.json",
-  "title": "IRMV fake-only runtime configuration",
+  "title": "IRMV runtime configuration (fake and real backends)",
   "type": "object",
-  "$comment": "Conforming validation MUST evaluate the irmv-joint-name format as a nonempty string whose UTF-8 encoding is at most 64 bytes; validators that ignore format annotations do not implement this contract. LoadConfig additionally enforces cross-field joint-name completeness, unique names, position_min < position_max, boot deadline ordering, minimum frequency versus control_hz, and state-window coverage. LoadApplicationConfig enforces joint-map completeness for the application sections, position limits, gain sign rules, trajectory and supervision ordering, and the input binding reservation; the $comments below state the units and the rules the schema cannot express.",
+  "$comment": "Conforming validation MUST evaluate the irmv-joint-name format as a nonempty string whose UTF-8 encoding is at most 64 bytes; validators that ignore format annotations do not implement this contract. LoadConfig additionally enforces; a real deployment requires explicit robot.buses and per-joint hardware fields, and the loader requires robot.imu when runtime.imu_required is true cross-field joint-name completeness, unique names, position_min < position_max, boot deadline ordering, minimum frequency versus control_hz, and state-window coverage. LoadApplicationConfig enforces joint-map completeness for the application sections, position limits, gain sign rules, trajectory and supervision ordering, and the input binding reservation; the $comments below state the units and the rules the schema cannot express.",
   "required": [
     "schema_version",
     "deployment",
@@ -20,18 +20,31 @@
       "const": 1
     },
     "deployment": {
-      "const": "fake_only"
+      "enum": [
+        "fake_only",
+        "real"
+      ]
     },
     "backend": {
-      "const": "fake"
+      "enum": [
+        "fake",
+        "real"
+      ]
     },
     "robot": {
       "type": "object",
-      "required": ["units", "joints"],
+      "required": [
+        "units",
+        "joints"
+      ],
       "properties": {
         "units": {
           "type": "object",
-          "required": ["position", "velocity", "torque"],
+          "required": [
+            "position",
+            "velocity",
+            "torque"
+          ],
           "properties": {
             "position": {
               "const": "rad"
@@ -50,7 +63,11 @@
           "maxItems": 64,
           "items": {
             "type": "object",
-            "required": ["name", "position_min", "position_max"],
+            "required": [
+              "name",
+              "position_min",
+              "position_max"
+            ],
             "properties": {
               "name": {
                 "$ref": "#/$defs/jointName"
@@ -60,9 +77,64 @@
               },
               "position_max": {
                 "type": "number"
+              },
+              "bus": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "motor_id": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 31
+              },
+              "direction": {
+                "enum": [
+                  -1,
+                  1
+                ]
+              },
+              "reduction_ratio": {
+                "$ref": "#/$defs/positiveNumber"
+              },
+              "encoder_offset": {
+                "type": "number"
+              },
+              "torque_constant": {
+                "$ref": "#/$defs/positiveNumber"
               }
-            }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "required": [
+                    "bus"
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "bus",
+                    "motor_id",
+                    "direction",
+                    "reduction_ratio",
+                    "encoder_offset",
+                    "torque_constant"
+                  ]
+                }
+              }
+            ]
           }
+        },
+        "buses": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/busConfig"
+          },
+          "$comment": "Required for deployment=real. Bus names are configuration-local labels; (device_type,device_index,channel) must be unique, and the loader enforces it."
+        },
+        "imu": {
+          "$ref": "#/$defs/imuConfig"
         }
       }
     },
@@ -86,7 +158,9 @@
         },
         "damping": {
           "type": "object",
-          "required": ["kd"],
+          "required": [
+            "kd"
+          ],
           "properties": {
             "kd": {
               "$ref": "#/$defs/positiveJointMap"
@@ -165,7 +239,10 @@
         },
         "recovery": {
           "type": "object",
-          "required": ["healthy_window_us", "minimum_frequency_hz"],
+          "required": [
+            "healthy_window_us",
+            "minimum_frequency_hz"
+          ],
           "properties": {
             "healthy_window_us": {
               "$ref": "#/$defs/positiveTimeUs"
@@ -180,7 +257,11 @@
         },
         "continuity": {
           "type": "object",
-          "required": ["position_delta", "velocity_delta", "torque_delta"],
+          "required": [
+            "position_delta",
+            "velocity_delta",
+            "torque_delta"
+          ],
           "properties": {
             "position_delta": {
               "$ref": "#/$defs/nonNegativeJointMap"
@@ -211,7 +292,11 @@
       "properties": {
         "initialization": {
           "type": "object",
-          "required": ["target_position", "gains", "trajectory"],
+          "required": [
+            "target_position",
+            "gains",
+            "trajectory"
+          ],
           "properties": {
             "target_position": {
               "$ref": "#/$defs/positionJointMap"
@@ -281,10 +366,16 @@
         },
         "policy": {
           "type": "object",
-          "required": ["model_path", "inference_timeout_us"],
+          "required": [
+            "model_path",
+            "inference_timeout_us"
+          ],
           "properties": {
             "model_path": {
-              "type": ["string", "null"],
+              "type": [
+                "string",
+                "null"
+              ],
               "$comment": "Path of the policy ONNX carrying the irmv.deployment contract. null means this deployment ships no local policy, which is the shipped Fake configuration; the local locomotion source is refused at startup without a path. The path is not a model identity: the model's own SHA-256 is what selects the overrides below."
             },
             "inference_timeout_us": {
@@ -303,7 +394,10 @@
         },
         "external_producer": {
           "type": "object",
-          "required": ["prepare_timeout_us", "registration_timeout_us"],
+          "required": [
+            "prepare_timeout_us",
+            "registration_timeout_us"
+          ],
           "properties": {
             "prepare_timeout_us": {
               "$ref": "#/$defs/positiveTimeUs",
@@ -320,7 +414,11 @@
     },
     "input": {
       "type": "object",
-      "required": ["intent_timeout_us", "repeat_guard_us", "bindings"],
+      "required": [
+        "intent_timeout_us",
+        "repeat_guard_us",
+        "bindings"
+      ],
       "properties": {
         "intent_timeout_us": {
           "$ref": "#/$defs/positiveTimeUs",
@@ -399,7 +497,14 @@
       ],
       "properties": {
         "level": {
-          "enum": ["TRACE", "DEBUG", "INFO", "WARNING", "ERROR", "FATAL"]
+          "enum": [
+            "TRACE",
+            "DEBUG",
+            "INFO",
+            "WARNING",
+            "ERROR",
+            "FATAL"
+          ]
         },
         "directory": {
           "type": "string",
@@ -420,7 +525,12 @@
         },
         "recorder": {
           "type": "object",
-          "required": ["enabled", "sample_hz", "queue_capacity", "directory"],
+          "required": [
+            "enabled",
+            "sample_hz",
+            "queue_capacity",
+            "directory"
+          ],
           "properties": {
             "enabled": {
               "type": "boolean",
@@ -439,7 +549,10 @@
               "$comment": "Samples the handoff between the control thread and the recorder's writer holds. A full queue costs the sample - counted and reported as a gap in the run - and never delays the control tick. The upper bound is this build's fixed channel capacity."
             },
             "directory": {
-              "type": ["string", "null"],
+              "type": [
+                "string",
+                "null"
+              ],
               "$comment": "Where one directory per run is created; null means the log directory of the same document. The recorder never creates a path it was not told to use."
             }
           },
@@ -449,7 +562,10 @@
     },
     "dds": {
       "type": "object",
-      "required": ["domain", "interface"],
+      "required": [
+        "domain",
+        "interface"
+      ],
       "properties": {
         "domain": {
           "type": "integer",
@@ -508,7 +624,10 @@
     },
     "policyOverrideSet": {
       "type": "object",
-      "required": ["model_sha256", "joints"],
+      "required": [
+        "model_sha256",
+        "joints"
+      ],
       "properties": {
         "model_sha256": {
           "type": "string",
@@ -547,7 +666,10 @@
       "maxProperties": 64,
       "additionalProperties": {
         "type": "object",
-        "required": ["kp", "kd"],
+        "required": [
+          "kp",
+          "kd"
+        ],
         "properties": {
           "kp": {
             "$ref": "#/$defs/positiveNumber",
@@ -568,6 +690,100 @@
       "maxLength": 1,
       "pattern": "^[^ ]$",
       "$comment": "One character, never the reserved space byte. maxLength counts code points; LoadApplicationConfig additionally requires exactly one UTF-8 byte."
+    },
+    "busConfig": {
+      "type": "object",
+      "required": [
+        "name",
+        "device_type",
+        "device_index",
+        "channel",
+        "arbitration_bps",
+        "data_bps",
+        "iso_mode",
+        "resistance_enabled"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "device_type": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295,
+          "$comment": "Vendor device type constant; only the type the build was verified against is accepted at runtime."
+        },
+        "device_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "channel": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "arbitration_bps": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "data_bps": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "iso_mode": {
+          "type": "boolean"
+        },
+        "resistance_enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "imuConfig": {
+      "type": "object",
+      "required": [
+        "hardware_id",
+        "baudrate"
+      ],
+      "properties": {
+        "hardware_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "baudrate": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "deployment": {
+            "const": "real"
+          }
+        },
+        "required": [
+          "deployment"
+        ]
+      },
+      "then": {
+        "properties": {
+          "robot": {
+            "required": [
+              "buses"
+            ]
+          }
+        }
+      }
+    }
+  ]
 }

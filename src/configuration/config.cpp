@@ -50,18 +50,47 @@ Json JointMap(const std::vector<std::string> &names, const JointArray &values) {
 Json CanonicalConfig(const RuntimeConfig &config) {
   Json joints = Json::array();
   for (std::size_t index = 0; index < config.joint_count(); ++index) {
-    joints.push_back({{"name", config.joint_names[index]},
-                      {"position_min", config.position_min[index]},
-                      {"position_max", config.position_max[index]}});
+    Json joint = {{"name", config.joint_names[index]},
+                  {"position_min", config.position_min[index]},
+                  {"position_max", config.position_max[index]}};
+    if (config.hardware && index < config.hardware->joints.size()) {
+      const HardwareJointConfig &mapping = config.hardware->joints[index];
+      joint["bus"] = mapping.bus;
+      joint["motor_id"] = mapping.motor_id;
+      joint["direction"] = mapping.direction;
+      joint["reduction_ratio"] = mapping.reduction_ratio;
+      joint["encoder_offset"] = mapping.encoder_offset;
+      joint["torque_constant"] = mapping.torque_constant;
+    }
+    joints.push_back(std::move(joint));
+  }
+  Json robot = {
+      {"units",
+       {{"position", "rad"}, {"velocity", "rad_s"}, {"torque", "Nm"}}},
+      {"joints", std::move(joints)}};
+  if (config.hardware) {
+    Json buses = Json::array();
+    for (const BusConfig &bus : config.hardware->buses) {
+      buses.push_back({{"name", bus.name},
+                       {"device_type", bus.device_type},
+                       {"device_index", bus.device_index},
+                       {"channel", bus.channel},
+                       {"arbitration_bps", bus.arbitration_bps},
+                       {"data_bps", bus.data_bps},
+                       {"iso_mode", bus.iso_mode},
+                       {"resistance_enabled", bus.resistance_enabled}});
+    }
+    robot["buses"] = std::move(buses);
+    if (config.hardware->imu) {
+      robot["imu"] = {{"hardware_id", config.hardware->imu->hardware_id},
+                      {"baudrate", config.hardware->imu->baudrate}};
+    }
   }
   return {
       {"schema_version", config.schema_version},
       {"deployment", config.deployment},
       {"backend", config.backend},
-      {"robot",
-       {{"units",
-         {{"position", "rad"}, {"velocity", "rad_s"}, {"torque", "Nm"}}},
-        {"joints", joints}}},
+      {"robot", std::move(robot)},
       {"runtime",
        {{"control_hz", config.control_hz},
         {"damping", {{"kd", JointMap(config.joint_names, config.damping_kd)}}},
@@ -150,12 +179,15 @@ RuntimeConfig LoadConfig(const std::filesystem::path &path,
   }
   config.schema_version = static_cast<std::uint32_t>(schema_version);
   config.deployment = StringMember(document, "deployment", "");
-  if (config.deployment != "fake_only") {
-    Fail("deployment", "must equal fake_only");
+  const bool real_deployment = config.deployment == "real";
+  if (!real_deployment && config.deployment != "fake_only") {
+    Fail("deployment", "must equal fake_only or real");
   }
   config.backend = StringMember(document, "backend", "");
-  if (config.backend != "fake") {
-    Fail("backend", "only the fake backend is supported");
+  if (config.backend != (real_deployment ? "real" : "fake")) {
+    Fail("backend",
+         real_deployment ? "must equal real when deployment is real"
+                         : "must equal fake when deployment is fake_only");
   }
 
   const Json &robot = ObjectMember(document, "robot", "");
@@ -175,6 +207,69 @@ RuntimeConfig LoadConfig(const std::filesystem::path &path,
     Fail("robot.joints", "must contain between 1 and 64 joints");
   }
   std::unordered_set<std::string> seen_names;
+
+  // A real deployment names its hardware explicitly. The tables are parsed here
+  // with the joint order they belong to, so the runtime and the tools consume
+  // one definition of the machine instead of two.
+  std::optional<HardwareConfig> hardware;
+  std::unordered_set<std::string> seen_bus_names;
+  std::unordered_set<std::string> seen_endpoints;
+  const auto buses_member = robot.find("buses");
+  if (real_deployment && buses_member == robot.end()) {
+    Fail("robot.buses", "is required for a real deployment");
+  }
+  if (buses_member != robot.end()) {
+    if (!buses_member->is_array() || buses_member->empty()) {
+      Fail("robot.buses", "must be a non-empty array");
+    }
+    hardware.emplace();
+    for (std::size_t index = 0; index < buses_member->size(); ++index) {
+      const std::string path = "robot.buses[" + std::to_string(index) + "]";
+      const Json &bus = (*buses_member)[index];
+      if (!bus.is_object()) {
+        Fail(path, "must be an object");
+      }
+      BusConfig parsed;
+      parsed.name = StringMember(bus, "name", path);
+      if (parsed.name.empty() || parsed.name.size() > protocol::kMaxNameBytes) {
+        Fail(path + ".name", "must contain 1 to 64 bytes");
+      }
+      if (!seen_bus_names.insert(parsed.name).second) {
+        Fail(path + ".name", "must be unique");
+      }
+      parsed.device_type = static_cast<std::uint32_t>(
+          PositiveInteger(Member(bus, "device_type", path),
+                          path + ".device_type",
+                          std::numeric_limits<std::uint32_t>::max()));
+      parsed.device_index = static_cast<std::uint32_t>(
+          IntegerInRange(Member(bus, "device_index", path),
+                         path + ".device_index", 0,
+                         std::numeric_limits<std::uint32_t>::max()));
+      parsed.channel = static_cast<std::uint32_t>(IntegerInRange(
+          Member(bus, "channel", path), path + ".channel", 0, 1));
+      parsed.arbitration_bps = static_cast<std::uint32_t>(
+          PositiveInteger(Member(bus, "arbitration_bps", path),
+                          path + ".arbitration_bps",
+                          std::numeric_limits<std::uint32_t>::max()));
+      parsed.data_bps = static_cast<std::uint32_t>(
+          PositiveInteger(Member(bus, "data_bps", path), path + ".data_bps",
+                          std::numeric_limits<std::uint32_t>::max()));
+      parsed.iso_mode = BoolMember(bus, "iso_mode", path);
+      parsed.resistance_enabled = BoolMember(bus, "resistance_enabled", path);
+      const std::string endpoint =
+          std::to_string(parsed.device_type) + ":" +
+          std::to_string(parsed.device_index) + ":" +
+          std::to_string(parsed.channel);
+      if (!seen_endpoints.insert(endpoint).second) {
+        Fail(path, "duplicates the device/channel of another bus");
+      }
+      hardware->buses.push_back(std::move(parsed));
+    }
+  }
+  std::unordered_set<std::string> seen_motor_addresses;
+  std::vector<HardwareJointConfig> joint_mappings;
+  bool joint_hardware_present = false;
+  joint_mappings.reserve(joints.size());
   config.joint_names.reserve(joints.size());
   for (std::size_t index = 0; index < joints.size(); ++index) {
     const std::string joint_path =
@@ -196,7 +291,88 @@ RuntimeConfig LoadConfig(const std::filesystem::path &path,
     if (config.position_min[index] >= config.position_max[index]) {
       Fail(joint_path + ".position_min", "must be less than position_max");
     }
+
+    const bool require_mapping = real_deployment ||
+                                 buses_member != robot.end();
+    static constexpr const char *kMappingFields[] = {
+        "bus",         "motor_id",       "direction",
+        "reduction_ratio", "encoder_offset", "torque_constant"};
+    bool has_mapping = false;
+    for (const char *field : kMappingFields) {
+      has_mapping = has_mapping || joint.contains(field);
+    }
+    if (require_mapping && !has_mapping) {
+      Fail(joint_path + ".bus", "is required for a real hardware mapping");
+    }
+    if (has_mapping) {
+      joint_hardware_present = true;
+      HardwareJointConfig mapping;
+      mapping.name = config.joint_names.back();
+      mapping.bus = StringMember(joint, "bus", joint_path);
+      if (mapping.bus.empty()) {
+        Fail(joint_path + ".bus", "must not be empty");
+      }
+      mapping.motor_id = static_cast<std::uint32_t>(IntegerInRange(
+          Member(joint, "motor_id", joint_path), joint_path + ".motor_id", 1,
+          31));
+      const double direction =
+          FiniteMember(joint, "direction", joint_path);
+      if (direction != 1.0 && direction != -1.0) {
+        Fail(joint_path + ".direction", "must equal -1 or 1");
+      }
+      mapping.direction = direction > 0.0 ? 1 : -1;
+      mapping.reduction_ratio =
+          FiniteMember(joint, "reduction_ratio", joint_path);
+      if (mapping.reduction_ratio <= 0.0) {
+        Fail(joint_path + ".reduction_ratio", "must be positive");
+      }
+      mapping.encoder_offset =
+          FiniteMember(joint, "encoder_offset", joint_path);
+      mapping.torque_constant =
+          FiniteMember(joint, "torque_constant", joint_path);
+      if (mapping.torque_constant <= 0.0) {
+        Fail(joint_path + ".torque_constant", "must be positive");
+      }
+      if (!seen_bus_names.count(mapping.bus)) {
+        Fail(joint_path + ".bus", "does not name a configured bus");
+      }
+      const std::string address =
+          mapping.bus + ":" + std::to_string(mapping.motor_id);
+      if (!seen_motor_addresses.insert(address).second) {
+        Fail(joint_path + ".motor_id",
+             "duplicates another joint on the same bus");
+      }
+      joint_mappings.push_back(std::move(mapping));
+    }
   }
+
+  if (buses_member != robot.end() || joint_hardware_present) {
+    if (!hardware) {
+      hardware.emplace();
+    }
+    hardware->joints = std::move(joint_mappings);
+  }
+
+  const auto imu_member = robot.find("imu");
+  if (imu_member != robot.end()) {
+    if (!imu_member->is_object()) {
+      Fail("robot.imu", "must be an object");
+    }
+    if (!hardware) {
+      hardware.emplace();
+    }
+    ImuConfig imu;
+    imu.hardware_id = StringMember(*imu_member, "hardware_id", "robot.imu");
+    if (imu.hardware_id.empty() || imu.hardware_id.size() > 128) {
+      Fail("robot.imu.hardware_id", "must contain 1 to 128 bytes");
+    }
+    imu.baudrate = static_cast<std::uint32_t>(
+        PositiveInteger(Member(*imu_member, "baudrate", "robot.imu"),
+                        "robot.imu.baudrate",
+                        std::numeric_limits<std::uint32_t>::max()));
+    hardware->imu = std::move(imu);
+  }
+  config.hardware = std::move(hardware);
 
   const Json &runtime = ObjectMember(document, "runtime", "");
   config.control_hz = FiniteMember(runtime, "control_hz", "runtime");
@@ -274,6 +450,10 @@ RuntimeConfig LoadConfig(const std::filesystem::path &path,
          "must be positive and no greater than control_hz");
   }
   config.imu_required = BoolMember(runtime, "imu_required", "runtime");
+  if (real_deployment && config.imu_required &&
+      (!config.hardware || !config.hardware->imu)) {
+    Fail("robot.imu", "is required when runtime.imu_required is true");
+  }
 
   const Json &continuity = ObjectMember(runtime, "continuity", "runtime");
   ReadJointMap(Member(continuity, "position_delta", "runtime.continuity"),

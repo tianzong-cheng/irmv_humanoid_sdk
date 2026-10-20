@@ -1,0 +1,191 @@
+{
+  "schema_version": 1,
+  "deployment": "real",
+  "backend": "real",
+  "robot": {
+    "units": {
+      "position": "rad",
+      "velocity": "rad_s",
+      "torque": "Nm"
+    },
+    "joints": [
+      {
+        "name": "test_left",
+        "position_min": -2,
+        "position_max": 2,
+        "bus": "can0",
+        "motor_id": 1,
+        "direction": 1,
+        "reduction_ratio": 36.0,
+        "encoder_offset": 0.0,
+        "torque_constant": 0.1
+      },
+      {
+        "name": "test_right",
+        "position_min": -2,
+        "position_max": 2,
+        "bus": "can1",
+        "motor_id": 7,
+        "direction": -1,
+        "reduction_ratio": 10.0,
+        "encoder_offset": 0.25,
+        "torque_constant": 0.13
+      }
+    ],
+    "buses": [
+      {
+        "name": "can0",
+        "device_type": 41,
+        "device_index": 0,
+        "channel": 0,
+        "arbitration_bps": 1000000,
+        "data_bps": 5000000,
+        "iso_mode": true,
+        "resistance_enabled": false
+      },
+      {
+        "name": "can1",
+        "device_type": 41,
+        "device_index": 0,
+        "channel": 1,
+        "arbitration_bps": 1000000,
+        "data_bps": 5000000,
+        "iso_mode": true,
+        "resistance_enabled": false
+      }
+    ]
+  },
+  "runtime": {
+    "control_hz": 500,
+    "damping": {
+      "kd": {
+        "test_left": 2,
+        "test_right": 2
+      }
+    },
+    "safety": {
+      "joint_velocity_limits": {
+        "test_left": 10,
+        "test_right": 10
+      },
+      "torque_limits": {
+        "test_left": 20,
+        "test_right": 20
+      },
+      "target_velocity_limits": {
+        "test_left": 10,
+        "test_right": 10
+      },
+      "timeouts": {
+        "command_us": 100000,
+        "source_state_us": 150000,
+        "feedback_us": 20000,
+        "imu_us": 20000,
+        "supervisor_us": 300000
+      }
+    },
+    "boot": {
+      "frequency_grace_us": 1000000,
+      "healthy_window_us": 100000,
+      "deadline_us": 2000000,
+      "minimum_frequency_hz": 400
+    },
+    "recovery": {
+      "healthy_window_us": 100000,
+      "minimum_frequency_hz": 400
+    },
+    "imu_required": false,
+    "continuity": {
+      "position_delta": {
+        "test_left": 0.1,
+        "test_right": 0.1
+      },
+      "velocity_delta": {
+        "test_left": 0.5,
+        "test_right": 0.5
+      },
+      "torque_delta": {
+        "test_left": 5,
+        "test_right": 5
+      }
+    },
+    "state_window_capacity": 1024
+  },
+  "application": {
+    "initialization": {
+      "target_position": {
+        "test_left": 0.0,
+        "test_right": 0.0
+      },
+      "gains": {
+        "test_left": {
+          "kp": 10.0,
+          "kd": 1.0
+        },
+        "test_right": {
+          "kp": 10.0,
+          "kd": 1.0
+        }
+      },
+      "trajectory": {
+        "duration_us": 500000,
+        "position_tolerance": 0.02,
+        "velocity_tolerance": 0.05,
+        "stable_window_us": 100000,
+        "deadline_us": 2000000
+      }
+    },
+    "supervision": {
+      "target_period_us": 20000,
+      "heartbeat_period_us": 50000,
+      "request_retry_us": 50000,
+      "request_deadline_us": 1000000,
+      "state_timeout_us": 150000
+    },
+    "policy": {
+      "model_path": null,
+      "inference_timeout_us": 100000
+    },
+    "external_producer": {
+      "prepare_timeout_us": 1000000,
+      "registration_timeout_us": 1000000
+    }
+  },
+  "input": {
+    "intent_timeout_us": 500000,
+    "repeat_guard_us": 250000,
+    "bindings": {
+      "emergency_stop": " ",
+      "damping": "d",
+      "initialize": "i",
+      "start_locomotion": "l",
+      "zero_torque": "z",
+      "reset": "r",
+      "exit": "x",
+      "velocity_forward": "w",
+      "velocity_backward": "s",
+      "velocity_left": "a",
+      "velocity_right": "f",
+      "velocity_yaw_left": "q",
+      "velocity_yaw_right": "e"
+    }
+  },
+  "telemetry": {
+    "level": "INFO",
+    "directory": "logs",
+    "rotate_bytes": 1048576,
+    "retained_files": 3,
+    "queue_capacity": 1024,
+    "recorder": {
+      "enabled": false,
+      "sample_hz": 100,
+      "queue_capacity": 256,
+      "directory": null
+    }
+  },
+  "dds": {
+    "domain": 1,
+    "interface": "lo"
+  },
+  "_comment": "SYNTHETIC FIXTURE ONLY. The joint/bus values are test values, not verified hardware parameters; never use this file on a robot."
+}
