@@ -1,5 +1,6 @@
 #include "irmv/hardware/real_backend.hpp"
 
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <limits>
@@ -7,6 +8,7 @@
 #include <stdexcept>
 
 #include "irmv/hardware/device_lease.hpp"
+#include "irmv/hardware/joint_conversion.hpp"
 #include "support/check.hpp"
 #include "support/scripted_driver_port.hpp"
 
@@ -85,6 +87,14 @@ bool InitializeThrows(RealBackend &backend, std::string_view expected) {
 }  // namespace
 
 int main() {
+  // The conversion is applied once, with the expected signs and ratios.
+  {
+    const irmv::hardware::JointConversion conversion{-1, 10.0, 0.25, 0.13};
+    CHECK(std::abs(conversion.ToJointPosition(0.0) - 0.025) < 1e-12);
+    CHECK(std::abs(conversion.ToJointVelocity(-20.0) - 2.0) < 1e-12);
+    CHECK(std::abs(conversion.ToJointTorque(1.0) + 1.3) < 1e-12);
+    CHECK(std::abs(conversion.ToMotorTorque(2.0) + 0.2) < 1e-12);
+  }
   const TemporaryLockDirectory locks;
   const RuntimeConfig config = TwoJointConfig();
 

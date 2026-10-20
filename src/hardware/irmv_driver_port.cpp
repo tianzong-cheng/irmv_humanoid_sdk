@@ -7,6 +7,7 @@
 
 #include "hardware/runtime_io.h"
 #include "irmv/hardware/driver_port.hpp"
+#include "irmv/hardware/joint_conversion.hpp"
 
 namespace irmv::hardware {
 namespace {
