@@ -108,6 +108,9 @@ int main() {
                          "--torque-nm", "-1.5", "--duration-ms", "10",
                          "--rate-hz", "200", "--execute"}) == 0);
     CHECK(fixture.port.send_calls >= 2);
+    CHECK(fixture.port.enable_calls == 1);
+    CHECK(fixture.port.enabled.size() == 1);
+    CHECK(fixture.port.enabled[0] == "can0:1");
     for (const auto &send : fixture.port.sends) {
       CHECK(send.output.count == 2);
       CHECK(send.output.torque[1] == 0.0);
@@ -116,6 +119,16 @@ int main() {
     CHECK(fixture.port.sends.back().output.torque[0] == 0.0);
     CHECK(fixture.port.sends.back().output.torque[1] == 0.0);
     CHECK(fixture.port.close_calls == 1);
+  }
+
+  // A refused enable stops the load test before any torque frame.
+  {
+    Fixture fixture;
+    fixture.port.next_enable_result = WriteResult{false, 0x80000003u};
+    CHECK(
+        Call(fixture, {"motor-load-test", "--joint", "test_left", "--torque-nm",
+                       "1", "--duration-ms", "5", "--execute"}) == 1);
+    CHECK(fixture.port.send_calls == 0);
   }
 
   // A torque outside the configured limit is refused before any device opens.
