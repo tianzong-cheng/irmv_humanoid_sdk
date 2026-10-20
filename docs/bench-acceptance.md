@@ -29,7 +29,9 @@ evidence in `.superpowers/phase4/<run>/`.
 | Launcher keeps a surviving runtime and reports a runtime that never becomes ready | PASS | `launcher_test` |
 | Dependency pins, vendor digest/arch, runtime-only configure without ONNX Runtime | PASS | `hardware_package_test` |
 | Movable install tree runs Fake from a moved prefix | PASS (manual, this branch) | `cmake --install` into a temporary prefix, then `mv` and run |
-| Full Fake regression and sanitizers | pending final run | `ctest`, `IRMV_SANITIZE=address,undefined` |
+| Full default regression | PASS | `ctest -j2`: 64/64, 28 core + 36 integration |
+| Sanitizer core suite | PASS | `IRMV_SANITIZE=address,undefined`, 28/28 core |
+| Runtime-only build without ONNX Runtime | PASS | `IRMV_BUILD_APPLICATION=OFF`, `ldd` has no ONNX |
 | RealBackend over real DDS with scripted port | **NOT IMPLEMENTED** | no automated entry yet |
 
 ## Bench matrix
