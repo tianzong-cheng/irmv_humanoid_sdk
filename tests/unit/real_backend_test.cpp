@@ -135,6 +135,13 @@ int main() {
     backend.Initialize();
     CHECK(script->open_calls == 1);
     CHECK(script->opened_hardware.buses.size() == 1);
+    CHECK(script->enable_calls == 2);
+    CHECK(script->enabled[0] == "can0:1");
+    CHECK(script->enabled[1] == "can0:7");
+    CHECK(script->sends.size() == 1);
+    CHECK(script->sends[0].output.count == 2);
+    CHECK(script->sends[0].output.torque[0] == 0.0);
+    CHECK(script->sends[0].output.torque[1] == 0.0);
     for (const irmv::protocol::TimeUs now : {1u, 50u, 5000u}) {
       const auto snapshot = backend.Read(now);
       CHECK(snapshot.joints[0].rx_stamp_us == 1200);
@@ -158,6 +165,8 @@ int main() {
     ScriptedDriverPort *script = port.get();
     RealBackend backend(config, std::move(port));
     backend.Initialize();
+    script->sends.clear();
+    script->send_calls = 0;
 
     TorqueOutput output{2, {1.5, -0.5}};
     script->next_result = WriteResult{true, 0};
@@ -191,6 +200,16 @@ int main() {
     CHECK(script->close_calls == 1);
     DeviceLease lease = DeviceLease::Acquire(*config.hardware);
     CHECK(lease.held());
+  }
+
+  // A refused initial zero frame aborts the start and closes the port.
+  {
+    auto port = std::make_unique<ScriptedDriverPort>();
+    ScriptedDriverPort *script = port.get();
+    script->next_result = WriteResult{false, 0x80000002u};
+    RealBackend backend(config, std::move(port));
+    CHECK(InitializeThrows(backend, "initial zero"));
+    CHECK(script->close_calls >= 1);
   }
 
   // Another owner blocks the start before the port is opened.

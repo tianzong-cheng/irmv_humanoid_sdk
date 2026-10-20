@@ -61,9 +61,36 @@ def main() -> int:
             if result.returncode == 0:
                 print("FAIL: a mismatched IRMVControl pin configured successfully")
                 return 1
-            if "pinned commit" not in result.stderr:
+            if "does not match the manifest pin" not in result.stderr:
                 print("FAIL: the pin mismatch is not named\n" + result.stderr)
                 return 1
+
+            # A modified vendor digest or architecture must fail before the
+            # build, using the manifest the configure step actually reads.
+            pins = json.loads((source / "deps/hardware-pins.json").read_text())
+            for field, value, needle in (
+                    ("sha256", "0" * 64, "does not match the manifest"),
+                    ("elf_machine", 183, "architecture check failed")):
+                changed = json.loads(json.dumps(pins))
+                changed["vendor_library"][field] = value
+                manifest = Path(directory) / f"pins-{field}.json"
+                manifest.write_text(json.dumps(changed))
+                bad_vendor = Path(directory) / f"bad-{field}"
+                result = subprocess.run(
+                    ["cmake", "-S", str(source), "-B", str(bad_vendor),
+                     "-DIRMV_ENABLE_REAL_BACKEND=ON",
+                     "-DIRMV_IRMV_CONTROL_SOURCE_DIR=" + str(control),
+                     "-DIRMV_YIS_IMU_SOURCE_DIR=" +
+                     str(source / "deps/yis_imu_driver"),
+                     f"-DIRMV_PINS_FILE={manifest}"],
+                    text=True, capture_output=True)
+                if result.returncode == 0:
+                    print(f"FAIL: a wrong vendor {field} configured")
+                    return 1
+                if needle not in result.stderr:
+                    print(f"FAIL: the wrong vendor {field} is not named\n" +
+                          result.stderr)
+                    return 1
         else:
             print("IRMVControl is not checked out; the commit-mismatch "
                   "configuration check belongs to the real-dependency job")

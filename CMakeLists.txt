@@ -993,6 +993,8 @@ add_test(
     "${Python3_EXECUTABLE}"
     "${PROJECT_SOURCE_DIR}/tests/integration/launcher_test.py"
     "${PROJECT_SOURCE_DIR}"
+    "$<TARGET_FILE:robot_runtime>"
+    "$<TARGET_FILE:application>"
 )
 set_tests_properties(
   launcher_test PROPERTIES LABELS integration TIMEOUT 120
@@ -1353,16 +1355,18 @@ if(TARGET irmv_maintenance)
           RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 endif()
 if(IRMV_HAS_REAL_BACKEND)
-  install(
-    FILES
-      "${IRMV_IRMV_CONTROL_SOURCE_DIR}/ThirdParty/controlcanfd/libs/libcontrolcanfd.so"
-    DESTINATION "${CMAKE_INSTALL_LIBDIR}")
-  if(IRMV_YIS_IMU_SOURCE_DIR)
-    install(
-      FILES "${IRMV_YIS_IMU_SOURCE_DIR}/build/libyis_imu_driver.so"
-            "${IRMV_YIS_IMU_SOURCE_DIR}/build/libserial.so"
-      DESTINATION "${CMAKE_INSTALL_LIBDIR}"
-      OPTIONAL)
+  if(TARGET controlcanfd)
+    get_target_property(_irmv_controlcanfd_location controlcanfd
+                        IMPORTED_LOCATION)
+    if(NOT _irmv_controlcanfd_location)
+      message(FATAL_ERROR "controlcanfd has no IMPORTED_LOCATION")
+    endif()
+    install(FILES "${_irmv_controlcanfd_location}"
+            DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+  endif()
+  if(TARGET yis_imu_driver)
+    install(TARGETS yis_imu_driver serial
+            LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}")
   endif()
 endif()
 if(TARGET application)
@@ -1392,6 +1396,12 @@ set_target_properties(
 if(TARGET application)
   set_target_properties(
     application
+    PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
+  )
+endif()
+if(TARGET irmv_maintenance)
+  set_target_properties(
+    irmv_maintenance
     PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
   )
 endif()
@@ -1432,23 +1442,48 @@ endif()
 # directory) and the pinned ONNX Runtime lives in a prefix of its own as well.
 # This is the Linux layout ($ORIGIN, ELF dependencies), which is the only
 # platform this phase targets.
-set(_irmv_install_executables "\"$<TARGET_FILE:robot_runtime>\"")
+set(_irmv_install_executables "$<TARGET_FILE:robot_runtime>")
 set(_irmv_install_directories
-    "\"$<TARGET_FILE_DIR:CycloneDDS-CXX::ddscxx>\""
-    "\"$<TARGET_FILE_DIR:CycloneDDS::ddsc>\"")
+    "$<TARGET_FILE_DIR:CycloneDDS-CXX::ddscxx>"
+    "$<TARGET_FILE_DIR:CycloneDDS::ddsc>")
 if(TARGET application)
-  string(APPEND _irmv_install_executables
-         " \"$<TARGET_FILE:application>\"")
-  string(APPEND _irmv_install_directories
-         " \"${IRMV_ONNXRUNTIME_ROOT}/lib\"")
+  list(APPEND _irmv_install_executables "$<TARGET_FILE:application>")
+  list(APPEND _irmv_install_directories "${IRMV_ONNXRUNTIME_ROOT}/lib")
 endif()
+if(TARGET irmv_maintenance)
+  list(APPEND _irmv_install_executables "$<TARGET_FILE:irmv_maintenance>")
+endif()
+if(TARGET controlcanfd)
+  get_target_property(_irmv_controlcanfd_location controlcanfd
+                      IMPORTED_LOCATION)
+  get_filename_component(_irmv_controlcanfd_dir
+                         "${_irmv_controlcanfd_location}" DIRECTORY)
+  list(APPEND _irmv_install_directories "${_irmv_controlcanfd_dir}")
+endif()
+if(TARGET yis_imu_driver)
+  list(APPEND _irmv_install_directories
+       "$<TARGET_FILE_DIR:yis_imu_driver>"
+       "$<TARGET_FILE_DIR:serial>")
+endif()
+string(REPLACE ";" "\" \"" _irmv_install_executables_arg
+               "${_irmv_install_executables}")
+string(REPLACE ";" "\" \"" _irmv_install_directories_arg
+               "${_irmv_install_directories}")
+set(_irmv_install_executables_arg "\"${_irmv_install_executables_arg}\"")
+set(_irmv_install_directories_arg "\"${_irmv_install_directories_arg}\"")
 install(
   CODE "
 set(_irmv_libdir \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}\")
+foreach(_irmv_bundled IN ITEMS libyis_imu_driver.so libserial.so)
+  if(EXISTS \"\${_irmv_libdir}/\${_irmv_bundled}\")
+    file(RPATH_SET FILE \"\${_irmv_libdir}/\${_irmv_bundled}\"
+         NEW_RPATH \"\\$ORIGIN\")
+  endif()
+endforeach()
 file(
   GET_RUNTIME_DEPENDENCIES
-  EXECUTABLES ${_irmv_install_executables}
-  DIRECTORIES ${_irmv_install_directories}
+  EXECUTABLES ${_irmv_install_executables_arg}
+  DIRECTORIES ${_irmv_install_directories_arg}
   RESOLVED_DEPENDENCIES_VAR _irmv_resolved
   UNRESOLVED_DEPENDENCIES_VAR _irmv_unresolved
   PRE_EXCLUDE_REGEXES
@@ -1457,7 +1492,7 @@ file(
     \"^ld-linux\"
   POST_EXCLUDE_REGEXES
     \"^/lib/\" \"^/lib64/\" \"^/usr/lib/\" \"^/usr/lib64/\" \"^/usr/local/lib/\"
-  POST_INCLUDE_REGEXES \"^libonnxruntime\" \"^libddsc\"
+  POST_INCLUDE_REGEXES \"^libonnxruntime\" \"^libddsc\" \"^libcontrolcanfd\" \"^libyis_imu_driver\" \"^libserial\"
 )
 if(_irmv_unresolved)
   message(
@@ -1486,6 +1521,13 @@ file(
   FILE \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/robot_runtime\"
   RPATH \"\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}\"
 )
+if(EXISTS \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/irmv_maintenance\")
+  file(
+    RPATH_CHECK
+    FILE \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/irmv_maintenance\"
+    RPATH \"\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}\"
+  )
+endif()
 foreach(_irmv_optional_binary IN ITEMS application external_producer verify_policy_sample)
   if(EXISTS \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/\${_irmv_optional_binary}\")
     file(

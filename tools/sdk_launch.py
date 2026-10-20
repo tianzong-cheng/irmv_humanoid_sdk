@@ -96,6 +96,9 @@ def main(argv: list[str]) -> int:
                         choices=["none", "local", "external"])
     parser.add_argument("--runtime", default=None)
     parser.add_argument("--application", default=None)
+    parser.add_argument("--stop-all", action="store_true",
+                        help="after the application exits, also send the "
+                             "runtime SIGTERM (explicit whole-system stop)")
     options = parser.parse_args(argv)
 
     runtime = find_binary("robot_runtime", options.runtime)
@@ -105,9 +108,12 @@ def main(argv: list[str]) -> int:
     if options.domain is not None:
         common += ["--domain", str(options.domain)]
 
+    # The runtime lives in its own session and process group: a terminal Ctrl+C
+    # reaches the launcher and the application, never the lower layer.
     runtime_process = subprocess.Popen(
-        [runtime, *common], stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT, text=True, bufsize=1)
+        [runtime, *common], stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        bufsize=1, start_new_session=True)
     runtime_lines = LineCollector(runtime_process.stdout, "runtime")
     runtime_lines.start()
 
@@ -126,15 +132,20 @@ def main(argv: list[str]) -> int:
     app_arguments = [application, *common]
     if options.locomotion_source is not None:
         app_arguments += ["--locomotion-source", options.locomotion_source]
-    application_process = subprocess.Popen(app_arguments)
+    try:
+        application_process = subprocess.Popen(app_arguments)
+    except OSError as error:
+        print("sdk_launch: the application did not start: %s" % error,
+              file=sys.stderr)
+        print("sdk_launch: runtime is still running, pid %d" %
+              runtime_process.pid, file=sys.stderr)
+        return 1
 
     def forward(signum, _frame):
+        # Signals for the upper layer only. The runtime is never stopped by the
+        # launcher's own termination path.
         try:
             application_process.send_signal(signum)
-        except ProcessLookupError:
-            pass
-        try:
-            runtime_process.send_signal(signum)
         except ProcessLookupError:
             pass
 
@@ -147,13 +158,29 @@ def main(argv: list[str]) -> int:
         forward(signal.SIGINT, None)
         application_status = application_process.wait()
 
-    print("sdk_launch: application exited with %d" % application_status)
-    if runtime_process.poll() is None:
+    runtime_status = runtime_process.poll()
+    if runtime_status is None:
+        print("sdk_launch: application exited with %d" % application_status)
         print("sdk_launch: runtime is still running, pid %d; send it SIGTERM "
               "for the ordered ZeroTorque stop" % runtime_process.pid)
-        # The launcher never kills the runtime on the application's exit.
+        if options.stop_all:
+            print("sdk_launch: --stop-all requested; sending SIGTERM to the "
+                  "runtime")
+            runtime_process.send_signal(signal.SIGTERM)
+            try:
+                runtime_status = runtime_process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                print("sdk_launch: the runtime did not stop within 30 s; pid "
+                      "%d is still running" % runtime_process.pid,
+                      file=sys.stderr)
+                return 1
+            print("sdk_launch: runtime exited with %d" % runtime_status)
+        # The default path leaves the runtime alive; it is a separate decision
+        # to stop the machine, and its own ZeroTorque confirmation is the only
+        # orderly close.
         return application_status
-    print("sdk_launch: runtime exited with %d" % runtime_process.poll())
+    print("sdk_launch: application exited with %d" % application_status)
+    print("sdk_launch: runtime exited with %d" % runtime_status)
     return application_status
 
 

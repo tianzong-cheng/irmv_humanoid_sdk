@@ -38,6 +38,28 @@ void RealBackend::Initialize() {
     port_->Close();
     throw;
   }
+  // Enable is explicit and per motor; opening a device never enables anything.
+  // A refused enable rolls the whole start back.
+  for (const configuration::HardwareJointConfig &joint :
+       config_.hardware->joints) {
+    const WriteResult enabled = port_->EnableMotor(joint.bus, joint.motor_id);
+    if (!enabled.accepted) {
+      port_->Close();
+      throw std::runtime_error("the backend could not enable motor " +
+                               std::to_string(joint.motor_id) + " on " +
+                               joint.bus);
+    }
+  }
+  // The first command is an explicit all-zero frame, never a cached non-zero
+  // target.
+  TorqueOutput zero;
+  zero.count = config_.joint_count();
+  const WriteResult written = port_->SendTorque(zero);
+  if (!written.accepted) {
+    port_->Close();
+    throw std::runtime_error(
+        "the backend could not send the initial zero frame");
+  }
   lease_ = std::move(lease);
   initialized_ = true;
 }

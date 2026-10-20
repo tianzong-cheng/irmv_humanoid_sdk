@@ -2,12 +2,12 @@
   "$comment": "Local pins of the real-backend dependencies. The commits are the ones this branch was built against; publishing them to the Codeup remotes is a separate delivery step.",
   "irmv_control": {
     "path": "deps/irmv_control",
-    "commit": "927f3a2aa06060a570ecf5fce132e5c44e85164c",
+    "commit": "493275f87c809b369c409a84d6bf4abe604ccab6",
     "url": "git@codeup.aliyun.com:609a653640d06141cf86953a/IRMVControl.git"
   },
   "yis_imu_driver": {
     "path": "deps/yis_imu_driver",
-    "commit": "0b14ed8a057209603695c63c3c0dbd27f21b23fd",
+    "commit": "3b73395d823b92a5c9760a759cd58709fd9e31c8",
     "url": "git@codeup.aliyun.com:609a653640d06141cf86953a/yis_imu_driver.git"
   },
   "vendor_library": {

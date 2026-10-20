@@ -178,6 +178,7 @@ int main() {
     fixture.port.snapshot.joints[0].valid = true;
     fixture.port.snapshot.joints[0].rx_stamp_us = NowUs();
     fixture.port.on_command = [&fixture](const ScriptedDriverPort::Command &) {
+      ++fixture.port.snapshot.snapshot_seq;
       fixture.port.snapshot.joints[0].rx_stamp_us =
           std::numeric_limits<std::uint64_t>::max() - 1;
       fixture.port.snapshot.joints[0].q = 0.0;
@@ -194,6 +195,29 @@ int main() {
     CHECK(fixture.port.commands[1].command == kReset);
     CHECK(Contains(fixture.out.str(), "fresh readback passed"));
     CHECK(Contains(fixture.out.str(), "not a reboot verification"));
+  }
+
+  // A heartbeat that arrives while the motor is being disabled is not a
+  // read-back of the reset: a silent interval after the reset must fail.
+  {
+    Fixture fixture;
+    fixture.port.snapshot.count = 2;
+    fixture.port.snapshot.joints[0].valid = true;
+    fixture.port.snapshot.joints[0].rx_stamp_us = NowUs();
+    fixture.port.on_command =
+        [&fixture](const ScriptedDriverPort::Command &cmd) {
+          if (cmd.command == kDisable) {
+            ++fixture.port.snapshot.snapshot_seq;
+            fixture.port.snapshot.joints[0].rx_stamp_us =
+                std::numeric_limits<std::uint64_t>::max() - 2;
+            fixture.port.snapshot.joints[0].q = 0.0;
+          }
+        };
+    CHECK(Call(fixture, {"motor-zero-reset", "--joint", "test_left",
+                         "--execute", "--verify-position-tolerance-rad", "0.01",
+                         "--verify-velocity-tolerance-rad-s", "0.1",
+                         "--verify-timeout-ms", "10"}) == 1);
+    CHECK(Contains(fixture.out.str(), "fresh readback failed"));
   }
 
   // A reset whose readback never becomes fresh fails; the tool reports it non

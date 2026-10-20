@@ -1911,12 +1911,18 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
   ShutdownPlanner shutdown;
 
   while (true) {
-    const protocol::TimeUs now = MonotonicUs();
+    // The read starts at this instant, but the tick is evaluated at a later
+    // instant: a frame may arrive while the coherent snapshot is being copied.
+    // Reading the evaluation clock after the feedback keeps a legitimately
+    // newer receive stamp from looking like a timestamp from the future. A
+    // genuinely future stamp is still rejected by the safety check.
+    const protocol::TimeUs read_started_us = MonotonicUs();
     // Due scenario entries are applied before the read of this tick, so the
     // snapshot the state machine sees is the one the scenario describes at this
     // instant - including the entry due at process start.
     if (applier) {
-      applier->ApplyDue(now - process_start_us, now, *fake_backend);
+      applier->ApplyDue(read_started_us - process_start_us, read_started_us,
+                        *fake_backend);
     }
 
     const bool stop_requested =
@@ -1925,7 +1931,8 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
     if (stop_requested) {
       input = shutdown.PlanStop(*input, fsm);
     }
-    const protocol::FeedbackSnapshot feedback = backend->Read(now);
+    const protocol::FeedbackSnapshot feedback = backend->Read(read_started_us);
+    const protocol::TimeUs now = MonotonicUs();
     const TickResult result = fsm.Tick(now, feedback, *input, *backend);
     transport.Publish(result);
     ++counters.ticks;

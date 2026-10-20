@@ -49,6 +49,13 @@ class ScriptedDriverPort final : public DriverPort {
     return result;
   }
 
+  WriteResult EnableMotor(const std::string &bus_name,
+                          std::uint32_t motor_id) override {
+    ++enable_calls;
+    enabled.push_back(bus_name + ":" + std::to_string(motor_id));
+    return next_enable_result;
+  }
+
   WriteResult SendMotorCommand(const std::string &bus_name,
                                std::uint32_t motor_id,
                                std::uint8_t command) override {
@@ -81,6 +88,9 @@ class ScriptedDriverPort final : public DriverPort {
   int close_calls{0};
   configuration::HardwareConfig opened_hardware;
   std::vector<Send> sends;
+  WriteResult next_enable_result{true, 0};
+  int enable_calls{0};
+  std::vector<std::string> enabled;
   WriteResult next_command_result{true, 0};
   int command_calls{0};
   std::vector<Command> commands;

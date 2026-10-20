@@ -141,6 +141,21 @@ class IrmvDriverPort final : public DriverPort {
     return result;
   }
 
+  WriteResult EnableMotor(const std::string &bus_name,
+                          std::uint32_t motor_id) override {
+    WriteResult result;
+    const auto bus = bus_indices_.find(bus_name);
+    if (!opened_ || bus == bus_indices_.end() || motor_id == 0 ||
+        motor_id > 31) {
+      result.error_code = 1;
+      return result;
+    }
+    const upstream::SendResult sent = io_.EnableMotor(bus->second, motor_id);
+    result.accepted = sent.accepted;
+    result.error_code = sent.error_code;
+    return result;
+  }
+
   WriteResult SendMotorCommand(const std::string &bus_name,
                                std::uint32_t motor_id,
                                std::uint8_t command) override {

@@ -343,6 +343,17 @@ int LoadTest(const configuration::RuntimeConfig &config,
     return kExitFailure;
   }
   port.Open(hardware);
+  for (const std::size_t index : indices) {
+    const configuration::HardwareJointConfig &mapping = hardware.joints[index];
+    const hardware::WriteResult enabled =
+        port.EnableMotor(mapping.bus, mapping.motor_id);
+    if (!enabled.accepted) {
+      out << "motor-load-test: enable refused for " << mapping.name << " (0x"
+          << std::hex << enabled.error_code << std::dec << ")\n";
+      port.Close();
+      return kExitFailure;
+    }
+  }
   const auto period = std::chrono::microseconds(
       1'000'000 / std::max<std::uint32_t>(arguments.rate_hz, 1));
   auto deadline = std::chrono::steady_clock::now();
@@ -421,7 +432,6 @@ int ZeroReset(const configuration::RuntimeConfig &config,
     return kExitFailure;
   }
   port.Open(hardware);
-  const std::uint64_t before = MonotonicUs();
   // A pre-reset observation is required for every target: a silent motor is
   // not a calibrated one.
   {
@@ -438,7 +448,12 @@ int ZeroReset(const configuration::RuntimeConfig &config,
     }
   }
 
-  for (const std::string &name : arguments.joints) {
+  // Each reset owns its own baseline. A heartbeat that arrived while the motor
+  // was being disabled is not a read-back of the reset.
+  std::vector<std::uint64_t> reset_time(arguments.joints.size(), 0);
+  std::vector<protocol::Sequence> baseline_seq(arguments.joints.size(), 0);
+  for (std::size_t target = 0; target < arguments.joints.size(); ++target) {
+    const std::string &name = arguments.joints[target];
     const configuration::HardwareJointConfig *mapping =
         FindJoint(hardware, name);
     const hardware::WriteResult disabled =
@@ -449,8 +464,10 @@ int ZeroReset(const configuration::RuntimeConfig &config,
       port.Close();
       return kExitFailure;
     }
+    baseline_seq[target] = port.ReadLatest().snapshot_seq;
     const hardware::WriteResult reset =
         maintenance.ResetZero(mapping->bus, mapping->motor_id);
+    reset_time[target] = MonotonicUs();
     if (!reset.accepted) {
       out << "motor-zero-reset: reset refused for " << name << " (0x"
           << std::hex << reset.error_code << std::dec << ")\n";
@@ -479,7 +496,9 @@ int ZeroReset(const configuration::RuntimeConfig &config,
       const double expected = -static_cast<double>(mapping->direction) *
                               mapping->encoder_offset /
                               mapping->reduction_ratio;
-      if (joint.rx_stamp_us > before && joint.valid &&
+      const bool after_reset = joint.rx_stamp_us >= reset_time[target] &&
+                               snapshot.snapshot_seq > baseline_seq[target];
+      if (after_reset && joint.valid && joint.error_code == 0 &&
           std::abs(joint.q - expected) <= arguments.position_tolerance &&
           std::abs(joint.dq) <= arguments.velocity_tolerance) {
         verified[target] = true;

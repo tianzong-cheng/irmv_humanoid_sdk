@@ -29,6 +29,15 @@ class DriverPort {
   // request touches; a partial submission is not accepted.
   virtual WriteResult SendTorque(const TorqueOutput &output) = 0;
 
+  // Explicit motion entry points. Read-only use never calls them; there is no
+  // broadcast enable.
+  virtual WriteResult EnableMotor(const std::string &bus_name,
+                                  std::uint32_t motor_id) {
+    static_cast<void>(bus_name);
+    static_cast<void>(motor_id);
+    return WriteResult{false, 1};
+  }
+
   // Maintenance-only single-motor command (disable, enable, zero reset). It is
   // the one extra write the bench tool needs; the production motion path never
   // calls it. A port that cannot address a motor reports rejection.
