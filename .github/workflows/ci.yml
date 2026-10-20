@@ -58,7 +58,9 @@ jobs:
                       integration_producer_paused integration_runtime_restarted \
                       integration_command_flood integration_slow_logger \
                       integration_stderr_backpressure integration_local_stop \
-                      integration_write_refused; do
+                      integration_write_refused hardware_config_test \
+                      device_lease_test real_backend_test maintenance_test \
+                      launcher_test hardware_package_test; do
             grep -Eq "Test +#[0-9]+: ${test}$" registered-tests.txt
           done
 
@@ -83,6 +85,40 @@ jobs:
             build/Testing/Temporary/LastTest.log
             build/Testing/Temporary/LastTestsFailed.log
             build/cyclonedds-build
+
+  runtime-only:
+    name: runtime-only build and movable install
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install the build toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake git python3
+
+      - name: Configure without the application or ONNX Runtime
+        run: cmake -S . -B build-runtime-only -DCMAKE_BUILD_TYPE=Debug \
+               -DIRMV_BUILD_APPLICATION=OFF
+
+      - name: Build the lower layer
+        run: cmake --build build-runtime-only -j2 --target robot_runtime
+
+      - name: Assert that ONNX Runtime did not reach the runtime
+        run: |
+          set -euo pipefail
+          test ! -d build-runtime-only/onnxruntime-prefix
+          if ldd build-runtime-only/robot_runtime | grep -q onnxruntime; then
+            echo "robot_runtime links ONNX Runtime"; exit 1
+          fi
+
+      - name: Test the runtime-only hardware entries
+        run: ctest --test-dir build-runtime-only -R
+             '^(hardware_config|device_lease|real_backend|maintenance|runtime_cli)_test$'
+             --output-on-failure
 
   sanitizers:
     name: address+undefined sanitizers on the core suite
@@ -116,7 +152,9 @@ jobs:
           ctest --test-dir build-sanitize -N -L core | tee core-tests.txt
           for test in protocol_test config_test fake_backend_test safety_test \
                       command_gate_test execution_fsm_test logger_test \
-                      channel_test config_schema_contract_test; do
+                      channel_test config_schema_contract_test \
+                      hardware_config_test device_lease_test real_backend_test \
+                      maintenance_test; do
             grep -Eq "Test +#[0-9]+: ${test}$" core-tests.txt
           done
 
@@ -133,3 +171,34 @@ jobs:
             build-sanitize/CMakeCache.txt
             build-sanitize/Testing/Temporary/LastTest.log
             build-sanitize/Testing/Temporary/LastTestsFailed.log
+
+  real-dependencies:
+    name: real backend with pinned dependencies
+    # Requires a runner with the Codeup deploy key and the vendor hardware
+    # library; absent credentials mean the gate is reported as not verified,
+    # never as a green real build.
+    if: vars.IRMV_REAL_CI == 'on'
+    runs-on: self-hosted
+    timeout-minutes: 120
+    steps:
+      - name: Check out the repository and its pinned dependencies
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          ssh-key: ${{ secrets.IRMV_CODUP_DEPLOY_KEY }}
+
+      - name: Verify dependency pins and vendor digest
+        run: python3 tools/verify_hardware_dependencies.py .
+
+      - name: Configure the real build
+        run: |
+          cmake -S . -B build-real -DCMAKE_BUILD_TYPE=Debug \
+            -DIRMV_ENABLE_REAL_BACKEND=ON \
+            -DIRMV_BUILD_MAINTENANCE=ON \
+            -DIRMV_IRMV_CONTROL_SOURCE_DIR=$PWD/deps/irmv_control \
+            -DIRMV_YIS_IMU_SOURCE_DIR=$PWD/deps/yis_imu_driver
+
+      - name: Build and test the real path
+        run: |
+          cmake --build build-real -j2
+          ctest --test-dir build-real -L core --output-on-failure

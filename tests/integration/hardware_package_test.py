@@ -49,23 +49,24 @@ def main() -> int:
                 print("FAIL: runtime-only build still has %s" % forbidden)
                 return 1
 
-        bad = Path(directory) / "bad-pin"
-        result = subprocess.run(
-            configure + [f"-DIRMV_ENABLE_REAL_BACKEND=ON",
-                         "-DIRMV_IRMV_CONTROL_COMMIT=deadbeef"],
-            text=True, capture_output=True)
-        result = subprocess.run(
-            ["cmake", "-S", str(source), "-B", str(bad),
-             "-DIRMV_ENABLE_REAL_BACKEND=ON",
-             "-DIRMV_IRMV_CONTROL_SOURCE_DIR=" + str(source / "deps/irmv_control"),
-             "-DIRMV_IRMV_CONTROL_COMMIT=deadbeef"],
-            text=True, capture_output=True)
-        if result.returncode == 0:
-            print("FAIL: a mismatched IRMVControl pin configured successfully")
-            return 1
-        if "pinned commit" not in result.stderr:
-            print("FAIL: the pin mismatch is not named\n" + result.stderr)
-            return 1
+        control = source / "deps/irmv_control"
+        if control.is_dir() and (control / "include").is_dir():
+            bad = Path(directory) / "bad-pin"
+            result = subprocess.run(
+                ["cmake", "-S", str(source), "-B", str(bad),
+                 "-DIRMV_ENABLE_REAL_BACKEND=ON",
+                 "-DIRMV_IRMV_CONTROL_SOURCE_DIR=" + str(control),
+                 "-DIRMV_IRMV_CONTROL_COMMIT=deadbeef"],
+                text=True, capture_output=True)
+            if result.returncode == 0:
+                print("FAIL: a mismatched IRMVControl pin configured successfully")
+                return 1
+            if "pinned commit" not in result.stderr:
+                print("FAIL: the pin mismatch is not named\n" + result.stderr)
+                return 1
+        else:
+            print("IRMVControl is not checked out; the commit-mismatch "
+                  "configuration check belongs to the real-dependency job")
     print("hardware package contract passed")
     return 0
 
