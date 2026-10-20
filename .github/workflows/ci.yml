@@ -104,8 +104,8 @@ jobs:
         run: cmake -S . -B build-runtime-only -DCMAKE_BUILD_TYPE=Debug \
                -DIRMV_BUILD_APPLICATION=OFF
 
-      - name: Build the lower layer
-        run: cmake --build build-runtime-only -j2 --target robot_runtime
+      - name: Build the lower layer and its contract helper
+        run: cmake --build build-runtime-only -j2 --target robot_runtime real_backend_runtime
 
       - name: Assert that ONNX Runtime did not reach the runtime
         run: |
