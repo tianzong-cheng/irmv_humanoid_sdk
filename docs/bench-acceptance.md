@@ -23,12 +23,14 @@ evidence in `.superpowers/phase4/<run>/`.
 | Configuration accepts a real pair and rejects partial/duplicate/non-finite mappings | PASS | `hardware_config_test` |
 | Device lease excludes a second process, releases on failure/exit, ignores bus renaming | PASS | `device_lease_test` |
 | RealBackend lifecycle, invalid output refusal, lease-before-open, idempotent close | PASS | `real_backend_test` |
-| Upstream codec: 32-bit error, boundary ids, short frames, position expansion, saturation | PASS | upstream `runtime_io_test` |
+| Upstream codec and port boundary: 32-bit error, boundary ids, short frames, position expansion, saturation, open-without-send, per-motor enable, preallocated zero frame, shared-device close order | PASS | upstream `runtime_io_test` |
+| IMU complete-frame rule: empty/partial/truncated/timestamp-only frames never publish; quaternion normalisation; host stamp | PASS | YIS `imu_parse_test` |
 | Upstream dependency contract: fresh configure, no examples, no `-march=native` | PASS | upstream `dependency_contract_test` |
-| Maintenance dry-run, raw error display, selected-joint load, can1 channel rule, zero read-back | PASS | `maintenance_test` |
-| Launcher keeps a surviving runtime and reports a runtime that never becomes ready | PASS | `launcher_test` |
-| Dependency pins, vendor digest/arch, runtime-only configure without ONNX Runtime | PASS | `hardware_package_test` |
-| Movable install tree runs Fake from a moved prefix | PASS (manual, this branch) | `cmake --install` into a temporary prefix, then `mv` and run |
+| Maintenance dry-run, raw error display, selected-joint load and enable, can1 channel rule, per-reset baseline read-back | PASS | `maintenance_test` |
+| Launcher keeps a surviving runtime across Ctrl+C/SIGTERM, reports start failure, and runs the real Fake two-process pair | PASS | `launcher_test` |
+| Dependency pins are mandatory from the manifest; wrong SHA/arch/commit fails configure; runtime-only configure without ONNX Runtime | PASS | `hardware_package_test` |
+| Movable install tree, real + IMU + maintenance, no source/build rpath | PASS | real `cmake --install`, `mv`, `ldd` and `irmv_maintenance` dry-run from the moved prefix |
+| Targeted ThreadSanitizer on the snapshot handoff | PASS | upstream `runtime_io_test` built with `-fsanitize=thread`, run under `setarch -R` |
 | Full default regression | PASS | `ctest -j2`: 64/64, 28 core + 36 integration |
 | Sanitizer core suite | PASS | `IRMV_SANITIZE=address,undefined`, 28/28 core |
 | Runtime-only build without ONNX Runtime | PASS | `IRMV_BUILD_APPLICATION=OFF`, `ldd` has no ONNX |
