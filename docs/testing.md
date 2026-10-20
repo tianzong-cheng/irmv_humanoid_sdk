@@ -12,14 +12,15 @@ says explicitly what no test here proves.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j2
 
-ctest --test-dir build --output-on-failure          # everything (57 tests)
+ctest --test-dir build --output-on-failure          # everything
 ctest --test-dir build -L core --output-on-failure  # deterministic core suite
 ctest --test-dir build -L integration --output-on-failure
 ctest --test-dir build -R integration_normal --output-on-failure
 ```
 
-The whole matrix takes about four minutes on a developer machine
-(`ctest -N` reports 23 core and 34 integration entries) and each integration
+The whole matrix takes a few minutes on a developer machine
+(`ctest -N` reports the current entry count; the hardware additions are 64 in
+the default configuration) and each integration
 entry is bounded by its own CTest timeout (30 s for `dds_codec_test`, 180 s for
 `runtime_cli_test` and `application_cli_test`, 300 s for `application_client_test`
 and per scenario, 600 s for `application_flow_test`).
@@ -975,6 +976,25 @@ review, and both are fixed and pinned:
    stream. The acceptance reads the runtime's own trace of adopted targets, so a
    frame nobody accepted cannot pass; it failed before the fix and passes after
    it.
+
+## Hardware and packaging entries
+
+The default configuration also runs the no-device hardware entries:
+
+| Entry | What it proves |
+| --- | --- |
+| `hardware_config_test` | real/fake pair selection, complete and unique joint mappings, finite values, IMU requirement |
+| `device_lease_test` | exclusive ownership across processes, release on failure/exit, identity independent of bus names |
+| `real_backend_test` | lifecycle, lease-before-open, original 32-bit errors, invalid output refusal, idempotent close |
+| `maintenance_test` | dry-run default, raw error display, selected-joint load, channel-1 rule, verified zero read-back |
+| `launcher_test` | readiness gate, surviving runtime report, never-ready runtime failure |
+| `hardware_package_test` | pinned submodules/vendor digest, runtime-only configure without ONNX Runtime |
+
+The upstream checkout has its own `runtime_io_test` and
+`dependency_contract_test`; run them with
+`ctest --test-dir <irmv_control-build> --output-on-failure` after configuring
+IRMVControl with `-DENABLE_TEST=ON`. The real-device matrix is `NOT RUN` and is
+listed in `docs/bench-acceptance.md`.
 
 ## What is not covered
 

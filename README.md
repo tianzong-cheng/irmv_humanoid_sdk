@@ -1,11 +1,11 @@
 # IRMV humanoid SDK — runtime foundation
 
-Phases one and two of the humanoid runtime: the standalone execution runtime
-(`robot_runtime`) for the **Fake** deployment only, the supervising upper process
-(`application`) that drives it, the frozen protocol they speak with each other
-over real DDS, and the deterministic and real-DDS test suites that prove both.
-There is no real robot backend and no real hardware emergency stop in these
-phases.
+The humanoid runtime: the standalone execution runtime (`robot_runtime`), the
+supervising upper process (`application`) that drives it, the frozen protocol
+they speak over real DDS, and the deterministic and real-DDS suites that prove
+both. The default build is the **Fake** deployment. An opt-in real build adds
+the CAN-FD/IMU backend and the maintenance program; it has no hardware evidence
+yet and makes no physical-execution claim.
 
 ## Build
 
@@ -104,14 +104,35 @@ Two different things, deliberately kept apart:
   request never clears a fault and never reports a clean stop). A hard kill is
   always possible and always reported as such: it is not a clean shutdown.
 
-### No real hardware in this phase
+### Backends
 
-The backend is the fake one; `deployment: fake_only` and `backend: fake` are
-enforced by the configuration contract. There is **no RealBackend, no CAN
-transport and no physical execution confirmation**: `Applied` means the host
-send path accepted the output implementing a request, never that a device
-acknowledged it. Real hardware, real safety limits, firmware-loss behaviour and
-the physical-execution acceptance belong to later phases.
+The default build selects the fake backend; `deployment: fake_only` and
+`backend: fake` remain the shipped demo. A second pair, `deployment: real` and
+`backend: real`, is accepted only when the file also carries the hardware table
+described in `docs/hardware-config.md`, and only in a build configured with
+`-DIRMV_ENABLE_REAL_BACKEND=ON`; otherwise the runtime refuses to start before
+touching a device or DDS.
+
+```bash
+cmake -S . -B build-real -DCMAKE_BUILD_TYPE=Debug \
+  -DIRMV_ENABLE_REAL_BACKEND=ON \
+  -DIRMV_IRMV_CONTROL_SOURCE_DIR=$PWD/deps/irmv_control \
+  -DIRMV_YIS_IMU_SOURCE_DIR=$PWD/deps/yis_imu_driver
+cmake --build build-real -j2
+```
+
+The real build links the pinned driver submodules, takes an exclusive device
+lock before opening a device, and reports the complete 32-bit device error and
+the host send result. `Applied` still means the host send path accepted the
+output, never that a motor applied it. There is **no physical-execution
+evidence** yet: see `docs/hardware-migration.md`, `docs/maintenance.md` and
+`docs/bench-acceptance.md`.
+
+A runtime-only build (`-DIRMV_BUILD_APPLICATION=OFF`) builds `robot_runtime`
+without ONNX Runtime or the upper process. The maintenance program is built with
+`-DIRMV_BUILD_MAINTENANCE=ON` (requires the real backend). `tools/sdk_launch.py`
+starts the two processes and never kills a runtime that outlives the
+application.
 
 ## Run the application: the supervising upper process
 
