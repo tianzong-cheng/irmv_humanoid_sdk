@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -18,6 +19,12 @@ class ScriptedDriverPort final : public DriverPort {
     WriteResult result;
   };
 
+  struct Command {
+    std::string bus_name;
+    std::uint32_t motor_id;
+    std::uint8_t command;
+  };
+
   void Open(const configuration::HardwareConfig &hardware) override {
     ++open_calls;
     opened_hardware = hardware;
@@ -29,6 +36,9 @@ class ScriptedDriverPort final : public DriverPort {
 
   protocol::FeedbackSnapshot ReadLatest() override {
     ++read_calls;
+    if (before_read) {
+      before_read();
+    }
     return snapshot;
   }
 
@@ -39,6 +49,17 @@ class ScriptedDriverPort final : public DriverPort {
     return result;
   }
 
+  WriteResult SendMotorCommand(const std::string &bus_name,
+                               std::uint32_t motor_id,
+                               std::uint8_t command) override {
+    ++command_calls;
+    commands.push_back(Command{bus_name, motor_id, command});
+    if (on_command) {
+      on_command(commands.back());
+    }
+    return next_command_result;
+  }
+
   void Close() noexcept override {
     ++close_calls;
     opened = false;
@@ -46,6 +67,8 @@ class ScriptedDriverPort final : public DriverPort {
 
   // Script.
   protocol::FeedbackSnapshot snapshot;
+  std::function<void()> before_read;
+  std::function<void(const Command &)> on_command;
   WriteResult next_result{true, 0};
   bool open_error{false};
   std::string open_error_message{"scripted open failure"};
@@ -58,6 +81,9 @@ class ScriptedDriverPort final : public DriverPort {
   int close_calls{0};
   configuration::HardwareConfig opened_hardware;
   std::vector<Send> sends;
+  WriteResult next_command_result{true, 0};
+  int command_calls{0};
+  std::vector<Command> commands;
 };
 
 }  // namespace irmv::hardware

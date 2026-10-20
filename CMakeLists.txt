@@ -413,6 +413,45 @@ target_link_libraries(real_backend_test PRIVATE irmv_hardware)
 add_test(NAME real_backend_test COMMAND real_backend_test)
 set_tests_properties(real_backend_test PROPERTIES LABELS core)
 
+add_library(irmv_maintenance_commands src/maintenance/commands.cpp)
+target_compile_features(irmv_maintenance_commands PUBLIC cxx_std_17)
+target_include_directories(
+  irmv_maintenance_commands
+  PUBLIC
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:include>"
+)
+target_link_libraries(irmv_maintenance_commands PUBLIC irmv_hardware)
+
+add_executable(maintenance_test tests/unit/maintenance_test.cpp)
+target_compile_features(maintenance_test PRIVATE cxx_std_17)
+target_include_directories(
+  maintenance_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(maintenance_test PRIVATE irmv_maintenance_commands)
+
+add_test(NAME maintenance_test COMMAND maintenance_test)
+set_tests_properties(
+  maintenance_test PROPERTIES LABELS core
+  WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
+option(IRMV_BUILD_MAINTENANCE "Build the bench maintenance program" OFF)
+if(IRMV_BUILD_MAINTENANCE)
+  if(NOT IRMV_HAS_REAL_BACKEND)
+    message(
+      FATAL_ERROR
+        "IRMV_BUILD_MAINTENANCE=ON requires IRMV_ENABLE_REAL_BACKEND=ON")
+  endif()
+  add_executable(irmv_maintenance src/maintenance/main.cpp)
+  target_compile_features(irmv_maintenance PRIVATE cxx_std_17)
+  target_link_libraries(irmv_maintenance
+                        PRIVATE irmv_maintenance_commands irmv_hardware)
+endif()
+
 add_library(
   irmv_runtime
   src/runtime/safety.cpp
