@@ -327,7 +327,8 @@ set_tests_properties(
   WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
-add_library(irmv_hardware src/hardware/fake_backend.cpp)
+add_library(irmv_hardware src/hardware/fake_backend.cpp
+                          src/hardware/device_lease.cpp)
 target_compile_features(irmv_hardware PUBLIC cxx_std_17)
 target_include_directories(
   irmv_hardware
@@ -348,6 +349,19 @@ target_link_libraries(fake_backend_test PRIVATE irmv_hardware)
 
 add_test(NAME fake_backend_test COMMAND fake_backend_test)
 set_tests_properties(fake_backend_test PROPERTIES LABELS core)
+
+add_executable(device_lease_test tests/unit/device_lease_test.cpp)
+target_compile_features(device_lease_test PRIVATE cxx_std_17)
+target_include_directories(
+  device_lease_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(device_lease_test PRIVATE irmv_hardware)
+
+add_test(NAME device_lease_test COMMAND device_lease_test)
+set_tests_properties(device_lease_test PROPERTIES LABELS core)
 
 add_library(
   irmv_runtime
