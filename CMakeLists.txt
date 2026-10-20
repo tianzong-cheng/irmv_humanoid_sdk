@@ -5,6 +5,12 @@ project(irmv_humanoid_sdk LANGUAGES CXX)
 include(CTest)
 include(GNUInstallDirs)
 include(cmake/Dependencies.cmake)
+include(cmake/HardwareDependencies.cmake)
+
+option(IRMV_ENABLE_REAL_BACKEND "Build the real CAN-FD/IMU backend" OFF)
+if(IRMV_ENABLE_REAL_BACKEND)
+  irmv_make_real_backend_available()
+endif()
 
 # Every installed artifact finds its neighbours through a relative rpath and
 # never through the build or source directory: a library in <prefix>/lib
@@ -346,9 +352,15 @@ set_tests_properties(
   WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
-add_library(irmv_hardware src/hardware/fake_backend.cpp
-                          src/hardware/device_lease.cpp
-                          src/hardware/real_backend.cpp)
+set(IRMV_HARDWARE_SOURCES
+    src/hardware/fake_backend.cpp
+    src/hardware/device_lease.cpp
+    src/hardware/real_backend.cpp
+    src/hardware/backend_factory.cpp)
+if(IRMV_HAS_REAL_BACKEND)
+  list(APPEND IRMV_HARDWARE_SOURCES src/hardware/irmv_driver_port.cpp)
+endif()
+add_library(irmv_hardware ${IRMV_HARDWARE_SOURCES})
 target_compile_features(irmv_hardware PUBLIC cxx_std_17)
 target_include_directories(
   irmv_hardware
@@ -356,6 +368,11 @@ target_include_directories(
     "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
     "$<INSTALL_INTERFACE:include>"
 )
+target_link_libraries(irmv_hardware PUBLIC irmv_configuration irmv_protocol)
+if(IRMV_HAS_REAL_BACKEND)
+  target_compile_definitions(irmv_hardware PRIVATE IRMV_HAS_REAL_BACKEND=1)
+  target_link_libraries(irmv_hardware PRIVATE IRMVControl::runtime_io)
+endif()
 
 add_executable(fake_backend_test tests/unit/fake_backend_test.cpp)
 target_compile_features(fake_backend_test PRIVATE cxx_std_17)

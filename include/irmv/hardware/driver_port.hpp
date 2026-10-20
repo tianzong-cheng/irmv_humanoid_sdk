@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
+#include <string>
 
 #include "irmv/configuration/config.hpp"
 #include "irmv/hardware/backend.hpp"
@@ -26,6 +28,18 @@ class DriverPort {
   // Sends one canonical torque request. Acceptance covers every bus the
   // request touches; a partial submission is not accepted.
   virtual WriteResult SendTorque(const TorqueOutput &output) = 0;
+
+  // Maintenance-only single-motor command (disable, enable, zero reset). It is
+  // the one extra write the bench tool needs; the production motion path never
+  // calls it. A port that cannot address a motor reports rejection.
+  virtual WriteResult SendMotorCommand(const std::string &bus_name,
+                                       std::uint32_t motor_id,
+                                       std::uint8_t command) {
+    static_cast<void>(bus_name);
+    static_cast<void>(motor_id);
+    static_cast<void>(command);
+    return WriteResult{false, 1};
+  }
 
   virtual void Close() noexcept = 0;
 };

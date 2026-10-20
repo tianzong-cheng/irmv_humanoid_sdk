@@ -147,7 +147,17 @@ def build_workspace(source_dir):
     config["dds"]["domain"] = CONFIG_DOMAIN
     (workspace / "config.json").write_text(json.dumps(config), "utf-8")
     real = json.loads(json.dumps(config))
+    real["deployment"] = "real"
     real["backend"] = "real"
+    real["robot"]["buses"] = [
+        {"name": "can0", "device_type": 41, "device_index": 0, "channel": 0,
+         "arbitration_bps": 1000000, "data_bps": 5000000,
+         "iso_mode": True, "resistance_enabled": False},
+    ]
+    for index, joint in enumerate(real["robot"]["joints"]):
+        joint.update({"bus": "can0", "motor_id": index + 1, "direction": 1,
+                      "reduction_ratio": 1.0, "encoder_offset": 0.0,
+                      "torque_constant": 1.0})
     (workspace / "real.json").write_text(json.dumps(real), "utf-8")
     (workspace / "malformed.json").write_text(
         '{"schema_version": 1, "backend": "fake"', "utf-8"
@@ -177,7 +187,7 @@ def test_startup_rejections(workspace):
     cases = [
         ("missing config", workspace / "absent.json", "cannot open configuration"),
         ("malformed config", workspace / "malformed.json", "invalid JSON"),
-        ("real backend", workspace / "real.json", "only the fake backend"),
+        ("real backend", workspace / "real.json", "real backend"),
     ]
     for name, config_path, expected in cases:
         with Runtime(["--config", str(config_path), "--domain", str(DOMAIN)],
@@ -199,9 +209,9 @@ def test_startup_rejections(workspace):
               failure_report("real backend with scenario", runtime,
                              "expected a non-zero exit, got %s" % code))
         output = runtime.output()
-        check("backend" in output and "fake" in output,
+        check("fake-only" in output,
               failure_report("real backend with scenario", runtime,
-                             "the message does not name the backend"))
+                             "the message does not name the fake-only options"))
 
     with Runtime(["--config", str(workspace / "config.json"), "--domain", str(DOMAIN),
                   "--fake-scenario", str(workspace / "scenario_broken.json")],

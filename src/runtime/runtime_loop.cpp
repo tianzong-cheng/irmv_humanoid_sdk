@@ -22,6 +22,7 @@
 #include <thread>
 #include <utility>
 
+#include "irmv/hardware/backend_factory.hpp"
 #include "irmv/runtime/execution_fsm.hpp"
 #include "irmv/telemetry/diagnostic_write.hpp"
 #include "irmv/telemetry/logger.hpp"
@@ -1730,19 +1731,20 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
     StderrFormat("robot_runtime: configuration error: %s\n", error.what());
     return kExitStartupError;
   }
-  // The configuration parser already refuses every backend but the fake one, so
-  // this is the second, explicit gate: nothing touches a device or DDS before
-  // it passed, and `--fake-scenario` therefore can only reach a fake backend.
-  if (config.backend != "fake") {
-    StderrFormat(
-        "robot_runtime: backend \"%s\" is not supported; only the "
-        "fake backend can be started\n",
-        config.backend.c_str());
+  // The fake-only options are refused before a device is opened, a log
+  // directory is created or DDS starts: a real deployment has no scenario and
+  // no fake output history to trace.
+  const bool fake_selected = config.backend == "fake";
+  if (!fake_selected &&
+      (options.fake_scenario_path || options.output_trace_path)) {
+    StderrLine(
+        "robot_runtime: --fake-scenario and --output-trace are fake-only "
+        "options\n");
     return kExitStartupError;
   }
 
   std::optional<FakeScenario> scenario;
-  if (options.fake_scenario_path) {
+  if (fake_selected && options.fake_scenario_path) {
     try {
       scenario = LoadFakeScenario(*options.fake_scenario_path, config);
     } catch (const std::exception &error) {
@@ -1775,10 +1777,8 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
   };
 
   // The output trace records the fake backend's own output history, so it is
-  // part of the fake deployment only: the backend gate above has already
-  // refused every other backend, which is what keeps this option away from a
-  // real device. A trace file that cannot be created is a startup error, not a
-  // silently missing measurement.
+  // part of the fake deployment only. A trace file that cannot be created is a
+  // startup error, not a silently missing measurement.
   std::unique_ptr<OutputTrace> trace;
   if (options.output_trace_path) {
     trace = std::make_unique<OutputTrace>(*options.output_trace_path);
@@ -1788,15 +1788,28 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
   }
 
   const RuntimeIdentity identity = MakeRuntimeId();
-  hardware::FakeBackend backend(config);
-  backend.Initialize();
+  std::unique_ptr<hardware::Backend> backend;
+  try {
+    backend = hardware::MakeBackend(config);
+    backend->Initialize();
+  } catch (const std::exception &error) {
+    StderrFormat("robot_runtime: backend start failed: %s\n", error.what());
+    if (backend) {
+      backend->Close();
+    }
+    trace.reset();
+    return kExitStartupError;
+  }
+  hardware::FakeBackend *fake_backend =
+      fake_selected ? dynamic_cast<hardware::FakeBackend *>(backend.get())
+                    : nullptr;
 
   ExecutionFsm fsm(config, identity.id);
   telemetry::Logger logger(config.telemetry);
   if (!logger.Start()) {
     StderrLine("robot_runtime: the logger did not start\n");
     trace.reset();
-    backend.Close();
+    backend->Close();
     return kExitStartupError;
   }
   // The run recorder: the control thread offers one coherent snapshot per
@@ -1848,7 +1861,7 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
       StderrFormat("robot_runtime: %s\n", recorder_error.c_str());
       logger.Stop();
       trace.reset();
-      backend.Close();
+      backend->Close();
       return kExitStartupError;
     }
   }
@@ -1859,7 +1872,7 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
     }
     logger.Stop();
     trace.reset();
-    backend.Close();
+    backend->Close();
     return kExitStartupError;
   }
 
@@ -1870,11 +1883,14 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
     StderrFormat("robot_runtime: transport start failed: %s\n", error.what());
     logger.Stop();
     trace.reset();
-    backend.Close();
+    backend->Close();
     return kExitStartupError;
   }
 
-  ScenarioApplier applier(scenario.value_or(FakeScenario{}), config);
+  std::optional<ScenarioApplier> applier;
+  if (fake_backend != nullptr) {
+    applier.emplace(scenario.value_or(FakeScenario{}), config);
+  }
   LogStartup(logger, config, identity.id, fsm.execution_state(),
              process_start_us);
   if (identity.entropy_fallback) {
@@ -1899,7 +1915,9 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
     // Due scenario entries are applied before the read of this tick, so the
     // snapshot the state machine sees is the one the scenario describes at this
     // instant - including the entry due at process start.
-    applier.ApplyDue(now - process_start_us, now, backend);
+    if (applier) {
+      applier->ApplyDue(now - process_start_us, now, *fake_backend);
+    }
 
     const bool stop_requested =
         g_stop_requested.load(std::memory_order_relaxed);
@@ -1907,8 +1925,8 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
     if (stop_requested) {
       input = shutdown.PlanStop(*input, fsm);
     }
-    const protocol::FeedbackSnapshot feedback = backend.Read(now);
-    const TickResult result = fsm.Tick(now, feedback, *input, backend);
+    const protocol::FeedbackSnapshot feedback = backend->Read(now);
+    const TickResult result = fsm.Tick(now, feedback, *input, *backend);
     transport.Publish(result);
     ++counters.ticks;
     counters.fsm_dropped =
@@ -1948,12 +1966,13 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
       }
     }
 
-    if (trace) {
+    if (trace && fake_backend != nullptr) {
       // The torque the backend really recorded, one record per write the tick
       // made: hand it to the writer thread, never to a file.
       hardware::OutputRecord written[kTraceDrainBatch];
       std::size_t drained = 0;
-      while ((drained = backend.DrainOutputHistory(written, kTraceDrainBatch)) >
+      while ((drained = fake_backend->DrainOutputHistory(written,
+                                                          kTraceDrainBatch)) >
              0) {
         for (std::size_t index = 0; index < drained; ++index) {
           trace->TryRecord(MakeTraceRecord(fsm, result, written[index]));
@@ -1988,7 +2007,7 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
       ReportCleanStop(logger, counters, fsm, transport,
                       trace ? trace->counters() : OutputTrace::Counters{}, now);
       trace.reset();
-      backend.Close();
+      backend->Close();
       return kExitOk;
     }
 
