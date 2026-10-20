@@ -260,7 +260,7 @@ no scenario in this group asserts anything about motor execution.
 | A runtime restart or a one-way state-link interruption: the upper layer does not automatically resume `Tracking`, and `Unknown` is never presented as a stopped machine | `application_flow_test` (`restart`, `state_link`), `application_unknown`, `runtime_restarted`, `stale_context` |
 | Upper `Fault` with the lower layer damping; the lower layer's own fault reported in step | `application_repeat_and_reset`, `application_fault` (`WriteFailed`), `application_overspeed` (`JointVelocityExceeded`), `application_cli_test` |
 | The upper layer keeps publishing targets across several lower-layer deadline windows | `application_ready_hold` |
-| No real hardware, no ONNX, no external producer, no `Recorder`, no `Locomotion` entry, no motor acknowledgement | **not covered** – see the list below |
+| Real hardware, physical execution and motor acknowledgement | **not covered** – the hardware entries above stop at the host send path; the real-device matrix is `NOT RUN` in `docs/bench-acceptance.md` |
 
 ## Timing claims
 
