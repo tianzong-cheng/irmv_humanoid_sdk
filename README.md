@@ -123,8 +123,10 @@ cmake --build build-real -j2
 
 The real build links the pinned driver submodules, takes an exclusive device
 lock before opening a device, and reports the complete 32-bit device error and
-the host send result. `Applied` still means the host send path accepted the
-output, never that a motor applied it. There is **no physical-execution
+the host send result. Opening a device sends no frame; enabling is explicit and
+per motor. The vendor send is synchronous and its worst-case wait must be
+measured on the bench before claiming a control-period bound. `Applied` still
+means the host send path accepted the output, never that a motor applied it. There is **no physical-execution
 evidence** yet: see `docs/hardware-migration.md`, `docs/maintenance.md` and
 `docs/bench-acceptance.md`.
 

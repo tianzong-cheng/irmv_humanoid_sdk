@@ -987,6 +987,10 @@ set_tests_properties(
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
+set(_irmv_launcher_application_arg)
+if(TARGET application)
+  set(_irmv_launcher_application_arg "$<TARGET_FILE:application>")
+endif()
 add_test(
   NAME launcher_test
   COMMAND
@@ -994,7 +998,7 @@ add_test(
     "${PROJECT_SOURCE_DIR}/tests/integration/launcher_test.py"
     "${PROJECT_SOURCE_DIR}"
     "$<TARGET_FILE:robot_runtime>"
-    "$<TARGET_FILE:application>"
+    ${_irmv_launcher_application_arg}
 )
 set_tests_properties(
   launcher_test PROPERTIES LABELS integration TIMEOUT 120
@@ -1539,3 +1543,29 @@ foreach(_irmv_optional_binary IN ITEMS application external_producer verify_poli
 endforeach()
 "
 )
+
+# The RealBackend contract helper: the real loop and DDS with a scripted port.
+# It defines its own MakeBackend, so the archive member of the production
+# factory is never pulled in; it is a test peer and is not installed.
+add_executable(real_backend_runtime tests/integration/real_backend_runtime.cpp
+                                     src/runtime/runtime_loop.cpp)
+target_compile_features(real_backend_runtime PRIVATE cxx_std_17)
+target_include_directories(
+  real_backend_runtime PRIVATE "${PROJECT_SOURCE_DIR}/include"
+                               "${PROJECT_SOURCE_DIR}/tests")
+target_link_libraries(
+  real_backend_runtime
+  PRIVATE irmv_runtime irmv_transport irmv_telemetry irmv_hardware
+          nlohmann_json::nlohmann_json Threads::Threads)
+
+add_test(
+  NAME real_backend_contract_test
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/integration/real_backend_contract_test.py"
+    "$<TARGET_FILE:real_backend_runtime>"
+    "${PROJECT_SOURCE_DIR}")
+set_tests_properties(
+  real_backend_contract_test
+  PROPERTIES LABELS integration TIMEOUT 180
+  WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")

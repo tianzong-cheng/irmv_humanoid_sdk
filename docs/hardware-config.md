@@ -62,6 +62,15 @@ time.
 
 ## Device ownership
 
+Opening a device is not enabling it. `RuntimeIo::Open` only opens channels and
+starts reception; the runtime explicitly enables each configured motor and then
+sends an all-zero torque frame. `heartbeat-decode` never sends a frame at all,
+and the load test enables only its explicitly selected motors.
+
+The vendor send is synchronous. Its worst-case wait is not documented by the
+vendor, so the control-period claim is a bench qualification item, not an
+assumption of the host code.
+
 The runtime and `irmv_maintenance` take an exclusive `flock` before opening a
 device. The lock identity is the physical device `(device_type, device_index)`
 and the IMU hardware id, not the configuration bus name. The default directory

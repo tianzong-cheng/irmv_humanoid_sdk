@@ -10,8 +10,8 @@ evidence in `.superpowers/phase4/<run>/`.
 | --- | --- |
 | Branch | `feat/real-backend-maintenance` |
 | Baseline | `main@425290f58735cd0deb16585dc1c9f28f4c1b66f6` |
-| IRMVControl | `927f3a2aa06060a570ecf5fce132e5c44e85164c` (local pin) |
-| YIS | `0b14ed8a057209603695c63c3c0dbd27f21b23fd` (local pin) |
+| IRMVControl | `493275f87c809b369c409a84d6bf4abe604ccab6` (local pin) |
+| YIS | `3b73395d823b92a5c9760a759cd58709fd9e31c8` (local pin) |
 | Vendor library | SHA-256 `56beee8e...f0b2c`, x86-64 |
 | Synthetic config | `tests/support/hardware/real_two_joint.json` (**not a machine config**) |
 | Real config | none yet; values are unverified |
@@ -32,7 +32,7 @@ evidence in `.superpowers/phase4/<run>/`.
 | Full default regression | PASS | `ctest -j2`: 64/64, 28 core + 36 integration |
 | Sanitizer core suite | PASS | `IRMV_SANITIZE=address,undefined`, 28/28 core |
 | Runtime-only build without ONNX Runtime | PASS | `IRMV_BUILD_APPLICATION=OFF`, `ldd` has no ONNX |
-| RealBackend over real DDS with scripted port | **NOT IMPLEMENTED** | no automated entry yet |
+| RealBackend over real DDS with scripted port | PASS | `real_backend_contract_test`: read-only send log, edge/far future stamps, write refusal, driver error, overspeed, missing IMU |
 
 ## Bench matrix
 

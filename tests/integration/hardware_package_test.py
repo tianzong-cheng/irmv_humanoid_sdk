@@ -69,7 +69,7 @@ def main() -> int:
             # build, using the manifest the configure step actually reads.
             pins = json.loads((source / "deps/hardware-pins.json").read_text())
             for field, value, needle in (
-                    ("sha256", "0" * 64, "does not match the manifest"),
+                    ("sha256", "0" * 64, "vendor library SHA-256"),
                     ("elf_machine", 183, "architecture check failed")):
                 changed = json.loads(json.dumps(pins))
                 changed["vendor_library"][field] = value

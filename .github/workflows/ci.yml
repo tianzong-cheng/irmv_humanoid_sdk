@@ -58,7 +58,7 @@ jobs:
                       integration_producer_paused integration_runtime_restarted \
                       integration_command_flood integration_slow_logger \
                       integration_stderr_backpressure integration_local_stop \
-                      integration_write_refused hardware_config_test \
+                      integration_write_refused real_backend_contract_test hardware_config_test \
                       device_lease_test real_backend_test maintenance_test \
                       launcher_test hardware_package_test; do
             grep -Eq "Test +#[0-9]+: ${test}$" registered-tests.txt

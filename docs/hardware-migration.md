@@ -11,8 +11,8 @@ shipped `config/sdk.json` stays fake, and the synthetic fixture in
 | --- | --- | --- |
 | SDK baseline | `main@425290f58735cd0deb16585dc1c9f28f4c1b66f6` | plan baseline |
 | IRMVControl upstream | `6bc7ed0` before this branch | `/home/tianzong/Workspace/Humanoid/IRMVControl` |
-| IRMVControl with runtime I/O | `927f3a2aa06060a570ecf5fce132e5c44e85164c` | this branch, `deps/irmv_control` |
-| YIS IMU driver | `0b14ed8a057209603695c63c3c0dbd27f21b23fd` | this branch, `deps/yis_imu_driver` |
+| IRMVControl with runtime I/O | `493275f87c809b369c409a84d6bf4abe604ccab6` | this branch, `deps/irmv_control` |
+| YIS IMU driver | `3b73395d823b92a5c9760a759cd58709fd9e31c8` | this branch, `deps/yis_imu_driver` |
 | Vendor library | `libcontrolcanfd.so`, SHA-256 `56beee8e...f0b2c`, ELF x86-64 (machine 62) | `deps/irmv_control/ThirdParty/controlcanfd/libs` |
 | Licence | IRMVControl ships the repository `LICENSE`; YIS ships `LICENSE` | each checkout |
 
@@ -78,8 +78,11 @@ not contain a per-joint `Kt`; the legacy value 2.2 is the only one seen and it
 must be confirmed per motor model. Enable is `0x300` with `data[0]=0x01`;
 single-motor disable/reset are `id=motor_id` with `data[0]=0x00`/`0xFF`.
 
-The driver wrapper divides the receive id mask by the full low byte, so motor
-ids 16..19 remain distinct. The old `motor_load_test_can1` used `0xF` and
+`RuntimeIo::Open` opens devices and starts reception only. Enable is a separate,
+per-motor command, and the initial zero torque frame is an explicit send. A
+read-only tool therefore transmits nothing. The vendor send call is synchronous
+and has no documented worst-case bound; the bench item must measure it before a
+control-period claim is accepted. The old `motor_load_test_can1` used `0xF` and
 aliased 0x710..0x713 onto 1..3; that variant is not a reference.
 
 ## Missing facts and gates
