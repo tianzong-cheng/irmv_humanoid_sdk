@@ -1971,9 +1971,8 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
       // made: hand it to the writer thread, never to a file.
       hardware::OutputRecord written[kTraceDrainBatch];
       std::size_t drained = 0;
-      while ((drained = fake_backend->DrainOutputHistory(written,
-                                                          kTraceDrainBatch)) >
-             0) {
+      while ((drained = fake_backend->DrainOutputHistory(
+                  written, kTraceDrainBatch)) > 0) {
         for (std::size_t index = 0; index < drained; ++index) {
           trace->TryRecord(MakeTraceRecord(fsm, result, written[index]));
         }

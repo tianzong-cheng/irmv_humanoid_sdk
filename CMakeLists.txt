@@ -8,6 +8,8 @@ include(cmake/Dependencies.cmake)
 include(cmake/HardwareDependencies.cmake)
 
 option(IRMV_ENABLE_REAL_BACKEND "Build the real CAN-FD/IMU backend" OFF)
+option(IRMV_BUILD_APPLICATION
+       "Build the supervised upper process and the ONNX policy layer" ON)
 if(IRMV_ENABLE_REAL_BACKEND)
   irmv_make_real_backend_available()
 endif()
@@ -143,6 +145,7 @@ set_tests_properties(
 # transformation. It is the only internal library besides the application that
 # may link ONNX Runtime, which is what keeps `ldd build/robot_runtime` free of
 # it: the lower process never parses a model.
+if(IRMV_BUILD_APPLICATION)
 irmv_make_onnxruntime_available()
 add_library(
   irmv_policy
@@ -351,6 +354,7 @@ set_tests_properties(
   input_router_test PROPERTIES LABELS core
   WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
+endif()
 
 set(IRMV_HARDWARE_SOURCES
     src/hardware/fake_backend.cpp
@@ -550,6 +554,7 @@ set_tests_properties(deployment_schema_contract_test PROPERTIES LABELS core)
 # The policy math is pure: it reads a frozen contract, one snapshot and one
 # model action. The fixtures it is exercised against are the very documents the
 # contract test parses.
+if(IRMV_BUILD_APPLICATION)
 add_executable(policy_math_test tests/unit/policy_math_test.cpp)
 target_compile_features(policy_math_test PRIVATE cxx_std_17)
 target_include_directories(
@@ -614,10 +619,12 @@ add_dependencies(onnx_model_test policy_model_fixtures)
 
 add_test(NAME onnx_model_test COMMAND onnx_model_test "${IRMV_POLICY_FIXTURE_DIR}")
 set_tests_properties(onnx_model_test PROPERTIES LABELS core)
+endif()
 
 # The application config test also covers the policy section of the shipped
 # configuration, and the config schema contract test the schema that describes
 # it.
+if(IRMV_BUILD_APPLICATION)
 add_test(
   NAME policy_package_test
   COMMAND
@@ -632,6 +639,7 @@ set_tests_properties(
     TIMEOUT 300
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
+endif()
 
 # The acceptance of the local policy: the real application and the real runtime,
 # over real DDS, driven through the application's terminal, from a generated
@@ -657,6 +665,7 @@ set_tests_properties(
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
+if(IRMV_BUILD_APPLICATION)
 add_test(
   NAME policy_locomotion_test
   COMMAND
@@ -673,6 +682,7 @@ set_tests_properties(
     TIMEOUT 300
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
+endif()
 
 # The example external producer: a target generator the application selects,
 # prepares and authorizes, and that then publishes on the execution command
@@ -683,6 +693,7 @@ set_tests_properties(
 # installed next to the two processes as part of operating the deployment. Its
 # link libraries are defined later in this file, which is a plain forward
 # reference CMake resolves when it generates.
+if(IRMV_BUILD_APPLICATION)
 add_executable(external_producer examples/external_producer.cpp)
 target_compile_features(external_producer PRIVATE cxx_std_17)
 target_include_directories(
@@ -772,6 +783,7 @@ set_tests_properties(
     TIMEOUT 300
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
+endif()
 
 find_package(Threads REQUIRED)
 
@@ -975,6 +987,31 @@ set_tests_properties(
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
+add_test(
+  NAME launcher_test
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/integration/launcher_test.py"
+    "${PROJECT_SOURCE_DIR}"
+)
+set_tests_properties(
+  launcher_test PROPERTIES LABELS integration TIMEOUT 120
+  WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
+add_test(
+  NAME hardware_package_test
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/integration/hardware_package_test.py"
+    "${PROJECT_SOURCE_DIR}"
+    "${CMAKE_BINARY_DIR}/cyclonedds-prefix"
+)
+set_tests_properties(
+  hardware_package_test PROPERTIES LABELS integration TIMEOUT 900
+  WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
 # The read tool of a recorded run: it walks one run directory and prints what it
 # holds. It only reads - no DDS, no device - and it is installed with the two
 # processes because reading a run back is part of operating one.
@@ -984,6 +1021,7 @@ set_tests_properties(
 # environment recorded (docs/testing.md). It needs a model and a reference
 # document, so it is a tool rather than a test of its own, and the test entry
 # below registers it when those artifacts are present.
+if(IRMV_BUILD_APPLICATION)
 add_executable(verify_policy_sample tools/verify_policy_sample.cpp)
 target_compile_features(verify_policy_sample PRIVATE cxx_std_17)
 target_include_directories(
@@ -995,6 +1033,7 @@ target_link_libraries(
 install(
   TARGETS verify_policy_sample RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )
+endif()
 
 add_executable(read_record tools/read_record.cpp)
 target_compile_features(read_record PRIVATE cxx_std_17)
@@ -1011,6 +1050,7 @@ target_link_libraries(
 # application host libraries and never irmv_runtime (the lower layer is another
 # process, reached through DDS alone) and never irmv_telemetry (phase two ships
 # no application logging; the status goes to stdout).
+if(IRMV_BUILD_APPLICATION)
 add_executable(application src/application/main.cpp
                            src/application/application_loop.cpp)
 target_compile_features(application PRIVATE cxx_std_17)
@@ -1085,6 +1125,8 @@ set_tests_properties(
 )
 
 # Confirmation helper of the integration tests: pure protocol logic, no DDS.
+endif()
+
 add_executable(confirmation_test tests/integration/confirmation_test.cpp)
 target_compile_features(confirmation_test PRIVATE cxx_std_17)
 target_include_directories(
@@ -1143,15 +1185,24 @@ set(
   stderr_backpressure
   local_stop
   write_refused
-  application_normal
-  application_ready_hold
-  application_repeat_and_reset
-  application_stop_preempt
-  application_fault
-  application_unknown
-  application_overspeed
-  application_external_absent
 )
+if(IRMV_BUILD_APPLICATION)
+  list(APPEND IRMV_INTEGRATION_SCENARIOS
+    application_normal
+    application_ready_hold
+    application_repeat_and_reset
+    application_stop_preempt
+    application_fault
+    application_unknown
+    application_overspeed
+    application_external_absent
+  )
+endif()
+set(_irmv_scenario_application_args)
+if(TARGET application)
+  set(_irmv_scenario_application_args
+      "--application" "$<TARGET_FILE:application>")
+endif()
 foreach(scenario IN LISTS IRMV_INTEGRATION_SCENARIOS)
   add_test(
     NAME integration_${scenario}
@@ -1161,7 +1212,7 @@ foreach(scenario IN LISTS IRMV_INTEGRATION_SCENARIOS)
       --scenario "${PROJECT_SOURCE_DIR}/tests/integration/scenarios/${scenario}.json"
       --runtime "$<TARGET_FILE:robot_runtime>"
       --client "$<TARGET_FILE:runtime_client>"
-      --application "$<TARGET_FILE:application>"
+      ${_irmv_scenario_application_args}
       --source "${PROJECT_SOURCE_DIR}"
       # The runner isolates each scenario under <work-dir>/<scenario> and
       # claims its domain lock one level up, in the shared parent, which is
@@ -1177,6 +1228,7 @@ foreach(scenario IN LISTS IRMV_INTEGRATION_SCENARIOS)
   )
 endforeach()
 
+if(IRMV_BUILD_APPLICATION)
 # The cross-process phase acceptance: the cases one scenario run cannot express
 # (a runtime replaced under a running application, a SIGSTOPped runtime, a
 # paused and a killed application, the Locomotion boundary and the survivor
@@ -1249,6 +1301,8 @@ set_tests_properties(
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
+endif()
+
 # ---------------------------------------------------------------------------
 # Formatting
 # ---------------------------------------------------------------------------
@@ -1294,8 +1348,29 @@ add_custom_target(
 # The test clients of this phase are never installed.
 install(TARGETS robot_runtime RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(TARGETS read_record RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
-install(TARGETS application RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
-install(TARGETS external_producer RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+if(TARGET irmv_maintenance)
+  install(TARGETS irmv_maintenance
+          RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+endif()
+if(IRMV_HAS_REAL_BACKEND)
+  install(
+    FILES
+      "${IRMV_IRMV_CONTROL_SOURCE_DIR}/ThirdParty/controlcanfd/libs/libcontrolcanfd.so"
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+  if(IRMV_YIS_IMU_SOURCE_DIR)
+    install(
+      FILES "${IRMV_YIS_IMU_SOURCE_DIR}/build/libyis_imu_driver.so"
+            "${IRMV_YIS_IMU_SOURCE_DIR}/build/libserial.so"
+      DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+      OPTIONAL)
+  endif()
+endif()
+if(TARGET application)
+  install(TARGETS application RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+endif()
+if(TARGET external_producer)
+  install(TARGETS external_producer RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+endif()
 
 # The configuration of the default Fake deployment and the schema that describes
 # it: the schema is part of the configuration contract, not of a test.
@@ -1314,23 +1389,29 @@ set_target_properties(
 )
 # The application resolves its libraries the same way: it is built from the same
 # tree, links the same pinned DDS libraries and is started from the same bin.
-set_target_properties(
-  application
-  PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
-)
+if(TARGET application)
+  set_target_properties(
+    application
+    PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
+  )
+endif()
 # The example producer links the same pinned DDS libraries the application does
 # (its transport), so the installed binary resolves them from <prefix>/lib
 # exactly like the two processes and runs from a tree that was moved away from
 # its build directory. The reference-sample tool links ONNX Runtime for the same
 # reason the application does, and needs the same entry.
-set_target_properties(
-  external_producer
-  PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
-)
-set_target_properties(
-  verify_policy_sample
-  PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
-)
+if(TARGET external_producer)
+  set_target_properties(
+    external_producer
+    PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
+  )
+endif()
+if(TARGET verify_policy_sample)
+  set_target_properties(
+    verify_policy_sample
+    PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
+  )
+endif()
 
 # The installed tree has to run after being moved or copied to another machine
 # and must never reference the build or source directory. Every shared library
@@ -1351,16 +1432,23 @@ set_target_properties(
 # directory) and the pinned ONNX Runtime lives in a prefix of its own as well.
 # This is the Linux layout ($ORIGIN, ELF dependencies), which is the only
 # platform this phase targets.
+set(_irmv_install_executables "\"$<TARGET_FILE:robot_runtime>\"")
+set(_irmv_install_directories
+    "\"$<TARGET_FILE_DIR:CycloneDDS-CXX::ddscxx>\""
+    "\"$<TARGET_FILE_DIR:CycloneDDS::ddsc>\"")
+if(TARGET application)
+  string(APPEND _irmv_install_executables
+         " \"$<TARGET_FILE:application>\"")
+  string(APPEND _irmv_install_directories
+         " \"${IRMV_ONNXRUNTIME_ROOT}/lib\"")
+endif()
 install(
   CODE "
 set(_irmv_libdir \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}\")
 file(
   GET_RUNTIME_DEPENDENCIES
-  EXECUTABLES \"$<TARGET_FILE:robot_runtime>\"
-              \"$<TARGET_FILE:application>\"
-  DIRECTORIES \"$<TARGET_FILE_DIR:CycloneDDS-CXX::ddscxx>\"
-            \"$<TARGET_FILE_DIR:CycloneDDS::ddsc>\"
-            \"${IRMV_ONNXRUNTIME_ROOT}/lib\"
+  EXECUTABLES ${_irmv_install_executables}
+  DIRECTORIES ${_irmv_install_directories}
   RESOLVED_DEPENDENCIES_VAR _irmv_resolved
   UNRESOLVED_DEPENDENCIES_VAR _irmv_unresolved
   PRE_EXCLUDE_REGEXES
@@ -1398,20 +1486,14 @@ file(
   FILE \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/robot_runtime\"
   RPATH \"\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}\"
 )
-file(
-  RPATH_CHECK
-  FILE \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/application\"
-  RPATH \"\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}\"
-)
-file(
-  RPATH_CHECK
-  FILE \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/external_producer\"
-  RPATH \"\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}\"
-)
-file(
-  RPATH_CHECK
-  FILE \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/verify_policy_sample\"
-  RPATH \"\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}\"
-)
+foreach(_irmv_optional_binary IN ITEMS application external_producer verify_policy_sample)
+  if(EXISTS \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/\${_irmv_optional_binary}\")
+    file(
+      RPATH_CHECK
+      FILE \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/\${_irmv_optional_binary}\"
+      RPATH \"\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}\"
+    )
+  endif()
+endforeach()
 "
 )

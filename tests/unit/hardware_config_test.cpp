@@ -1,5 +1,3 @@
-#include "irmv/configuration/config.hpp"
-
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -8,6 +6,7 @@
 #include <string>
 #include <string_view>
 
+#include "irmv/configuration/config.hpp"
 #include "support/check.hpp"
 
 namespace {
@@ -42,16 +41,16 @@ Json BaseConfig() {
          {{"position", "rad"}, {"velocity", "rad_s"}, {"torque", "Nm"}}},
         {"joints",
          {{{"name", "test_left"}, {"position_min", -2}, {"position_max", 2}},
-          {{"name", "test_right"}, {"position_min", -2}, {"position_max", 2}}}}}},
+          {{"name", "test_right"},
+           {"position_min", -2},
+           {"position_max", 2}}}}}},
       {"runtime",
        {{"control_hz", 500},
         {"damping", {{"kd", {{"test_left", 2}, {"test_right", 2}}}}},
         {"safety",
-         {{"joint_velocity_limits",
-           {{"test_left", 10}, {"test_right", 10}}},
+         {{"joint_velocity_limits", {{"test_left", 10}, {"test_right", 10}}},
           {"torque_limits", {{"test_left", 20}, {"test_right", 20}}},
-          {"target_velocity_limits",
-           {{"test_left", 10}, {"test_right", 10}}},
+          {"target_velocity_limits", {{"test_left", 10}, {"test_right", 10}}},
           {"timeouts",
            {{"command_us", 100000},
             {"source_state_us", 150000},
@@ -84,23 +83,22 @@ Json RealConfig() {
   Json document = BaseConfig();
   document["deployment"] = "real";
   document["backend"] = "real";
-  document["robot"]["buses"] = {
-      {{"name", "can0"},
-       {"device_type", 41},
-       {"device_index", 0},
-       {"channel", 0},
-       {"arbitration_bps", 1000000},
-       {"data_bps", 5000000},
-       {"iso_mode", true},
-       {"resistance_enabled", false}},
-      {{"name", "can1"},
-       {"device_type", 41},
-       {"device_index", 0},
-       {"channel", 1},
-       {"arbitration_bps", 1000000},
-       {"data_bps", 5000000},
-       {"iso_mode", true},
-       {"resistance_enabled", false}}};
+  document["robot"]["buses"] = {{{"name", "can0"},
+                                 {"device_type", 41},
+                                 {"device_index", 0},
+                                 {"channel", 0},
+                                 {"arbitration_bps", 1000000},
+                                 {"data_bps", 5000000},
+                                 {"iso_mode", true},
+                                 {"resistance_enabled", false}},
+                                {{"name", "can1"},
+                                 {"device_type", 41},
+                                 {"device_index", 0},
+                                 {"channel", 1},
+                                 {"arbitration_bps", 1000000},
+                                 {"data_bps", 5000000},
+                                 {"iso_mode", true},
+                                 {"resistance_enabled", false}}};
   document["robot"]["joints"][0]["bus"] = "can0";
   document["robot"]["joints"][0]["motor_id"] = 1;
   document["robot"]["joints"][0]["direction"] = 1;

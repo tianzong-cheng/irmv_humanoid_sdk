@@ -1,5 +1,3 @@
-#include "irmv/hardware/driver_port.hpp"
-
 #include <cmath>
 #include <cstddef>
 #include <stdexcept>
@@ -8,6 +6,7 @@
 #include <vector>
 
 #include "hardware/runtime_io.h"
+#include "irmv/hardware/driver_port.hpp"
 
 namespace irmv::hardware {
 namespace {
@@ -25,7 +24,8 @@ class IrmvDriverPort final : public DriverPort {
  public:
   void Open(const configuration::HardwareConfig &hardware) override {
     upstream::Options options;
-    if (hardware.joints.empty() || hardware.joints.size() > upstream::kMaxJoints) {
+    if (hardware.joints.empty() ||
+        hardware.joints.size() > upstream::kMaxJoints) {
       throw std::runtime_error("driver adapter: invalid joint count");
     }
     if (hardware.buses.empty() || hardware.buses.size() > upstream::kMaxBuses) {
@@ -94,8 +94,7 @@ class IrmvDriverPort final : public DriverPort {
       const double direction = static_cast<double>(mapping.direction);
       joint.valid = sample.valid;
       joint.connected = sample.connected;
-      joint.q = direction *
-                (sample.position_rad - mapping.encoder_offset) /
+      joint.q = direction * (sample.position_rad - mapping.encoder_offset) /
                 mapping.reduction_ratio;
       joint.dq = direction * sample.speed_rad_s / mapping.reduction_ratio;
       joint.tau_est = direction * mapping.reduction_ratio *
@@ -131,9 +130,9 @@ class IrmvDriverPort final : public DriverPort {
         return result;
       }
       // Joint output torque -> motor side, once.
-      frame.targets[index].torque_nm =
-          static_cast<double>(mapping.direction) * output.torque[index] /
-          mapping.reduction_ratio;
+      frame.targets[index].torque_nm = static_cast<double>(mapping.direction) *
+                                       output.torque[index] /
+                                       mapping.reduction_ratio;
     }
     const upstream::SendResult sent = io_.SendTorque(frame);
     result.accepted = sent.accepted;

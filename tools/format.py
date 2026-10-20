@@ -38,7 +38,7 @@ CONFIG_PATH = SOURCE_ROOT / ".clang-format"
 REQUIREMENTS_PATH = SOURCE_ROOT / "tools" / "requirements-format.txt"
 
 # Every first-party directory that may hold C/C++ code.
-SCAN_DIRECTORIES = ("include", "src", "tests")
+SCAN_DIRECTORIES = ("include", "src", "tests", "examples", "tools")
 SOURCE_SUFFIXES = frozenset(
     {".h", ".hh", ".hpp", ".hxx", ".c", ".cc", ".cpp", ".cxx"}
 )

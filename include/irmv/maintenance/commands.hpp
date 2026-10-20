@@ -27,7 +27,8 @@ class MaintenancePort {
 // runtime share one device owner and one protocol codec.
 class DriverPortMaintenancePort final : public MaintenancePort {
  public:
-  explicit DriverPortMaintenancePort(hardware::DriverPort &port) : port_(port) {}
+  explicit DriverPortMaintenancePort(hardware::DriverPort &port)
+      : port_(port) {}
   hardware::WriteResult Disable(const std::string &bus_name,
                                 std::uint32_t motor_id) override;
   hardware::WriteResult ResetZero(const std::string &bus_name,

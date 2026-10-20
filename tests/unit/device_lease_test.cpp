@@ -191,16 +191,15 @@ int main() {
   {
     DeviceLease first =
         DeviceLease::Acquire(OneBus("can0", 0, 0), lock_directory.path());
-    CHECK(AcquireFails(OneBus("can0", 0, 0), lock_directory.path(),
-                       "can-41-0"));
+    CHECK(
+        AcquireFails(OneBus("can0", 0, 0), lock_directory.path(), "can-41-0"));
   }
 
   // The IMU is part of the same lease, keyed by its normalised identity.
   {
     HardwareConfig with_imu = OneBus("can0", 0, 0);
     with_imu.imu = irmv::configuration::ImuConfig{"YIS/IMU 0", 921600};
-    DeviceLease lease =
-        DeviceLease::Acquire(with_imu, lock_directory.path());
+    DeviceLease lease = DeviceLease::Acquire(with_imu, lock_directory.path());
     CHECK(lease.identities() ==
           (std::vector<std::string>{"can-41-0", "imu-YIS_IMU_0"}));
   }

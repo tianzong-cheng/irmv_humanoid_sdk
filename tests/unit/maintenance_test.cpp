@@ -1,5 +1,3 @@
-#include "irmv/maintenance/commands.hpp"
-
 #include <chrono>
 #include <cstdint>
 #include <limits>
@@ -7,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "irmv/maintenance/commands.hpp"
 #include "support/check.hpp"
 #include "support/scripted_driver_port.hpp"
 
@@ -79,8 +78,8 @@ int main() {
     fixture.port.snapshot.joints[0].rx_stamp_us = now;
     fixture.port.snapshot.joints[0].error_code = 0x80010000u;
     fixture.port.snapshot.joints[0].freq_hz = 500.0;
-    CHECK(Call(fixture, {"heartbeat-decode", "--duration-ms", "2",
-                         "--rate-hz", "100"}) == 0);
+    CHECK(Call(fixture, {"heartbeat-decode", "--duration-ms", "2", "--rate-hz",
+                         "100"}) == 0);
     CHECK(fixture.port.open_calls == 1);
     CHECK(Contains(fixture.out.str(), "error=0x80010000"));
     CHECK(Contains(fixture.out.str(), "age_us="));
@@ -122,9 +121,9 @@ int main() {
   // A torque outside the configured limit is refused before any device opens.
   {
     Fixture fixture;
-    CHECK(Call(fixture, {"motor-load-test", "--joint", "test_left",
-                         "--torque-nm", "100", "--duration-ms", "5",
-                         "--execute"}) == 2);
+    CHECK(
+        Call(fixture, {"motor-load-test", "--joint", "test_left", "--torque-nm",
+                       "100", "--duration-ms", "5", "--execute"}) == 2);
     CHECK(fixture.port.open_calls == 0);
   }
 
@@ -132,14 +131,14 @@ int main() {
   // name. test_right is on can1; test_left is not.
   {
     Fixture fixture;
-    CHECK(Call(fixture, {"motor-load-test-can1", "--joint", "test_left",
-                         "--torque-nm", "1", "--duration-ms", "5",
-                         "--execute"}) == 2);
+    CHECK(Call(fixture,
+               {"motor-load-test-can1", "--joint", "test_left", "--torque-nm",
+                "1", "--duration-ms", "5", "--execute"}) == 2);
     CHECK(fixture.port.open_calls == 0);
     Fixture can1;
     CHECK(Call(can1, {"motor-load-test-can1", "--joint", "test_right",
-                      "--torque-nm", "1", "--duration-ms", "5",
-                      "--rate-hz", "100", "--execute"}) == 0);
+                      "--torque-nm", "1", "--duration-ms", "5", "--rate-hz",
+                      "100", "--execute"}) == 0);
     CHECK(can1.port.send_calls >= 2);
     CHECK(can1.port.sends.front().output.torque[1] == 1.0);
     CHECK(can1.port.sends.front().output.torque[0] == 0.0);
@@ -156,8 +155,8 @@ int main() {
     CHECK(fixture.port.open_calls == 0);
     CHECK(fixture.port.commands.empty());
     Fixture missing;
-    CHECK(Call(missing, {"motor-zero-reset", "--joint", "test_left",
-                         "--execute"}) == 2);
+    CHECK(Call(missing,
+               {"motor-zero-reset", "--joint", "test_left", "--execute"}) == 2);
     CHECK(missing.port.open_calls == 0);
   }
 

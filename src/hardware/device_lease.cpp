@@ -55,14 +55,12 @@ std::filesystem::path DeviceLease::DefaultDirectory() {
   return std::filesystem::path("/run/lock/irmv");
 }
 
-DeviceLease DeviceLease::Acquire(
-    const configuration::HardwareConfig &config) {
+DeviceLease DeviceLease::Acquire(const configuration::HardwareConfig &config) {
   return Acquire(config, DefaultDirectory());
 }
 
-DeviceLease DeviceLease::Acquire(
-    const configuration::HardwareConfig &config,
-    const std::filesystem::path &directory) {
+DeviceLease DeviceLease::Acquire(const configuration::HardwareConfig &config,
+                                 const std::filesystem::path &directory) {
   std::error_code error;
   std::filesystem::create_directories(directory, error);
   if (error) {

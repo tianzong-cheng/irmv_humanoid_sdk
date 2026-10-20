@@ -65,8 +65,7 @@ Json CanonicalConfig(const RuntimeConfig &config) {
     joints.push_back(std::move(joint));
   }
   Json robot = {
-      {"units",
-       {{"position", "rad"}, {"velocity", "rad_s"}, {"torque", "Nm"}}},
+      {"units", {{"position", "rad"}, {"velocity", "rad_s"}, {"torque", "Nm"}}},
       {"joints", std::move(joints)}};
   if (config.hardware) {
     Json buses = Json::array();
@@ -185,9 +184,9 @@ RuntimeConfig LoadConfig(const std::filesystem::path &path,
   }
   config.backend = StringMember(document, "backend", "");
   if (config.backend != (real_deployment ? "real" : "fake")) {
-    Fail("backend",
-         real_deployment ? "must equal real when deployment is real"
-                         : "must equal fake when deployment is fake_only");
+    Fail("backend", real_deployment
+                        ? "must equal real when deployment is real"
+                        : "must equal fake when deployment is fake_only");
   }
 
   const Json &robot = ObjectMember(document, "robot", "");
@@ -237,29 +236,25 @@ RuntimeConfig LoadConfig(const std::filesystem::path &path,
       if (!seen_bus_names.insert(parsed.name).second) {
         Fail(path + ".name", "must be unique");
       }
-      parsed.device_type = static_cast<std::uint32_t>(
-          PositiveInteger(Member(bus, "device_type", path),
-                          path + ".device_type",
-                          std::numeric_limits<std::uint32_t>::max()));
-      parsed.device_index = static_cast<std::uint32_t>(
-          IntegerInRange(Member(bus, "device_index", path),
-                         path + ".device_index", 0,
-                         std::numeric_limits<std::uint32_t>::max()));
+      parsed.device_type = static_cast<std::uint32_t>(PositiveInteger(
+          Member(bus, "device_type", path), path + ".device_type",
+          std::numeric_limits<std::uint32_t>::max()));
+      parsed.device_index = static_cast<std::uint32_t>(IntegerInRange(
+          Member(bus, "device_index", path), path + ".device_index", 0,
+          std::numeric_limits<std::uint32_t>::max()));
       parsed.channel = static_cast<std::uint32_t>(IntegerInRange(
           Member(bus, "channel", path), path + ".channel", 0, 1));
-      parsed.arbitration_bps = static_cast<std::uint32_t>(
-          PositiveInteger(Member(bus, "arbitration_bps", path),
-                          path + ".arbitration_bps",
-                          std::numeric_limits<std::uint32_t>::max()));
+      parsed.arbitration_bps = static_cast<std::uint32_t>(PositiveInteger(
+          Member(bus, "arbitration_bps", path), path + ".arbitration_bps",
+          std::numeric_limits<std::uint32_t>::max()));
       parsed.data_bps = static_cast<std::uint32_t>(
           PositiveInteger(Member(bus, "data_bps", path), path + ".data_bps",
                           std::numeric_limits<std::uint32_t>::max()));
       parsed.iso_mode = BoolMember(bus, "iso_mode", path);
       parsed.resistance_enabled = BoolMember(bus, "resistance_enabled", path);
-      const std::string endpoint =
-          std::to_string(parsed.device_type) + ":" +
-          std::to_string(parsed.device_index) + ":" +
-          std::to_string(parsed.channel);
+      const std::string endpoint = std::to_string(parsed.device_type) + ":" +
+                                   std::to_string(parsed.device_index) + ":" +
+                                   std::to_string(parsed.channel);
       if (!seen_endpoints.insert(endpoint).second) {
         Fail(path, "duplicates the device/channel of another bus");
       }
@@ -292,11 +287,13 @@ RuntimeConfig LoadConfig(const std::filesystem::path &path,
       Fail(joint_path + ".position_min", "must be less than position_max");
     }
 
-    const bool require_mapping = real_deployment ||
-                                 buses_member != robot.end();
-    static constexpr const char *kMappingFields[] = {
-        "bus",         "motor_id",       "direction",
-        "reduction_ratio", "encoder_offset", "torque_constant"};
+    const bool require_mapping = real_deployment || buses_member != robot.end();
+    static constexpr const char *kMappingFields[] = {"bus",
+                                                     "motor_id",
+                                                     "direction",
+                                                     "reduction_ratio",
+                                                     "encoder_offset",
+                                                     "torque_constant"};
     bool has_mapping = false;
     for (const char *field : kMappingFields) {
       has_mapping = has_mapping || joint.contains(field);
@@ -312,11 +309,10 @@ RuntimeConfig LoadConfig(const std::filesystem::path &path,
       if (mapping.bus.empty()) {
         Fail(joint_path + ".bus", "must not be empty");
       }
-      mapping.motor_id = static_cast<std::uint32_t>(IntegerInRange(
-          Member(joint, "motor_id", joint_path), joint_path + ".motor_id", 1,
-          31));
-      const double direction =
-          FiniteMember(joint, "direction", joint_path);
+      mapping.motor_id = static_cast<std::uint32_t>(
+          IntegerInRange(Member(joint, "motor_id", joint_path),
+                         joint_path + ".motor_id", 1, 31));
+      const double direction = FiniteMember(joint, "direction", joint_path);
       if (direction != 1.0 && direction != -1.0) {
         Fail(joint_path + ".direction", "must equal -1 or 1");
       }
@@ -366,10 +362,9 @@ RuntimeConfig LoadConfig(const std::filesystem::path &path,
     if (imu.hardware_id.empty() || imu.hardware_id.size() > 128) {
       Fail("robot.imu.hardware_id", "must contain 1 to 128 bytes");
     }
-    imu.baudrate = static_cast<std::uint32_t>(
-        PositiveInteger(Member(*imu_member, "baudrate", "robot.imu"),
-                        "robot.imu.baudrate",
-                        std::numeric_limits<std::uint32_t>::max()));
+    imu.baudrate = static_cast<std::uint32_t>(PositiveInteger(
+        Member(*imu_member, "baudrate", "robot.imu"), "robot.imu.baudrate",
+        std::numeric_limits<std::uint32_t>::max()));
     hardware->imu = std::move(imu);
   }
   config.hardware = std::move(hardware);

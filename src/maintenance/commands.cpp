@@ -147,8 +147,7 @@ bool Parse(std::vector<std::string> arguments, Arguments *parsed,
       if (!ReadValue(arguments, &index, &value) ||
           !ParseDouble(value, &parsed->velocity_tolerance) ||
           parsed->velocity_tolerance <= 0.0) {
-        *error =
-            "--verify-velocity-tolerance-rad-s requires a positive number";
+        *error = "--verify-velocity-tolerance-rad-s requires a positive number";
         return false;
       }
     } else if (argument == "--verify-timeout-ms") {
@@ -185,8 +184,7 @@ bool InstallStopHandlers() {
 }
 
 const configuration::HardwareJointConfig *FindJoint(
-    const configuration::HardwareConfig &hardware,
-    const std::string &name) {
+    const configuration::HardwareConfig &hardware, const std::string &name) {
   for (const auto &joint : hardware.joints) {
     if (joint.name == name) {
       return &joint;
@@ -206,8 +204,7 @@ std::size_t JointIndex(const configuration::HardwareConfig &hardware,
 }
 
 const configuration::BusConfig *FindBus(
-    const configuration::HardwareConfig &hardware,
-    const std::string &name) {
+    const configuration::HardwareConfig &hardware, const std::string &name) {
   for (const auto &bus : hardware.buses) {
     if (bus.name == name) {
       return &bus;
@@ -250,8 +247,7 @@ int Heartbeat(const configuration::RuntimeConfig &config,
   const auto period = std::chrono::microseconds(
       1'000'000 / std::max<std::uint32_t>(arguments.rate_hz, 1));
   auto deadline = std::chrono::steady_clock::now();
-  const auto end =
-      deadline + std::chrono::milliseconds(duration_ms);
+  const auto end = deadline + std::chrono::milliseconds(duration_ms);
   while (!g_stop.load() && std::chrono::steady_clock::now() < end) {
     const protocol::FeedbackSnapshot snapshot = port.ReadLatest();
     const std::uint64_t now = MonotonicUs();
@@ -268,10 +264,9 @@ int Heartbeat(const configuration::RuntimeConfig &config,
       } else {
         out << " age_us=none";
       }
-      out << " freq_hz=" << std::fixed << std::setprecision(1)
-          << joint.freq_hz << std::setprecision(6) << " q=" << joint.q
-          << " dq=" << joint.dq << " tau_est=" << joint.tau_est
-          << " valid=" << (joint.valid ? 1 : 0)
+      out << " freq_hz=" << std::fixed << std::setprecision(1) << joint.freq_hz
+          << std::setprecision(6) << " q=" << joint.q << " dq=" << joint.dq
+          << " tau_est=" << joint.tau_est << " valid=" << (joint.valid ? 1 : 0)
           << " connected=" << (joint.connected ? 1 : 0)
           << " temperature=unsupported voltage=unsupported\n";
     }
@@ -306,8 +301,7 @@ int LoadTest(const configuration::RuntimeConfig &config,
     const auto &mapping = hardware.joints[index];
     const configuration::BusConfig *bus = FindBus(hardware, mapping.bus);
     if (bus == nullptr) {
-      out << "motor-load-test: joint " << name
-          << " names an unknown bus\n";
+      out << "motor-load-test: joint " << name << " names an unknown bus\n";
       return kExitFailure;
     }
     if (channel_one_only && bus->channel != 1) {
@@ -317,14 +311,15 @@ int LoadTest(const configuration::RuntimeConfig &config,
     }
     if (std::abs(arguments.torque_nm) > config.torque_limits[index]) {
       out << "motor-load-test: torque " << arguments.torque_nm
-          << " exceeds torque_limits[" << name << "]="
-          << config.torque_limits[index] << "\n";
+          << " exceeds torque_limits[" << name
+          << "]=" << config.torque_limits[index] << "\n";
       return kExitUsage;
     }
     indices.push_back(index);
   }
 
-  const std::uint32_t count = static_cast<std::uint32_t>(hardware.joints.size());
+  const std::uint32_t count =
+      static_cast<std::uint32_t>(hardware.joints.size());
   hardware::TorqueOutput output;
   output.count = count;
   for (const std::size_t index : indices) {
@@ -333,8 +328,8 @@ int LoadTest(const configuration::RuntimeConfig &config,
 
   out << (arguments.execute ? "execute" : "dry-run") << ": "
       << arguments.joints.size() << " joint(s) at " << arguments.torque_nm
-      << " Nm for " << arguments.duration_ms << " ms at "
-      << arguments.rate_hz << " Hz\n";
+      << " Nm for " << arguments.duration_ms << " ms at " << arguments.rate_hz
+      << " Hz\n";
   for (std::size_t index = 0; index < hardware.joints.size(); ++index) {
     out << "  " << hardware.joints[index].name
         << " torque=" << output.torque[index] << "\n";
@@ -371,8 +366,8 @@ int LoadTest(const configuration::RuntimeConfig &config,
   zero.count = count;
   const hardware::WriteResult stopped = port.SendTorque(zero);
   if (!stopped.accepted) {
-    out << "motor-load-test: the closing zero frame was refused (0x"
-        << std::hex << stopped.error_code << std::dec << ")\n";
+    out << "motor-load-test: the closing zero frame was refused (0x" << std::hex
+        << stopped.error_code << std::dec << ")\n";
     failure = true;
   }
   out << "motor-load-test: " << sends << " frame(s) accepted; closing zero "
@@ -382,8 +377,9 @@ int LoadTest(const configuration::RuntimeConfig &config,
 }
 
 int ZeroReset(const configuration::RuntimeConfig &config,
-              const Arguments &arguments, bool single, hardware::DriverPort &port,
-              MaintenancePort &maintenance, std::ostream &out) {
+              const Arguments &arguments, bool single,
+              hardware::DriverPort &port, MaintenancePort &maintenance,
+              std::ostream &out) {
   const auto &hardware = *config.hardware;
   if (arguments.joints.empty()) {
     out << "motor-zero-reset: --joint is required; the broadcast path is "
@@ -395,8 +391,7 @@ int ZeroReset(const configuration::RuntimeConfig &config,
     return kExitUsage;
   }
   if (arguments.position_tolerance <= 0.0 ||
-      arguments.velocity_tolerance <= 0.0 ||
-      arguments.verify_timeout_ms <= 0) {
+      arguments.velocity_tolerance <= 0.0 || arguments.verify_timeout_ms <= 0) {
     out << "motor-zero-reset: --verify-position-tolerance-rad, "
            "--verify-velocity-tolerance-rad-s and --verify-timeout-ms are "
            "required positive values\n";
@@ -412,10 +407,9 @@ int ZeroReset(const configuration::RuntimeConfig &config,
   for (const std::string &name : arguments.joints) {
     out << " " << name;
   }
-  out << " after disable; position tolerance "
-      << arguments.position_tolerance << " rad, velocity tolerance "
-      << arguments.velocity_tolerance << " rad/s, timeout "
-      << arguments.verify_timeout_ms << " ms\n";
+  out << " after disable; position tolerance " << arguments.position_tolerance
+      << " rad, velocity tolerance " << arguments.velocity_tolerance
+      << " rad/s, timeout " << arguments.verify_timeout_ms << " ms\n";
   out << "  firmware persistence is not acknowledged by this protocol; a "
          "successful fresh readback is not a reboot verification\n";
   if (!arguments.execute) {
@@ -482,9 +476,9 @@ int ZeroReset(const configuration::RuntimeConfig &config,
           FindJoint(hardware, name);
       // After the reset the raw rotor angle is zero; the configured offset
       // implies this joint-side reading.
-      const double expected =
-          -static_cast<double>(mapping->direction) * mapping->encoder_offset /
-          mapping->reduction_ratio;
+      const double expected = -static_cast<double>(mapping->direction) *
+                              mapping->encoder_offset /
+                              mapping->reduction_ratio;
       if (joint.rx_stamp_us > before && joint.valid &&
           std::abs(joint.q - expected) <= arguments.position_tolerance &&
           std::abs(joint.dq) <= arguments.velocity_tolerance) {

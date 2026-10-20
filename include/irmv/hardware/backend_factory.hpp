@@ -13,6 +13,7 @@ namespace irmv::hardware {
 //
 // Throws std::runtime_error when the backend is unavailable. The caller is
 // responsible for the startup sequence: nothing here touches a device.
-std::unique_ptr<Backend> MakeBackend(const configuration::RuntimeConfig &config);
+std::unique_ptr<Backend> MakeBackend(
+    const configuration::RuntimeConfig &config);
 
 }  // namespace irmv::hardware

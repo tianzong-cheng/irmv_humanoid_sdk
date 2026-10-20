@@ -9,7 +9,8 @@
 
 namespace irmv::hardware {
 
-std::unique_ptr<Backend> MakeBackend(const configuration::RuntimeConfig &config) {
+std::unique_ptr<Backend> MakeBackend(
+    const configuration::RuntimeConfig &config) {
   if (config.backend == "fake") {
     return std::make_unique<FakeBackend>(config);
   }

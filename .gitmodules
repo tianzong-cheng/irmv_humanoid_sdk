@@ -1,0 +1,6 @@
+[submodule "deps/irmv_control"]
+	path = deps/irmv_control
+	url = git@codeup.aliyun.com:609a653640d06141cf86953a/IRMVControl.git
+[submodule "deps/yis_imu_driver"]
+	path = deps/yis_imu_driver
+	url = git@codeup.aliyun.com:609a653640d06141cf86953a/yis_imu_driver.git

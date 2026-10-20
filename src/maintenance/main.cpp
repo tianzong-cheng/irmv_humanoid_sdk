@@ -16,7 +16,8 @@ namespace {
 // port closed it.
 class LeasedDriverPort final : public irmv::hardware::DriverPort {
  public:
-  explicit LeasedDriverPort(irmv::hardware::DriverPort &inner) : inner_(inner) {}
+  explicit LeasedDriverPort(irmv::hardware::DriverPort &inner)
+      : inner_(inner) {}
 
   void Open(const irmv::configuration::HardwareConfig &hardware) override {
     lease_ = irmv::hardware::DeviceLease::Acquire(hardware);

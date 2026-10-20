@@ -1,0 +1,19 @@
+{
+  "$comment": "Local pins of the real-backend dependencies. The commits are the ones this branch was built against; publishing them to the Codeup remotes is a separate delivery step.",
+  "irmv_control": {
+    "path": "deps/irmv_control",
+    "commit": "927f3a2aa06060a570ecf5fce132e5c44e85164c",
+    "url": "git@codeup.aliyun.com:609a653640d06141cf86953a/IRMVControl.git"
+  },
+  "yis_imu_driver": {
+    "path": "deps/yis_imu_driver",
+    "commit": "0b14ed8a057209603695c63c3c0dbd27f21b23fd",
+    "url": "git@codeup.aliyun.com:609a653640d06141cf86953a/yis_imu_driver.git"
+  },
+  "vendor_library": {
+    "path": "deps/irmv_control/ThirdParty/controlcanfd/libs/libcontrolcanfd.so",
+    "sha256": "56beee8ea0aa08443905779121d50584adbef0a27e411c804b159577469f0b2c",
+    "elf_machine": 62,
+    "$comment": "ELF e_machine 62 is x86-64. No aarch64 build of this vendor library was verified."
+  }
+}

@@ -179,8 +179,7 @@ int main() {
     CHECK(InitializeThrows(backend, "scripted open failure"));
     CHECK(script->open_calls == 1);
     CHECK(script->close_calls == 1);
-    DeviceLease lease =
-        DeviceLease::Acquire(*config.hardware);
+    DeviceLease lease = DeviceLease::Acquire(*config.hardware);
     CHECK(lease.held());
   }
 
