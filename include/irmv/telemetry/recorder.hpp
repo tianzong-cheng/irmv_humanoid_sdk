@@ -36,12 +36,19 @@
 // so a twelve-joint deployment does not pay for the sixty-four the protocol
 // allows.
 //
-// The run's loss table is the one thing the worker cannot finish alone: samples
-// can still be sitting in the handoff when the worker is done, and only Stop()
-// sees them. Stop() therefore takes that tail, folds in the refusals the
-// control thread counted, and writes the index the same table gaps() returns -
-// after the worker has been joined, on the path that is already shutting the
-// run down.
+// Finalization belongs to the worker: Stop() first closes the handoff, waits
+// for the producers already inside TryRecord to leave, and then asks the worker
+// to drain the tail, fold in the refusals the control thread counted, and write
+// the index the same table gaps() returns. The worker owns the queue and its
+// own state through a shared allocation, so a sink or file system that blocks
+// past Stop()'s deadline can finish safely on its own; Stop() returns false at
+// the deadline instead of joining unconditionally or writing files from the
+// stopping thread.
+//
+// The index is replaced atomically after every committed chunk and at the start
+// of the run, and carries a `complete` flag. A reader can therefore open a run
+// that is still recording, and recover the chunks a crash committed before the
+// next index replacement.
 //
 // Nothing here decides what to record: the runtime builds the sample and this
 // component stores it, reports what it could not store, and keeps the control
@@ -76,6 +83,11 @@ inline constexpr std::size_t kRecordSessionQueueCapacity = 64;
 // pathological run reports one coarse loss rather than silence. The resolution
 // degrades past this bound; the loss itself is still named.
 inline constexpr std::size_t kRecordGapSegments = 64;
+
+// The bound Stop() gives its worker to drain and finalize. A blocked device is
+// handed off to the worker, which owns its state, rather than holding the
+// control loop past this deadline.
+inline constexpr std::uint32_t kRecorderStopTimeoutMs = 2000;
 
 // One run's configuration.
 struct RecorderConfig {
@@ -128,11 +140,12 @@ class Recorder {
   // writes what it accepted to `sessions.json` in the run directory.
   bool TryRecordSession(const RecordSessionEvent &event) noexcept;
 
-  // Stops the worker after draining what it can, closes the run and writes the
-  // index: the same gap table gaps() returns. Idempotent, and called by the
-  // destructor. A drain that does not finish inside the bound is reported by
-  // returning false rather than waiting for the disk: the control loop that
-  // owns this call has its own deadlines.
+  // Closes the handoff, asks the worker to drain and finalize, and waits for it
+  // against one deadline. Returns true when the worker finished and was joined;
+  // false when the deadline expired, in which case the worker still owns every
+  // queue, buffer and file and finishes on its own. Idempotent, and called by
+  // the destructor. No filesystem write happens on the caller's thread after
+  // the deadline.
   bool Stop();
 
   bool started() const;
@@ -164,76 +177,11 @@ class Recorder {
  private:
   struct Impl;
 
-  // One stretch of loss, in the sequence space the runtime published and the
-  // stamps it published it with. The control thread records the refusals of the
-  // handoff as these, because a refused sample never reaches the worker: only
-  // the side that saw the loss can name the stretch it covers.
-  struct RefusalSpan {
-    protocol::Sequence first_seq{0};
-    protocol::Sequence last_seq{0};
-    protocol::TimeUs first_stamp_us{0};
-    protocol::TimeUs last_stamp_us{0};
-  };
-
-  // The body of TryRecord, run with this thread announced in `offering_`.
-  bool OfferSample(const RecordSample &sample) noexcept;
-  // Records one refused sample in the stretch being tracked. The stretch grows
-  // while the refusals are the same sample offered again or the next sample of
-  // the run's stride; anything else, or a sample recorded since the stretch
-  // opened, ends it and starts a new one.
-  void NoteRefusal(const RecordSample &sample) noexcept;
-  // Closes the open stretch into the table, or folds it into the last entry
-  // when the table is full. See kRecordGapSegments.
-  void CloseRefusal() noexcept;
-  // Files one span in the table under the overflow rule. Shared with Stop(),
-  // which files the stretch that was still open when the run was closed.
-  static void PutRefusal(RefusalSpan *table, std::uint32_t *count,
-                         const RefusalSpan &span) noexcept;
-  // Appends the refusal stretches, and the stretch still open, to `gaps`.
-  void AppendRefusalGaps(std::vector<RecordGap> *gaps) const;
-
-  std::unique_ptr<Impl> impl_;
-  std::filesystem::path run_directory_;
-  std::atomic<bool> started_{false};
-  transport::BoundedChannel<RecordSample, kRecordQueueCapacity> queue_;
-  // The session events' own bounded handoff. The control thread pushes and the
-  // worker drains; a full channel costs the event and is counted, exactly like
-  // the sample queue, so a session can never delay a tick.
-  transport::BoundedChannel<RecordSessionEvent, kRecordSessionQueueCapacity>
-      session_queue_;
-  // How many control-thread calls are inside TryRecord. The control thread
-  // announces itself around every offer - two lock-free increments, never a
-  // wait - so a Stop() on another thread can tell when the refusal table below
-  // is quiescent and when no sample can still land behind the tail it takes.
-  std::atomic<std::uint32_t> offering_{0};
-  // The same announcement for the session channel, so Stop() can tell when no
-  // session event can still land behind the drain it takes.
-  std::atomic<std::uint32_t> session_offering_{0};
-  // The refusal stretches already recorded, and the one still being extended,
-  // written by the control thread in TryRecord and read by Stop() once
-  // `offering_` is zero.
-  RefusalSpan refused_[kRecordGapSegments]{};
-  std::uint32_t refused_count_{0};
-  RefusalSpan refusal_open_{};
-  bool refusal_open_valid_{false};
-  // The accepted-sample count `recorded_` held when the open stretch started: a
-  // sample that made it into the handoff ends the stretch, which is what makes
-  // two refusals with a healthy run between them two losses instead of one gap
-  // spanning the samples that were recorded fine.
-  std::uint64_t refusal_open_recorded_{0};
-  // The run's sampling stride, fixed by Start() before the control thread can
-  // call TryRecord.
-  protocol::Sequence stride_{1};
-  std::atomic<std::uint64_t> dropped_{0};
-  std::atomic<std::uint64_t> session_dropped_{0};
-  std::atomic<std::uint64_t> sessions_written_{0};
-  std::atomic<std::uint64_t> recorded_{0};
-  std::atomic<std::uint64_t> chunks_{0};
-  std::atomic<std::uint64_t> write_failures_{0};
-  // The run's loss table, published by Stop(). Guarded because gaps() may be
-  // asked from another thread while the run is closing.
-  mutable std::mutex gaps_mutex_;
-  std::vector<RecordGap> gaps_;
+  std::shared_ptr<Impl> impl_;
+  // Counters for offers made before Start() or after a failed Start(), when no
+  // run state exists to hold them.
+  std::atomic<std::uint64_t> unattached_dropped_{0};
+  std::atomic<std::uint64_t> unattached_session_dropped_{0};
 };
 
 }  // namespace irmv::telemetry

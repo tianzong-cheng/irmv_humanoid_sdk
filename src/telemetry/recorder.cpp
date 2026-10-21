@@ -115,62 +115,144 @@ std::string DigestText(const std::array<char, kModelDigestBytes> &digest) {
   return std::string(digest.data(), length);
 }
 
+// Writes a JSON document under a temporary name and renames it into place, so a
+// reader never observes a half-written index or sidecar. The rename is the
+// publication point; a crash before it leaves the previous document intact.
+bool WriteJsonAtomic(const std::filesystem::path &path, const Json &document) {
+  const std::filesystem::path temporary = path.string() + ".tmp";
+  {
+    std::ofstream file(temporary, std::ios::trunc);
+    if (!file) {
+      return false;
+    }
+    file << document.dump(1);
+    file.flush();
+    if (!file.good()) {
+      std::error_code ignored;
+      std::filesystem::remove(temporary, ignored);
+      return false;
+    }
+  }
+  std::error_code code;
+  std::filesystem::rename(temporary, path, code);
+  if (code) {
+    std::error_code ignored;
+    std::filesystem::remove(temporary, ignored);
+    return false;
+  }
+  return true;
+}
+
+// Test seam for the lifetime ordering below. It is called after the producer
+// count is decremented and touches no recorder state; a test can pause there
+// while the worker finalizes and the wrapper is destroyed.
+std::atomic<void (*)()> g_after_decrement_hook{nullptr};
+
+void RunAfterDecrementHook() noexcept {
+  void (*const hook)() = g_after_decrement_hook.load(std::memory_order_relaxed);
+  if (hook != nullptr) {
+    hook();
+  }
+}
+
 }  // namespace
 
+void SetProducerAfterDecrementHookForTest(void (*hook)()) noexcept {
+  g_after_decrement_hook.store(hook, std::memory_order_relaxed);
+}
+
 struct Recorder::Impl {
-  explicit Impl(Recorder &recorder) : owner(recorder) {}
+  // One stretch of loss, in the sequence space the runtime published and the
+  // stamps it published it with.
+  struct RefusalSpan {
+    protocol::Sequence first_seq{0};
+    protocol::Sequence last_seq{0};
+    protocol::TimeUs first_stamp_us{0};
+    protocol::TimeUs last_stamp_us{0};
+  };
 
   bool Prepare(const RecorderConfig &recorder_config, std::string meta_json,
                std::string *error);
   void Run();
   // Takes what the queue holds into the chunk buffer, and closes the chunk when
-  // it is full. Returns how many samples it took, so the final drain can stop
-  // when the queue is empty instead of guessing.
+  // it is full. Returns how many samples it took.
   std::size_t DrainInto();
   void WriteChunk();
-  // Records the rows the chunk buffer held as one loss of the given reason and
-  // drops them. They were already taken out of the queue, so nothing else can
-  // see them: without this the run would only show a hole in the sequence.
+  // Records the rows the chunk buffer held as one loss of the given reason.
   void DropChunk(RecordGapReason reason);
-  void WriteIndex(const std::vector<RecordGap> &gaps) const;
-  // Takes what the session channel holds into the worker's session list. Like
-  // DrainInto it never blocks: it stops when the channel is empty.
+  // Atomically replaces `index.json`. `complete` is false while the run is
+  // still open and true only after the worker has finalized every queue.
+  bool WriteIndex(const std::vector<RecordGap> &gaps, bool complete) const;
+  // Takes what the session channel holds into the worker's session list.
   void DrainSessionsInto();
-  // Writes the session list to `sessions.json` as a JSON array, in the order
-  // the events arrived.
-  void WriteSessions() const;
-  void Finish();
-  // The sampling stride of the run, normalized: a stride of zero is one tick.
+  // Atomically replaces `sessions.json`.
+  bool WriteSessions();
+  // Producer side, run by the control thread with `offering` announced.
+  bool OfferSample(const RecordSample &sample) noexcept;
+  bool OfferSession(const RecordSessionEvent &event) noexcept;
+  void NoteRefusal(const RecordSample &sample) noexcept;
+  void CloseRefusal() noexcept;
+  static void PutRefusal(RefusalSpan *table, std::uint32_t *count,
+                         const RefusalSpan &span) noexcept;
+  void AppendRefusalGaps(std::vector<RecordGap> *gaps) const;
+  // The sampling stride of the run, normalized.
   protocol::Sequence Stride() const noexcept {
     return config.stride == 0 ? 1 : config.stride;
   }
 
-  Recorder &owner;
   RecorderConfig config;
   std::filesystem::path run_directory;
   std::string metadata;
-  std::string index_json;
+
+  // Shared ownership: the worker thread captures this state, not the Recorder
+  // object. After a timed-out Stop() the worker may finish on its own without
+  // touching destroyed caller state.
   std::thread worker;
+  std::atomic<bool> accepting{false};
   std::atomic<bool> stop_requested{false};
   std::mutex done_mutex;
   std::condition_variable done_cv;
+  bool stop_signalled{false};
   bool finished{false};
 
-  // Worker-owned.
+  // Queues and the control thread's refusal accounting. TryRecord announces
+  // itself around every offer, so Stop() can wait for producers to leave before
+  // the worker reads the table.
+  transport::BoundedChannel<RecordSample, kRecordQueueCapacity> queue;
+  transport::BoundedChannel<RecordSessionEvent, kRecordSessionQueueCapacity>
+      session_queue;
+  std::atomic<std::uint32_t> offering{0};
+  std::atomic<std::uint32_t> session_offering{0};
+  RefusalSpan refused[kRecordGapSegments]{};
+  std::uint32_t refused_count{0};
+  RefusalSpan refusal_open{};
+  bool refusal_open_valid{false};
+  std::uint64_t refusal_open_recorded{0};
+  protocol::Sequence stride{1};
+
+  // Counters are shared with the caller's accessors and may still advance
+  // after Stop() timed out.
+  std::atomic<std::uint64_t> dropped{0};
+  std::atomic<std::uint64_t> session_dropped{0};
+  std::atomic<std::uint64_t> sessions_written{0};
+  std::atomic<std::uint64_t> recorded{0};
+  std::atomic<std::uint64_t> chunks{0};
+  std::atomic<std::uint64_t> write_failures{0};
+
+  // Worker-owned after construction.
   std::vector<RecordSample> buffer;
-  // The session events the worker took off the channel, in arrival order.
-  // Stop() drains what is left before writing the sidecar, so a run's sessions
-  // are what the channel held when it closed rather than what the worker
-  // happened to have woken up for.
   std::vector<RecordSessionEvent> sessions;
-  std::vector<ChunkEntry> chunks;
-  // The losses the worker itself saw - one per chunk it could not write - in
-  // the order they happened. Stop() adds the refusals the control thread saw
-  // and the tail it could not drain, and writes the merged table.
+  std::vector<ChunkEntry> chunk_entries;
   std::vector<RecordGap> gaps;
   std::uint32_t joint_count{0};
   bool have_joint_count{false};
-  std::uint64_t write_failures{0};
+  std::uint64_t write_failure_count{0};
+  bool sessions_dirty{false};
+
+  // The published loss table, guarded because gaps() may be asked from another
+  // thread while the worker finalizes.
+  mutable std::mutex gaps_mutex;
+  std::vector<RecordGap> published_gaps;
 };
 
 bool Recorder::Impl::Prepare(const RecorderConfig &recorder_config,
@@ -215,7 +297,25 @@ bool Recorder::Impl::Prepare(const RecorderConfig &recorder_config,
     *error = "the recorder could not write " + run_directory.string();
     return false;
   }
+  // The metadata is authoritative for the run's joint count, so an index
+  // published before the first chunk already describes the layout. A test or
+  // caller whose metadata omits it keeps the worker's first-sample discovery.
+  const Json document = Json::parse(metadata, nullptr, false);
+  if (!document.is_discarded() && document.is_object()) {
+    const std::uint32_t declared = document.value("joint_count", 0U);
+    if (declared > 0 && declared <= protocol::kMaxJoints) {
+      joint_count = declared;
+      have_joint_count = true;
+    }
+  }
   buffer.reserve(kRecordChunkRows);
+  // Publish an open run immediately: a reader can open it while it is still
+  // recording, and a crash after any committed chunk is recoverable even if the
+  // index replacement never happened.
+  if (!WriteSessions() || !WriteIndex({}, false)) {
+    *error = "the recorder could not write " + run_directory.string();
+    return false;
+  }
   return true;
 }
 
@@ -335,8 +435,8 @@ void Recorder::Impl::WriteChunk() {
   AppendU32(&chunk, ChunkCrc32(chunk.data(), chunk.size()));
   AppendBytes(&chunk, payload.data(), payload.size());
 
-  const std::string name =
-      std::string(kRecordChunkPrefix) + std::to_string(chunks.size()) + ".bin";
+  const std::string name = std::string(kRecordChunkPrefix) +
+                           std::to_string(chunk_entries.size()) + ".bin";
   const std::filesystem::path final_path = run_directory / name;
   // The chunk is written under a temporary name and renamed into place only
   // once every byte is on the device, so a run that ends abruptly leaves a
@@ -346,7 +446,8 @@ void Recorder::Impl::WriteChunk() {
   {
     std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
     if (!file) {
-      ++write_failures;
+      ++write_failure_count;
+      write_failures.store(write_failure_count, std::memory_order_relaxed);
       DropChunk(RecordGapReason::WriteFailed);
       return;
     }
@@ -354,7 +455,8 @@ void Recorder::Impl::WriteChunk() {
                static_cast<std::streamsize>(chunk.size()));
     file.flush();
     if (!file.good()) {
-      ++write_failures;
+      ++write_failure_count;
+      write_failures.store(write_failure_count, std::memory_order_relaxed);
       DropChunk(RecordGapReason::WriteFailed);
       return;
     }
@@ -362,7 +464,8 @@ void Recorder::Impl::WriteChunk() {
   std::error_code code;
   std::filesystem::rename(temporary, final_path, code);
   if (code) {
-    ++write_failures;
+    ++write_failure_count;
+    write_failures.store(write_failure_count, std::memory_order_relaxed);
     std::filesystem::remove(temporary, code);
     DropChunk(RecordGapReason::WriteFailed);
     return;
@@ -375,8 +478,15 @@ void Recorder::Impl::WriteChunk() {
   entry.last_stamp_us = buffer.back().stamp_us;
   entry.first_state_seq = buffer.front().state_seq;
   entry.last_state_seq = buffer.back().state_seq;
-  chunks.push_back(std::move(entry));
+  chunk_entries.push_back(std::move(entry));
+  chunks.store(static_cast<std::uint64_t>(chunk_entries.size()),
+               std::memory_order_relaxed);
   buffer.clear();
+  // The chunk is already committed under its final name. Replacing the index
+  // now keeps a reader that opens the run during recording aware of it; a
+  // crash between the rename and this write is covered by the reader's
+  // recovery scan of committed chunks.
+  static_cast<void>(WriteIndex(gaps, false));
 }
 
 std::size_t Recorder::Impl::DrainInto() {
@@ -396,7 +506,7 @@ std::size_t Recorder::Impl::DrainInto() {
   // of a full handoff, DropChunk for a chunk that could not be written, Stop()
   // for the tail. What is left here is a stretch the runtime never sampled,
   // which is not this component's loss to report.
-  while (buffer.size() < kRecordChunkRows && owner.queue_.TryPop(sample)) {
+  while (buffer.size() < kRecordChunkRows && queue.TryPop(sample)) {
     ++taken;
     if (!have_joint_count) {
       joint_count = sample.joint_count;
@@ -421,12 +531,13 @@ void Recorder::Impl::DrainSessionsInto() {
   // empty. A session channel a control loop filled faster than this side could
   // drain has already counted the events it refused; what is here is what was
   // accepted.
-  while (owner.session_queue_.TryPop(event)) {
+  while (session_queue.TryPop(event)) {
     sessions.push_back(event);
+    sessions_dirty = true;
   }
 }
 
-void Recorder::Impl::WriteSessions() const {
+bool Recorder::Impl::WriteSessions() {
   Json array = Json::array();
   for (const RecordSessionEvent &event : sessions) {
     Json entry;
@@ -452,22 +563,46 @@ void Recorder::Impl::WriteSessions() const {
   }
   const std::filesystem::path path =
       run_directory / std::string(kRecordSessionsFile);
-  std::ofstream file(path, std::ios::trunc);
-  if (!file) {
-    return;
+  if (!WriteJsonAtomic(path, array)) {
+    return false;
   }
-  file << array.dump(1);
+  sessions_written.store(static_cast<std::uint64_t>(sessions.size()),
+                         std::memory_order_relaxed);
+  sessions_dirty = false;
+  return true;
 }
 
 void Recorder::Impl::Run() {
-  while (!stop_requested.load(std::memory_order_relaxed)) {
+  for (;;) {
     {
       std::unique_lock<std::mutex> lock(done_mutex);
       done_cv.wait_for(lock, std::chrono::milliseconds(50),
                        [this] { return stop_requested.load(); });
     }
+    if (stop_requested.load(std::memory_order_relaxed)) {
+      break;
+    }
     static_cast<void>(DrainInto());
     DrainSessionsInto();
+    if (sessions_dirty) {
+      static_cast<void>(WriteSessions());
+    }
+  }
+  // Stop() signals shutdown on every path, including one where its own
+  // deadline expired before the producers left. Finalization waits here until
+  // both producer counts are zero, so a paused producer that resumes sees the
+  // refusal and leaves before the worker reads the queue or the refusal table.
+  // The sequential-consistent handshake makes the zero observation final: a
+  // producer that announces after it must load the refusal and not touch the
+  // data.
+  for (;;) {
+    const bool quiet = offering.load(std::memory_order_seq_cst) == 0 &&
+                       session_offering.load(std::memory_order_seq_cst) == 0;
+    if (quiet) {
+      break;
+    }
+    std::unique_lock<std::mutex> lock(done_mutex);
+    done_cv.wait_for(lock, std::chrono::milliseconds(10));
   }
   // Drain what is left inside the bound Stop() gives, then close the run. The
   // loop ends when the queue has nothing left, and the pass bound keeps a
@@ -481,9 +616,48 @@ void Recorder::Impl::Run() {
   if (!buffer.empty()) {
     WriteChunk();
   }
-  // The run is not closed here: Stop() takes the tail out of the handoff and
-  // writes the index, because the samples still queued at that moment are a
-  // loss only Stop() can see, and the table it writes has to hold them.
+  // The samples still in the handoff were accepted and never written. They are
+  // a loss the run names - with their sequence and stamp range - rather than
+  // only a number in dropped(): a reader has to be able to see where a run
+  // stopped, not infer it from the samples that happen to surround it. Stop()
+  // has already waited for every producer, so what is here is final.
+  RecordSample sample;
+  RecordGap tail;
+  bool have_tail = false;
+  std::uint64_t left = 0;
+  while (queue.TryPop(sample)) {
+    if (!have_tail) {
+      have_tail = true;
+      tail.first_seq = sample.state_seq;
+      tail.first_stamp_us = sample.stamp_us;
+      tail.reason = RecordGapReason::Stopped;
+    }
+    tail.last_seq = sample.state_seq;
+    tail.last_stamp_us = sample.stamp_us;
+    tail.dropped = MissingSamples(tail.first_seq, tail.last_seq, Stride());
+    ++left;
+  }
+  if (have_tail) {
+    gaps.push_back(tail);
+  }
+  if (left != 0) {
+    dropped.fetch_add(left, std::memory_order_relaxed);
+  }
+  // One table for the run: what the worker failed to write, what the handoff
+  // refused, and the tail, ordered by the sequence each loss covers.
+  AppendRefusalGaps(&gaps);
+  std::stable_sort(gaps.begin(), gaps.end(),
+                   [](const RecordGap &left_gap, const RecordGap &right_gap) {
+                     return left_gap.first_seq < right_gap.first_seq;
+                   });
+  {
+    const std::lock_guard<std::mutex> lock(gaps_mutex);
+    published_gaps = gaps;
+  }
+  if (sessions_dirty || !sessions.empty()) {
+    static_cast<void>(WriteSessions());
+  }
+  static_cast<void>(WriteIndex(published_gaps, true));
   {
     const std::lock_guard<std::mutex> lock(done_mutex);
     finished = true;
@@ -491,14 +665,16 @@ void Recorder::Impl::Run() {
   done_cv.notify_all();
 }
 
-void Recorder::Impl::WriteIndex(const std::vector<RecordGap> &gaps) const {
+bool Recorder::Impl::WriteIndex(const std::vector<RecordGap> &gaps,
+                                bool complete) const {
   Json index;
   index["schema_version"] = kRecordSchemaVersion;
+  index["complete"] = complete;
   index["joint_count"] = joint_count;
   index["rows_recorded"] = 0;
   Json chunk_list = Json::array();
   std::uint64_t rows_total = 0;
-  for (const ChunkEntry &entry : chunks) {
+  for (const ChunkEntry &entry : chunk_entries) {
     Json chunk;
     chunk["file"] = entry.file;
     chunk["rows"] = entry.rows;
@@ -523,28 +699,10 @@ void Recorder::Impl::WriteIndex(const std::vector<RecordGap> &gaps) const {
     gap_list.push_back(std::move(entry));
   }
   index["gaps"] = std::move(gap_list);
-  index["write_failures"] = write_failures;
+  index["write_failures"] = write_failure_count;
   const std::filesystem::path path =
       run_directory / std::string(kRecordIndexFile);
-  std::ofstream file(path, std::ios::trunc);
-  if (!file) {
-    return;
-  }
-  file << index.dump(1);
-}
-
-void Recorder::Impl::Finish() {
-  stop_requested.store(true, std::memory_order_relaxed);
-  done_cv.notify_all();
-  if (!worker.joinable()) {
-    return;
-  }
-  {
-    std::unique_lock<std::mutex> lock(done_mutex);
-    done_cv.wait_for(lock, std::chrono::milliseconds(2000),
-                     [this] { return finished; });
-  }
-  worker.join();
+  return WriteJsonAtomic(path, index);
 }
 
 Recorder::Recorder() = default;
@@ -556,50 +714,82 @@ bool Recorder::Start(const RecorderConfig &config, std::string meta_json,
   if (impl_) {
     return true;
   }
+  std::shared_ptr<Impl> impl = std::make_shared<Impl>();
   std::string message;
-  std::unique_ptr<Impl> impl = std::make_unique<Impl>(*this);
   if (!impl->Prepare(config, std::move(meta_json), &message)) {
     if (error != nullptr) {
       *error = message;
     }
     return false;
   }
-  impl_ = std::move(impl);
-  run_directory_ = impl_->run_directory;
-  // The control thread's own copy of the run's sampling stride, so the refusal
-  // path never reaches into the worker's record - it is set before the release
-  // store of `started_` that lets the control thread in.
-  stride_ = impl_->Stride();
-  started_.store(true, std::memory_order_release);
-  impl_->worker = std::thread([this] { impl_->Run(); });
+  impl->stride = impl->Stride();
+  impl_ = impl;
+  // Sequential consistency is part of the stop handshake: Stop's refusal store
+  // and a producer's acceptance load must be in one total order with the
+  // producer-count operations.
+  impl->accepting.store(true, std::memory_order_seq_cst);
+  const std::shared_ptr<Impl> shared = impl;
+  impl->worker = std::thread([shared] { shared->Run(); });
   return true;
 }
 
 bool Recorder::TryRecord(const RecordSample &sample) noexcept {
-  // The control thread announces itself around every offer so a Stop() on
-  // another thread can tell when the refusal table below is quiescent and no
-  // sample can still land behind the tail it takes. This side never waits for
-  // anyone: the announcement is two lock-free increments.
-  offering_.fetch_add(1, std::memory_order_acquire);
-  const bool accepted = OfferSample(sample);
-  offering_.fetch_sub(1, std::memory_order_release);
+  if (!impl_) {
+    unattached_dropped_.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  Impl &impl = *impl_;
+  // The fast path keeps a producer that runs after Stop from making the
+  // quiescence wait longer on every call. It is not the safety argument: a
+  // producer that observes acceptance here still announces and re-checks
+  // below, which is what makes the handshake final.
+  if (!impl.accepting.load(std::memory_order_seq_cst)) {
+    impl.dropped.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  // Announce first, then check acceptance. The count and `accepting` are
+  // sequential-consistent on purpose, exactly like the logger's producer
+  // scope: if Stop() publishes the refusal and then reads a zero producer
+  // count, a producer that increments afterwards must see the refusal in its
+  // own load and never touch the queue or the refusal table. Acquire/release on
+  // two separate atomics would let both sides read the stale value.
+  impl.offering.fetch_add(1, std::memory_order_seq_cst);
+  if (!impl.accepting.load(std::memory_order_seq_cst)) {
+    impl.dropped.fetch_add(1, std::memory_order_relaxed);
+    // Notify before the decrement: the decrement is this producer's final
+    // access to the shared state. If the worker observes zero, finalizes and
+    // releases the last owner while this thread is preempted, a notify after
+    // the decrement would touch freed storage. The worker polls with a bounded
+    // wait, so a missed notification when another producer is still counted
+    // delays it by at most one poll interval.
+    if (impl.offering.load(std::memory_order_seq_cst) == 1) {
+      impl.done_cv.notify_all();
+    }
+    impl.offering.fetch_sub(1, std::memory_order_seq_cst);
+    RunAfterDecrementHook();
+    return false;
+  }
+  const bool accepted = impl.OfferSample(sample);
+  if (impl.offering.load(std::memory_order_seq_cst) == 1) {
+    impl.done_cv.notify_all();
+  }
+  impl.offering.fetch_sub(1, std::memory_order_seq_cst);
+  RunAfterDecrementHook();
   return accepted;
 }
 
-bool Recorder::OfferSample(const RecordSample &sample) noexcept {
+bool Recorder::Impl::OfferSample(const RecordSample &sample) noexcept {
   // On the control thread: one copy into a fixed-capacity queue and nothing
-  // else. A disabled or stopped recorder, and a full queue, refuse the sample
-  // and count it - the tick that produced it does not wait for the disk.
-  if (!started_.load(std::memory_order_acquire)) {
-    dropped_.fetch_add(1, std::memory_order_relaxed);
-    return false;
-  }
-  if (!queue_.TryPush(sample)) {
+  // else. The caller already passed the sequential-consistent admission check
+  // and is counted, so Stop() cannot finalize before this offer leaves. A full
+  // queue is refused and counted - the tick that produced it does not wait for
+  // the disk.
+  if (!queue.TryPush(sample)) {
     NoteRefusal(sample);
-    dropped_.fetch_add(1, std::memory_order_relaxed);
+    dropped.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
-  recorded_.fetch_add(1, std::memory_order_relaxed);
+  recorded.fetch_add(1, std::memory_order_relaxed);
   return true;
 }
 
@@ -608,19 +798,46 @@ bool Recorder::TryRecordSession(const RecordSessionEvent &event) noexcept {
   // session handoff and nothing else. Never blocks, allocates, formats or
   // throws; a stopped recorder or a full channel costs the event and is
   // counted, exactly like a sample.
-  session_offering_.fetch_add(1, std::memory_order_acquire);
-  bool accepted = false;
-  if (started_.load(std::memory_order_acquire)) {
-    accepted = session_queue_.TryPush(event);
+  if (!impl_) {
+    unattached_session_dropped_.fetch_add(1, std::memory_order_relaxed);
+    return false;
   }
-  session_offering_.fetch_sub(1, std::memory_order_release);
+  Impl &impl = *impl_;
+  if (!impl.accepting.load(std::memory_order_seq_cst)) {
+    impl.session_dropped.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  impl.session_offering.fetch_add(1, std::memory_order_seq_cst);
+  if (!impl.accepting.load(std::memory_order_seq_cst)) {
+    impl.session_dropped.fetch_add(1, std::memory_order_relaxed);
+    // Same final-access ordering as the sample channel: notify (when this is
+    // the last counted producer), then decrement and do not touch the shared
+    // state again.
+    if (impl.session_offering.load(std::memory_order_seq_cst) == 1) {
+      impl.done_cv.notify_all();
+    }
+    impl.session_offering.fetch_sub(1, std::memory_order_seq_cst);
+    RunAfterDecrementHook();
+    return false;
+  }
+  const bool accepted = impl.OfferSession(event);
+  if (impl.session_offering.load(std::memory_order_seq_cst) == 1) {
+    impl.done_cv.notify_all();
+  }
+  impl.session_offering.fetch_sub(1, std::memory_order_seq_cst);
+  RunAfterDecrementHook();
+  return accepted;
+}
+
+bool Recorder::Impl::OfferSession(const RecordSessionEvent &event) noexcept {
+  const bool accepted = session_queue.TryPush(event);
   if (!accepted) {
-    session_dropped_.fetch_add(1, std::memory_order_relaxed);
+    session_dropped.fetch_add(1, std::memory_order_relaxed);
   }
   return accepted;
 }
 
-void Recorder::NoteRefusal(const RecordSample &sample) noexcept {
+void Recorder::Impl::NoteRefusal(const RecordSample &sample) noexcept {
   // A refusal extends the current stretch when it is the same sample offered
   // again - a caller that retries a tick costs itself the same loss twice, not
   // two losses - or the next sample of the stride the run is sampled on, and
@@ -629,22 +846,22 @@ void Recorder::NoteRefusal(const RecordSample &sample) noexcept {
   // ends the stretch and starts a new one, so two refusals a minute apart are
   // two losses rather than one gap spanning every sample that was recorded fine
   // between them.
-  const bool same_sample = sample.state_seq == refusal_open_.last_seq;
-  const bool next_sample = sample.state_seq == refusal_open_.last_seq + stride_;
-  if (!refusal_open_valid_ || (!same_sample && !next_sample) ||
-      recorded_.load(std::memory_order_relaxed) != refusal_open_recorded_) {
+  const bool same_sample = sample.state_seq == refusal_open.last_seq;
+  const bool next_sample = sample.state_seq == refusal_open.last_seq + stride;
+  if (!refusal_open_valid || (!same_sample && !next_sample) ||
+      recorded.load(std::memory_order_relaxed) != refusal_open_recorded) {
     CloseRefusal();
-    refusal_open_.first_seq = sample.state_seq;
-    refusal_open_.first_stamp_us = sample.stamp_us;
-    refusal_open_valid_ = true;
-    refusal_open_recorded_ = recorded_.load(std::memory_order_relaxed);
+    refusal_open.first_seq = sample.state_seq;
+    refusal_open.first_stamp_us = sample.stamp_us;
+    refusal_open_valid = true;
+    refusal_open_recorded = recorded.load(std::memory_order_relaxed);
   }
-  refusal_open_.last_seq = sample.state_seq;
-  refusal_open_.last_stamp_us = sample.stamp_us;
+  refusal_open.last_seq = sample.state_seq;
+  refusal_open.last_stamp_us = sample.stamp_us;
 }
 
-void Recorder::PutRefusal(RefusalSpan *table, std::uint32_t *count,
-                          const RefusalSpan &span) noexcept {
+void Recorder::Impl::PutRefusal(RefusalSpan *table, std::uint32_t *count,
+                                const RefusalSpan &span) noexcept {
   if (*count < kRecordGapSegments) {
     table[*count] = span;
     ++*count;
@@ -661,26 +878,25 @@ void Recorder::PutRefusal(RefusalSpan *table, std::uint32_t *count,
   }
 }
 
-void Recorder::CloseRefusal() noexcept {
-  if (!refusal_open_valid_) {
+void Recorder::Impl::CloseRefusal() noexcept {
+  if (!refusal_open_valid) {
     return;
   }
-  refusal_open_valid_ = false;
-  PutRefusal(refused_, &refused_count_, refusal_open_);
+  refusal_open_valid = false;
+  PutRefusal(refused, &refused_count, refusal_open);
 }
 
-void Recorder::AppendRefusalGaps(std::vector<RecordGap> *gaps) const {
-  // Called from Stop() once the control thread has left TryRecord, so the table
-  // is still. The stretch that was open when the run was closed is a loss like
-  // any other - its refusals were counted like any other - and is filed by the
-  // same rule.
+void Recorder::Impl::AppendRefusalGaps(
+    std::vector<RecordGap> *target_gaps) const {
+  // Called by the worker after Stop() has waited for every control-thread
+  // producer to leave, so the table is still.
   RefusalSpan table[kRecordGapSegments];
-  std::uint32_t count = refused_count_;
+  std::uint32_t count = refused_count;
   for (std::uint32_t index = 0; index < count; ++index) {
-    table[index] = refused_[index];
+    table[index] = refused[index];
   }
-  if (refusal_open_valid_) {
-    PutRefusal(table, &count, refusal_open_);
+  if (refusal_open_valid) {
+    PutRefusal(table, &count, refusal_open);
   }
   for (std::uint32_t index = 0; index < count; ++index) {
     RecordGap gap;
@@ -688,124 +904,97 @@ void Recorder::AppendRefusalGaps(std::vector<RecordGap> *gaps) const {
     gap.last_seq = table[index].last_seq;
     gap.first_stamp_us = table[index].first_stamp_us;
     gap.last_stamp_us = table[index].last_stamp_us;
-    gap.dropped = MissingSamples(gap.first_seq, gap.last_seq, stride_);
+    gap.dropped = MissingSamples(gap.first_seq, gap.last_seq, stride);
     gap.reason = RecordGapReason::QueueFull;
-    gaps->push_back(gap);
+    target_gaps->push_back(gap);
   }
 }
 
 bool Recorder::Stop() {
   if (!impl_) {
-    started_.store(false, std::memory_order_release);
     return true;
   }
-  // The worker drains what it can and closes the last chunk; it does not write
-  // the index, because what follows is a loss only this call can see.
-  impl_->Finish();
-  // Nothing is accepted from here on, and a control thread that was already
-  // inside TryRecord is waited out: that freezes the queue for the tail below
-  // and leaves the refusal table still for the read below.
-  started_.store(false, std::memory_order_release);
-  while (offering_.load(std::memory_order_acquire) != 0) {
-    std::this_thread::yield();
-  }
-  // The session channel is frozen the same way: a control thread that was
-  // already inside TryRecordSession is waited out, and then the events still in
-  // the channel - which no worker pass will see again - are drained and written
-  // to the sidecar. Sessions are not samples: the tail here is not a loss, it
-  // is simply what the run adopted after the worker's last pass.
-  while (session_offering_.load(std::memory_order_acquire) != 0) {
-    std::this_thread::yield();
-  }
-  impl_->DrainSessionsInto();
-  impl_->WriteSessions();
-  // The samples still in the handoff were accepted and never written. They are
-  // a loss the run names - with their sequence and stamp range - rather than
-  // only a number in dropped(): a reader has to be able to see where a run
-  // stopped, not infer it from the samples that happen to surround it.
-  RecordSample sample;
-  RecordGap tail;
-  bool have_tail = false;
-  std::uint64_t left = 0;
-  while (queue_.TryPop(sample)) {
-    if (!have_tail) {
-      have_tail = true;
-      tail.first_seq = sample.state_seq;
-      tail.first_stamp_us = sample.stamp_us;
-      tail.reason = RecordGapReason::Stopped;
-    }
-    tail.last_seq = sample.state_seq;
-    tail.last_stamp_us = sample.stamp_us;
-    tail.dropped = MissingSamples(tail.first_seq, tail.last_seq, stride_);
-    ++left;
-  }
-  if (have_tail) {
-    impl_->gaps.push_back(tail);
-  }
-  // One table for the run: what the worker failed to write, what the handoff
-  // refused, and the tail, ordered by the sequence each loss covers - which is
-  // the order the losses happened for every run that is not still being offered
-  // samples while it is stopped.
-  AppendRefusalGaps(&impl_->gaps);
-  std::stable_sort(impl_->gaps.begin(), impl_->gaps.end(),
-                   [](const RecordGap &left_gap, const RecordGap &right_gap) {
-                     return left_gap.first_seq < right_gap.first_seq;
-                   });
+  const std::shared_ptr<Impl> impl = impl_;
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(kRecorderStopTimeoutMs);
+  // Refuse every later sample first, with the sequentially consistent
+  // handshake that makes a later zero producer count final. Shutdown is then
+  // signalled unconditionally: the worker, not this deadline-limited caller,
+  // waits for any producer that is still inside TryRecord to leave. If Stop()
+  // times out with a paused producer, the worker keeps the shared state alive
+  // until that producer resumes and the run can be finalized safely.
+  impl->accepting.store(false, std::memory_order_seq_cst);
   {
-    const std::lock_guard<std::mutex> lock(gaps_mutex_);
-    gaps_ = impl_->gaps;
+    const std::lock_guard<std::mutex> lock(impl->done_mutex);
+    if (!impl->stop_signalled) {
+      impl->stop_signalled = true;
+      impl->stop_requested.store(true, std::memory_order_release);
+    }
   }
-  // The index and gaps() are one list by construction: a caller reads what a
-  // reader of the run reads.
-  impl_->WriteIndex(gaps_);
-  if (left != 0) {
-    dropped_.fetch_add(left, std::memory_order_relaxed);
+  impl->done_cv.notify_all();
+
+  bool finished = false;
+  {
+    std::unique_lock<std::mutex> lock(impl->done_mutex);
+    finished = impl->done_cv.wait_until(lock, deadline,
+                                        [&impl] { return impl->finished; });
   }
-  chunks_.store(static_cast<std::uint64_t>(impl_->chunks.size()),
-                std::memory_order_relaxed);
-  sessions_written_.store(static_cast<std::uint64_t>(impl_->sessions.size()),
-                          std::memory_order_relaxed);
-  write_failures_.store(impl_->write_failures, std::memory_order_relaxed);
-  impl_.reset();
-  started_.store(false, std::memory_order_release);
-  return true;
+  if (finished) {
+    if (impl->worker.joinable()) {
+      impl->worker.join();
+    }
+    return true;
+  }
+  // A blocked writer must not hold the control loop. The worker only references
+  // this shared state, which it keeps alive itself, and it is the only writer
+  // from here on; Stop() returns without joining or touching the filesystem.
+  if (impl->worker.joinable()) {
+    impl->worker.detach();
+  }
+  return false;
 }
 
 bool Recorder::started() const {
-  return started_.load(std::memory_order_acquire);
+  return impl_ && impl_->accepting.load(std::memory_order_acquire);
 }
 
 const std::filesystem::path &Recorder::run_directory() const {
-  return run_directory_;
+  static const std::filesystem::path kEmpty;
+  return impl_ ? impl_->run_directory : kEmpty;
 }
 
 std::uint64_t Recorder::dropped() const {
-  return dropped_.load(std::memory_order_relaxed);
+  return unattached_dropped_.load(std::memory_order_relaxed) +
+         (impl_ ? impl_->dropped.load(std::memory_order_relaxed) : 0);
 }
 
 std::uint64_t Recorder::session_dropped() const {
-  return session_dropped_.load(std::memory_order_relaxed);
+  return unattached_session_dropped_.load(std::memory_order_relaxed) +
+         (impl_ ? impl_->session_dropped.load(std::memory_order_relaxed) : 0);
 }
 
 std::uint64_t Recorder::sessions_written() const {
-  return sessions_written_.load(std::memory_order_relaxed);
+  return impl_ ? impl_->sessions_written.load(std::memory_order_relaxed) : 0;
 }
 
 std::uint64_t Recorder::recorded() const {
-  return recorded_.load(std::memory_order_relaxed);
+  return impl_ ? impl_->recorded.load(std::memory_order_relaxed) : 0;
 }
 
 std::uint64_t Recorder::chunks() const {
-  return chunks_.load(std::memory_order_relaxed);
+  return impl_ ? impl_->chunks.load(std::memory_order_relaxed) : 0;
 }
 
 std::uint64_t Recorder::write_failures() const {
-  return write_failures_.load(std::memory_order_relaxed);
+  return impl_ ? impl_->write_failures.load(std::memory_order_relaxed) : 0;
 }
 
 std::vector<RecordGap> Recorder::gaps() const {
-  const std::lock_guard<std::mutex> lock(gaps_mutex_);
-  return gaps_;
+  if (!impl_) {
+    return {};
+  }
+  const std::lock_guard<std::mutex> lock(impl_->gaps_mutex);
+  return impl_->published_gaps;
 }
 
 }  // namespace irmv::telemetry

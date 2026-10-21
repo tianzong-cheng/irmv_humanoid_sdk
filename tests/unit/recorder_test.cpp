@@ -6,14 +6,22 @@
 // the sample - counted and visible as a gap in the run - rather than the tick.
 #include "irmv/telemetry/recorder.hpp"
 
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <thread>
@@ -22,6 +30,7 @@
 #include "irmv/telemetry/record.hpp"
 #include "irmv/telemetry/record_reader.hpp"
 #include "support/check.hpp"
+#include "support/recorder_test_hooks.hpp"
 
 namespace {
 
@@ -307,6 +316,25 @@ int CheckRefusalGapsMissRecordedOffers(
   return 0;
 }
 
+// The producer pause is a plain function pointer, so the state it uses lives
+// here and the hook touches no recorder object.
+struct DecrementPause {
+  std::mutex mutex;
+  std::condition_variable cv;
+  bool entered{false};
+  bool released{false};
+};
+
+DecrementPause *g_decrement_pause = nullptr;
+
+void PauseAfterDecrement() {
+  DecrementPause *const pause = g_decrement_pause;
+  std::unique_lock<std::mutex> lock(pause->mutex);
+  pause->entered = true;
+  pause->cv.notify_all();
+  pause->cv.wait(lock, [pause] { return pause->released; });
+}
+
 }  // namespace
 
 // A recorder that was never started accepts nothing and creates nothing; one
@@ -571,10 +599,10 @@ int WriteFailureIsReported() {
   return 0;
 }
 
-// Samples the worker could not drain before the recorder stopped were accepted
-// and never written: they are a loss with a sequence and stamp range of their
-// own, not just a number in dropped().
-int StoppedTailIsReported() {
+// Stop closes the handoff first, so a producer cannot keep refilling it while
+// the worker finalizes. Every sample the handoff accepted is drained and
+// written; no accepted sample is left behind as a Stopped tail.
+int ProducerShutdownDrainsAcceptedSamples() {
   const std::filesystem::path directory = MakeDirectory();
   Recorder recorder;
   CHECK(StartRecorder(&recorder, directory));
@@ -596,23 +624,13 @@ int StoppedTailIsReported() {
   producer.join();
 
   const std::vector<RecordGap> gaps = recorder.gaps();
-  std::size_t stopped = 0;
   for (const RecordGap &gap : gaps) {
-    if (gap.reason != RecordGapReason::Stopped) {
-      continue;
-    }
-    ++stopped;
-    // The stretch names the samples themselves: sequence and stamp, on the
-    // recorded grid.
-    CHECK(gap.last_seq >= gap.first_seq);
-    CHECK(gap.dropped == gap.last_seq - gap.first_seq + 1);
-    CHECK(gap.first_stamp_us == MakeSample(gap.first_seq).stamp_us);
-    CHECK(gap.last_stamp_us == MakeSample(gap.last_seq).stamp_us);
-    CHECK(recorder.dropped() >= gap.dropped);
+    CHECK(gap.reason != RecordGapReason::Stopped);
   }
-  CHECK(stopped == 1);
-
   const nlohmann::json index = ReadIndex(recorder.run_directory());
+  CHECK(index["complete"] == true);
+  // Everything the handoff accepted before it closed is in a committed chunk.
+  CHECK(index["rows_recorded"] == recorder.recorded());
   CHECK(CheckSameGaps(IndexGaps(index), gaps) == 0);
   std::filesystem::remove_all(directory);
   return 0;
@@ -819,6 +837,114 @@ int SessionChannelIsBounded() {
   return 0;
 }
 
+// A writer blocked past Stop()'s deadline must not hold the caller: Stop()
+// returns false at the deadline, performs no filesystem write itself, and the
+// worker finishes safely once the device drains. The worker and its queues are
+// shared state, so the detached thread never references the Recorder.
+int BlockedWriterDoesNotBlockStop() {
+  const std::filesystem::path directory = MakeDirectory();
+  Recorder recorder;
+  CHECK(StartRecorder(&recorder, directory));
+  const std::filesystem::path fifo =
+      recorder.run_directory() / "chunk_0.bin.part";
+  CHECK(::mkfifo(fifo.c_str(), 0600) == 0);
+  const int read_fd = ::open(fifo.c_str(), O_RDONLY | O_NONBLOCK);
+  CHECK(read_fd >= 0);
+
+  // Fill and close the first chunk. The worker opens the FIFO for its temporary
+  // file and blocks writing the payload once the pipe buffer is full.
+  for (std::uint64_t seq = 1; seq <= kRecordChunkRows; ++seq) {
+    bool accepted = false;
+    for (int attempt = 0; attempt < 500 && !accepted; ++attempt) {
+      accepted = recorder.TryRecord(MakeSample(static_cast<Sequence>(seq)));
+      if (!accepted) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+    }
+    CHECK(accepted);
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  CHECK(recorder.chunks() == 0);
+  CHECK(recorder.write_failures() == 0);
+
+  const auto started = std::chrono::steady_clock::now();
+  CHECK(!recorder.Stop());
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  CHECK(elapsed < std::chrono::milliseconds(3000));
+  // Stop() itself did not finalize the run; only the worker may write it.
+  const nlohmann::json index = ReadIndex(recorder.run_directory());
+  CHECK(index["complete"] == false);
+
+  // Drain the pipe so the blocked write can finish, then let the worker close
+  // the run. The second Stop observes the worker's own completion.
+  std::array<char, 64 * 1024> buffer{};
+  const auto drain_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  for (;;) {
+    const ssize_t count = ::read(read_fd, buffer.data(), buffer.size());
+    if (count > 0) {
+      continue;
+    }
+    if (count == 0) {
+      break;
+    }
+    if (errno != EAGAIN && errno != EWOULDBLOCK) {
+      break;
+    }
+    if (std::chrono::steady_clock::now() >= drain_deadline) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  ::close(read_fd);
+  CHECK(recorder.Stop());
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
+// The producer's decrement is its final access to the shared state. Pause it
+// immediately after that decrement, let the worker finalize and Stop() join,
+// destroy the wrapper, then resume the producer: any notify or other shared
+// access after the decrement is a use-after-free (caught by the sanitizer run)
+// and the deterministic interleaving makes that window observable.
+int ProducerAfterDecrementDoesNotTouchSharedState() {
+  const std::filesystem::path directory = MakeDirectory();
+  auto recorder = std::make_unique<Recorder>();
+  CHECK(StartRecorder(recorder.get(), directory));
+
+  DecrementPause pause;
+  g_decrement_pause = &pause;
+  irmv::telemetry::SetProducerAfterDecrementHookForTest(&PauseAfterDecrement);
+  std::atomic<bool> producer_done{false};
+  std::thread producer([&recorder, &producer_done] {
+    static_cast<void>(recorder->TryRecord(MakeSample(1)));
+    producer_done.store(true, std::memory_order_release);
+  });
+  {
+    std::unique_lock<std::mutex> lock(pause.mutex);
+    CHECK(pause.cv.wait_for(lock, std::chrono::seconds(5),
+                            [&pause] { return pause.entered; }));
+  }
+
+  CHECK(recorder->Stop());
+  // The worker has been joined, so the wrapper now holds the last reference to
+  // the shared state. Destroying it frees the queue, refusal table and
+  // condition variable while the producer is still parked after its decrement.
+  recorder.reset();
+  {
+    const std::lock_guard<std::mutex> lock(pause.mutex);
+    pause.released = true;
+  }
+  pause.cv.notify_all();
+  producer.join();
+  CHECK(producer_done.load(std::memory_order_acquire));
+
+  irmv::telemetry::SetProducerAfterDecrementHookForTest(nullptr);
+  g_decrement_pause = nullptr;
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
 int main() {
   int failures = 0;
   failures += Lifecycle();
@@ -827,13 +953,15 @@ int main() {
   failures += FullQueueIsCounted();
   failures += RefusalStretches();
   failures += WriteFailureIsReported();
-  failures += StoppedTailIsReported();
+  failures += ProducerShutdownDrainsAcceptedSamples();
   failures += GapTableMatchesIndex();
   failures += RefusalTableOverflow();
   failures += StridedRun();
   failures += SessionEventIsWritten();
   failures += SessionChannelIsBounded();
   failures += Disabled();
+  failures += BlockedWriterDoesNotBlockStop();
+  failures += ProducerAfterDecrementDoesNotTouchSharedState();
   if (failures == 0) {
     return 0;
   }
