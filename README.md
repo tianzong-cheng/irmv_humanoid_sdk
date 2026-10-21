@@ -1,4 +1,4 @@
-# IRMV humanoid SDK — runtime foundation
+# IRMV humanoid SDK — execution runtime and supervising application
 
 The humanoid runtime: the standalone execution runtime (`robot_runtime`), the
 supervising upper process (`application`) that drives it, the frozen protocol
@@ -10,9 +10,13 @@ yet and makes no physical-execution claim.
 ## Build
 
 Requirements: a C++17 compiler, CMake ≥ 3.22, Python 3 (test harness and
-tools) and network access on the first configure — the pinned CycloneDDS
-0.10.5 and its C++ binding and the pinned nlohmann/json are fetched and built
-from their pinned commits unless a prebuilt prefix is given.
+tools; `numpy` and `onnx` are needed when the application is built, the
+default, because the build generates the policy model fixtures), and network
+access on the first configure — the pinned CycloneDDS 0.10.5 and its C++ binding
+and the pinned nlohmann/json are fetched and built from their pinned commits,
+and ONNX Runtime 1.22.0 is downloaded and SHA-256 verified when the application
+is configured, unless a prebuilt prefix is given. The real-backend submodule
+requires CMake ≥ 3.26.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
@@ -28,9 +32,11 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug \
       -DIRMV_CYCLONEDDS_PREFIX=/path/to/cyclonedds-prefix
 ```
 
-`robot_runtime` and `application` are the two executables these phases ship;
-`runtime_client`, `confirmation_test` and the `*_test` binaries are test-only and
-are never installed.
+`robot_runtime` and `application` are the two processes these phases ship.
+`read_record` is always installed; the application build adds
+`external_producer` and `verify_policy_sample`. `runtime_client`,
+`confirmation_test` and the `*_test` binaries are test-only and are never
+installed.
 
 ## Run the default Fake deployment
 
@@ -48,9 +54,9 @@ usage: robot_runtime --config PATH [--domain N] [--fake-scenario PATH] [--output
 
 * `--config PATH` is mandatory. The file is validated by the loader's own
   checks - `config/sdk.schema.json` documents them and a contract test keeps the
-  two in step, but the schema file itself is not consulted at runtime. `backend`
-  must be `fake`, and a configuration that selects `real` is refused before any
-  device, DDS or log directory is touched.
+  two in step, but the schema file itself is not consulted at runtime. In the
+  default build `backend` must be `fake`, and a configuration that selects
+  `real` is refused before any device, DDS or log directory is touched.
 * `--domain N` overrides `dds.domain` for this run (0..230). The override is
   applied by the configuration layer, so the published `config_id` describes
   the configuration actually in effect, domain included.
@@ -68,7 +74,8 @@ the configuration, build the runtime identity, initialise the fake backend,
 construct the state machine and the logger, start the logger, then start the
 transport. Every failure before the control loop reports on stderr and exits
 non-zero (exit 1 for configuration, scenario and startup errors, exit 2 for a
-usage error) without starting DDS.
+usage error). A failure at the transport stage can already have created DDS
+entities of this process; no command is sent.
 
 The runtime reports its state on stderr through the structured logger
 (`[runtime] runtime started`, `BootCompleted`, `status`, `shutdown`, …); the
@@ -133,8 +140,8 @@ evidence** yet: see `docs/hardware-migration.md`, `docs/maintenance.md` and
 A runtime-only build (`-DIRMV_BUILD_APPLICATION=OFF`) builds `robot_runtime`
 without ONNX Runtime or the upper process. The maintenance program is built with
 `-DIRMV_BUILD_MAINTENANCE=ON` (requires the real backend). `tools/sdk_launch.py`
-starts the two processes and never kills a runtime that outlives the
-application.
+starts the two processes and, unless `--stop-all` is given, leaves a runtime
+that outlives the application running.
 
 ## Run the application: the supervising upper process
 
@@ -150,7 +157,7 @@ build/application  --config config/sdk.json --domain 3
 ```
 
 ```text
-usage: application --config PATH [--domain N]
+usage: application --config PATH [--domain N] [--locomotion-source local|external|none]
 ```
 
 `--config` is mandatory and `--domain N` (0..230) overrides `dds.domain` exactly
@@ -163,7 +170,7 @@ digest and the same instance. The file carries the runtime section plus the
 | Key | Action |
 | --- | --- |
 | `space` | emergency stop: latch `OperatorEmergencyStop`, enter `Fault`, request `Damping`. The latch is left only by an explicit Reset |
-| `d` | damping stop: `Standby`/`Initializing`/`Ready` → `Damping` |
+| `d` | damping stop: `Standby`/`Initializing`/`Ready`/`Locomotion` → `Damping` |
 | `i` | initialize: `Damping` → `Initializing` (a trajectory towards `application.initialization.target_position`), then `Ready` once the target is reached and stable |
 | `l` | locomotion: from `Ready`, arm the source this run was started with - the local policy or the external producer process - and let the first frame it produces become the first frame of the Tracking request; the confirmed context enters `Locomotion`. Refused from any other behaviour |
 | `z` | zero torque: request a zero-torque stop; a confirmed `ZeroTorque` brings a non-faulted behaviour back to `Standby` |
@@ -189,8 +196,9 @@ unbound, and is then inert like every other unbound byte.
 ```
 
 `behavior` is the upper behaviour (`Starting`, `Standby`, `Damping`,
-`Initializing`, `Ready`, `Locomotion`, `Fault`; `Locomotion` has an enumerator
-and an entry guard but this phase never enters it), `runtime`/`output` the lower
+`Initializing`, `Ready`, `Locomotion`, `Fault`; `Locomotion` is entered only
+after a configured local policy or an external producer supplies a first frame
+and the runtime confirms the tracking context), `runtime`/`output` the lower
 layer's own `execution_state`/`output_action` (`Unknown` while no current state
 is known), `pending` the operation of the request the application waits on,
 `reject` the reason of the last refused request, `fresh` whether a `RobotState`
@@ -274,19 +282,19 @@ demonstration values for the fake deployment and are **not bench-approved**.
 
 ### What these phases do not ship
 
-No trained policy of its own and no real backend. The shipped configuration
-carries no model (`application.policy.model_path` is null) and every process
-runs the Fake backend, so a `Locomotion` behaviour needs a locomotion source
-chosen at startup: the local model the configuration points at, or an external
-producer process. The run recorder is shipped but disabled in the shipped
-configuration. Nothing here is a validated machine limit - every gain, tolerance
-and limit is a nominal training or demonstration value - and the phase-4 bench
-acceptance is still owed. The upper layer never re-implements a lower-layer
-safety rule: the runtime's limits, watchdogs, fault rules and damping stay
-independent of whether the application runs at all.
+The shipped configuration carries no trained policy and selects the Fake
+backend (`application.policy.model_path` is null); the opt-in real backend has
+no physical-execution evidence yet. A `Locomotion` behaviour therefore needs a
+locomotion source chosen at startup: the local model the configuration points
+at, or an external producer process. The run recorder is shipped but disabled
+in the shipped configuration. Nothing here is a validated machine limit - every
+gain, tolerance and limit is a nominal training or demonstration value - and the
+phase-4 bench acceptance is still owed. The upper layer never re-implements a
+lower-layer safety rule: the runtime's limits, watchdogs, fault rules and
+damping stay independent of whether the application runs at all.
 
 
-## The policy model contract (phase 3, in progress)
+## The policy model contract (phase 3)
 
 A local locomotion policy is a `policy.onnx` that carries its deployment
 parameters in one model-level metadata key, `irmv.deployment`, whose document is
@@ -337,7 +345,9 @@ embedded in, proves the graph and the weights did not move when the document was
 written, and compares the outputs of the two files on a fixed input. The
 training side writes that document from the instantiated environment; see
 `docs/testing.md` for the contract the recorded run produced and for what is
-still missing before a `Locomotion` behaviour drives the machine.
+still missing before a `Locomotion` behaviour drives real hardware. The Fake
+deployment enters `Locomotion` when a source is configured; no
+physical-execution claim is made.
 
 ## Run an external producer (phase 3)
 
@@ -387,19 +397,28 @@ machine and run from any working directory:
 ```text
 <prefix>/bin/robot_runtime                      the runtime
 <prefix>/bin/application                        the supervising upper layer
+<prefix>/bin/external_producer                  the example producer
+<prefix>/bin/read_record                        the recorded-run reader
+<prefix>/bin/verify_policy_sample               the policy reference tool
+<prefix>/bin/irmv_maintenance                   the bench tool, when built
 <prefix>/etc/irmv/sdk.json                      the default Fake configuration
 <prefix>/etc/irmv/sdk.schema.json               its schema
 <prefix>/lib/libddscxx.so*, libddsc.so*         the DDS libraries, when they
                                                 are not provided system-wide
+<prefix>/lib/libonnxruntime.so*                 the inference runtime, when the
+                                                application is built
+<prefix>/lib/                                   the pinned vendor libraries,
+                                                when the real backend is built
 ```
 
-`robot_runtime` and `application` find their libraries through the relative rpath
+The installed binaries find their libraries through the relative rpath
 `$ORIGIN/../lib`; no installed artifact carries a build or source path in its
 dynamic section (a Debug build still embeds source paths in its DWARF debug
 information, so ship a release build if the tree must be path-clean). The
-installation bundles every shared library either of them resolves outside the
+installation bundles every shared library the processes resolve outside the
 platform directories and fails if one cannot be resolved, and it verifies that
-both installed binaries have exactly that one relative rpath entry.
+each installed binary that needs the bundle has exactly that one relative rpath
+entry.
 
 ```bash
 mkdir -p /tmp/run && cd /tmp/run
@@ -433,13 +452,15 @@ cmake --build build --target format          # formats in place
 
 Both targets run `tools/format.py`, which refuses any clang-format other than
 the pinned version, reports the version and path it found, and prints a unified
-diff for every file that is not formatted. `.github/workflows/ci.yml` runs
-configure, build, `ctest --output-on-failure`, `format-check` and the install
-step on Ubuntu 24.04, plus a second job that builds with
-`-DIRMV_SANITIZE=address,undefined` and runs the deterministic core suite
-(`ctest -L core`). No stage is skipped silently: a failed dependency fetch, a
-failed build and a failed format check all fail the job, and logs are kept as
-artifacts on failure.
+diff for every file that is not formatted. `.github/workflows/ci.yml` runs four
+jobs: the Debug build with `ctest --output-on-failure`, `format-check` and the
+install step on Ubuntu 24.04; a runtime-only build
+(`-DIRMV_BUILD_APPLICATION=OFF`) that checks ONNX Runtime did not reach the
+runtime; an ASan+UBSan build that runs the deterministic core suite
+(`ctest -L core`); and a real-backend job on a self-hosted runner, gated on
+`vars.IRMV_REAL_CI == 'on'`. No stage is skipped silently: a failed dependency
+fetch, a failed build and a failed format check all fail the job, and logs are
+kept as artifacts on failure.
 
 ## Documentation
 
@@ -449,6 +470,13 @@ artifacts on failure.
 * `docs/testing.md` — every deterministic and real-DDS test with what it
   proves, how to run the suites, the DDS domain policy, the phase-3 acceptance
   runs with their numbers, and what this phase does not cover.
+* `docs/hardware-config.md` — the real-backend configuration, loader rules,
+  unit conversion and device-lease semantics.
+* `docs/hardware-migration.md` — provenance of the hardware facts and the
+  candidate wiring; `docs/bench-acceptance.md` — the software evidence and the
+  still-unrun bench matrix.
+* `docs/maintenance.md` — the `irmv_maintenance` commands, dry-run rules and
+  device ownership.
 * `docs/superpowers/plans/` — the phase plans and the per-phase handoff reports
   (a local, untracked directory; the handoff names the commits, the evidence and
   the remaining risks).
