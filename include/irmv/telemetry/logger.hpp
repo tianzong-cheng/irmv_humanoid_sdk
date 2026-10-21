@@ -168,10 +168,10 @@ class Logger {
   std::uint64_t Undrained() const;
 
   // Sink Write()/Flush() calls that failed. Worker side.
-  std::uint64_t error_count() const;
+  std::uint64_t ErrorCount() const;
 
   // True between a successful Start() and Stop().
-  bool started() const;
+  bool Started() const;
 
  private:
   struct Shared;

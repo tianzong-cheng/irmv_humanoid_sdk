@@ -275,7 +275,7 @@ int main() {
     sink->Block();
     Logger logger(config, sink);
     CHECK(logger.Start());
-    CHECK(logger.started());
+    CHECK(logger.Started());
     CHECK(logger.TryLog(MakeEvent(LogLevel::Info, "in flight", 0)));
     CHECK(sink->WaitForWriteEntry(kWait));
 
@@ -318,7 +318,7 @@ int main() {
     // cannot fail against a correct logger.
     sink->Release();
     logger.Stop();
-    CHECK(!logger.started());
+    CHECK(!logger.Started());
     CHECK(WaitFor([&logger] { return logger.Written() == 1025; }, kWait));
     CHECK(logger.Dropped() == 2048);
   }
@@ -349,7 +349,7 @@ int main() {
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - begin);
     CHECK(elapsed < std::chrono::milliseconds(4 * kStopDrainTimeoutMs + 1000));
-    CHECK(!logger.started());
+    CHECK(!logger.Started());
     CHECK(logger.Undrained() == static_cast<std::uint64_t>(accepted));
 
     // A stopped logger accepts nothing, and a refused event is not a drop.
@@ -435,13 +435,13 @@ int main() {
     config.queue_capacity = 8;
     std::shared_ptr<RecordingSink> sink = std::make_shared<RecordingSink>();
     Logger logger(config, sink);
-    CHECK(!logger.started());
+    CHECK(!logger.Started());
     CHECK(!logger.TryLog(MakeEvent(LogLevel::Info, "before start", 0)));
     CHECK(logger.Start());
     CHECK(!logger.Start());
     CHECK(logger.TryLog(MakeEvent(LogLevel::Info, "written", 0)));
     logger.Stop();
-    CHECK(!logger.started());
+    CHECK(!logger.Started());
     CHECK(sink->WaitForEvents(1, kWait));
     const std::size_t written = sink->event_count();
     CHECK(written == 1);
@@ -519,7 +519,7 @@ int main() {
       // The sink is invisible to the test, so the two writes are awaited rather
       // than assumed to be finished before Stop()'s deadline.
       CHECK(WaitFor([&logger] { return logger.Written() == 2; }, kWait));
-      CHECK(logger.error_count() == 0);
+      CHECK(logger.ErrorCount() == 0);
     }
 
     const auto files = LogFiles(directory.path());
@@ -550,7 +550,7 @@ int main() {
       }
       logger.Stop();
       CHECK(WaitFor([&logger] { return logger.Written() == 60; }, kWait));
-      CHECK(logger.error_count() == 0);
+      CHECK(logger.ErrorCount() == 0);
     }
 
     const auto files = LogFiles(directory.path());
@@ -599,7 +599,7 @@ int main() {
     CHECK(sink->event_count() == 4);
     CHECK(logger.Written() == 0);
     // Four failed writes plus the failed flush the worker performs on exit.
-    CHECK(logger.error_count() == 5);
+    CHECK(logger.ErrorCount() == 5);
   }
 
   // An unusable log directory is an observable error, not a crash out of the
@@ -620,7 +620,7 @@ int main() {
     CHECK(logger.Start());
     CHECK(logger.TryLog(MakeEvent(LogLevel::Info, "no directory", 0)));
     logger.Stop();
-    CHECK(WaitFor([&logger] { return logger.error_count() == 1; }, kWait));
+    CHECK(WaitFor([&logger] { return logger.ErrorCount() == 1; }, kWait));
     CHECK(logger.Written() == 0);
     CHECK(!std::filesystem::exists(file / "logs"));
   }
@@ -649,7 +649,7 @@ int main() {
       CHECK(logger.TryLog(event));
       logger.Stop();
       CHECK(WaitFor([&logger] { return logger.Written() == 1; }, kWait));
-      CHECK(logger.error_count() == 0);
+      CHECK(logger.ErrorCount() == 0);
     }
 
     const auto files = LogFiles(directory.path());

@@ -506,11 +506,11 @@ std::uint64_t Logger::Written() const {
 
 std::uint64_t Logger::Undrained() const { return shared_->undrained_; }
 
-std::uint64_t Logger::error_count() const {
+std::uint64_t Logger::ErrorCount() const {
   return shared_->errors_.load(std::memory_order_relaxed);
 }
 
-bool Logger::started() const {
+bool Logger::Started() const {
   return shared_->accepting_.load(std::memory_order_acquire);
 }
 

@@ -111,20 +111,20 @@ class BoundedChannel {
 // Slot ownership is the synchronisation, not a sequence re-checked after the
 // payload was touched. Every slot carries one atomic state, and each state
 // transition is a claim (a compare-exchange) performed by exactly one side:
-//   * kFree      - nobody owns the slot;
-//   * kWriting   - the producer owns it and is the only writer of the payload;
-//   * kPublished - the payload is complete and may be the newest entry;
-//   * kHeld      - the consumer owns it and is the only reader of the payload.
+//   * Free      - nobody owns the slot;
+//   * Writing   - the producer owns it and is the only writer of the payload;
+//   * Published - the payload is complete and may be the newest entry;
+//   * Held      - the consumer owns it and is the only reader of the payload.
 // The producer claims the published slot first (a compare-exchange on
-// kPublished, so a slot the consumer already emptied is not mistaken for an
+// Published, so a slot the consumer already emptied is not mistaken for an
 // unread entry) and otherwise claims a free slot; the consumer claims the
 // published slot. Neither side can reach a payload slot the other owns, so the
 // copy in TryTake cannot overlap a write in Publish.
 //
 // Three slots are enough, which is why the "no slot could be claimed" branch is
 // a defensive bound rather than a routine path. There is one producer, so at
-// most one slot is kWriting at any instant, and one consumer, so at most one
-// slot is kHeld; the published index names the single slot that is published,
+// most one slot is Writing at any instant, and one consumer, so at most one
+// slot is Held; the published index names the single slot that is published,
 // is being replaced by this very call, or was already taken and is now free. A
 // Publish whose claim of the published slot failed has therefore found that
 // slot free - it is itself the free slot - or held by the consumer, and in the
@@ -147,13 +147,13 @@ class LatestValueChannel {
     std::size_t slot = kNothingPublished;
     const std::size_t published = published_.load(std::memory_order_acquire);
     if (published < kSlots &&
-        Claim(state_[published], SlotState::kPublished, SlotState::kWriting)) {
+        Claim(state_[published], SlotState::Published, SlotState::Writing)) {
       slot = published;
       replaced = true;
     }
     if (slot == kNothingPublished) {
       for (std::size_t index = 0; index < kSlots; ++index) {
-        if (Claim(state_[index], SlotState::kFree, SlotState::kWriting)) {
+        if (Claim(state_[index], SlotState::Free, SlotState::Writing)) {
           slot = index;
           break;
         }
@@ -169,7 +169,7 @@ class LatestValueChannel {
     // The payload is written while this side owns the slot, so no reader can be
     // copying it, and the release store of the state publishes it.
     storage_[slot] = value;
-    state_[slot].store(SlotState::kPublished, std::memory_order_release);
+    state_[slot].store(SlotState::Published, std::memory_order_release);
     published_.store(slot, std::memory_order_release);
     if (evicted != nullptr) {
       *evicted = replaced;
@@ -189,11 +189,11 @@ class LatestValueChannel {
       if (published >= kSlots) {
         return false;
       }
-      if (!Claim(state_[published], SlotState::kPublished, SlotState::kHeld)) {
+      if (!Claim(state_[published], SlotState::Published, SlotState::Held)) {
         continue;
       }
       out = storage_[published];
-      state_[published].store(SlotState::kFree, std::memory_order_release);
+      state_[published].store(SlotState::Free, std::memory_order_release);
       return true;
     }
     return false;
@@ -208,16 +208,16 @@ class LatestValueChannel {
   void Clear() {
     published_.store(kNothingPublished, std::memory_order_relaxed);
     for (std::size_t index = 0; index < kSlots; ++index) {
-      state_[index].store(SlotState::kFree, std::memory_order_relaxed);
+      state_[index].store(SlotState::Free, std::memory_order_relaxed);
     }
   }
 
  private:
   enum class SlotState : std::uint8_t {
-    kFree,
-    kWriting,
-    kPublished,
-    kHeld,
+    Free,
+    Writing,
+    Published,
+    Held,
   };
 
   // Three slots, the count the class comment proves sufficient: at most one is
@@ -226,7 +226,7 @@ class LatestValueChannel {
   static constexpr std::size_t kSlots = 3;
   // The published index is a slot number; any value outside the slots means
   // that nothing is published. TryTake never clears it, because the claim is on
-  // the slot state and a takeable slot is always kPublished.
+  // the slot state and a takeable slot is always Published.
   static constexpr std::size_t kNothingPublished = kSlots;
   // Bounded retries when a producer replaces the entry between the published
   // index load and the claim, which keeps TryTake non-blocking.
