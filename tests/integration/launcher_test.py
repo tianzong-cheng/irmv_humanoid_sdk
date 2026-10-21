@@ -44,7 +44,9 @@ def main() -> int:
             import sys, time
             print("INFO runtime started", flush=True)
             print('INFO BootCompleted {event=1}', flush=True)
-            time.sleep(30)
+            for seq in range(600):
+                print('INFO State {state_seq=%d}' % seq, flush=True)
+                time.sleep(0.05)
         """)
         app = workspace / "fake_app.py"
         write(app, """\
@@ -63,11 +65,32 @@ def main() -> int:
             return 1
         match = re.search(r"pid (\d+)", result.stdout)
         pid = int(match.group(1)) if match else None
-        if pid:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        log_match = re.search(r"runtime diagnostics: (.*)", result.stdout)
+        if not pid or not log_match:
+            print("FAIL: the launcher did not report the runtime pid and log\n" +
+                  result.stdout)
+            return 1
+        runtime_log = Path(log_match.group(1).strip())
+        before = runtime_log.stat().st_size if runtime_log.exists() else 0
+        # The application is gone and the launcher has exited. The runtime's
+        # diagnostics destination must still exist and receive its state lines:
+        # a pipe would have raised SIGPIPE on the first write after the reader
+        # disappeared, which would now show as a dead pid or a frozen log.
+        time.sleep(0.5)
+        if not runtime_log.exists() or runtime_log.stat().st_size <= before:
+            print("FAIL: runtime diagnostics stopped after the launcher exited\n" +
+                  result.stdout)
+            return 1
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            print("FAIL: the runtime exited after the launcher exited, signal %s\n"
+                  % result.returncode)
+            return 1
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
         slow = workspace / "slow_runtime.py"
         write(slow, """\

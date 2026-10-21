@@ -22,7 +22,6 @@ import os
 import signal
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 
@@ -60,28 +59,41 @@ def shutil_which(name: str) -> str | None:
     return None
 
 
-class LineCollector(threading.Thread):
-    def __init__(self, stream, name: str):
-        super().__init__(daemon=True)
-        self.stream = stream
-        self.name = name
-        self.lines: list[str] = []
-        self.ready = threading.Event()
+def runtime_log_path() -> Path:
+    """A diagnostics file the runtime owns for its whole life.
 
-    def run(self) -> None:
-        for line in self.stream:
-            self.lines.append(line.rstrip("\n"))
-            if "BootCompleted" in line:
-                self.ready.set()
-        self.ready.set()
+    The runtime must never write into a pipe whose reader is this launcher: a
+    launcher exit would close that reader and the next runtime write would end
+    the lower layer with SIGPIPE. The file is opened by the child and survives
+    the launcher, so diagnostics and readiness remain observable after the
+    upper process is gone.
+    """
+    configured = os.environ.get("IRMV_LAUNCH_LOG_DIR")
+    directory = Path(configured) if configured else (Path.cwd() / "logs")
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / ("launcher_runtime_%d_%d.log" %
+                        (os.getpid(), int(time.time() * 1000)))
 
 
-def wait_ready(collector: LineCollector, process: subprocess.Popen,
+def read_log_tail(path: Path, count: int = 20) -> list[str]:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    return lines[-count:]
+
+
+def wait_ready(log_path: Path, process: subprocess.Popen,
                timeout: float) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if "BootCompleted" in "\n".join(collector.lines):
-            return True
+        try:
+            with log_path.open("r", encoding="utf-8", errors="replace") as log:
+                for line in log:
+                    if "BootCompleted" in line:
+                        return True
+        except OSError:
+            pass
         if process.poll() is not None:
             return False
         time.sleep(0.05)
@@ -109,20 +121,23 @@ def main(argv: list[str]) -> int:
         common += ["--domain", str(options.domain)]
 
     # The runtime lives in its own session and process group: a terminal Ctrl+C
-    # reaches the launcher and the application, never the lower layer.
-    runtime_process = subprocess.Popen(
-        [runtime, *common], stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-        bufsize=1, start_new_session=True)
-    runtime_lines = LineCollector(runtime_process.stdout, "runtime")
-    runtime_lines.start()
+    # reaches the launcher and the application, never the lower layer. Its
+    # diagnostics go to a file, not a pipe: when this launcher exits, a pipe's
+    # reader disappears and the runtime's next write raises SIGPIPE.
+    log_path = runtime_log_path()
+    with log_path.open("w", encoding="utf-8") as runtime_log:
+        runtime_process = subprocess.Popen(
+            [runtime, *common], stdin=subprocess.DEVNULL,
+            stdout=runtime_log, stderr=subprocess.STDOUT, text=True,
+            bufsize=1, start_new_session=True)
+    print("sdk_launch: runtime diagnostics: %s" % log_path)
 
-    if not wait_ready(runtime_lines, runtime_process, START_TIMEOUT_S):
+    if not wait_ready(log_path, runtime_process, START_TIMEOUT_S):
         state = ("exited with %s" % runtime_process.poll()
                  if runtime_process.poll() is not None else "still running")
         print("sdk_launch: the runtime did not become ready (%s)" % state,
               file=sys.stderr)
-        for line in runtime_lines.lines[-20:]:
+        for line in read_log_tail(log_path):
             print("runtime: " + line, file=sys.stderr)
         if runtime_process.poll() is None:
             print("sdk_launch: runtime pid %d left running" %
