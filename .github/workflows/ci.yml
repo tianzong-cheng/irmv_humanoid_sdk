@@ -115,10 +115,11 @@ jobs:
             echo "robot_runtime links ONNX Runtime"; exit 1
           fi
 
-      - name: Test the runtime-only hardware entries
-        run: ctest --test-dir build-runtime-only -R
-             '^(hardware_config|device_lease|real_backend|maintenance|runtime_cli)_test$'
-             --output-on-failure
+      - name: Test the runtime-only hardware and contract entries
+        run: |
+          ctest --test-dir build-runtime-only -R \
+            '^(hardware_config|device_lease|real_backend|maintenance|runtime_cli|real_backend_contract|launcher)_test$' \
+            --output-on-failure
 
   sanitizers:
     name: address+undefined sanitizers on the core suite
