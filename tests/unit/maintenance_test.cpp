@@ -237,6 +237,52 @@ int main() {
     CHECK(Contains(fixture.out.str(), "not a reboot verification"));
   }
 
+  // A delayed first heartbeat is not a calibration failure: the preflight
+  // waits within the verification deadline, then the reset proceeds normally.
+  {
+    Fixture fixture;
+    fixture.port.snapshot.count = 2;
+    fixture.port.before_read = [&fixture] {
+      // The first four asynchronous reads carry nothing; the fifth is the
+      // first frame an asynchronous driver delivered.
+      if (fixture.port.read_calls >= 5) {
+        fixture.port.snapshot.joints[0].valid = true;
+        fixture.port.snapshot.joints[0].connected = true;
+        fixture.port.snapshot.joints[0].rx_stamp_us = NowUs();
+      }
+    };
+    fixture.port.on_command = [&fixture](const ScriptedDriverPort::Command &) {
+      ++fixture.port.snapshot.snapshot_seq;
+      fixture.port.snapshot.joints[0].rx_stamp_us =
+          std::numeric_limits<std::uint64_t>::max() - 1;
+      fixture.port.snapshot.joints[0].q = 0.0;
+      fixture.port.snapshot.joints[0].dq = 0.0;
+    };
+    CHECK(Call(fixture, {"motor-zero-reset", "--joint", "test_left",
+                         "--execute", "--verify-position-tolerance-rad", "0.01",
+                         "--verify-velocity-tolerance-rad-s", "0.1",
+                         "--verify-timeout-ms", "200"}) == 0);
+    CHECK(fixture.port.read_calls > 5);
+    CHECK(fixture.port.commands.size() == 2);
+    CHECK(Contains(fixture.out.str(), "fresh readback passed"));
+  }
+
+  // Permanent silence must fail, not write a maintenance command: the wait is
+  // bounded by the verification deadline.
+  {
+    Fixture fixture;
+    fixture.port.snapshot.count = 2;
+    const auto started = std::chrono::steady_clock::now();
+    CHECK(Call(fixture, {"motor-zero-reset", "--joint", "test_left",
+                         "--execute", "--verify-position-tolerance-rad", "0.01",
+                         "--verify-velocity-tolerance-rad-s", "0.1",
+                         "--verify-timeout-ms", "30"}) == 1);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    CHECK(elapsed >= std::chrono::milliseconds(25));
+    CHECK(fixture.port.commands.empty());
+    CHECK(Contains(fixture.out.str(), "no fresh pre-reset feedback"));
+  }
+
   // A heartbeat that arrives while the motor is being disabled is not a
   // read-back of the reset: a silent interval after the reset must fail.
   {

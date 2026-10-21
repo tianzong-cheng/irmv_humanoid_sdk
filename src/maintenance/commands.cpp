@@ -433,18 +433,46 @@ int ZeroReset(const configuration::RuntimeConfig &config,
   }
   port.Open(hardware);
   // A pre-reset observation is required for every target: a silent motor is
-  // not a calibrated one.
+  // not a calibrated one. Opening an asynchronous driver does not guarantee
+  // that the first heartbeat has arrived, so this waits within the caller's
+  // verification deadline instead of reading the all-default sample once and
+  // declaring the calibration impossible.
   {
-    const protocol::FeedbackSnapshot snapshot = port.ReadLatest();
-    for (const std::string &name : arguments.joints) {
-      const std::size_t index = JointIndex(hardware, name);
-      if (!snapshot.joints[index].valid ||
-          snapshot.joints[index].rx_stamp_us == 0) {
-        out << "motor-zero-reset: no fresh pre-reset feedback for " << name
-            << "; nothing was written\n";
-        port.Close();
-        return kExitFailure;
+    const auto deadline =
+        std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(arguments.verify_timeout_ms);
+    std::string missing;
+    bool ready = false;
+    while (!g_stop.load() && std::chrono::steady_clock::now() < deadline) {
+      const protocol::FeedbackSnapshot snapshot = port.ReadLatest();
+      const std::uint64_t now_us = MonotonicUs();
+      missing.clear();
+      for (const std::string &name : arguments.joints) {
+        const std::size_t index = JointIndex(hardware, name);
+        const protocol::JointFeedback &joint = snapshot.joints[index];
+        const bool fresh =
+            joint.valid && joint.rx_stamp_us != 0 &&
+            joint.rx_stamp_us <= now_us &&
+            now_us - joint.rx_stamp_us <= config.timeouts.feedback_us;
+        if (!fresh) {
+          missing = name;
+          break;
+        }
       }
+      if (missing.empty()) {
+        ready = true;
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    if (!ready) {
+      if (missing.empty()) {
+        missing = arguments.joints.front();
+      }
+      out << "motor-zero-reset: no fresh pre-reset feedback for " << missing
+          << "; nothing was written\n";
+      port.Close();
+      return kExitFailure;
     }
   }
 
