@@ -112,6 +112,14 @@ int main(int argc, char **argv) {
       "dynamic_width.onnx",     // an input width that is not fixed
       "extra_input.onnx",       // two inputs
       "unknown_joint.onnx",     // a joint the deployment does not have
+      // Valid shapes and metadata, unsupported element types: the worker only
+      // feeds and reads FLOAT, so admitting these would interpret the bytes as
+      // the wrong numbers.
+      "double_input.onnx",
+      "double_output.onnx",
+      "float16_output.onnx",
+      "int32_output.onnx",
+      "int64_output.onnx",
   };
   (void)rejected;
   for (const char *name : rejected) {

@@ -63,6 +63,27 @@ std::string OutputName(const Ort::Session &session, OrtAllocator *allocator) {
   return std::string(name.get());
 }
 
+// The graph's declared tensor type, admitted only when it is a FLOAT tensor.
+// Width alone cannot catch a model whose shape is right and whose elements are
+// not: the worker feeds a float observation and reads the output with
+// GetTensorData<float>(), so a DOUBLE or FLOAT16 graph would be interpreted as
+// float bits and could return a successful, wrong action.
+Ort::ConstTensorTypeAndShapeInfo FloatTensorInfo(const Ort::TypeInfo &type,
+                                                 const std::string &role,
+                                                 const std::string &name) {
+  if (type.GetONNXType() != ONNX_TYPE_TENSOR) {
+    throw ModelError("the model " + role + " " + name + " is not a tensor");
+  }
+  const Ort::ConstTensorTypeAndShapeInfo info =
+      type.GetTensorTypeAndShapeInfo();
+  if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    throw ModelError("the model " + role + " " + name +
+                     " must be FLOAT, got element type " +
+                     std::to_string(static_cast<int>(info.GetElementType())));
+  }
+  return info;
+}
+
 // The [1, N] shape of one declared tensor. Every other rank, a batch dimension
 // other than one and a dynamic width are refused: the worker feeds exactly one
 // observation and reads exactly one action per step.
@@ -124,9 +145,11 @@ struct OnnxModel::Impl {
     input_name = InputName(session, allocator);
     output_name = OutputName(session, allocator);
     input_width = WidthOf(
-        session.GetInputTypeInfo(0).GetTensorTypeAndShapeInfo(), input_name);
+        FloatTensorInfo(session.GetInputTypeInfo(0), "input", input_name),
+        input_name);
     output_width = WidthOf(
-        session.GetOutputTypeInfo(0).GetTensorTypeAndShapeInfo(), output_name);
+        FloatTensorInfo(session.GetOutputTypeInfo(0), "output", output_name),
+        output_name);
 
     // The single `irmv.deployment` entry, read through the same interface the
     // application would use at runtime. A missing key is refused here, before a
@@ -283,8 +306,15 @@ bool OnnxModel::Run(const Observation &observation,
     if (outputs.size() != 1 || !outputs[0].IsTensor()) {
       return false;
     }
-    const std::vector<std::int64_t> output_shape =
-        outputs[0].GetTensorTypeAndShapeInfo().GetShape();
+    const Ort::TensorTypeAndShapeInfo output_info =
+        outputs[0].GetTensorTypeAndShapeInfo();
+    if (output_info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+      // The session declared FLOAT at admission, but the value in hand is what
+      // GetTensorData<float>() would reinterpret. Never trust the declaration
+      // alone.
+      return false;
+    }
+    const std::vector<std::int64_t> output_shape = output_info.GetShape();
     if (output_shape.size() != 2 || output_shape[0] != 1 ||
         output_shape[1] != impl_->output_width) {
       return false;
