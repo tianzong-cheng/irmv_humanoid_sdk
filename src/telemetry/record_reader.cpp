@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
@@ -102,6 +103,69 @@ bool ReadJson(const std::filesystem::path &path, Json *out) {
   }
   *out = Json::parse(file, nullptr, false);
   return !out->is_discarded();
+}
+
+// Reads the header of one committed chunk. Only a file that is whole - exactly
+// the bytes its valid header describes - is a committed chunk; a `.part` file,
+// a truncated tail or a chunk of another layout is not recovered into the
+// index. The payload checksum is left to ReadRange, which names a corrupt chunk
+// instead of silently dropping it.
+bool ReadChunkInfo(const std::filesystem::path &path,
+                   const RunMetadata &metadata, ChunkInfo *info,
+                   std::string *error) {
+  std::ifstream file(path, std::ios::binary);
+  if (!file) {
+    return false;
+  }
+  file.seekg(0, std::ios::end);
+  const std::streamoff size = file.tellg();
+  if (size < static_cast<std::streamoff>(kChunkHeaderBytes)) {
+    return false;
+  }
+  file.seekg(0, std::ios::beg);
+  std::vector<std::uint8_t> bytes(kChunkHeaderBytes);
+  file.read(reinterpret_cast<char *>(bytes.data()),
+            static_cast<std::streamsize>(bytes.size()));
+  if (file.gcount() != static_cast<std::streamsize>(bytes.size()) ||
+      std::memcmp(bytes.data(), kChunkMagic, sizeof(kChunkMagic)) != 0) {
+    return false;
+  }
+  Cursor header(bytes, sizeof(kChunkMagic));
+  std::uint32_t schema_version = 0;
+  std::uint32_t joint_count = 0;
+  std::uint32_t row_count = 0;
+  std::uint32_t payload_length = 0;
+  std::uint64_t first_stamp = 0;
+  std::uint64_t last_stamp = 0;
+  std::uint64_t first_seq = 0;
+  std::uint64_t last_seq = 0;
+  std::uint32_t payload_crc = 0;
+  std::uint32_t header_crc = 0;
+  if (!header.U32(&schema_version) || !header.U32(&joint_count) ||
+      !header.U32(&row_count) || !header.U32(&payload_length) ||
+      !header.U64(&first_stamp) || !header.U64(&last_stamp) ||
+      !header.U64(&first_seq) || !header.U64(&last_seq) ||
+      !header.U32(&payload_crc) || !header.U32(&header_crc)) {
+    return false;
+  }
+  static_cast<void>(payload_crc);
+  if (schema_version != metadata.schema_version ||
+      joint_count != metadata.joint_count ||
+      header_crc != ChunkCrc32(bytes.data(), kChunkHeaderCrcOffset) ||
+      payload_length != ChunkPayloadBytes(row_count, joint_count) ||
+      static_cast<std::uint64_t>(size) != kChunkHeaderBytes + payload_length) {
+    if (error != nullptr) {
+      *error = path.filename().string() + " is not a committed chunk";
+    }
+    return false;
+  }
+  info->file = path.filename().string();
+  info->rows = row_count;
+  info->first_stamp_us = first_stamp;
+  info->last_stamp_us = last_stamp;
+  info->first_state_seq = first_seq;
+  info->last_state_seq = last_seq;
+  return true;
 }
 
 // One hex digit, or -1. The identity rendering the writer and the tools share
@@ -406,54 +470,117 @@ bool RecordReader::Open(const std::filesystem::path &run_directory,
   }
 
   Json index;
-  if (!ReadJson(run_directory / std::string(kRecordIndexFile), &index) ||
-      !index.is_object()) {
-    *error = "the run has no readable " + std::string(kRecordIndexFile);
-    return false;
-  }
-  if (index.value("schema_version", 0U) != kRecordSchemaVersion) {
-    *error = "the run index declares schema version " +
-             (index.contains("schema_version") ? index["schema_version"].dump()
-                                               : std::string("null")) +
-             "; this build implements " + std::to_string(kRecordSchemaVersion);
-    return false;
-  }
-  if (index.contains("chunks") && index["chunks"].is_array()) {
-    for (const auto &chunk : index["chunks"]) {
-      ChunkInfo info;
-      info.file = chunk.value("file", std::string());
-      info.rows = chunk.value("rows", 0U);
-      info.first_stamp_us = chunk.value("first_stamp_us", 0ULL);
-      info.last_stamp_us = chunk.value("last_stamp_us", 0ULL);
-      info.first_state_seq = chunk.value("first_state_seq", 0ULL);
-      info.last_state_seq = chunk.value("last_state_seq", 0ULL);
-      if (info.file.empty()) {
-        *error = "the run index names a chunk without a file";
-        return false;
+  const bool have_index =
+      ReadJson(run_directory / std::string(kRecordIndexFile), &index) &&
+      index.is_object();
+  if (have_index) {
+    if (index.value("schema_version", 0U) != kRecordSchemaVersion) {
+      *error =
+          "the run index declares schema version " +
+          (index.contains("schema_version") ? index["schema_version"].dump()
+                                            : std::string("null")) +
+          "; this build implements " + std::to_string(kRecordSchemaVersion);
+      return false;
+    }
+    opened.complete_ = index.value("complete", false);
+    if (index.contains("chunks") && index["chunks"].is_array()) {
+      for (const auto &chunk : index["chunks"]) {
+        ChunkInfo info;
+        info.file = chunk.value("file", std::string());
+        info.rows = chunk.value("rows", 0U);
+        info.first_stamp_us = chunk.value("first_stamp_us", 0ULL);
+        info.last_stamp_us = chunk.value("last_stamp_us", 0ULL);
+        info.first_state_seq = chunk.value("first_state_seq", 0ULL);
+        info.last_state_seq = chunk.value("last_state_seq", 0ULL);
+        if (info.file.empty()) {
+          *error = "the run index names a chunk without a file";
+          return false;
+        }
+        opened.chunks_.push_back(std::move(info));
       }
-      opened.chunks_.push_back(std::move(info));
+    }
+    if (index.contains("gaps") && index["gaps"].is_array()) {
+      for (const auto &gap : index["gaps"]) {
+        RecordGap entry;
+        entry.first_seq = gap.value("first_seq", 0ULL);
+        entry.last_seq = gap.value("last_seq", 0ULL);
+        entry.first_stamp_us = gap.value("first_stamp_us", 0ULL);
+        entry.last_stamp_us = gap.value("last_stamp_us", 0ULL);
+        entry.dropped = gap.value("dropped", 0ULL);
+        const std::string reason = gap.value("reason", std::string("none"));
+        if (reason == "queue_full") {
+          entry.reason = RecordGapReason::QueueFull;
+        } else if (reason == "write_failed") {
+          entry.reason = RecordGapReason::WriteFailed;
+        } else if (reason == "stopped") {
+          entry.reason = RecordGapReason::Stopped;
+        } else {
+          entry.reason = RecordGapReason::None;
+        }
+        opened.gaps_.push_back(entry);
+      }
     }
   }
-  if (index.contains("gaps") && index["gaps"].is_array()) {
-    for (const auto &gap : index["gaps"]) {
-      RecordGap entry;
-      entry.first_seq = gap.value("first_seq", 0ULL);
-      entry.last_seq = gap.value("last_seq", 0ULL);
-      entry.first_stamp_us = gap.value("first_stamp_us", 0ULL);
-      entry.last_stamp_us = gap.value("last_stamp_us", 0ULL);
-      entry.dropped = gap.value("dropped", 0ULL);
-      const std::string reason = gap.value("reason", std::string("none"));
-      if (reason == "queue_full") {
-        entry.reason = RecordGapReason::QueueFull;
-      } else if (reason == "write_failed") {
-        entry.reason = RecordGapReason::WriteFailed;
-      } else if (reason == "stopped") {
-        entry.reason = RecordGapReason::Stopped;
-      } else {
-        entry.reason = RecordGapReason::None;
-      }
-      opened.gaps_.push_back(entry);
+
+  // A committed chunk is a fact on disk whether or not the last index
+  // replacement reached it. Merge every whole chunk the index does not name,
+  // so a crash between the chunk rename and the index write leaves the run
+  // readable. An unreadable index is not fatal when chunks exist; the run is
+  // reported as unfinished instead.
+  std::vector<ChunkInfo> recovered;
+  std::error_code directory_code;
+  for (std::filesystem::directory_iterator iterator(run_directory,
+                                                    directory_code);
+       !directory_code && iterator != std::filesystem::directory_iterator();
+       iterator.increment(directory_code)) {
+    if (!iterator->is_regular_file(directory_code) || directory_code) {
+      continue;
     }
+    const std::string name = iterator->path().filename().string();
+    if (name.rfind(std::string(kRecordChunkPrefix), 0) != 0 ||
+        name.size() < std::string(kRecordChunkSuffix).size() ||
+        name.compare(name.size() - std::string(kRecordChunkSuffix).size(),
+                     std::string(kRecordChunkSuffix).size(),
+                     kRecordChunkSuffix) != 0) {
+      continue;
+    }
+    bool known = false;
+    for (const ChunkInfo &chunk : opened.chunks_) {
+      known = known || chunk.file == name;
+    }
+    if (known) {
+      continue;
+    }
+    ChunkInfo info;
+    std::string failure;
+    if (ReadChunkInfo(iterator->path(), opened.metadata_, &info, &failure)) {
+      recovered.push_back(std::move(info));
+    } else {
+      // The file has a final chunk name and is not a temporary file, so its
+      // failure is a fact about this run. Keep the name and the reason: a
+      // missing index must not turn a damaged committed chunk into silence.
+      if (failure.empty()) {
+        failure = name + ": not a committed chunk";
+      } else if (failure.rfind(name, 0) != 0) {
+        failure = name + ": " + failure;
+      }
+      opened.damaged_chunks_.push_back(std::move(failure));
+    }
+  }
+  opened.chunks_.insert(opened.chunks_.end(),
+                        std::make_move_iterator(recovered.begin()),
+                        std::make_move_iterator(recovered.end()));
+  std::stable_sort(opened.chunks_.begin(), opened.chunks_.end(),
+                   [](const ChunkInfo &left, const ChunkInfo &right) {
+                     if (left.first_stamp_us != right.first_stamp_us) {
+                       return left.first_stamp_us < right.first_stamp_us;
+                     }
+                     return left.first_state_seq < right.first_state_seq;
+                   });
+  if (!have_index && opened.chunks_.empty() && opened.damaged_chunks_.empty()) {
+    *error = "the run has no readable " + std::string(kRecordIndexFile) +
+             " and no committed chunk";
+    return false;
   }
   // The session sidecar is optional: a v2 run writes one (possibly empty), and
   // a run without it reports no sessions rather than failing to open.
@@ -523,6 +650,18 @@ bool RecordReader::ReadRange(protocol::TimeUs begin_us, protocol::TimeUs end_us,
     result.ok = true;
     *range = std::move(result);
     return true;
+  }
+  for (const std::string &damaged : damaged_chunks_) {
+    // A damaged committed chunk has no trustworthy time span, so it cannot be
+    // filtered by the requested range. The run is corrupt wherever it is read,
+    // and the error names the file the recovery scan could not validate.
+    result.corrupt = true;
+    if (result.error.empty()) {
+      result.error = damaged;
+    } else {
+      result.error += "; ";
+      result.error += damaged;
+    }
   }
   for (const ChunkInfo &chunk : chunks_) {
     if (chunk.last_stamp_us < begin_us || chunk.first_stamp_us >= end_us) {

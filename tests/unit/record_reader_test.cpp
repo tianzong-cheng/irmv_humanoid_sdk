@@ -7,7 +7,11 @@
 // could agree with a format neither of them implements.
 #include "irmv/telemetry/record_reader.hpp"
 
+#include <sys/wait.h>
+#include <unistd.h>
+
 #include <chrono>
+#include <csignal>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -154,6 +158,40 @@ bool TookRowsFromChunk(const irmv::telemetry::RecordRange &range,
         sample.stamp_us <= chunk.last_stamp_us) {
       return true;
     }
+  }
+  return false;
+}
+
+// Starts a recorder whose metadata a reader can open and whose samples are the
+// four-joint run this file reads.
+bool StartReaderRecorder(Recorder *recorder,
+                         const std::filesystem::path &directory,
+                         std::uint32_t stride = kStride) {
+  RecorderConfig config;
+  config.enabled = true;
+  config.sample_hz = 100;
+  config.stride = stride;
+  config.directory = directory;
+  std::string error;
+  const std::string metadata =
+      std::string(R"({"schema_version":)") +
+      std::to_string(irmv::telemetry::kRecordSchemaVersion) +
+      R"(,"config_id":"cfg","layout_id":"lay","backend":"fake","control_hz":500.0,"sample_hz":100,"joint_count":4,"joints":["j1","j2","j3","j4"],"units":{"position":"rad"}})";
+  if (!recorder->Start(config, metadata, &error)) {
+    std::cerr << "recorder start failed: " << error << '\n';
+    return false;
+  }
+  return true;
+}
+
+// Offers one sample until the bounded handoff has room, like a control loop
+// that wants every sample recorded.
+bool OfferUntilTaken(Recorder *recorder, Sequence seq) {
+  for (int attempt = 0; attempt < 500; ++attempt) {
+    if (recorder->TryRecord(MakeSample(seq))) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
   return false;
 }
@@ -575,6 +613,141 @@ int VersionOneChunk() {
   return 0;
 }
 
+// A run can be opened while the recorder is still writing it. The index is
+// published before the first chunk and replaced after each committed chunk, so
+// the reader sees the committed rows and is told the run is unfinished.
+int ReadDuringRecording() {
+  const std::filesystem::path directory = MakeDirectory();
+  Recorder recorder;
+  CHECK(StartReaderRecorder(&recorder, directory));
+  Sequence seq = 1;
+  for (int index = 0; index < 2000 && recorder.chunks() == 0; ++index) {
+    CHECK(OfferUntilTaken(&recorder, seq));
+    seq += kStride;
+    if ((index % 32) == 0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  }
+  CHECK(recorder.chunks() > 0);
+
+  RecordReader reader;
+  std::string error;
+  CHECK(RecordReader::Open(recorder.run_directory(), &reader, &error));
+  CHECK(!reader.complete());
+  CHECK(!reader.chunks().empty());
+  RecordRange range;
+  CHECK(reader.ReadRange(0, ~0ULL, &range));
+  CHECK(!range.samples.empty());
+
+  CHECK(recorder.Stop());
+  RecordReader finalized;
+  CHECK(RecordReader::Open(recorder.run_directory(), &finalized, &error));
+  CHECK(finalized.complete());
+  CHECK(finalized.chunks().size() == recorder.chunks());
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
+// A crash between a chunk's rename and the next index replacement leaves a
+// committed chunk the index does not name. Opening the run recovers it and
+// reports the run as unfinished.
+int RecoverCommittedChunkWithoutIndex() {
+  const std::filesystem::path directory = MakeDirectory();
+  std::filesystem::path run;
+  CHECK(WriteRun(directory, 30, 0, 0, nullptr, &run));
+  std::filesystem::remove(run / "index.json");
+  RecordReader reader;
+  std::string error;
+  CHECK(RecordReader::Open(run, &reader, &error));
+  CHECK(!reader.complete());
+  CHECK(!reader.chunks().empty());
+  RecordRange range;
+  CHECK(reader.ReadRange(0, ~0ULL, &range));
+  CHECK(range.samples.size() == 30);
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
+// Recovery must not turn a damaged committed chunk into silence. With no
+// index, a valid chunk and a chunk whose header no longer validates, the reader
+// recovers the valid rows and reports the run corrupt by filename.
+int DamagedRecoveredChunkIsReported() {
+  const std::filesystem::path directory = MakeDirectory();
+  std::filesystem::path run;
+  CHECK(WriteRun(directory, 950, 0, 0, nullptr, &run));
+  RecordReader indexed;
+  std::string error;
+  CHECK(RecordReader::Open(run, &indexed, &error));
+  CHECK(indexed.chunks().size() >= 2);
+  const std::string damaged = indexed.chunks().front().file;
+  CHECK(std::filesystem::remove(run / "index.json"));
+  CHECK(FlipByte(run / damaged, 0));
+
+  RecordReader reader;
+  CHECK(RecordReader::Open(run, &reader, &error));
+  CHECK(!reader.complete());
+  CHECK(reader.chunks().size() + 1 == indexed.chunks().size());
+  RecordRange range;
+  CHECK(reader.ReadRange(0, ~0ULL, &range));
+  CHECK(range.corrupt);
+  CHECK(!range.truncated);
+  CHECK(range.error.find(damaged) != std::string::npos);
+  CHECK(!range.samples.empty());
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
+// A recorder killed before any finalization still leaves its committed chunks
+// readable. The run is explicitly unfinished rather than silently presented as
+// a complete one.
+int ReadAfterSigkill() {
+  const std::filesystem::path directory = MakeDirectory();
+  const pid_t child = fork();
+  if (child == 0) {
+    Recorder recorder;
+    if (!StartReaderRecorder(&recorder, directory)) {
+      _exit(2);
+    }
+    Sequence seq = 1;
+    for (int index = 0; index < 2000 && recorder.chunks() == 0; ++index) {
+      if (!OfferUntilTaken(&recorder, seq)) {
+        _exit(3);
+      }
+      seq += kStride;
+    }
+    if (recorder.chunks() == 0) {
+      _exit(4);
+    }
+    // No destructor, no Stop(), no index finalization: exactly the state a
+    // crash leaves.
+    std::raise(SIGKILL);
+    _exit(5);
+  }
+  int status = 0;
+  CHECK(child > 0);
+  CHECK(waitpid(child, &status, 0) == child);
+  CHECK(WIFSIGNALED(status));
+  CHECK(WTERMSIG(status) == SIGKILL);
+
+  std::filesystem::path run;
+  for (const auto &entry : std::filesystem::directory_iterator(directory)) {
+    if (entry.is_directory()) {
+      run = entry.path();
+    }
+  }
+  CHECK(!run.empty());
+  RecordReader reader;
+  std::string error;
+  CHECK(RecordReader::Open(run, &reader, &error));
+  CHECK(!reader.complete());
+  CHECK(!reader.chunks().empty());
+  RecordRange range;
+  CHECK(reader.ReadRange(0, ~0ULL, &range));
+  CHECK(!range.samples.empty());
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
 int main() {
   int failures = 0;
   failures += FullRead();
@@ -587,6 +760,10 @@ int main() {
   failures += UnknownVersion();
   failures += VersionOneRun();
   failures += VersionOneChunk();
+  failures += ReadDuringRecording();
+  failures += RecoverCommittedChunkWithoutIndex();
+  failures += DamagedRecoveredChunkIsReported();
+  failures += ReadAfterSigkill();
   if (failures == 0) {
     return 0;
   }

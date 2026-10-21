@@ -260,6 +260,8 @@ def main() -> int:
             fail("the archive marks an intact run as truncated")
         if bool(data["corrupt"]):
             fail("the archive marks an intact run as corrupt")
+        if "complete" not in data or not bool(data["complete"]):
+            fail("the archive does not mark an intact run as complete")
         if int(data["sample_hz"]) != 100:
             fail("the archive does not carry the sampling rate")
         if str(data["config_id"]) == "":
@@ -408,6 +410,100 @@ def main() -> int:
             ]
             if not np.array_equal(subset["state_seq"], expected):
                 fail("the windowed export does not match the same rows of the whole run")
+
+        # A run killed before its recorder finalizes is unfinished even when
+        # every committed chunk reads cleanly. Both exports must carry that
+        # fact; a consumer that only sees truncated=false and corrupt=false
+        # would otherwise treat the run as whole.
+        killed_runs = work / "killed-runs"
+        killed_runs.mkdir()
+        killed_config = json.loads(config_path.read_text())
+        killed_config["telemetry"]["directory"] = str(work / "killed-logs")
+        killed_config["telemetry"]["recorder"] = {
+            "enabled": True,
+            # One second of rows per chunk at the Fake deployment's 500 Hz
+            # control rate, so the test does not wait nine seconds for the first
+            # committed chunk.
+            "sample_hz": 500,
+            "queue_capacity": 256,
+            "directory": str(killed_runs),
+        }
+        killed_config_path = work / "killed.json"
+        killed_config_path.write_text(json.dumps(killed_config, indent=2))
+        killed_log_path = work / "killed-runtime.log"
+        with killed_log_path.open("w", encoding="utf-8") as killed_log:
+            killed = subprocess.Popen(
+                [
+                    runtime,
+                    "--config",
+                    str(killed_config_path),
+                    "--domain",
+                    str(DOMAIN + 4),
+                    "--fake-scenario",
+                    str(work / "deployment" / "fake_scenario.json"),
+                ],
+                stdout=killed_log,
+                stderr=subprocess.STDOUT,
+                cwd=work,
+            )
+            killed_run = None
+            try:
+                text = wait_for(killed_log_path, 'state="ZeroTorque"', 20)
+                if 'state="ZeroTorque"' not in text:
+                    fail(f"the killed runtime never reached ZeroTorque: {text[-400:]}")
+                else:
+                    deadline = time.monotonic() + 20
+                    while time.monotonic() < deadline:
+                        runs = [entry for entry in killed_runs.iterdir()
+                                if entry.is_dir()]
+                        if runs:
+                            index_path = runs[0] / "index.json"
+                            try:
+                                current = json.loads(index_path.read_text())
+                            except (OSError, ValueError):
+                                current = {}
+                            if int(current.get("rows_recorded", 0)) > 0 and current.get("chunks"):
+                                killed_run = runs[0]
+                                break
+                        time.sleep(0.1)
+                    if killed_run is None:
+                        fail("the killed run committed no chunk to export")
+                    else:
+                        # SIGKILL leaves the open run exactly as a crash does:
+                        # no final index replacement, no Stop().
+                        killed.kill()
+                        killed.wait(timeout=10)
+                        killed_archive = work / "killed.npz"
+                        killed_convert = subprocess.run(
+                            [
+                                sys.executable,
+                                str(source_root / "tools" / "record_to_npz.py"),
+                                str(killed_run),
+                                str(killed_archive),
+                                "--reader",
+                                str(reader),
+                            ],
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                        if killed_convert.returncode != 0:
+                            fail(f"the killed-run conversion failed: {killed_convert.stderr.strip()}")
+                        else:
+                            unfinished = np.load(killed_archive, allow_pickle=False)
+                            if "complete" not in unfinished:
+                                fail("the killed-run archive has no completion flag")
+                            elif bool(unfinished["complete"]):
+                                fail("the killed-run archive marks the run complete")
+                            if int(unfinished["stamp_us"].shape[0]) == 0:
+                                fail("the killed-run archive exported no committed rows")
+            finally:
+                if killed.poll() is None:
+                    killed.kill()
+                    try:
+                        killed.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        pass
 
     if failures:
         return 1

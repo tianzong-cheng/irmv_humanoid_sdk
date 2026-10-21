@@ -189,6 +189,11 @@ int main(int argc, char **argv) {
   }
   summary["chunks"] = reader.chunks().size();
   summary["rows_in_range"] = range.samples.size();
+  // A run that was killed before its worker finalized has no final loss table,
+  // and its last chunk may be only what the crash left. The reader already
+  // knows this; the export has to say it rather than let a consumer infer a
+  // complete run from the absence of truncation and corruption.
+  summary["complete"] = reader.complete();
   summary["truncated"] = range.truncated;
   // A corrupt chunk is reported as itself rather than folded into the
   // truncation flag: a caller has to be able to tell a run that was cut short

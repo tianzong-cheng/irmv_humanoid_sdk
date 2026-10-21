@@ -74,14 +74,21 @@ struct RecordRange {
 
 class RecordReader {
  public:
-  // Opens one run directory: the metadata and the index must exist, parse, and
-  // declare a schema version this build implements.
+  // Opens one run directory: the metadata must exist, parse, and declare a
+  // schema version this build implements. The index is used when present, but
+  // committed chunks are also scanned and merged, so a crash between a chunk's
+  // rename and the index replacement does not hide it. A run with neither a
+  // readable index nor a committed chunk is refused.
   static bool Open(const std::filesystem::path &run_directory,
                    RecordReader *reader, std::string *error);
 
   const RunMetadata &metadata() const { return metadata_; }
   const std::vector<ChunkInfo> &chunks() const { return chunks_; }
   const std::vector<RecordGap> &gaps() const { return gaps_; }
+  // False while the recorder is still open or after it was killed before its
+  // worker finalized. A reader can still return every committed chunk; the flag
+  // says the run has no final loss table and its last chunk may be a tail.
+  bool complete() const { return complete_; }
   // The session events the run's `sessions.json` sidecar holds, in arrival
   // order. A run records one per authorization context the runtime adopted; a
   // run with no sidecar (or none adopted) reports none.
@@ -100,6 +107,11 @@ class RecordReader {
   std::vector<ChunkInfo> chunks_;
   std::vector<RecordGap> gaps_;
   std::vector<RecordSessionEvent> sessions_;
+  // Final chunk filenames the recovery scan found on disk but could not
+  // validate. They are not silently ignored: every range reports the run as
+  // corrupt and names them.
+  std::vector<std::string> damaged_chunks_;
+  bool complete_{false};
 };
 
 }  // namespace irmv::telemetry
