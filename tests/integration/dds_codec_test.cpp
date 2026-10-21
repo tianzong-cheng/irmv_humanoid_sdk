@@ -659,14 +659,18 @@ bool RejectInvalidSamples() {
     }
   }
   {
+    // Zero joints is representable on the command lane. The runtime, not the
+    // codec, classifies it: ownership first, then shape, so an authorized
+    // empty frame faults while a foreign one cannot touch the owner.
     wire::JointCommand wire_command;
     codec::ToWire(command, wire_command);
     wire_command.joints().count(0);
     JointCommand destination = command;
-    const JointCommand before = command;
-    if (codec::FromWire(wire_command, destination) ||
-        !Same(before, destination)) {
-      std::cerr << "codec: a zero joint count was accepted\n";
+    if (!codec::FromWire(wire_command, destination) ||
+        destination.joints.count != 0 ||
+        !SameText(destination.layout_id, command.layout_id) ||
+        destination.command_seq != command.command_seq) {
+      std::cerr << "codec: a representable zero joint command was rejected\n";
       return false;
     }
   }

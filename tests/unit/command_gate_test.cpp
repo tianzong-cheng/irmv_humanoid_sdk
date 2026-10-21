@@ -513,6 +513,40 @@ int main() {
                                   huge_count, RejectReason::Malformed) == 0);
   }
 
+  // ---- an empty command is classified by ownership before shape ----
+  {
+    CommandGate gate(config);
+    gate.RecordState(10, 55'000);
+    gate.Authorize(runtime, session, producer, 1);
+    JointCommand valid = CommandFor(config);
+    valid.source_state_seq = 10;
+    valid.command_seq = 3;
+    CHECK(gate.Accept({valid, 60'000}, 60'000).accepted());
+
+    // A foreign empty frame cannot fault the owner: ownership is checked
+    // before the payload shape. The accepted target and deadline stay intact.
+    JointCommand foreign_empty = valid;
+    foreign_empty.producer_id = OtherProducerId();
+    foreign_empty.joints.count = 0;
+    foreign_empty.command_seq = 9;
+    const GateResult foreign = gate.Accept({foreign_empty, 200'000}, 200'000);
+    CHECK(foreign.decision == GateDecision::Ignored);
+    CHECK(foreign.reason == RejectReason::WrongInstance);
+    CHECK(gate.current_target().command_seq == 3);
+    CHECK(gate.last_valid_command_rx_us() == 60'000);
+
+    // The current owner's empty frame is an invalid owner command: the runtime
+    // latches CommandInvalid immediately rather than waiting for a timeout.
+    JointCommand owner_empty = valid;
+    owner_empty.joints.count = 0;
+    owner_empty.command_seq = 9;
+    const GateResult owner = gate.Accept({owner_empty, 200'000}, 200'000);
+    CHECK(owner.decision == GateDecision::InvalidOwnerCommand);
+    CHECK(owner.reason == RejectReason::Malformed);
+    CHECK(gate.current_target().command_seq == 3);
+    CHECK(gate.last_valid_command_rx_us() == 60'000);
+  }
+
   // ---- limits are inclusive and the accepted frame is stored by value ----
   {
     CommandGate gate(config);

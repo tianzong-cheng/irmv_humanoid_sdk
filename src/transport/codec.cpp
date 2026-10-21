@@ -448,8 +448,12 @@ void ToWire(const protocol::RobotState &source,
 bool FromWire(const protocol::wire::JointCommand &source,
               protocol::JointCommand &target) {
   protocol::JointCommand candidate;
-  // A sample of the command lane is a target frame: it names its joints.
-  if (!ReadCommand(source, candidate, true)) {
+  // An empty command is representable. Decoding it here is what lets the
+  // runtime tell an authorized owner's malformed frame - which must latch
+  // CommandInvalid immediately - from a foreign empty frame, which must not
+  // fault the owner. The ownership check precedes the shape check in
+  // CommandGate.
+  if (!ReadCommand(source, candidate, false)) {
     return false;
   }
   target = candidate;
