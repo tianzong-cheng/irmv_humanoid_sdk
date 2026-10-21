@@ -62,14 +62,14 @@ int main(int argc, char **argv) {
   CHECK(argc == 2);
   const std::string directory = argv[1];
 
-  const std::unique_ptr<OnnxModel> model =
+  const std::shared_ptr<OnnxModel> model =
       OnnxModel::Load(directory + "/valid.onnx", kRobotJoints);
   CHECK(model != nullptr);
   const std::size_t dimension = model->contract().observation.dimension;
 
   // A new worker runs nothing until something is submitted.
   {
-    InferenceWorker worker(*model);
+    InferenceWorker worker(model);
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     CHECK(worker.submitted() == 0);
     CHECK(worker.completed() == 0);
@@ -83,7 +83,7 @@ int main(int argc, char **argv) {
   // One request produces one response that carries the identity of its request,
   // so the caller can tell which step it belongs to.
   {
-    InferenceWorker worker(*model);
+    InferenceWorker worker(model);
     const PolicyRequest request = MakeRequest(3, 11, 42, 1000, dimension);
     worker.Submit(request);
     PolicyResponse response;
@@ -110,7 +110,7 @@ int main(int argc, char **argv) {
   // A burst never blocks the submitter and never queues: the worker runs the
   // steps it can and the superseded ones are counted, not accumulated.
   {
-    InferenceWorker worker(*model);
+    InferenceWorker worker(model);
     constexpr int kBurst = 64;
     for (int index = 0; index < kBurst; ++index) {
       worker.Submit(MakeRequest(
@@ -127,12 +127,33 @@ int main(int argc, char **argv) {
     CHECK(worker.completed() <= kBurst);
   }
 
+  // A valid but long-running Loop model must be stopped by the cancellation
+  // token, not by waiting for its trip count. The worker owns the Ort
+  // RunOptions that Stop() terminates.
+  {
+    const std::shared_ptr<OnnxModel> long_running =
+        OnnxModel::Load(directory + "/long_running.onnx", kRobotJoints);
+    InferenceWorker worker(long_running);
+    worker.Submit(MakeRequest(1, 1, 1, 2500,
+                              long_running->contract().observation.dimension));
+    // Give the worker time to take the request and enter the Loop.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    CHECK(worker.completed() == 0);
+    const auto started = std::chrono::steady_clock::now();
+    CHECK(worker.Stop());
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    CHECK(elapsed < std::chrono::milliseconds(1500));
+    // The cancelled step is reported as failed, so the request really entered
+    // the model rather than being discarded before it started.
+    CHECK(worker.failed() == 1);
+  }
+
   // A model that cannot answer produces a failed step, never a silent zero
   // action: the caller has to see the difference.
   {
-    const std::unique_ptr<OnnxModel> broken =
+    const std::shared_ptr<OnnxModel> broken =
         OnnxModel::Load(directory + "/non_finite.onnx", kRobotJoints);
-    InferenceWorker worker(*broken);
+    InferenceWorker worker(broken);
     worker.Submit(
         MakeRequest(1, 1, 1, 3000, broken->contract().observation.dimension));
     PolicyResponse response;
@@ -146,7 +167,7 @@ int main(int argc, char **argv) {
   // An observation of the wrong width is refused by the model and reported as a
   // failed step.
   {
-    InferenceWorker worker(*model);
+    InferenceWorker worker(model);
     worker.Submit(MakeRequest(1, 1, 1, 4000, dimension - 1));
     PolicyResponse response;
     CHECK(TakeWithin(worker, &response));
@@ -164,7 +185,7 @@ int main(int argc, char **argv) {
   // one round at a time, with a bounded wait so a lost wakeup fails the round
   // instead of hanging.
   {
-    InferenceWorker worker(*model);
+    InferenceWorker worker(model);
     constexpr int kChurn = 2000;
     for (int round = 1; round <= kChurn; ++round) {
       const auto older = static_cast<irmv::protocol::Sequence>(round * 2 - 1);

@@ -1,5 +1,6 @@
 #include "irmv/policy/inference.hpp"
 
+#include <chrono>
 #include <utility>
 
 namespace irmv::policy {
@@ -45,50 +46,140 @@ bool PolicySourceStateUsable(const PolicyResponse &response,
          source_state_timeout_us;
 }
 
-InferenceWorker::InferenceWorker(const OnnxModel &model) : model_(model) {
-  worker_ = std::thread([this] { Run(); });
+namespace {
+
+// The one deadline Stop() waits for. ONNX cancellation is cooperative; an
+// execution that never observes the terminate flag cannot be joined safely
+// from here, and the worker then keeps only its shared state alive.
+constexpr std::uint32_t kInferenceStopTimeoutMs = 2000;
+
+}  // namespace
+
+struct InferenceWorker::Shared {
+  explicit Shared(std::shared_ptr<const OnnxModel> worker_model)
+      : model(std::move(worker_model)) {}
+
+  std::shared_ptr<const OnnxModel> model;
+  // Owned by this worker and handed to every Run it starts, so Stop() can
+  // terminate the call that is really executing.
+  RunCancellation cancellation;
+  transport::LatestValueChannel<PolicyRequest> requests;
+  transport::LatestValueChannel<PolicyResponse> responses;
+  // Wakes the worker only; the two channels carry the payloads.
+  std::mutex mutex;
+  std::condition_variable wakeup;
+  std::condition_variable finished_cv;
+  bool pending{false};
+  bool stop_requested{false};
+  std::atomic<bool> accepting{true};
+  bool finished{false};
+  std::thread worker;
+  std::atomic<std::uint64_t> submitted{0};
+  std::atomic<std::uint64_t> replaced{0};
+  std::atomic<std::uint64_t> completed{0};
+  std::atomic<std::uint64_t> failed{0};
+  std::atomic<std::uint64_t> uncollected{0};
+};
+
+InferenceWorker::InferenceWorker(std::shared_ptr<const OnnxModel> model)
+    : shared_(std::make_shared<Shared>(std::move(model))) {
+  const std::shared_ptr<Shared> shared = shared_;
+  shared_->worker = std::thread([shared] { InferenceWorker::Run(shared); });
 }
 
-InferenceWorker::~InferenceWorker() { Stop(); }
+InferenceWorker::~InferenceWorker() { static_cast<void>(Stop()); }
 
 void InferenceWorker::Submit(const PolicyRequest &request) {
+  Shared &shared = *shared_;
+  if (!shared.accepting.load(std::memory_order_acquire)) {
+    // Shutdown has already rejected new work.
+    return;
+  }
   bool evicted = false;
-  if (!requests_.Publish(request, &evicted)) {
+  if (!shared.requests.Publish(request, &evicted)) {
     // No slot could be claimed, which the one-producer/one-consumer contract
     // makes unreachable; the value is counted by the channel and this call
     // reports it by not counting a submission.
     return;
   }
-  submitted_.fetch_add(1);
+  shared.submitted.fetch_add(1);
   if (evicted) {
-    replaced_.fetch_add(1);
+    shared.replaced.fetch_add(1);
   }
   {
-    const std::lock_guard<std::mutex> lock(mutex_);
-    pending_ = true;
+    const std::lock_guard<std::mutex> lock(shared.mutex);
+    shared.pending = true;
   }
-  wakeup_.notify_one();
+  shared.wakeup.notify_one();
 }
 
 bool InferenceWorker::TryTake(PolicyResponse *response) {
   if (response == nullptr) {
     return false;
   }
-  return responses_.TryTake(*response);
+  return shared_->responses.TryTake(*response);
 }
 
-void InferenceWorker::Stop() {
+bool InferenceWorker::Stop() {
+  const std::shared_ptr<Shared> shared = shared_;
+  if (!shared) {
+    return true;
+  }
   {
-    const std::lock_guard<std::mutex> lock(mutex_);
-    stopping_ = true;
+    const std::lock_guard<std::mutex> lock(shared->mutex);
+    // Reject first, then cancel: a submission that passed the accepting check
+    // may still be published, but the worker returns on the stop request and
+    // does not start a new step for it.
+    shared->accepting.store(false, std::memory_order_release);
+    shared->stop_requested = true;
+    shared->pending = false;
   }
-  wakeup_.notify_one();
-  if (worker_.joinable()) {
-    worker_.join();
+  shared->cancellation.Request();
+  shared->wakeup.notify_all();
+
+  bool finished = false;
+  {
+    std::unique_lock<std::mutex> lock(shared->mutex);
+    finished = shared->finished_cv.wait_for(
+        lock, std::chrono::milliseconds(kInferenceStopTimeoutMs),
+        [&shared] { return shared->finished; });
   }
+  if (finished) {
+    if (shared->worker.joinable()) {
+      shared->worker.join();
+    }
+    return true;
+  }
+  // The kernel did not observe the terminate flag inside the deadline. The
+  // thread references only `shared`, so detaching is safe; returning false
+  // tells the caller the inference was not proven stopped. A strict bound on
+  // uninterruptible kernels belongs in process isolation, not in a join that
+  // could block the control loop forever.
+  if (shared->worker.joinable()) {
+    shared->worker.detach();
+  }
+  return false;
 }
 
-void InferenceWorker::Run() {
+std::uint64_t InferenceWorker::submitted() const {
+  return shared_->submitted.load();
+}
+
+std::uint64_t InferenceWorker::replaced() const {
+  return shared_->replaced.load();
+}
+
+std::uint64_t InferenceWorker::completed() const {
+  return shared_->completed.load();
+}
+
+std::uint64_t InferenceWorker::failed() const { return shared_->failed.load(); }
+
+std::uint64_t InferenceWorker::uncollected() const {
+  return shared_->uncollected.load();
+}
+
+void InferenceWorker::Run(std::shared_ptr<Shared> shared) {
   for (;;) {
     PolicyRequest request;
     {
@@ -102,22 +193,24 @@ void InferenceWorker::Run() {
       // afterwards) leaves a window in which that submission's flag is erased
       // by this thread: the newest request then stays in the channel with
       // nothing left to wake the worker for it.
-      std::unique_lock<std::mutex> lock(mutex_);
-      wakeup_.wait(lock, [this] { return pending_ || stopping_; });
-      if (stopping_ && !pending_) {
-        return;
+      std::unique_lock<std::mutex> lock(shared->mutex);
+      shared->wakeup.wait(lock, [&shared] {
+        return shared->pending || shared->stop_requested;
+      });
+      if (shared->stop_requested) {
+        break;
       }
-      if (!requests_.TryTake(request)) {
+      if (!shared->requests.TryTake(request)) {
         // The flag was set by a submission whose request this take already
         // consumed: nothing is left for this wakeup. Clearing the flag parks
         // the thread on the next wait, and a submission that arrives after
         // this section sets it again.
-        pending_ = false;
+        shared->pending = false;
         continue;
       }
       // Cleared before the step runs, so a submission that arrives while this
       // one is being computed is not lost and is not mistaken for this one.
-      pending_ = false;
+      shared->pending = false;
     }
 
     PolicyResponse response;
@@ -126,26 +219,32 @@ void InferenceWorker::Run() {
     response.state_seq = request.state_seq;
     response.state_stamp_us = request.state_stamp_us;
     response.submitted_us = request.submitted_us;
-    response.ok = model_.Run(request.observation, &response.action,
-                             &response.action_count);
+    response.ok =
+        shared->model->Run(request.observation, &response.action,
+                           &response.action_count, &shared->cancellation);
 
     bool evicted = false;
     // A response the caller did not collect is superseded by this one, which is
     // the same loss the request side counts: the newer step is the one that
     // matters.
-    if (responses_.Publish(response, &evicted)) {
+    if (shared->responses.Publish(response, &evicted)) {
       if (response.ok) {
-        completed_.fetch_add(1);
+        shared->completed.fetch_add(1);
       } else {
-        failed_.fetch_add(1);
+        shared->failed.fetch_add(1);
       }
       if (evicted) {
-        uncollected_.fetch_add(1);
+        shared->uncollected.fetch_add(1);
       }
     } else {
-      failed_.fetch_add(1);
+      shared->failed.fetch_add(1);
     }
   }
+  {
+    const std::lock_guard<std::mutex> lock(shared->mutex);
+    shared->finished = true;
+  }
+  shared->finished_cv.notify_all();
 }
 
 }  // namespace irmv::policy

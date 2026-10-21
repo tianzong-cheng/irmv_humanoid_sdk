@@ -4,6 +4,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <thread>
 
@@ -104,12 +105,13 @@ bool PolicySourceStateUsable(const PolicyResponse &response,
                              protocol::TimeUs newest_state_stamp_us,
                              protocol::TimeUs source_state_timeout_us);
 
-// Runs the model of one authorization on its own thread. The model must outlive
-// the worker.
+// Runs the model of one authorization on its own thread. The worker shares
+// ownership of the model with its thread, so a cancellation that is still
+// finishing cannot outlive the model it executes.
 class InferenceWorker {
  public:
   // Starts the worker thread. Construction does not run an inference.
-  explicit InferenceWorker(const OnnxModel &model);
+  explicit InferenceWorker(std::shared_ptr<const OnnxModel> model);
   ~InferenceWorker();
 
   InferenceWorker(const InferenceWorker &) = delete;
@@ -124,39 +126,33 @@ class InferenceWorker {
   // Takes the newest finished response, if one is waiting. Never blocks.
   bool TryTake(PolicyResponse *response);
 
-  // Requests the worker to finish the step it is running and join it. Safe to
-  // call more than once and from the destructor.
-  void Stop();
+  // Rejects later submissions, requests cooperative termination of the
+  // running inference through its owned Ort::RunOptions, and waits for the
+  // worker against one deadline. Returns true when the worker finished and was
+  // joined. On false the cancellation was not observed by an uninterruptible
+  // kernel; the thread keeps only shared state alive, never this object, so
+  // returning at the deadline is safe. Safe to call more than once and from the
+  // destructor.
+  bool Stop();
 
   // Requests accepted by the channel since construction.
-  std::uint64_t submitted() const { return submitted_.load(); }
+  std::uint64_t submitted() const;
   // Requests replaced before the worker picked them up.
-  std::uint64_t replaced() const { return replaced_.load(); }
+  std::uint64_t replaced() const;
   // Steps the model answered, with a usable action.
-  std::uint64_t completed() const { return completed_.load(); }
+  std::uint64_t completed() const;
   // Steps the model could not answer, or answered with a value that is not
   // usable. Both are a failed policy step for the caller.
-  std::uint64_t failed() const { return failed_.load(); }
+  std::uint64_t failed() const;
   // Responses replaced by a newer one before the caller collected them.
-  std::uint64_t uncollected() const { return uncollected_.load(); }
+  std::uint64_t uncollected() const;
 
  private:
-  void Run();
+  struct Shared;
 
-  const OnnxModel &model_;
-  transport::LatestValueChannel<PolicyRequest> requests_;
-  transport::LatestValueChannel<PolicyResponse> responses_;
-  // Wakes the worker only; the two channels carry the payloads.
-  std::mutex mutex_;
-  std::condition_variable wakeup_;
-  bool pending_{false};
-  bool stopping_{false};
-  std::thread worker_;
-  std::atomic<std::uint64_t> submitted_{0};
-  std::atomic<std::uint64_t> replaced_{0};
-  std::atomic<std::uint64_t> completed_{0};
-  std::atomic<std::uint64_t> failed_{0};
-  std::atomic<std::uint64_t> uncollected_{0};
+  static void Run(std::shared_ptr<Shared> shared);
+
+  std::shared_ptr<Shared> shared_;
 };
 
 }  // namespace irmv::policy

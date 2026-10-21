@@ -45,6 +45,89 @@ def base_graph(dimension: int, out_dimension: int, input_width: object, weight_s
     )
 
 
+def typed_graph(
+    dimension: int,
+    out_dimension: int,
+    input_type: int,
+    output_type: int,
+) -> onnx.GraphProto:
+    """A model whose shapes and metadata are valid but whose element types differ.
+
+    The admission check must refuse it before inference; reading a DOUBLE,
+    FLOAT16 or integer tensor through GetTensorData<float>() would produce a
+    successful action with the wrong numbers.
+    """
+    numpy_type = {
+        onnx.TensorProto.DOUBLE: np.float64,
+        onnx.TensorProto.FLOAT16: np.float16,
+    }.get(input_type, np.float32)
+    values = (np.linspace(-1.0, 1.0, dimension * out_dimension).astype(numpy_type)).tobytes()
+    weight = onnx.helper.make_tensor(
+        "W", input_type, [dimension, out_dimension], values, raw=True
+    )
+    matmul_output = "raw"
+    nodes = [onnx.helper.make_node("MatMul", [INPUT, "W"], [matmul_output])]
+    if output_type != input_type:
+        nodes.append(onnx.helper.make_node("Cast", [matmul_output], [OUTPUT], to=output_type))
+    else:
+        nodes.append(onnx.helper.make_node("Identity", [matmul_output], [OUTPUT]))
+    return onnx.helper.make_graph(
+        nodes,
+        "policy",
+        [onnx.helper.make_tensor_value_info(INPUT, input_type, [1, dimension])],
+        [onnx.helper.make_tensor_value_info(OUTPUT, output_type, [1, out_dimension])],
+        [weight],
+    )
+
+
+def long_running_graph(dimension: int, out_dimension: int, iterations: int = 200_000_000) -> onnx.GraphProto:
+    """A valid model whose Loop body keeps running until the executor terminates.
+
+    The body is a real loop-carried add, not something constant folding can
+    remove: a shutdown that merely waits for a join would block for the whole
+    trip count.
+    """
+    weight = weights(dimension, out_dimension)
+    trip = onnx.helper.make_tensor(
+        "M", onnx.TensorProto.INT64, [], np.array([iterations], dtype=np.int64).tobytes(), raw=True
+    )
+    enter = onnx.helper.make_tensor(
+        "COND", onnx.TensorProto.BOOL, [], np.array([True], dtype=np.bool_).tobytes(), raw=True
+    )
+    step = onnx.helper.make_tensor(
+        "STEP", onnx.TensorProto.FLOAT, [1, out_dimension],
+        np.full((1, out_dimension), 1e-9, dtype=np.float32).tobytes(), raw=True,
+    )
+
+    body = onnx.helper.make_graph(
+        [
+            onnx.helper.make_node("Identity", ["cond_in"], ["cond_out"]),
+            onnx.helper.make_node("Add", ["acc_in", "STEP"], ["acc_out"]),
+        ],
+        "loop_body",
+        [
+            onnx.helper.make_tensor_value_info("iter", onnx.TensorProto.INT64, []),
+            onnx.helper.make_tensor_value_info("cond_in", onnx.TensorProto.BOOL, []),
+            onnx.helper.make_tensor_value_info("acc_in", onnx.TensorProto.FLOAT, [1, out_dimension]),
+        ],
+        [
+            onnx.helper.make_tensor_value_info("cond_out", onnx.TensorProto.BOOL, []),
+            onnx.helper.make_tensor_value_info("acc_out", onnx.TensorProto.FLOAT, [1, out_dimension]),
+        ],
+    )
+    graph = onnx.helper.make_graph(
+        [
+            onnx.helper.make_node("MatMul", [INPUT, "W"], ["initial"]),
+            onnx.helper.make_node("Loop", ["M", "COND", "initial"], [OUTPUT], body=body),
+        ],
+        "policy",
+        [onnx.helper.make_tensor_value_info(INPUT, onnx.TensorProto.FLOAT, [1, dimension])],
+        [onnx.helper.make_tensor_value_info(OUTPUT, onnx.TensorProto.FLOAT, [1, out_dimension])],
+        [weight, trip, enter, step],
+    )
+    return graph
+
+
 # The pinned ONNX Runtime (1.22.0) supports IR versions up to 10; the onnx
 # package that builds these fixtures defaults to a newer one, so it is pinned
 # explicitly. The exporter of the training side emits IR 8 for opset 18, which
@@ -359,6 +442,28 @@ def main() -> int:
         [weights(dimension, out_dimension), zero],
     )
     save(directory, "non_finite.onnx", make_model(non_finite_graph, fixture))
+
+    # A valid model whose inference only ends when the executor is cancelled.
+    save(
+        directory,
+        "long_running.onnx",
+        make_model(long_running_graph(dimension, out_dimension), fixture),
+    )
+
+    # Element types the inference path cannot feed or read. Every other part of
+    # these models - metadata, names, ranks and widths - is the valid case.
+    for name, input_type, output_type in (
+        ("double_input.onnx", onnx.TensorProto.DOUBLE, onnx.TensorProto.DOUBLE),
+        ("double_output.onnx", onnx.TensorProto.FLOAT, onnx.TensorProto.DOUBLE),
+        ("float16_output.onnx", onnx.TensorProto.FLOAT, onnx.TensorProto.FLOAT16),
+        ("int32_output.onnx", onnx.TensorProto.FLOAT, onnx.TensorProto.INT32),
+        ("int64_output.onnx", onnx.TensorProto.FLOAT, onnx.TensorProto.INT64),
+    ):
+        save(
+            directory,
+            name,
+            make_model(typed_graph(dimension, out_dimension, input_type, output_type), fixture),
+        )
 
     print(f"make_test_model: {len(list(directory.glob('*.onnx')))} fixtures in {directory}")
     return 0

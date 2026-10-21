@@ -528,7 +528,7 @@ int RunApplication(const ApplicationOptions &options,
   // the worker that runs it. Everything that could refuse the model is decided
   // here, before the supervision loop exists, so a deployment that cannot run
   // its policy never starts supervising a link.
-  std::unique_ptr<policy::OnnxModel> model;
+  std::shared_ptr<policy::OnnxModel> model;
   std::unique_ptr<policy::InferenceWorker> worker;
   policy::ResolvedGains gains;
   if (source == LocomotionSource::Local) {
@@ -578,7 +578,7 @@ int RunApplication(const ApplicationOptions &options,
       transport.Stop();
       return kExitStartupError;
     }
-    worker = std::make_unique<policy::InferenceWorker>(*model);
+    worker = std::make_unique<policy::InferenceWorker>(model);
     std::printf(
         "[application] policy=%s sha256=%s joints=%zu period_us=%llu "
         "timeout_us=%llu overrides=%u\n",

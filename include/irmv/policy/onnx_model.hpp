@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -35,6 +36,29 @@ class ModelError : public std::runtime_error {
  public:
   explicit ModelError(const std::string &message)
       : std::runtime_error(message) {}
+};
+
+// One running inference's cancellation token. It owns the Ort::RunOptions the
+// session executes with; Request() asks ONNX Runtime to terminate that call.
+// Cancellation is cooperative: an execution that never checks the terminate
+// flag cannot be interrupted, so a caller that needs a strict bound must run
+// the inference in an isolated process.
+class RunCancellation {
+ public:
+  RunCancellation();
+  ~RunCancellation();
+  RunCancellation(const RunCancellation &) = delete;
+  RunCancellation &operator=(const RunCancellation &) = delete;
+
+  // Idempotent. Once requested, every later Run through this token is refused
+  // before entering ONNX Runtime.
+  void Request();
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+
+  friend class OnnxModel;
 };
 
 // One loaded policy. Constructed only by Load, never copied or moved: the
@@ -72,9 +96,12 @@ class OnnxModel {
   // reads, when ONNX Runtime reports an error, or when the output has another
   // shape or a value that is not finite. The worker turns that into a failed
   // policy step; it is never a silent zero action.
+  // `cancellation` names the owned RunOptions of a worker. A null token is a
+  // synchronous inference with no way to interrupt it.
   bool Run(const Observation &observation,
            std::array<float, protocol::kMaxJoints> *action,
-           std::uint32_t *action_count) const;
+           std::uint32_t *action_count,
+           RunCancellation *cancellation = nullptr) const;
 
  private:
   struct Impl;

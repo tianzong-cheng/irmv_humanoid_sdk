@@ -84,6 +84,25 @@ std::int64_t WidthOf(const Ort::ConstTensorTypeAndShapeInfo &info,
 
 }  // namespace
 
+struct RunCancellation::Impl {
+  // One RunOptions per worker. SetTerminate() is safe to call while another
+  // thread is inside Session::Run with the same options; the mutex only orders
+  // the "already requested" check against clearing the flag for a new call.
+  std::mutex mutex;
+  Ort::RunOptions options;
+  bool requested{false};
+};
+
+RunCancellation::RunCancellation() : impl_(std::make_unique<Impl>()) {}
+
+RunCancellation::~RunCancellation() = default;
+
+void RunCancellation::Request() {
+  const std::lock_guard<std::mutex> lock(impl_->mutex);
+  impl_->requested = true;
+  impl_->options.SetTerminate();
+}
+
 struct OnnxModel::Impl {
   Impl(std::string session_bytes, const std::filesystem::path &path,
        const std::vector<std::string> &robot_joint_names)
@@ -217,7 +236,8 @@ const std::string &OnnxModel::contract_sha256() const {
 
 bool OnnxModel::Run(const Observation &observation,
                     std::array<float, protocol::kMaxJoints> *action,
-                    std::uint32_t *action_count) const {
+                    std::uint32_t *action_count,
+                    RunCancellation *cancellation) const {
   if (action == nullptr || action_count == nullptr) {
     return false;
   }
@@ -227,6 +247,19 @@ bool OnnxModel::Run(const Observation &observation,
   if (observation.count != expected || expected > kMaxObservationDimension ||
       produced > protocol::kMaxJoints) {
     return false;
+  }
+
+  RunCancellation::Impl *run_cancellation = nullptr;
+  if (cancellation != nullptr) {
+    run_cancellation = cancellation->impl_.get();
+    const std::lock_guard<std::mutex> lock(run_cancellation->mutex);
+    if (run_cancellation->requested) {
+      return false;
+    }
+    // This worker is the only user of this token, so clearing the previous
+    // terminate flag here cannot race another Run. A Request() that lands after
+    // the unlock sets it again before the session observes it.
+    run_cancellation->options.UnsetTerminate();
   }
 
   try {
@@ -242,8 +275,11 @@ bool OnnxModel::Run(const Observation &observation,
         shape.data(), shape.size());
     const char *input_names[] = {impl_->input_name.c_str()};
     const char *output_names[] = {impl_->output_name.c_str()};
+    const Ort::RunOptions no_options{nullptr};
+    const Ort::RunOptions &run_options =
+        run_cancellation != nullptr ? run_cancellation->options : no_options;
     std::vector<Ort::Value> outputs = impl_->session.Run(
-        Ort::RunOptions{nullptr}, input_names, &input, 1, output_names, 1);
+        run_options, input_names, &input, 1, output_names, 1);
     if (outputs.size() != 1 || !outputs[0].IsTensor()) {
       return false;
     }
