@@ -11,8 +11,8 @@ shipped `config/sdk.json` stays fake, and the synthetic fixture in
 | --- | --- | --- |
 | SDK baseline | `main@425290f58735cd0deb16585dc1c9f28f4c1b66f6` | plan baseline |
 | IRMVControl upstream | `6bc7ed0` before this branch | `/home/tianzong/Workspace/Humanoid/IRMVControl` |
-| IRMVControl with runtime I/O | `493275f87c809b369c409a84d6bf4abe604ccab6` | this branch, `deps/irmv_control` |
-| YIS IMU driver | `3b73395d823b92a5c9760a759cd58709fd9e31c8` | this branch, `deps/yis_imu_driver` |
+| IRMVControl with runtime I/O | `0f161dbeeb1837497a00e119b08e996b03a21074` | this branch, `deps/irmv_control` |
+| YIS IMU driver | `4dda95fddbaee3756c15a22924d3e4058fa883c8` | this branch, `deps/yis_imu_driver` |
 | Vendor library | `libcontrolcanfd.so`, SHA-256 `56beee8e...f0b2c`, ELF x86-64 (machine 62) | `deps/irmv_control/ThirdParty/controlcanfd/libs` |
 | Licence | IRMVControl ships the repository `LICENSE`; YIS ships `LICENSE` | each checkout |
 

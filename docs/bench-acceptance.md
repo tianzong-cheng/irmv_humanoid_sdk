@@ -10,8 +10,8 @@ evidence in `.superpowers/phase4/<run>/`.
 | --- | --- |
 | Branch | `feat/real-backend-maintenance` |
 | Baseline | `main@425290f58735cd0deb16585dc1c9f28f4c1b66f6` |
-| IRMVControl | `493275f87c809b369c409a84d6bf4abe604ccab6` (local pin) |
-| YIS | `3b73395d823b92a5c9760a759cd58709fd9e31c8` (local pin) |
+| IRMVControl | `0f161dbeeb1837497a00e119b08e996b03a21074` (local pin) |
+| YIS | `4dda95fddbaee3756c15a22924d3e4058fa883c8` (local pin) |
 | Vendor library | SHA-256 `56beee8e...f0b2c`, x86-64 |
 | Synthetic config | `tests/support/hardware/real_two_joint.json` (**not a machine config**) |
 | Real config | none yet; values are unverified |
@@ -23,18 +23,18 @@ evidence in `.superpowers/phase4/<run>/`.
 | Configuration accepts a real pair and rejects partial/duplicate/non-finite mappings | PASS | `hardware_config_test` |
 | Device lease excludes a second process, releases on failure/exit, ignores bus renaming | PASS | `device_lease_test` |
 | RealBackend lifecycle, invalid output refusal, lease-before-open, idempotent close | PASS | `real_backend_test` |
-| Upstream codec and port boundary: 32-bit error, boundary ids, short frames, position expansion, saturation, open-without-send, per-motor enable, preallocated zero frame, shared-device close order | PASS | upstream `runtime_io_test` |
-| IMU complete-frame rule: empty/partial/truncated/timestamp-only frames never publish; quaternion normalisation; host stamp | PASS | YIS `imu_parse_test` |
+| Upstream codec and port boundary: 32-bit error, boundary ids, short frames, position expansion, saturation, open-without-send, per-motor enable, preallocated zero frame, shared-device close order, bounded read with a paused writer | PASS | upstream `runtime_io_test` |
+| IMU complete-frame rule and axis order: empty/partial/truncated/trailing bytes rejected; quaternion-only pure roll/pitch/mixed match the Euler path; host stamp | PASS | YIS `imu_parse_test`, upstream `runtime_io_test` |
 | Upstream dependency contract: fresh configure, no examples, no `-march=native` | PASS | upstream `dependency_contract_test` |
-| Maintenance dry-run, raw error display, selected-joint load and enable, can1 channel rule, per-reset baseline read-back | PASS | `maintenance_test` |
-| Launcher keeps a surviving runtime across Ctrl+C/SIGTERM, reports start failure, and runs the real Fake two-process pair | PASS | `launcher_test` |
+| Maintenance dry-run, raw error display, selected-joint load and enable through the production leased wrapper (success and refusal), can1 channel rule, per-reset baseline read-back | PASS | `maintenance_test` |
+| Launcher keeps a surviving runtime across Ctrl+C/SIGTERM, reports start failure, and the default CTest registration runs the real Fake two-process pair | PASS | `launcher_test` |
 | Dependency pins are mandatory from the manifest; wrong SHA/arch/commit fails configure; runtime-only configure without ONNX Runtime | PASS | `hardware_package_test` |
 | Movable install tree, real + IMU + maintenance, no source/build rpath | PASS | real `cmake --install`, `mv`, `ldd` and `irmv_maintenance` dry-run from the moved prefix |
 | Targeted ThreadSanitizer on the snapshot handoff | PASS | upstream `runtime_io_test` built with `-fsanitize=thread`, run under `setarch -R` |
 | Full default regression | PASS | `ctest -j2`: 64/64, 28 core + 36 integration |
 | Sanitizer core suite | PASS | `IRMV_SANITIZE=address,undefined`, 28/28 core |
 | Runtime-only build without ONNX Runtime | PASS | `IRMV_BUILD_APPLICATION=OFF`, `ldd` has no ONNX |
-| RealBackend over real DDS with scripted port | PASS | `real_backend_contract_test`: read-only send log, edge/far future stamps, write refusal, driver error, overspeed, missing IMU |
+| RealBackend over real DDS with scripted port | PASS | `real_backend_contract_test`: real supervisor handshake and Tracking, nonzero PD target, final zero frame, logged rejected writes, edge/far future stamps, driver error, overspeed, missing IMU |
 
 ## Bench matrix
 

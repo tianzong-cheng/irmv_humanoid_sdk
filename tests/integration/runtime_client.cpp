@@ -1524,6 +1524,53 @@ int Client::RunSupervisor() {
     return Finish("supervisor");
   }
 
+  if (scenario == "contract") {
+    // Drive the real handshake and a nonzero joint target, then stop. The
+    // RealBackend contract harness reads the port's send log to prove that the
+    // command reached the control path and that the closing frame is zero.
+    EnsureSession();
+    EnsureDamping(true);
+    if (!EnsureTracking(true, 0)) {
+      return Finish("supervisor");
+    }
+    const Sequence before = latest_state() == nullptr
+                                ? 0
+                                : latest_state()->last_applied_command_seq;
+    const TimeUs grant_us = now();
+    TimeUs next_command_us = grant_us;
+    bool saw_tracking = false;
+    while (now() - grant_us < 1'000'000 && !StopRequested()) {
+      Poll(true);
+      PumpHeartbeat();
+      const RobotState *state = latest_state();
+      if (state != nullptr &&
+          state->execution_state == ExecutionState::Tracking) {
+        saw_tracking = true;
+        if (now() >= next_command_us) {
+          CommandPlan plan;
+          plan.q_target = 0.05;
+          plan.kp = 40.0;
+          plan.kd = 3.0;
+          const JointCommand command = MakeCommand(*state, plan);
+          traffic_.SendCommand(command);
+          ++commands_sent_;
+          next_command_us = now() + 20'000;
+        }
+      }
+      std::this_thread::sleep_for(std::chrono::microseconds(kPollSleepUs));
+    }
+    Check(saw_tracking, "contract_tracking_observed",
+          "the contract scenario never observed Tracking");
+    const Sequence after = latest_state() == nullptr
+                               ? 0
+                               : latest_state()->last_applied_command_seq;
+    Check(after > before, "contract_command_applied",
+          "the nonzero target was never applied");
+    EnsureDamping(true);
+    RequestZeroTorque(true);
+    return Finish("supervisor");
+  }
+
   if (scenario == "request_retry") {
     EnsureSession();
     EnsureDamping(true);

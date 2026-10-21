@@ -90,6 +90,7 @@ def make_config(source, workspace, imu_required=False):
 def main() -> int:
     helper = Path(sys.argv[1]).resolve()
     source = Path(sys.argv[2]).resolve()
+    client = Path(sys.argv[3]).resolve()
     with tempfile.TemporaryDirectory(prefix="irmv-real-contract-") as directory:
         workspace = Path(directory)
         (workspace / "locks").mkdir()
@@ -124,6 +125,47 @@ def main() -> int:
                       f"{script}: missing fault reason {fault}\n{runtime.output()}")
                 runtime.stop()
 
+        # The real DDS handshake enters Tracking and a nonzero target reaches
+        # the port. The closing stop sends a zero frame after it.
+        contract = Runtime(helper, config, workspace, "contract")
+        client_result = subprocess.run(
+            [str(client), "--mode", "supervisor", "--scenario", "contract",
+             "--domain", str(DOMAIN), "--config", str(config)],
+            cwd=str(workspace), text=True, capture_output=True, timeout=30)
+        check(client_result.returncode == 0,
+              "contract client failed\n" + client_result.stdout +
+              client_result.stderr)
+        contract.stop()
+        contract_log = workspace / "contract.jsonl"
+        if check(contract_log.exists(), "contract run wrote no send log"):
+            records = [json.loads(line)
+                       for line in contract_log.read_text().splitlines()]
+            non_zero = [index for index, record in enumerate(records)
+                        if abs(record["torque0"]) > 0.5]
+            check(bool(non_zero),
+                  "the contract run never sent the nonzero target")
+            if non_zero:
+                check(len(non_zero) >= 10,
+                      "too few nonzero tracking frames: %d" % len(non_zero))
+                # q_target 0.05, measured q 0, kp 40: the PD target is 2 Nm.
+                first = records[non_zero[0]]
+                check(1.5 <= abs(first["torque0"]) <= 2.5,
+                      "the first tracking torque is not the PD result: %s" %
+                      first)
+                check(abs(first["torque0"] - first["torque1"]) < 1e-9,
+                      "the two identical joints were not commanded alike")
+                check(all(abs(record["torque0"]) <= 20.0
+                          for record in records),
+                      "a recorded torque exceeds the configured limit")
+                check(any(record["torque0"] == 0.0 and record["accepted"]
+                          for record in records[non_zero[-1] + 1:]),
+                      "no zero frame followed the last nonzero target")
+                check(records[-1]["torque0"] == 0.0 and
+                      records[-1]["accepted"],
+                      "the last accepted frame was not zero")
+            check(all(record["accepted"] for record in records),
+                  "the contract run had a rejected write")
+
         # The normal run recorded only zero torque frames and no non-zero target.
         log = workspace / "normal.jsonl"
         if check(log.exists(), "normal run wrote no send log"):
@@ -137,8 +179,10 @@ def main() -> int:
         # prefix instead of failing on a fabricated result.
         refused = workspace / "write-refused.jsonl"
         if check(refused.exists(), "write-refused wrote no send log"):
-            check(len(refused.read_text().splitlines()) >= 1,
-                  "write-refused never reached the send path")
+            records = [json.loads(line)
+                       for line in refused.read_text().splitlines()]
+            check(any(not record["accepted"] for record in records),
+                  "write-refused never logged a rejected attempt")
 
     if FAILURES:
         print(f"{len(FAILURES)} check(s) failed")

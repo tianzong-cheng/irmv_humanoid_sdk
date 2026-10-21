@@ -989,7 +989,7 @@ The default configuration also runs the no-device hardware entries:
 | `maintenance_test` | dry-run default, raw error display, selected-joint load, channel-1 rule, verified zero read-back |
 | `launcher_test` | readiness gate, surviving runtime report, never-ready runtime failure |
 | `hardware_package_test` | pinned submodules/vendor digest, runtime-only configure without ONNX Runtime |
-| `real_backend_contract_test` | the real loop and real DDS with the real RealBackend and a scripted device port: no read-only send, fresh/edge-future/far-future stamps, write refusal, driver error, speed limit, missing IMU, send log of zero targets |
+| `real_backend_contract_test` | the real loop and real DDS with the real RealBackend and a scripted device port: a real supervisor client completes the handshake, enters Tracking, applies a nonzero PD target (2 Nm from q=0.05, kp=40), and stops with a final zero frame; plus no read-only send, edge/far-future stamps, logged rejected writes, driver error, speed limit and missing IMU |
 
 The upstream checkout has its own `runtime_io_test` and
 `dependency_contract_test`; run them with

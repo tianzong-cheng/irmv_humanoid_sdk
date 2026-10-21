@@ -1,11 +1,15 @@
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
+#include <filesystem>
 #include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
 
+#include "irmv/hardware/device_lease.hpp"
 #include "irmv/maintenance/commands.hpp"
+#include "irmv/maintenance/leased_driver_port.hpp"
 #include "support/check.hpp"
 #include "support/scripted_driver_port.hpp"
 
@@ -16,6 +20,7 @@ using irmv::hardware::ScriptedDriverPort;
 using irmv::hardware::TorqueOutput;
 using irmv::hardware::WriteResult;
 using irmv::maintenance::DriverPortMaintenancePort;
+using irmv::maintenance::LeasedDriverPort;
 using irmv::maintenance::MaintenancePort;
 using irmv::maintenance::Run;
 
@@ -66,7 +71,29 @@ bool Contains(const std::string &text, const std::string &needle) {
 
 }  // namespace
 
+class TemporaryLockDirectory {
+ public:
+  TemporaryLockDirectory() {
+    static unsigned int next_id = 0;
+    path_ = std::filesystem::temp_directory_path() /
+            ("irmv-maintenance-lock-" + std::to_string(next_id++));
+    std::filesystem::create_directories(path_);
+    ::setenv("IRMV_LOCK_DIR", path_.c_str(), 1);
+  }
+  ~TemporaryLockDirectory() {
+    ::unsetenv("IRMV_LOCK_DIR");
+    std::error_code ignored;
+    std::filesystem::remove_all(path_, ignored);
+  }
+
+ private:
+  std::filesystem::path path_;
+};
+
 int main() {
+  const TemporaryLockDirectory locks;
+  const auto real_config = irmv::configuration::LoadConfig(kConfig);
+  CHECK(real_config.hardware.has_value());
   // Heartbeat output carries the full 32 bit error, the host age and the
   // unsupported measurements, and it opens the port read-only.
   {
@@ -259,6 +286,63 @@ int main() {
                          "--verify-velocity-tolerance-rad-s", "0.1",
                          "--verify-timeout-ms", "10"}) == 1);
     CHECK(fixture.port.commands.size() == 1);
+  }
+
+  // The production wrapper forwards the explicit per-motor enable. Without
+  // this, the load test opens the device and then always reports "enable
+  // refused" without the adapter ever seeing the request.
+  {
+    ScriptedDriverPort inner;
+    LeasedDriverPort leased(inner);
+    DriverPortMaintenancePort adapter(leased);
+    std::ostringstream out;
+    const int code = Run({"--config", kConfig, "motor-load-test", "--joint",
+                          "test_left", "--torque-nm", "1", "--duration-ms", "5",
+                          "--rate-hz", "100", "--execute"},
+                         leased, adapter, out);
+    CHECK(code == 0);
+    CHECK(inner.enable_calls == 1);
+    CHECK(inner.enabled.size() == 1);
+    CHECK(inner.enabled[0] == "can0:1");
+    CHECK(inner.send_calls >= 2);
+    // The wrapper released its lease when Run closed the port.
+    irmv::hardware::DeviceLease lease =
+        irmv::hardware::DeviceLease::Acquire(*real_config.hardware);
+    CHECK(lease.held());
+  }
+
+  // A refusal is forwarded too, and no torque frame is submitted.
+  {
+    ScriptedDriverPort inner;
+    inner.next_enable_result = WriteResult{false, 0x80000004u};
+    LeasedDriverPort leased(inner);
+    DriverPortMaintenancePort adapter(leased);
+    std::ostringstream out;
+    const int code =
+        Run({"--config", kConfig, "motor-load-test", "--joint", "test_left",
+             "--torque-nm", "1", "--duration-ms", "5", "--execute"},
+            leased, adapter, out);
+    CHECK(code == 1);
+    CHECK(inner.enable_calls == 1);
+    CHECK(inner.send_calls == 0);
+    CHECK(Contains(out.str(), "enable refused"));
+  }
+
+  // Read-only use through the same wrapper sends nothing.
+  {
+    ScriptedDriverPort inner;
+    inner.snapshot.count = 2;
+    inner.snapshot.joints[0].valid = true;
+    inner.snapshot.joints[0].rx_stamp_us = NowUs();
+    LeasedDriverPort leased(inner);
+    DriverPortMaintenancePort adapter(leased);
+    std::ostringstream out;
+    CHECK(Run({"--config", kConfig, "heartbeat-decode", "--duration-ms", "1",
+               "--rate-hz", "100"},
+              leased, adapter, out) == 0);
+    CHECK(inner.enable_calls == 0);
+    CHECK(inner.send_calls == 0);
+    CHECK(inner.command_calls == 0);
   }
   return 0;
 }

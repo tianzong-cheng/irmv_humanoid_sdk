@@ -91,13 +91,15 @@ class ScriptedPort final : public irmv::hardware::DriverPort {
       const irmv::hardware::TorqueOutput &output) override {
     irmv::hardware::WriteResult result;
     ++send_count_;
-    if (script_ == "write-refused" && send_count_ > 5) {
+    const bool refused = script_ == "write-refused" && send_count_ > 5;
+    result.accepted = !refused;
+    if (refused) {
       result.error_code = 0x80000001u;
-      return result;
     }
-    result.accepted = true;
     if (log_) {
-      log_ << "{\"send\":" << send_count_ << ",\"count\":" << output.count
+      log_ << "{\"send\":" << send_count_ << ",\"time_us\":" << NowUs()
+           << ",\"count\":" << output.count
+           << ",\"accepted\":" << (result.accepted ? "true" : "false")
            << ",\"torque0\":" << output.torque[0]
            << ",\"torque1\":" << output.torque[1] << "}\n";
       log_.flush();

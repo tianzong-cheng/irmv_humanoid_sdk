@@ -417,7 +417,9 @@ target_link_libraries(real_backend_test PRIVATE irmv_hardware)
 add_test(NAME real_backend_test COMMAND real_backend_test)
 set_tests_properties(real_backend_test PROPERTIES LABELS core)
 
-add_library(irmv_maintenance_commands src/maintenance/commands.cpp)
+add_library(irmv_maintenance_commands
+            src/maintenance/commands.cpp
+            src/maintenance/leased_driver_port.cpp)
 target_compile_features(irmv_maintenance_commands PUBLIC cxx_std_17)
 target_include_directories(
   irmv_maintenance_commands
@@ -987,24 +989,6 @@ set_tests_properties(
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
-set(_irmv_launcher_application_arg)
-if(TARGET application)
-  set(_irmv_launcher_application_arg "$<TARGET_FILE:application>")
-endif()
-add_test(
-  NAME launcher_test
-  COMMAND
-    "${Python3_EXECUTABLE}"
-    "${PROJECT_SOURCE_DIR}/tests/integration/launcher_test.py"
-    "${PROJECT_SOURCE_DIR}"
-    "$<TARGET_FILE:robot_runtime>"
-    ${_irmv_launcher_application_arg}
-)
-set_tests_properties(
-  launcher_test PROPERTIES LABELS integration TIMEOUT 120
-  WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
-)
-
 add_test(
   NAME hardware_package_test
   COMMAND
@@ -1132,6 +1116,28 @@ set_tests_properties(
 
 # Confirmation helper of the integration tests: pure protocol logic, no DDS.
 endif()
+
+if(IRMV_BUILD_APPLICATION AND NOT TARGET application)
+  message(FATAL_ERROR "launcher_test must be registered after the application")
+endif()
+set(_irmv_launcher_application_arg)
+if(TARGET application)
+  set(_irmv_launcher_application_arg "$<TARGET_FILE:application>")
+endif()
+add_test(
+  NAME launcher_test
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/integration/launcher_test.py"
+    "${PROJECT_SOURCE_DIR}"
+    "$<TARGET_FILE:robot_runtime>"
+    ${_irmv_launcher_application_arg}
+)
+set_tests_properties(
+  launcher_test PROPERTIES LABELS integration TIMEOUT 120
+  WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
 
 add_executable(confirmation_test tests/integration/confirmation_test.cpp)
 target_compile_features(confirmation_test PRIVATE cxx_std_17)
@@ -1564,7 +1570,8 @@ add_test(
     "${Python3_EXECUTABLE}"
     "${PROJECT_SOURCE_DIR}/tests/integration/real_backend_contract_test.py"
     "$<TARGET_FILE:real_backend_runtime>"
-    "${PROJECT_SOURCE_DIR}")
+    "${PROJECT_SOURCE_DIR}"
+    "$<TARGET_FILE:runtime_client>")
 set_tests_properties(
   real_backend_contract_test
   PROPERTIES LABELS integration TIMEOUT 180
