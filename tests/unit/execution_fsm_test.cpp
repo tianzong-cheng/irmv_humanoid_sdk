@@ -6,6 +6,7 @@
 
 #include "irmv/configuration/config.hpp"
 #include "irmv/hardware/backend.hpp"
+#include "irmv/hardware/joint_conversion.hpp"
 #include "irmv/protocol/types.hpp"
 #include "irmv/runtime/execution_context.hpp"
 #include "support/check.hpp"
@@ -2328,6 +2329,22 @@ int CheckSameProducerNewEpoch() {
 // grace window waits, commands zero torque and reports neither health nor a
 // fault, and the first frame that does arrive completes the self-check.
 int CheckBootWaitsForFirstFrame() {
+  // A configured encoder offset must not turn a never-received sample into a
+  // fabricated position: the adapter's boundary keeps the absent shape, which
+  // is what the boot grace below waits for.
+  const irmv::hardware::JointConversion conversion{-1, 10.0, 0.25, 0.13};
+  const irmv::protocol::JointFeedback absent =
+      irmv::hardware::ToProtocolFeedback(conversion,
+                                         irmv::hardware::RotorJointSample{});
+  CHECK(!absent.valid);
+  CHECK(!absent.connected);
+  CHECK(absent.q == 0.0);
+  CHECK(absent.dq == 0.0);
+  CHECK(absent.tau_est == 0.0);
+  CHECK(absent.rx_stamp_us == 0);
+  CHECK(absent.freq_hz == 0.0);
+  CHECK(absent.error_code == 0);
+
   RuntimeFixture f;
   f.SetFeedbackAbsent(true);
   for (int tick = 0; tick < 5; ++tick) {

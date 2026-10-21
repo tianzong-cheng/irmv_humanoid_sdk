@@ -95,6 +95,41 @@ int main() {
     CHECK(std::abs(conversion.ToJointTorque(1.0) + 1.3) < 1e-12);
     CHECK(std::abs(conversion.ToMotorTorque(2.0) + 0.2) < 1e-12);
   }
+
+  // An untouched upstream sample stays untouched after conversion, even with a
+  // non-zero encoder offset: converting its zeros would fabricate a position
+  // the safety layer would read as an observation and fault on at startup.
+  {
+    const irmv::hardware::JointConversion conversion{-1, 10.0, 0.25, 0.13};
+    const irmv::hardware::RotorJointSample untouched;
+    const irmv::protocol::JointFeedback absent =
+        irmv::hardware::ToProtocolFeedback(conversion, untouched);
+    CHECK(!absent.valid);
+    CHECK(!absent.connected);
+    CHECK(absent.q == 0.0);
+    CHECK(absent.dq == 0.0);
+    CHECK(absent.tau_est == 0.0);
+    CHECK(absent.rx_stamp_us == 0);
+    CHECK(absent.freq_hz == 0.0);
+    CHECK(absent.error_code == 0);
+
+    // Evidence of an observation - here a receive stamp with otherwise zero
+    // data - is never suppressed: it is converted and then judged, including
+    // the offset the conversion applies.
+    irmv::hardware::RotorJointSample observed = untouched;
+    observed.rx_stamp_us = 12345;
+    const irmv::protocol::JointFeedback evidence =
+        irmv::hardware::ToProtocolFeedback(conversion, observed);
+    CHECK(evidence.rx_stamp_us == 12345);
+    CHECK(std::abs(evidence.q - 0.025) < 1e-12);
+
+    // A malformed value is evidence too, not an absent sample.
+    irmv::hardware::RotorJointSample malformed = untouched;
+    malformed.position_rad = std::numeric_limits<double>::quiet_NaN();
+    CHECK(!irmv::hardware::IsUntouchedRotorSample(malformed));
+    CHECK(!std::isfinite(
+        irmv::hardware::ToProtocolFeedback(conversion, malformed).q));
+  }
   const TemporaryLockDirectory locks;
   const RuntimeConfig config = TwoJointConfig();
 

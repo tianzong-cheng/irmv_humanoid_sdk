@@ -91,18 +91,14 @@ class IrmvDriverPort final : public DriverPort {
     for (std::size_t index = 0; index < count; ++index) {
       const configuration::HardwareJointConfig &mapping = joints_[index];
       const upstream::JointSample &sample = raw.joints[index];
-      protocol::JointFeedback &joint = snapshot.joints[index];
-      const double direction = static_cast<double>(mapping.direction);
-      joint.valid = sample.valid;
-      joint.connected = sample.connected;
-      joint.q = direction * (sample.position_rad - mapping.encoder_offset) /
-                mapping.reduction_ratio;
-      joint.dq = direction * sample.speed_rad_s / mapping.reduction_ratio;
-      joint.tau_est = direction * mapping.reduction_ratio *
-                      mapping.torque_constant * sample.current_a;
-      joint.rx_stamp_us = sample.rx_stamp_us;
-      joint.freq_hz = sample.freq_hz;
-      joint.error_code = sample.error_code;
+      const JointConversion conversion{
+          mapping.direction, mapping.reduction_ratio, mapping.encoder_offset,
+          mapping.torque_constant};
+      const RotorJointSample rotor{sample.valid,        sample.connected,
+                                   sample.position_rad, sample.speed_rad_s,
+                                   sample.current_a,    sample.rx_stamp_us,
+                                   sample.freq_hz,      sample.error_code};
+      snapshot.joints[index] = ToProtocolFeedback(conversion, rotor);
     }
     snapshot.imu.valid = raw.imu.valid;
     snapshot.imu.orientation_rpy = raw.imu.orientation_rpy;
@@ -131,9 +127,11 @@ class IrmvDriverPort final : public DriverPort {
         return result;
       }
       // Joint output torque -> motor side, once.
-      frame.targets[index].torque_nm = static_cast<double>(mapping.direction) *
-                                       output.torque[index] /
-                                       mapping.reduction_ratio;
+      const JointConversion conversion{
+          mapping.direction, mapping.reduction_ratio, mapping.encoder_offset,
+          mapping.torque_constant};
+      frame.targets[index].torque_nm =
+          conversion.ToMotorTorque(output.torque[index]);
     }
     const upstream::SendResult sent = io_.SendTorque(frame);
     result.accepted = sent.accepted;
