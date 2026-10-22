@@ -35,10 +35,6 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-// How often the status line is repeated while nothing changed. A harness waits
-// for a behaviour, a reject reason or a pending operation, so the line has to
-// reappear without flooding the pipe.
-constexpr protocol::TimeUs kStatusIntervalUs = 500000;
 // Bytes read from the terminal in one iteration, and how many reads one
 // iteration performs: bounded so a stream nobody drains cannot starve the
 // supervision checks, generous enough for a burst of keystrokes.
@@ -690,7 +686,6 @@ int RunApplication(const ApplicationOptions &options,
 
   StatusFields last{};
   bool have_status = false;
-  protocol::TimeUs next_status_us = 0;
   bool input_lost = false;
 
   // The loop's own pacing, counted the way the runtime counts its ticks: an
@@ -1172,8 +1167,9 @@ int RunApplication(const ApplicationOptions &options,
     }
     locomotion_previously = behavior.state == BehaviorState::Locomotion;
 
-    // (6) The display: on every change, and at most every status interval
-    // otherwise.
+    // (6) The display: only when a field changes, so a mode request, a
+    // transition, a refusal or a lost session is reported exactly once and an
+    // idle run stays silent.
     StatusFields fields;
     fields.behavior = BehaviorName(behavior.state);
     fields.runtime = behavior.runtime_state_known
@@ -1199,12 +1195,10 @@ int RunApplication(const ApplicationOptions &options,
     fields.stop = behavior.runtime_state_known
                       ? StopReasonName(behavior.runtime_stop_reason)
                       : "-";
-    if (!have_status || !SameFields(fields, last) ||
-        decision_now >= next_status_us) {
+    if (!have_status || !SameFields(fields, last)) {
       PrintStatus(fields);
       last = fields;
       have_status = true;
-      next_status_us = decision_now + kStatusIntervalUs;
     }
 
     // (7) The exit. `exit_ready` is the FSM's own statement that the sequence

@@ -18,6 +18,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import signal
 import subprocess
@@ -26,6 +27,25 @@ import time
 from pathlib import Path
 
 START_TIMEOUT_S = float(os.environ.get("IRMV_LAUNCH_TIMEOUT_S", "20"))
+
+# One line of the key legend per group. The order is the order an operator uses
+# them: the stop, the modes, then the intent. Labels are the behaviour names the
+# application prints, so a key can be matched to a status line.
+MODE_KEYS = (
+    ("emergency_stop", "emergency stop"),
+    ("damping", "damping"),
+    ("initialize", "initialize"),
+    ("start_locomotion", "locomotion"),
+    ("zero_torque", "zero torque"),
+    ("reset", "reset"),
+    ("exit", "exit"),
+)
+VELOCITY_PAIRS = (
+    (("velocity_forward", "forward"), ("velocity_backward", "backward")),
+    (("velocity_left", "left"), ("velocity_right", "right")),
+    (("velocity_yaw_left", "yaw left"),
+     ("velocity_yaw_right", "yaw right")),
+)
 
 
 def find_binary(name: str, explicit: str | None) -> str:
@@ -81,6 +101,53 @@ def read_log_tail(path: Path, count: int = 20) -> list[str]:
     except OSError:
         return []
     return lines[-count:]
+
+
+def render_key_legend(config_path: str) -> list[str]:
+    """Render the configured bindings as the lines printed before the app starts.
+
+    The application owns the keyboard; the launcher only shows the map the
+    configuration actually contains, so a rebound key is reported correctly and
+    an unbound action is not invented.
+    """
+    try:
+        document = json.loads(Path(config_path).read_text(encoding="utf-8"))
+        bindings = document["input"]["bindings"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    if not isinstance(bindings, dict):
+        return []
+
+    def key_of(action: str) -> str | None:
+        value = bindings.get(action)
+        if not isinstance(value, str) or len(value) != 1:
+            return None
+        return "space" if value == " " else value
+
+    modes = []
+    for action, label in MODE_KEYS:
+        key = key_of(action)
+        if key is not None:
+            modes.append("%s=%s" % (key, label))
+    velocities = []
+    for (first_action, first_label), (second_action,
+                                      second_label) in VELOCITY_PAIRS:
+        first = key_of(first_action)
+        second = key_of(second_action)
+        if first is not None and second is not None:
+            velocities.append("%s/%s=%s/%s" %
+                              (first, second, first_label, second_label))
+        elif first is not None:
+            velocities.append("%s=%s" % (first, first_label))
+        elif second is not None:
+            velocities.append("%s=%s" % (second, second_label))
+
+    lines = []
+    if modes:
+        lines.append("sdk_launch: keys: " + "  ".join(modes))
+    if velocities:
+        lines.append("sdk_launch: keys: " + "  ".join(velocities))
+    return lines
 
 
 def wait_ready(log_path: Path, process: subprocess.Popen,
@@ -147,6 +214,8 @@ def main(argv: list[str]) -> int:
     app_arguments = [application, *common]
     if options.locomotion_source is not None:
         app_arguments += ["--locomotion-source", options.locomotion_source]
+    for line in render_key_legend(options.config):
+        print(line, flush=True)
     try:
         application_process = subprocess.Popen(app_arguments)
     except OSError as error:

@@ -4,6 +4,7 @@
 Usage: launcher_test.py <source directory>
 """
 
+import json
 import os
 import pty
 import re
@@ -22,14 +23,24 @@ def write(path: Path, body: str) -> None:
 
 
 def run_launcher(source: Path, workspace: Path, runtime: Path,
-                 application: Path, timeout: str = "2"):
+                 application: Path, timeout: str = "2",
+                 config: Path | None = None):
     environment = dict(os.environ)
     environment["IRMV_LAUNCH_TIMEOUT_S"] = timeout
     return subprocess.run(
         [sys.executable, str(source / "tools/sdk_launch.py"),
-         "--config", str(source / "config/sdk.json"),
+         "--config", str(config or source / "config/sdk.json"),
          "--runtime", str(runtime), "--application", str(application)],
         text=True, capture_output=True, env=environment, timeout=30)
+
+
+def kill_reported_runtime(output: str) -> None:
+    match = re.search(r"pid (\d+)", output)
+    if match:
+        try:
+            os.kill(int(match.group(1)), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 def main() -> int:
@@ -164,9 +175,46 @@ def main() -> int:
                 os.kill(int(match.group(1)), signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+        # The legend is flushed before the application starts, so a piped or
+        # redirected stdout cannot hold it until the launcher exits and let the
+        # application's output overtake it.
+        marker_app = workspace / "marker_app.py"
+        write(marker_app, """\
+            #!/usr/bin/env python3
+            import sys
+            print("application-marker", flush=True)
+            sys.exit(0)
+        """)
+        ordered = run_launcher(source, workspace, runtime, marker_app)
+        try:
+            legend_at = ordered.stdout.find("sdk_launch: keys:")
+            marker_at = ordered.stdout.find("application-marker")
+            if legend_at < 0 or marker_at < 0 or legend_at > marker_at:
+                print("FAIL: the key legend is missing or was not flushed before "
+                      "the application\n" + ordered.stdout + ordered.stderr)
+                return 1
+        finally:
+            kill_reported_runtime(ordered.stdout + ordered.stderr)
+
+        # A velocity action may be bound on its own; the label must name that
+        # direction rather than the pair.
+        config = json.loads((source / "config/sdk.json").read_text())
+        del config["input"]["bindings"]["velocity_forward"]
+        one_way = workspace / "one-way.json"
+        one_way.write_text(json.dumps(config))
+        single = run_launcher(source, workspace, runtime, app, config=one_way)
+        try:
+            if ("s=backward" not in single.stdout
+                    or "s=forward/backward" in single.stdout):
+                print("FAIL: a single velocity binding was labelled as a pair\n" +
+                      single.stdout + single.stderr)
+                return 1
+        finally:
+            kill_reported_runtime(single.stdout + single.stderr)
+
         if (real_runtime and real_application and real_runtime.is_file()
                 and real_application.is_file()):
-            import json
             config = json.loads((source / "config/sdk.json").read_text())
             config["telemetry"]["directory"] = str(workspace / "real-logs")
             config["dds"]["domain"] = 20 + (os.getpid() % 60)

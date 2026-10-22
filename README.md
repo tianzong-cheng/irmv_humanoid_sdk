@@ -141,7 +141,9 @@ A runtime-only build (`-DIRMV_BUILD_APPLICATION=OFF`) builds `robot_runtime`
 without ONNX Runtime or the upper process. The maintenance program is built with
 `-DIRMV_BUILD_MAINTENANCE=ON` (requires the real backend). `tools/sdk_launch.py`
 starts the two processes and, unless `--stop-all` is given, leaves a runtime
-that outlives the application running.
+that outlives the application running. Before starting the application it
+prints the configured key bindings (`input.bindings`), so the operator sees the
+actual map even when a key is rebound.
 
 ## Run the application: the supervising upper process
 
@@ -215,7 +217,10 @@ not known, otherwise `Requested`, `CommandTimeout`, `SourceStateTimeout` or
 `SupervisorTimeout`). The two together are what tells an operator emergency stop
 from an unreachable runtime, and a lower command timeout from a supervisor
 timeout; without them a `behavior=Fault` line names no cause at all. The line is
-printed whenever a field changes and at most every 500 ms otherwise.
+printed once initially, then only when the displayed fields change. A single
+request may produce multiple lines as those fields change; a repeated request
+that leaves them unchanged produces none. Idle operation does not repeat the
+line.
 
 ### Exit
 
