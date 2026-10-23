@@ -37,7 +37,10 @@ import tempfile
 import time
 from pathlib import Path
 
-DOMAIN = 222
+# Fixed test domains 150..153 are already taken by the record/application
+# tests, and the scenario harness allocates its own entries from the 190..229
+# band. 154 is outside both and is unique to this test.
+DOMAIN = 154
 RUN_DEADLINE_S = 30.0
 RECURRENCE_OBSERVE_S = 0.75
 

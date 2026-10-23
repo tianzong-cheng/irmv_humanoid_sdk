@@ -981,6 +981,59 @@ def main() -> int:
                     f"{app_summary.get('model')}"
                 )
 
+        # A window of the application sidecar follows the same interval rules
+        # as every other stream: a mid-range window returns the sessions in it,
+        # and an empty or inverted range returns none rather than the whole
+        # sidecar.
+        policy_stamp = app_fixture["t0"]
+        for label, window_start, window_end, expected_policy in (
+            ("mid-range", policy_stamp, policy_stamp + 1, 1),
+            ("empty", policy_stamp, policy_stamp, 0),
+            ("inverted", policy_stamp + 100, policy_stamp, 0),
+        ):
+            windowed = subprocess.run(
+                [
+                    str(reader),
+                    "--run",
+                    str(app_run),
+                    "--from-us",
+                    str(window_start),
+                    "--to-us",
+                    str(window_end),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if windowed.returncode != 0:
+                fail(f"the {label} application window failed: {windowed.stderr.strip()}")
+                continue
+            windowed_lines = [
+                line for line in windowed.stdout.splitlines() if line.strip()
+            ]
+            windowed_records = [json.loads(line) for line in windowed_lines[:-1]]
+            windowed_summary = json.loads(windowed_lines[-1])
+            returned_policy = [
+                row
+                for row in windowed_records
+                if row.get("record_type") == "policy_session"
+            ]
+            if len(returned_policy) != expected_policy:
+                fail(
+                    f"the {label} window returned {len(returned_policy)} policy "
+                    f"session(s), expected {expected_policy}"
+                )
+            if int(windowed_summary.get("policy_sessions", -1)) != expected_policy:
+                fail(
+                    f"the {label} window summary reports "
+                    f"{windowed_summary.get('policy_sessions')} policy session(s), "
+                    f"expected {expected_policy}"
+                )
+            if expected_policy == 0 and int(
+                windowed_summary.get("rows_in_range", -1)
+            ) != 0:
+                fail(f"the {label} window returned velocity rows")
+
         associated_path = work / "associated.npz"
         associated = subprocess.run(
             [
@@ -1106,6 +1159,129 @@ def main() -> int:
                             "the held forward value is "
                             f"{float(hold[finite_index])}, expected "
                             f"{expected_forward} from the sample in force"
+                        )
+
+            # A window that starts between two velocity samples still holds the
+            # sample before it: association and hold-forward see the whole
+            # application recording, while the exported rows are the window's.
+            sample_window_start = app_fixture["t0"] + 55_000
+            sample_window_end = app_fixture["t0"] + 85_000
+            sample_window_path = work / "sample-window.npz"
+            sample_window = subprocess.run(
+                [
+                    sys.executable,
+                    str(source_root / "tools" / "record_to_npz.py"),
+                    str(fault_run),
+                    str(sample_window_path),
+                    "--reader",
+                    str(reader),
+                    "--application-record",
+                    str(app_run),
+                    "--from-us",
+                    str(sample_window_start),
+                    "--to-us",
+                    str(sample_window_end),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if sample_window.returncode != 0:
+                fail(
+                    "the mid-segment window conversion failed: "
+                    f"{sample_window.stderr.strip()}"
+                )
+            else:
+                windowed = np.load(sample_window_path, allow_pickle=False)
+                if not bool(windowed["association_ok"]):
+                    fail(
+                        "a window starting between samples lost the association: "
+                        f"{str(windowed['association_reason'])}"
+                    )
+                exported = [int(value) for value in windowed["velocity_stamp_us"]]
+                if any(
+                    value < sample_window_start or value >= sample_window_end
+                    for value in exported
+                ):
+                    fail("the mid-segment window exported a velocity row out of range")
+                if app_fixture["t0"] + 50_000 in exported:
+                    fail("the mid-segment window exported the sample before its start")
+                first_index = int(
+                    np.searchsorted(
+                        windowed["stamp_us"],
+                        np.uint64(sample_window_start),
+                        side="left",
+                    )
+                )
+                if first_index >= int(windowed["stamp_us"].shape[0]):
+                    fail("the mid-segment window selected no runtime row")
+                else:
+                    stamp = int(windowed["stamp_us"][first_index])
+                    applied_seq = (stamp - app_fixture["t0"]) // 10_000
+                    expected_forward = 0.01 * (applied_seq + 1)
+                    held = float(windowed["velocity_hold_forward"][first_index])
+                    if np.isnan(held) or abs(held - expected_forward) > 1e-9:
+                        fail(
+                            "a window starting between samples did not hold the "
+                            f"preceding value: {held} != {expected_forward}"
+                        )
+
+            # A window narrower than one period may contain no velocity row at
+            # all. Association is still a fact about the full recordings, and
+            # the runtime rows in it still hold the sample in force.
+            narrow_start = app_fixture["t0"] + 51_000
+            narrow_end = app_fixture["t0"] + 59_000
+            narrow_path = work / "narrow-window.npz"
+            narrow = subprocess.run(
+                [
+                    sys.executable,
+                    str(source_root / "tools" / "record_to_npz.py"),
+                    str(fault_run),
+                    str(narrow_path),
+                    "--reader",
+                    str(reader),
+                    "--application-record",
+                    str(app_run),
+                    "--from-us",
+                    str(narrow_start),
+                    "--to-us",
+                    str(narrow_end),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if narrow.returncode != 0:
+                fail(f"the empty-velocity window failed: {narrow.stderr.strip()}")
+            else:
+                narrow_data = np.load(narrow_path, allow_pickle=False)
+                if not bool(narrow_data["association_ok"]):
+                    fail(
+                        "a window with no velocity row refused the association: "
+                        f"{str(narrow_data['association_reason'])}"
+                    )
+                if int(narrow_data["velocity_stamp_us"].shape[0]) != 0:
+                    fail("the narrow window exported velocity rows")
+                if int(narrow_data["application_rows_total"]) != 0:
+                    fail("the narrow window reports velocity rows in its total")
+                first_index = int(
+                    np.searchsorted(
+                        narrow_data["stamp_us"],
+                        np.uint64(narrow_start),
+                        side="left",
+                    )
+                )
+                if first_index >= int(narrow_data["stamp_us"].shape[0]):
+                    fail("the narrow window selected no runtime row")
+                else:
+                    stamp = int(narrow_data["stamp_us"][first_index])
+                    applied_seq = (stamp - app_fixture["t0"]) // 10_000
+                    expected_forward = 0.01 * (applied_seq + 1)
+                    held = float(narrow_data["velocity_hold_forward"][first_index])
+                    if np.isnan(held) or abs(held - expected_forward) > 1e-9:
+                        fail(
+                            "the narrow window did not hold the preceding value: "
+                            f"{held} != {expected_forward}"
                         )
 
             # The fault arrays have their own length, their own dtypes, and the

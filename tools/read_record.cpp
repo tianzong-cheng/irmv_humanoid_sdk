@@ -7,9 +7,10 @@
 // `schema_version` and holds control-tick samples plus the fault sidecar; an
 // application run declares `schema` = `irmv.application_velocity` and holds the
 // independent velocity stream plus its policy-session sidecar. One JSON object
-// per line is printed in the order the run recorded it, followed by a summary
-// line that reports the metadata, the number of rows, the range they span and
-// every gap or occurrence loss the run knows about.
+// per line is printed, grouped by stream - samples then fault occurrences, or
+// velocity then policy sessions - with each group in the order the run recorded
+// it. A final summary line reports the metadata, the number of rows, the range
+// they span and every gap or occurrence loss the run knows about.
 //
 // Every row carries `record_type` so a consumer never has to guess which stream
 // a line belongs to: `sample`, `fault`, `velocity` or `policy_session`. A fault
@@ -41,6 +42,7 @@
 #include <string_view>
 #include <vector>
 
+#include "irmv/application/policy_session_record.hpp"
 #include "irmv/protocol/types.hpp"
 #include "irmv/protocol/validation.hpp"
 #include "irmv/telemetry/fault_record.hpp"
@@ -291,6 +293,10 @@ bool ReadPolicySessions(const std::filesystem::path &path, TimeUs begin_us,
                         std::string *error) {
   *rows = Json::array();
   *truncated = false;
+  // An empty or inverted range reads nothing, exactly like the sample and
+  // velocity readers. The rest of the file is still parsed and validated, so a
+  // damaged sidecar is never hidden by a window that happens to select nothing.
+  const bool range_empty = begin_us >= end_us;
   std::error_code code;
   if (!std::filesystem::exists(path, code)) {
     if (code) {
@@ -329,9 +335,10 @@ bool ReadPolicySessions(const std::filesystem::path &path, TimeUs begin_us,
     const auto schema = row.find("schema");
     const auto version = row.find("version");
     if (schema == row.end() || !schema->is_string() ||
-        schema->get<std::string>() != "irmv.policy_session" ||
+        schema->get<std::string>() != irmv::application::kPolicySessionSchema ||
         version == row.end() || !version->is_number_unsigned() ||
-        version->get<std::uint64_t>() != 1) {
+        version->get<std::uint64_t>() !=
+            irmv::application::kPolicySessionSchemaVersion) {
       *error = path.string() + ":" + std::to_string(line_number) +
                ": unknown schema/version";
       return false;
@@ -343,7 +350,7 @@ bool ReadPolicySessions(const std::filesystem::path &path, TimeUs begin_us,
       return false;
     }
     const TimeUs stamp = monotonic->get<TimeUs>();
-    if (begin_us < end_us && (stamp < begin_us || stamp >= end_us)) {
+    if (range_empty || stamp < begin_us || stamp >= end_us) {
       start = newline + 1;
       continue;
     }
@@ -617,7 +624,8 @@ int RunApplication(const std::string &run_directory, TimeUs begin_us,
   bool policy_truncated = false;
   std::string error;
   if (!ReadPolicySessions(
-          std::filesystem::path(run_directory) / "policy_sessions.jsonl",
+          std::filesystem::path(run_directory) /
+              std::string(irmv::application::kPolicySessionFile),
           begin_us, end_us, &policy_rows, &policy_truncated, &error)) {
     std::fprintf(stderr, "read_record: %s\n", error.c_str());
     return 1;

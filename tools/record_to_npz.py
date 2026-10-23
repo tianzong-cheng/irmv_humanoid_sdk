@@ -271,9 +271,11 @@ def read_experiment(
         result["application"] = None
         return result
 
-    app_records, app_summary = _read_output(
-        reader, application_directory, begin_us, end_us
-    )
+    # The whole application run is read, not the requested window: association
+    # is a fact about the two recordings, and a window that starts between two
+    # velocity samples must still see the sample in force. The window is
+    # applied when the exported rows and counts are selected.
+    app_records, app_summary = _read_output(reader, application_directory, 0, None)
     velocity = [
         row for row in app_records if row.get("record_type") == "velocity"
     ]
@@ -286,6 +288,20 @@ def read_experiment(
             f"{len(velocity)} velocity row(s) but its summary reports "
             f"{app_summary['rows_in_range']}"
         )
+    # Policy sessions are a windowed sidecar for the archive; an empty or
+    # inverted range selects none, matching the velocity stream.
+    if end_us is not None and begin_us >= end_us:
+        policy = []
+    elif end_us is not None:
+        policy = [
+            row
+            for row in policy
+            if begin_us <= int(row["monotonic_us"]) < end_us
+        ]
+    elif begin_us:
+        policy = [
+            row for row in policy if int(row["monotonic_us"]) >= begin_us
+        ]
     result["application"] = {
         "summary": app_summary,
         "velocity": velocity,
@@ -701,24 +717,20 @@ def to_archive(rows, summary, faults=None, application=None) -> dict:
 
     if application is not None:
         app_summary = application["summary"]
-        app_rows = application.get("velocity", [])
-        association = application.get("association")
-        if association is None:
-            association = associate(summary, app_summary, app_rows)
+        # main() resolved the association and the window over the full
+        # application recording; this function only serializes that decision.
+        association = application["association"]
         selected = association["rows"]
-        hold = application.get("hold")
-        if hold is None:
-            hold = hold_forward(
-                rows,
-                selected,
-                app_summary.get("sample_hz", 0),
-                app_summary.get("losses", []),
-            )
+        hold = application["hold"]
         for column, dtype in VELOCITY_SCALAR_DTYPES.items():
             source = column[len("velocity_") :]
-            arrays[column] = np.array(
-                [row.get(source) for row in selected], dtype=dtype
-            )
+            if source in ("forward", "lateral", "yaw"):
+                values = [
+                    _decode_value(row.get(source), column) for row in selected
+                ]
+            else:
+                values = [row.get(source) for row in selected]
+            arrays[column] = np.array(values, dtype=dtype)
         for column, width in VELOCITY_TEXT_COLUMNS.items():
             source = column[len("velocity_") :]
             arrays[column] = _text_array(
@@ -778,9 +790,7 @@ def to_archive(rows, summary, faults=None, application=None) -> dict:
         arrays["association_reason"] = _text_scalar(
             association.get("reason", ""), 256
         )
-        arrays["application_rows_total"] = np.uint64(
-            association.get("total", len(app_rows))
-        )
+        arrays["application_rows_total"] = np.uint64(association["total"])
         arrays["application_rows_excluded"] = np.uint64(
             association.get("excluded", 0)
         )
@@ -835,17 +845,40 @@ def main() -> int:
         association = associate(
             summary, app_summary, application["velocity"]
         )
+        # Association and hold-forward see the whole application recording; the
+        # requested window only decides which rows and counts the archive
+        # exports. A runtime row at the start of a window therefore still holds
+        # the sample before it.
         hold = hold_forward(
             experiment["samples"],
             association["rows"],
             app_summary.get("sample_hz", summary.get("sample_hz", 0)),
             app_summary.get("losses", []),
         )
+        begin_us = args.from_us
+        end_us = args.to_us
+
+        def in_window(rows):
+            if end_us is not None and begin_us >= end_us:
+                return []
+            if end_us is None:
+                return [row for row in rows if int(row["stamp_us"]) >= begin_us]
+            return [
+                row
+                for row in rows
+                if begin_us <= int(row["stamp_us"]) < end_us
+            ]
+
+        selected = in_window(association["rows"])
+        total = len(in_window(application["velocity"]))
+        windowed = dict(association)
+        windowed["rows"] = selected
+        windowed["total"] = total
+        windowed["excluded"] = total - len(selected)
         application_payload = {
             "summary": app_summary,
-            "velocity": application["velocity"],
             "policy_sessions": application["policy_sessions"],
-            "association": association,
+            "association": windowed,
             "hold": hold,
         }
         if not association["ok"]:
