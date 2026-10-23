@@ -25,8 +25,9 @@
 //
 // The control path offers a sample to one fixed 256-slot handoff and returns.
 // `TryRecord` never allocates, formats, blocks or touches a file; a full queue
-// or a stopped recorder costs the sample and is counted, and the run's index
-// names the sequence stretch the loss covers. The worker owns the file, the
+// costs the sample and is counted, and the run's index names the sequence
+// stretch the loss covers. A sample offered after Stop() began is counted only:
+// the final loss table may already be published. The worker owns the file, the
 // metadata and the index, exactly like the runtime recorder: Stop() closes the
 // handoff, asks the worker to finalize and waits against a deadline; a device
 // that blocks past the deadline leaves the run to the worker, which keeps its
@@ -103,8 +104,6 @@ enum class VelocityLossReason : std::uint32_t {
   // The worker accepted the sample but could not persist its line. The writer
   // rolls a torn line back, so a later line never joins its bytes.
   WriteFailed = 2,
-  // Samples the worker still held when finalization ran out of its drain.
-  Stopped = 3,
 };
 
 const char *VelocityLossReasonName(VelocityLossReason reason) noexcept;

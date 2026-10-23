@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <ctime>
+#include <exception>
 #include <fstream>
 #include <iterator>
 #include <limits>
@@ -289,8 +290,6 @@ bool DecodeLoss(const Json &entry, VelocityLossSpan *loss, std::string *why) {
     loss->reason = VelocityLossReason::QueueFull;
   } else if (reason == "write_failed") {
     loss->reason = VelocityLossReason::WriteFailed;
-  } else if (reason == "stopped") {
-    loss->reason = VelocityLossReason::Stopped;
   } else {
     *why = "reason is not a known loss reason";
     return false;
@@ -335,6 +334,15 @@ bool DecodeSample(const Json &line, VelocitySample *sample, std::string *why) {
       *why = "a known identity is not two 32-digit hex ids";
       return false;
     }
+    // The writer never emits a "known" identity that is the protocol's
+    // all-zero "none" value; a file claiming one is not a sample this build
+    // produced, and accepting it would make the identity unusable as a join
+    // key.
+    if (sample->runtime_id == protocol::kNoId ||
+        sample->session_id == protocol::kNoId) {
+      *why = "a known identity is the all-zero id";
+      return false;
+    }
   } else {
     if (!runtime_id.empty() || !session_id.empty()) {
       *why = "an unknown identity carries a non-empty id";
@@ -376,8 +384,6 @@ const char *VelocityLossReasonName(VelocityLossReason reason) noexcept {
       return "queue_full";
     case VelocityLossReason::WriteFailed:
       return "write_failed";
-    case VelocityLossReason::Stopped:
-      return "stopped";
   }
   return "unknown";
 }
@@ -820,10 +826,29 @@ bool VelocityRecorder::Start(const configuration::RecorderConfig &config,
     return false;
   }
   start_error_.clear();
-  impl_ = impl;
   impl->accepting.store(true, std::memory_order_seq_cst);
-  const std::shared_ptr<Impl> shared = impl;
-  impl->worker = std::thread([shared] { shared->Run(); });
+  try {
+    const std::shared_ptr<Impl> shared = impl;
+    impl->worker = std::thread([shared] { shared->Run(); });
+  } catch (const std::exception &exception) {
+    // A process that cannot create the worker has not started a run: no state
+    // may claim it accepted samples, and the half-created directory is removed
+    // rather than left behind for a reader to misinterpret.
+    impl->accepting.store(false, std::memory_order_seq_cst);
+    std::error_code ignored;
+    std::filesystem::remove_all(impl->run_directory, ignored);
+    impl->run_directory.clear();
+    start_error_ = std::string(
+                       "the velocity recorder could not start its "
+                       "worker: ") +
+                   exception.what();
+    if (error != nullptr) {
+      *error = start_error_;
+    }
+    return false;
+  }
+  start_error_.clear();
+  impl_ = impl;
   return true;
 }
 
@@ -872,6 +897,22 @@ bool VelocityRecorder::Stop() {
     return true;
   }
   const std::shared_ptr<Impl> impl = impl_;
+  {
+    const std::lock_guard<std::mutex> lock(impl->done_mutex);
+    if (impl->finished) {
+      if (impl->worker.joinable()) {
+        impl->worker.join();
+      }
+      return true;
+    }
+    // A previous Stop already timed out and left the worker detached. Waiting
+    // again would give one exit path two full deadlines; this call reports the
+    // same unfinished state at once, and a later call observes the worker's
+    // own completion above.
+    if (impl->stop_signalled && !impl->worker.joinable()) {
+      return false;
+    }
+  }
   const auto deadline = std::chrono::steady_clock::now() +
                         std::chrono::milliseconds(kVelocityStopTimeoutMs);
   impl->accepting.store(false, std::memory_order_seq_cst);

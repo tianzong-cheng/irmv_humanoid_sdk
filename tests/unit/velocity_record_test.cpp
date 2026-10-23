@@ -396,6 +396,13 @@ int BlockedWriterBoundsStop() {
   CHECK(elapsed < std::chrono::seconds(10));
   CHECK(ReadIndex(recorder.run_directory())["complete"] == false);
 
+  // A second Stop while the writer is still parked must not arm another full
+  // deadline: the first call already left the worker detached.
+  const auto retry_started = std::chrono::steady_clock::now();
+  CHECK(!recorder.Stop());
+  const auto retry_elapsed = std::chrono::steady_clock::now() - retry_started;
+  CHECK(retry_elapsed < std::chrono::milliseconds(500));
+
   {
     const std::lock_guard<std::mutex> lock(state.mutex);
     state.released = true;
@@ -534,6 +541,30 @@ int TruncationCorruptAndUnknownVersion() {
   CHECK(!ReadVelocityRange(run, 0, kNever, &unknown_line));
   CHECK(!unknown_line.ok);
   CHECK(!unknown_line.error.empty());
+
+  // A line that claims a known identity but carries the all-zero "none" ids
+  // cannot have come from this writer; it is refused rather than accepted as an
+  // identity no reader could join to.
+  {
+    nlohmann::json line;
+    line["schema"] = "irmv.application_velocity";
+    line["version"] = 1;
+    line["stamp_us"] = 100;
+    line["sample_seq"] = std::string(16, '0');
+    line["identity_known"] = true;
+    line["runtime_id"] = std::string(32, '0');
+    line["session_id"] = std::string(32, '0');
+    line["latest_state_seq"] = std::string(16, '0');
+    line["forward"] = 0.0;
+    line["lateral"] = 0.0;
+    line["yaw"] = 0.0;
+    std::ofstream file(stream, std::ios::binary | std::ios::trunc);
+    file << line.dump() << "\n";
+  }
+  VelocityRecordRange zero_identity;
+  CHECK(!ReadVelocityRange(run, 0, kNever, &zero_identity));
+  CHECK(!zero_identity.ok);
+  CHECK(!zero_identity.error.empty());
 
   // The metadata owns the run's schema identity; a reader refuses a version it
   // does not know instead of interpreting the fields of another one.
