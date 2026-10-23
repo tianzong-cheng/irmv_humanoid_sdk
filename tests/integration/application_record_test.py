@@ -36,6 +36,8 @@ import tempfile
 import time
 from pathlib import Path
 
+import numpy as np
+
 DOMAIN = 151
 RECORD_HOLD_S = 2.0
 KEYS = {"damping": b"d", "initialize": b"i", "exit": b"x"}
@@ -353,15 +355,22 @@ def run(source_root, application_binary, runtime_binary, read_record, work,
             if int(row["imu_rx_stamp_us"]) <= 0:
                 fail("a tracking row carries no IMU receive stamp")
                 break
-            for vector in (
-                "imu_orientation_rpy",
-                "imu_angular_velocity",
-                "imu_linear_acceleration",
-            ):
-                if len(row[vector]) != 3 or not all(
-                    math.isfinite(float(value)) for value in row[vector]
+            expected_imu = {
+                "imu_orientation_rpy": (0.1, -0.2, 0.3),
+                "imu_angular_velocity": (0.4, -0.5, 0.6),
+                "imu_linear_acceleration": (0.7, -0.8, 9.81),
+            }
+            for vector, expected in expected_imu.items():
+                actual = row[vector]
+                if len(actual) != 3 or any(
+                    not math.isfinite(float(actual[index]))
+                    or abs(float(actual[index]) - expected[index]) > 1e-12
+                    for index in range(3)
                 ):
-                    fail(f"a tracking row carries no finite {vector}")
+                    fail(
+                        f"a tracking row does not carry the fixture's {vector}: "
+                        f"{actual}"
+                    )
                     break
 
     # The run's own session table: the authorization context the rows belong to,
@@ -646,6 +655,50 @@ def run(source_root, application_binary, runtime_binary, read_record, work,
                         f"{window_summary.get('rows_in_range')} row(s), expected "
                         f"{len(expected)}"
                     )
+
+    # The same values through the exporter: the scenario's IMU vectors reach
+    # the recorded writer, the reader and the NumPy archive unchanged. This is
+    # the end-to-end proof that the nonzero fixture is data, not a flag.
+    archive_path = work / "runtime.npz"
+    converted = subprocess.run(
+        [
+            sys.executable,
+            str(source_root / "tools" / "record_to_npz.py"),
+            str(run_directory),
+            str(archive_path),
+            "--reader",
+            str(read_record),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if converted.returncode != 0:
+        fail(f"the runtime export failed: {converted.stderr.strip()}")
+    else:
+        archived = np.load(archive_path, allow_pickle=False)
+        expected_imu = {
+            "imu_orientation_rpy": (0.1, -0.2, 0.3),
+            "imu_angular_velocity": (0.4, -0.5, 0.6),
+            "imu_linear_acceleration": (0.7, -0.8, 9.81),
+        }
+        rows_archived = int(archived["stamp_us"].shape[0])
+        if rows_archived != int(summary_json["rows_in_range"]):
+            fail(
+                f"the archive carries {rows_archived} row(s), expected "
+                f"{summary_json['rows_in_range']}"
+            )
+        for vector, expected in expected_imu.items():
+            column = archived[vector]
+            if column.shape != (rows_archived, 3):
+                fail(f"the archive's {vector} has shape {column.shape}")
+            elif not np.allclose(
+                column, np.array(expected, dtype=np.float64), atol=1e-12, rtol=0
+            ):
+                fail(
+                    f"the archive's {vector} is not the fixture's value: "
+                    f"{column[:1].tolist()}"
+                )
 
     if failures:
         return 1

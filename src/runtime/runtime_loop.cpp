@@ -1321,7 +1321,9 @@ ScenarioFeedbackEntry ParseFeedback(const Json &value, const std::string &path,
     if (!imu->is_object()) {
       ScenarioFail(imu_path, "must be an object");
     }
-    RejectUnknownMembers(*imu, imu_path, {"valid", "rx_stamp_us"});
+    RejectUnknownMembers(*imu, imu_path,
+                         {"valid", "rx_stamp_us", "orientation_rpy",
+                          "angular_velocity", "linear_acceleration"});
     ScenarioImuOverride parsed;
     if (const Json *valid = FindMember(*imu, "valid")) {
       parsed.valid = BoolValue(*valid, Join(imu_path, "valid"));
@@ -1330,6 +1332,27 @@ ScenarioFeedbackEntry ParseFeedback(const Json &value, const std::string &path,
       parsed.rx_stamp_offset_us =
           OffsetValue(*stamp, Join(imu_path, "rx_stamp_us"), kMaxStampOffsetUs);
     }
+    const auto read_vector = [&imu_path](
+                                 const Json &imu_object, const char *key,
+                                 std::optional<std::array<double, 3>> *out) {
+      const Json *values = FindMember(imu_object, key);
+      if (values == nullptr) {
+        return;
+      }
+      const std::string path = Join(imu_path, key);
+      if (!values->is_array() || values->size() != 3) {
+        ScenarioFail(path, "must be an array of exactly three numbers");
+      }
+      std::array<double, 3> vector{};
+      for (std::size_t index = 0; index < vector.size(); ++index) {
+        vector[index] = NumberValue((*values)[index],
+                                    path + "[" + std::to_string(index) + "]");
+      }
+      *out = vector;
+    };
+    read_vector(*imu, "orientation_rpy", &parsed.orientation_rpy);
+    read_vector(*imu, "angular_velocity", &parsed.angular_velocity);
+    read_vector(*imu, "linear_acceleration", &parsed.linear_acceleration);
     feedback.imu = parsed;
   }
   return feedback;
@@ -1485,6 +1508,15 @@ void ScenarioApplier::ApplyFeedback(const ScenarioFeedbackEntry &entry) {
     }
     if (entry.imu->rx_stamp_offset_us) {
       imu_stamp_offset_us_ = *entry.imu->rx_stamp_offset_us;
+    }
+    if (entry.imu->orientation_rpy) {
+      snapshot_.imu.orientation_rpy = *entry.imu->orientation_rpy;
+    }
+    if (entry.imu->angular_velocity) {
+      snapshot_.imu.angular_velocity = *entry.imu->angular_velocity;
+    }
+    if (entry.imu->linear_acceleration) {
+      snapshot_.imu.linear_acceleration = *entry.imu->linear_acceleration;
     }
   }
 }

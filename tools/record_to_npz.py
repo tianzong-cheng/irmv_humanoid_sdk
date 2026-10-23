@@ -660,12 +660,18 @@ def to_archive(rows, summary, faults=None, application=None) -> dict:
         if len(sessions) == 0:
             arrays[column] = np.zeros((0, joint_count), dtype=np.float64)
             continue
-        matrix = np.array([entry[source] for entry in sessions], dtype=np.float64)
-        if matrix.shape != (len(sessions), joint_count):
-            raise SystemExit(
-                f"record_to_npz: the {column} column has shape {matrix.shape}, expected "
-                f"({len(sessions)}, {joint_count})"
-            )
+        # A session event carries the gains its own context declared. A
+        # supervisor-timeout event records no gains at all (joint_count 0), and
+        # an event shorter than the run's joint table is not another shape: the
+        # row still belongs to the same joint order. Unprovided values are NaN
+        # so they cannot be mistaken for a declared zero.
+        matrix = np.full((len(sessions), joint_count), np.nan, dtype=np.float64)
+        for row_index, entry in enumerate(sessions):
+            values = entry.get(source, [])
+            for joint_index in range(min(len(values), joint_count)):
+                matrix[row_index, joint_index] = _decode_value(
+                    values[joint_index], column
+                )
         arrays[column] = matrix
     arrays["session_model_sha256"] = np.array(
         [entry["model_sha256"] for entry in sessions], dtype=SESSION_DIGEST_DTYPE

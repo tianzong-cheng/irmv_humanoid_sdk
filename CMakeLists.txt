@@ -1124,6 +1124,40 @@ target_link_libraries(
     nlohmann_json::nlohmann_json
 )
 
+# The fake-scenario parser is part of the fixture contract: the optional IMU
+# vectors are exactly three finite numbers each, and they reach the injected
+# snapshot. The parser lives in the runtime executable's translation unit, so
+# this test compiles that file directly rather than introducing a library
+# boundary the production binary does not need.
+add_executable(
+  scenario_test tests/unit/scenario_test.cpp src/runtime/runtime_loop.cpp
+)
+target_compile_features(scenario_test PRIVATE cxx_std_17)
+target_include_directories(
+  scenario_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(
+  scenario_test
+  PRIVATE
+    irmv_runtime
+    irmv_transport
+    irmv_telemetry
+    irmv_build_identity
+    nlohmann_json::nlohmann_json
+    Threads::Threads
+)
+add_test(NAME scenario_test COMMAND scenario_test "${PROJECT_SOURCE_DIR}")
+set_tests_properties(
+  scenario_test
+  PROPERTIES
+    LABELS core
+    TIMEOUT 120
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
 add_test(
   NAME runtime_cli_test
   COMMAND

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -148,6 +149,13 @@ struct ScenarioImuOverride {
   std::optional<bool> valid;
   // Offset of the IMU receive stamp from the current monotonic time.
   std::optional<std::int64_t> rx_stamp_offset_us;
+  // The three vectors of the driver contract, each exactly three finite
+  // numbers. They are optional so every existing scenario keeps its meaning:
+  // an omitted vector keeps the value of the previous entry, ultimately the
+  // all-zero snapshot of the fake backend.
+  std::optional<std::array<double, 3>> orientation_rpy;
+  std::optional<std::array<double, 3>> angular_velocity;
+  std::optional<std::array<double, 3>> linear_acceleration;
 };
 
 struct ScenarioFeedbackEntry {

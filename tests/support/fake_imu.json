@@ -2,15 +2,17 @@
   "$comment": [
     "Fake deployment scenario of the application-driven acceptance",
     "(tests/integration/application_record_test.py). It is the shipped static",
-    "scenario with two differences that make the recorded row informative:",
-    "each joint reports a nonzero torque estimate, and the IMU snapshot is",
-    "marked valid with a fresh receive stamp. The measured position stays at",
-    "zero so the initialization target is reached and the recorder's tracking",
-    "window is the same as in the static run.",
+    "scenario with three differences that make the recorded row informative:",
+    "each joint reports a nonzero torque estimate, the IMU snapshot is marked",
+    "valid with a fresh receive stamp, and all three IMU vectors carry distinct",
+    "nonzero values that the test can read back exactly. The measured position",
+    "stays at zero so the initialization target is reached and the recorder's",
+    "tracking window is the same as in the static run.",
     "",
-    "The fake backend does not model the IMU vectors themselves; their default",
-    "zero values are a valid measurement, and the test asserts the recorded",
-    "valid flag and receive stamp rather than inventing sample content.",
+    "orientation_rpy, angular_velocity and linear_acceleration are optional",
+    "three-number overrides of the injected snapshot; an omitted vector keeps",
+    "the previous value (initially the backend's zero). The values below are a",
+    "fixture, not a measurement.",
     "",
     "elapsed_us is monotonic from process start and mandatory; one entry is",
     "enough because nothing changes."
@@ -42,7 +44,10 @@
         ],
         "imu": {
           "valid": true,
-          "rx_stamp_us": 0
+          "rx_stamp_us": 0,
+          "orientation_rpy": [0.1, -0.2, 0.3],
+          "angular_velocity": [0.4, -0.5, 0.6],
+          "linear_acceleration": [0.7, -0.8, 9.81]
         }
       },
       "write_result": {
