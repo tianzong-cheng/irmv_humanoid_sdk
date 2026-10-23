@@ -4,6 +4,7 @@ project(irmv_humanoid_sdk LANGUAGES CXX)
 
 include(CTest)
 include(GNUInstallDirs)
+include(cmake/BuildIdentity.cmake)
 include(cmake/Dependencies.cmake)
 include(cmake/HardwareDependencies.cmake)
 
@@ -13,6 +14,12 @@ option(IRMV_BUILD_APPLICATION
 if(IRMV_ENABLE_REAL_BACKEND)
   irmv_make_real_backend_available()
 endif()
+
+# The revision of this build, in one small library both processes link. The
+# check behind it runs on every build, but rewrites the generated source only
+# when `git rev-parse HEAD` actually changed, so an unchanged repository causes
+# no rebuild and no relink.
+irmv_add_build_identity(irmv_build_identity)
 
 # Every installed artifact finds its neighbours through a relative rpath and
 # never through the build or source directory: a library in <prefix>/lib
@@ -810,6 +817,7 @@ add_library(
   irmv_telemetry
   src/telemetry/diagnostic_write.cpp
   src/telemetry/logger.cpp
+  src/telemetry/record_context.cpp
   src/telemetry/record_reader.cpp
   src/telemetry/recorder.cpp
 )
@@ -868,6 +876,38 @@ target_link_libraries(
 add_test(NAME record_reader_test COMMAND record_reader_test)
 set_tests_properties(record_reader_test PROPERTIES LABELS core TIMEOUT 120)
 set_tests_properties(recorder_test PROPERTIES LABELS core TIMEOUT 120)
+
+# The independent record sample plan and the startup clock identity are pure or
+# startup-only; the test injects the boot-id file so it never depends on /proc.
+add_executable(record_context_test tests/unit/record_context_test.cpp)
+target_compile_features(record_context_test PRIVATE cxx_std_17)
+target_include_directories(
+  record_context_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(record_context_test PRIVATE irmv_telemetry)
+
+add_test(NAME record_context_test COMMAND record_context_test)
+set_tests_properties(record_context_test PROPERTIES LABELS core TIMEOUT 60)
+
+# The generator is exercised through a temporary repository, so its own view of
+# Git - including the no-repository case - is proven without touching this tree.
+add_test(
+  NAME build_identity_test
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/unit/build_identity_test.py"
+    "${PROJECT_SOURCE_DIR}"
+)
+set_tests_properties(
+  build_identity_test
+  PROPERTIES
+    LABELS core
+    TIMEOUT 300
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
 
 add_test(NAME logger_test COMMAND logger_test)
 set_tests_properties(
@@ -987,6 +1027,7 @@ target_link_libraries(
     irmv_runtime
     irmv_transport
     irmv_telemetry
+    irmv_build_identity
     nlohmann_json::nlohmann_json
 )
 
@@ -1072,6 +1113,7 @@ target_link_libraries(
     irmv_transport
     irmv_configuration
     irmv_protocol
+    irmv_build_identity
     # The policy layer is linked into the application executable and into
     # nothing else: ONNX Runtime reaches the supervising process and never the
     # runtime process, which the build verifies afterwards with `ldd`.
