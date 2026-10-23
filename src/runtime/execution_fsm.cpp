@@ -75,11 +75,16 @@ TickResult ExecutionFsm::Tick(protocol::TimeUs now_us,
   scope.report = &report;
   // The complete diagnostic of this tick, not the bounded published view: a
   // first faulty tick records every established condition. The safety check
-  // stamps neither the detection time nor the output action, so the detection
-  // time is this tick; the sample time stays the feedback stamp.
+  // stamps neither the detection time nor the output action, so both are
+  // filled here with the same damping rule the published details use; the
+  // sample time stays the feedback stamp.
+  const protocol::OutputAction observed_action =
+      DampingEligible(report) ? protocol::OutputAction::Damping
+                              : protocol::OutputAction::ZeroTorque;
   for (std::uint32_t index = 0; index < report.observations.count; ++index) {
     protocol::FaultDetail detail = report.observations.details[index];
     detail.detected_stamp_us = now_us;
+    detail.output_action = observed_action;
     ObserveFault(scope, detail);
   }
   gate_.RecordState(published_seq, now_us);
@@ -132,17 +137,11 @@ TickResult ExecutionFsm::Tick(protocol::TimeUs now_us,
     // what the latch reports.
     out.write_result = backend.Write(now_us, fallback);
     if (!out.write_result.accepted) {
-      protocol::FaultDetail detail;
-      detail.reason = protocol::FaultReason::WriteFailed;
-      detail.condition = protocol::FaultCondition::FallbackWriteFailed;
-      detail.joint_index = protocol::kNoJointIndex;
-      detail.error_code = out.write_result.error_code;
-      detail.sample_stamp_us = now_us;
-      detail.detected_stamp_us = now_us;
-      detail.output_action = protocol::OutputAction::ZeroTorque;
-      static_cast<void>(
-          detail.message.Assign("zero torque fallback write refused"));
-      ObserveFault(scope, detail);
+      const protocol::FaultReport fallback_report = MakeFaultReport(
+          protocol::FaultReason::WriteFailed,
+          protocol::FaultCondition::FallbackWriteFailed, now_us,
+          out.write_result.error_code, "zero torque fallback write refused");
+      ObserveFault(scope, fallback_report.details[0]);
     }
   }
   CommitPendingResults(scope, write.accepted);

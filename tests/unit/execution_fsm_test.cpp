@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <initializer_list>
 #include <limits>
+#include <string>
 
 #include "irmv/configuration/config.hpp"
 #include "irmv/hardware/backend.hpp"
@@ -1002,6 +1003,13 @@ int CheckFaultOutputDegradation() {
   CHECK(f.state().damping_eligible);
   CHECK(f.last_tick().output.torque[0] == -20.0);
   CHECK(f.last_tick().output.torque[1] == kDampingTorque1);
+  // The new observation names the action this fault actually commands, not
+  // the default zero torque.
+  CHECK(f.last_tick().new_faults != nullptr);
+  const FaultDetail *velocity =
+      FindNewFault(f.last_tick(), FaultCondition::JointVelocityExceeded, 0);
+  CHECK(velocity != nullptr);
+  CHECK(velocity->output_action == kActionDamping);
 
   // A driver error removes the damping context of this fault for good.
   f.SetDriverError();
@@ -2673,6 +2681,7 @@ int CheckWriteFailureObservations() {
     CHECK(primary != nullptr);
     CHECK(primary->reason == FaultReason::WriteFailed);
     CHECK(primary->error_code == 7);
+    CHECK(primary->sample_stamp_us == 0);
     CHECK(first.state.faults.count == 1);
     CHECK(first.state.faults.details[0].condition ==
           FaultCondition::PrimaryWriteFailed);
@@ -2705,6 +2714,9 @@ int CheckWriteFailureObservations() {
     CHECK(fallback->error_code == 12);
     CHECK(primary->reason == FaultReason::WriteFailed);
     CHECK(fallback->reason == FaultReason::WriteFailed);
+    // A refused write has no related feedback sample at all.
+    CHECK(primary->sample_stamp_us == 0);
+    CHECK(fallback->sample_stamp_us == 0);
     CHECK(both.state.faults.count == 1);
     CHECK(both.state.faults.details[0].condition ==
           FaultCondition::PrimaryWriteFailed);
@@ -2735,6 +2747,89 @@ int CheckWriteFailureObservations() {
     CHECK(f.fsm.fault_id() == fault_id);
     CHECK(SameFaultReport(recurring.state.faults, latched_report));
   }
+  return 0;
+}
+
+// The published diagnostics are bounded by the protocol payload; the internal
+// batch is not. A configuration wide enough to truncate the published report
+// proves that new_faults carries the complete SafetyReport observations rather
+// than a copy of report.details.
+RuntimeConfig MakeWideFaultConfig() {
+  constexpr std::size_t kWideJoints = 11;
+  RuntimeConfig config = RuntimeFixture::LoadFixtureConfig();
+  config.joint_names.clear();
+  for (std::size_t index = 0; index < kWideJoints; ++index) {
+    config.joint_names.push_back("wide_" + std::to_string(index));
+    config.position_min[index] = -2.0;
+    config.position_max[index] = 2.0;
+    config.damping_kd[index] = 2.0;
+    config.joint_velocity_limits[index] = 10.0;
+    config.torque_limits[index] = 20.0;
+    config.target_velocity_limits[index] = 10.0;
+    config.continuity.position_delta[index] = 0.1;
+    config.continuity.velocity_delta[index] = 0.5;
+    config.continuity.torque_delta[index] = 5.0;
+  }
+  return config;
+}
+
+int CheckCompleteObservationBatchBeyondPublishedCapacity() {
+  constexpr std::size_t kWideJoints = 11;
+  constexpr std::size_t kFiniteFaultJoints = 9;
+  RuntimeConfig config = MakeWideFaultConfig();
+  ScriptedWriteBackend backend;
+  ExecutionFsm fsm(config, irmv::test::FixtureRuntimeId());
+  TimeUs now = irmv::test::kFixtureStartUs;
+
+  // Tick 1 carries no observation at all, so the machine waits and stamps its
+  // boot start without faulting.
+  irmv::protocol::FeedbackSnapshot feedback;
+  feedback.count = static_cast<std::uint32_t>(kWideJoints);
+  feedback.stamp_us = now;
+  backend.feedback = feedback;
+  const TickResult waiting = fsm.Tick(now, feedback, TickInput{}, backend);
+  CHECK(waiting.new_faults != nullptr);
+  CHECK(waiting.new_faults->count == 0);
+  CHECK(fsm.execution_state() == kBoot);
+
+  // Tick 2 is outside the boot grace window and every joint establishes seven
+  // conditions: the first nine are finite but invalid, stale, slow,
+  // driver-faulty, out of position and over velocity; the last two are
+  // non-finite. 9 * 6 + 2 * 5 = 64 published details and 11 * 7 = 77 complete
+  // observations.
+  now += config.boot.frequency_grace_us + 1;
+  irmv::protocol::FeedbackSnapshot faulty;
+  faulty.count = static_cast<std::uint32_t>(kWideJoints);
+  faulty.stamp_us = now;
+  for (std::size_t index = 0; index < kWideJoints; ++index) {
+    irmv::protocol::JointFeedback &joint = faulty.joints[index];
+    joint.valid = false;
+    joint.connected = false;
+    joint.error_code = 7;
+    joint.rx_stamp_us = 0;
+    joint.freq_hz = 0.0;
+    joint.tau_est = 0.0;
+    if (index < kFiniteFaultJoints) {
+      joint.q = 3.0;
+      joint.dq = 11.0;
+    } else {
+      joint.q = std::numeric_limits<double>::quiet_NaN();
+      joint.dq = std::numeric_limits<double>::quiet_NaN();
+    }
+  }
+  backend.feedback = faulty;
+  const TickResult ticked = fsm.Tick(now, faulty, TickInput{}, backend);
+  CHECK(fsm.execution_state() == kFault);
+  CHECK(ticked.state.faults.count == irmv::protocol::kMaxJoints);
+  CHECK(ticked.new_faults != nullptr);
+  CHECK(ticked.new_faults->count == kWideJoints * 7);
+  CHECK(ticked.new_faults->count > ticked.state.faults.count);
+  CHECK(ticked.new_faults->dropped == 0);
+  // The last joint is beyond the truncated published report but present in the
+  // complete batch.
+  CHECK(FindNewFault(ticked, FaultCondition::JointDisconnected, 10) != nullptr);
+  CHECK(FindNewFault(ticked, FaultCondition::JointFeedbackNonFinite, 10) !=
+        nullptr);
   return 0;
 }
 
@@ -2791,5 +2886,6 @@ int main() {
   CHECK(CheckBootObservedThenLostFaults() == 0);
   CHECK(CheckFaultNewObservations() == 0);
   CHECK(CheckWriteFailureObservations() == 0);
+  CHECK(CheckCompleteObservationBatchBeyondPublishedCapacity() == 0);
   return 0;
 }
