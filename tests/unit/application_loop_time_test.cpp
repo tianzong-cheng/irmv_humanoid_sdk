@@ -27,7 +27,10 @@
 
 namespace {
 
+using irmv::application::CanServeSampleRate;
 using irmv::application::DecisionInstant;
+using irmv::application::WaitBudgetUs;
+using irmv::application::WaitTimeoutMs;
 using irmv::protocol::TimeUs;
 
 // Both ends of the unsigned range, as literals: the raise must be a comparison
@@ -73,6 +76,62 @@ int BothRangeEnds() {
   return 0;
 }
 
+// The pacing wait is the loop period, shortened to the next velocity sample
+// deadline and never lengthened - the heartbeat and FSM deadlines remain the
+// loop's own.
+int WaitIsCappedAtSampleDeadline() {
+  constexpr TimeUs kPeriod = 10'000;  // 10 ms
+  constexpr TimeUs kNow = 5'000'000;
+  CHECK(WaitBudgetUs(kPeriod, 0, kNow) == kPeriod);
+  CHECK(WaitTimeoutMs(kPeriod, 0, kNow) == 10);
+  // A sample is due in 3 ms: the iteration must not sleep the whole period.
+  CHECK(WaitBudgetUs(kPeriod, kNow + 3'000, kNow) == 3'000);
+  CHECK(WaitTimeoutMs(kPeriod, kNow + 3'000, kNow) == 3);
+  // The deadline already passed: one millisecond, the poll's floor.
+  CHECK(WaitBudgetUs(kPeriod, kNow - 1, kNow) == 0);
+  CHECK(WaitTimeoutMs(kPeriod, kNow - 1, kNow) == 1);
+  CHECK(WaitBudgetUs(kPeriod, kNow, kNow) == 0);
+  CHECK(WaitTimeoutMs(kPeriod, kNow, kNow) == 1);
+  // A deadline beyond the loop's own pacing does not stretch the wait.
+  CHECK(WaitBudgetUs(kPeriod, kNow + 25'000, kNow) == kPeriod);
+  CHECK(WaitTimeoutMs(kPeriod, kNow + 25'000, kNow) == 10);
+  return 0;
+}
+
+// The budget is reported in whole poll milliseconds, rounded up and clamped the
+// same way the loop's own period was always clamped.
+int WaitRoundsUpAndClamps() {
+  constexpr TimeUs kNow = 1'000;
+  CHECK(WaitTimeoutMs(1, 0, kNow) == 1);
+  CHECK(WaitTimeoutMs(999, 0, kNow) == 1);
+  CHECK(WaitTimeoutMs(1'000, 0, kNow) == 1);
+  CHECK(WaitTimeoutMs(1'001, 0, kNow) == 2);
+  CHECK(WaitTimeoutMs(1'000'000, 0, kNow) == 1000);
+  CHECK(WaitTimeoutMs(5'000'000, 0, kNow) == 1000);
+  // Both ends of the unsigned range are accepted without wrapping.
+  CHECK(WaitBudgetUs(kMax, 0, 0) == kMax);
+  CHECK(WaitTimeoutMs(kMax, 0, 0) == 1000);
+  CHECK(WaitBudgetUs(kMax, kMax, kMax) == 0);
+  CHECK(WaitTimeoutMs(kMax, kMax, kMax) == 1);
+  CHECK(WaitBudgetUs(7'000, kMax, kZero) == 7'000);
+  return 0;
+}
+
+// A slower loop is servable because the sample deadline caps its wait, but the
+// poll floor bounds how fast this loop can wake; a disabled loop or schedule is
+// never servable and is reported instead of silently recording another rate.
+int SampleRateFitIsExplicit() {
+  CHECK(CanServeSampleRate(2'000, 10'000));
+  CHECK(CanServeSampleRate(10'000, 10'000));
+  // The shipped 20 ms supervision loop serves the 100 Hz plan through the cap.
+  CHECK(CanServeSampleRate(20'000, 10'000));
+  CHECK(CanServeSampleRate(2'000, 1'000));
+  CHECK(!CanServeSampleRate(2'000, 999));
+  CHECK(!CanServeSampleRate(2'000, 0));
+  CHECK(!CanServeSampleRate(0, 10'000));
+  return 0;
+}
+
 }  // namespace
 
 int main() {
@@ -81,6 +140,9 @@ int main() {
   failures += OlderReceiveStampKeepsTheClock();
   failures += EqualInstantsAreTheSameInstant();
   failures += BothRangeEnds();
+  failures += WaitIsCappedAtSampleDeadline();
+  failures += WaitRoundsUpAndClamps();
+  failures += SampleRateFitIsExplicit();
   if (failures == 0) {
     return 0;
   }

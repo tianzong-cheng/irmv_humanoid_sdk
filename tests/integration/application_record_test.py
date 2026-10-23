@@ -195,9 +195,15 @@ def run(source_root, application_binary, runtime_binary, read_record, work,
     if failures:
         return 1
 
-    runs = sorted(path for path in runs_directory.iterdir() if path.is_dir())
+    # The runtime's recorder owns `run_*`; the application adds its own
+    # `app_run_*` directory for the velocity stream in the same base.
+    runs = sorted(
+        path
+        for path in runs_directory.iterdir()
+        if path.is_dir() and path.name.startswith("run_")
+    )
     if len(runs) != 1:
-        fail(f"the recorder created {len(runs)} run directories, expected one")
+        fail(f"the runtime recorder created {len(runs)} run directories, expected one")
         return 1
     run_directory = runs[0]
 

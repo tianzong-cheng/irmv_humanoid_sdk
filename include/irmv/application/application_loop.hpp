@@ -40,6 +40,61 @@ inline protocol::TimeUs DecisionInstant(
   return newest_rx_us > clock_us ? newest_rx_us : clock_us;
 }
 
+// True when a loop of `period_us` can serve a schedule of `sample_period_us`.
+//
+// A loop that is slower than the plan is still servable: the wait at the end of
+// an iteration is capped at the next sample deadline, so the loop is woken at
+// least once per sample period even when its nominal pacing period is longer.
+// The poll's one-millisecond floor is the real bound on how fast this loop can
+// wake, so a plan more frequent than 1 kHz cannot be honoured and is refused
+// instead of being recorded at another rate than the metadata declares. A
+// disabled loop period or schedule is never servable.
+inline bool CanServeSampleRate(protocol::TimeUs period_us,
+                               protocol::TimeUs sample_period_us) noexcept {
+  return period_us != 0 && sample_period_us >= 1000;
+}
+
+// The longest wait one iteration may take before it must run again. It is the
+// loop's own pacing period, shortened - never lengthened - to the next velocity
+// sample deadline so a due sample is taken on time. Heartbeat and FSM deadlines
+// are unaffected: they are judged from the decision instant of an iteration,
+// and this helper only decides how long that iteration idles between them.
+// `next_deadline_us` is zero when no sample plan is active.
+inline protocol::TimeUs WaitBudgetUs(protocol::TimeUs period_us,
+                                     protocol::TimeUs next_deadline_us,
+                                     protocol::TimeUs now_us) noexcept {
+  protocol::TimeUs budget = period_us == 0 ? 1 : period_us;
+  if (next_deadline_us != 0) {
+    const protocol::TimeUs until =
+        next_deadline_us > now_us ? next_deadline_us - now_us : 0;
+    if (until < budget) {
+      budget = until;
+    }
+  }
+  return budget;
+}
+
+// WaitBudgetUs rounded up to whole milliseconds and clamped to the poll
+// timeout's own 1..1000 ms bounds, so a sample deadline at any resolution is
+// never rounded away.
+inline int WaitTimeoutMs(protocol::TimeUs period_us,
+                         protocol::TimeUs next_deadline_us,
+                         protocol::TimeUs now_us) noexcept {
+  const protocol::TimeUs budget =
+      WaitBudgetUs(period_us, next_deadline_us, now_us);
+  // Division rather than `budget + 999`: both ends of the unsigned range are
+  // legal inputs and the sum could wrap.
+  const protocol::TimeUs milliseconds =
+      budget / 1000 + (budget % 1000 == 0 ? 0 : 1);
+  if (milliseconds < 1) {
+    return 1;
+  }
+  if (milliseconds > 1000) {
+    return 1000;
+  }
+  return static_cast<int>(milliseconds);
+}
+
 // Exit codes of the standalone application.
 inline constexpr int kExitOk = 0;
 // Invalid configuration or a failure of the startup sequence, including the

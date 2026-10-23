@@ -65,6 +65,13 @@ class SampleSchedule {
   // The integer period of the plan in microseconds, or zero when disabled.
   protocol::TimeUs PeriodUs() const noexcept { return period_us_; }
 
+  // The next deadline of the plan, or zero when it is disabled or no Due() call
+  // has established the phase origin yet. A caller that paces a loop can cap
+  // its wait at this instant without touching the plan's state.
+  protocol::TimeUs NextDeadlineUs() const noexcept {
+    return period_us_ != 0 && started_ ? next_due_us_ : 0;
+  }
+
   // Reports whether `now_us` has reached the next deadline and, if so, advances
   // the deadline to the first grid point strictly after now.
   bool Due(protocol::TimeUs now_us) noexcept;

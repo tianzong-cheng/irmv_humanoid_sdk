@@ -165,6 +165,7 @@ void PolicySessionRecorder::Impl::WriteLine(const Queued &queued) {
     }
   }
   nlohmann::json model;
+  model["name"] = event.model_name;
   model["sha256"] = event.model_sha256;
   model["path"] = event.model_path;
   model["input"] = event.model_input;

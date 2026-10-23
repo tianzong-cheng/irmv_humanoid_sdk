@@ -59,8 +59,12 @@ struct PolicySessionEvent {
   protocol::Sequence epoch{0};  // 0 for a local session
   bool external{false};
   // The model that was armed, as the policy layer reported it when it loaded.
-  // `contract_sha256` is the digest of the `irmv.deployment` metadata the model
-  // carried; it is never derived here.
+  // `model_name` is the file name of the actually loaded model path (the
+  // application's `policy.model_path`), never a name derived from a digest or
+  // invented for a run that loaded none. `contract_sha256` is the digest of the
+  // `irmv.deployment` metadata the model carried; it is never derived here.
+  // An external or sourceless session leaves the whole model summary empty.
+  std::string model_name;
   std::string model_sha256;
   std::string model_path;
   std::string model_input;
@@ -95,7 +99,10 @@ void FillFrameGains(const protocol::JointCommand &frame,
 // Appends one JSON line per accepted session to
 // `<directory>/policy_sessions.jsonl`. The directory must exist; the file is
 // created if it is missing and appended to otherwise, so a run that is split
-// across recorder lifetimes still reads as one file.
+// across recorder lifetimes still reads as one file. The application passes the
+// directory of its own `app_run_*` velocity run, so two applications never
+// share one sidecar; a reader joins the two records of a context by the
+// directory metadata and the identity the line carries.
 class PolicySessionRecorder {
  public:
   // Opens the sidecar and starts one worker thread. A directory that does not

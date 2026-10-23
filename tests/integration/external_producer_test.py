@@ -559,10 +559,16 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
 
         # The producer dies while its context is live: the runtime falls back on
         # its own command deadline, the application follows it without latching
-        # anything, and a fresh process can be authorized again.
+        # anything, and a fresh process can be authorized again. The deferred
+        # producer is still alive and selected after its stop, so it is the
+        # process a new context is authorized to before it is killed.
+        back_to_ready("the fallback context")
+        prepared = selected_before(r"producer=prepared ")
+        wait_more("the fallback preparation", r"producer=prepared ", prepared, 25)
+        authorize("the fallback context")
         falling = count_app(r"behavior=Damping runtime=Damping ")
-        replacing_process.send_signal(signal.SIGKILL)
-        replacing_process.wait(timeout=10)
+        deferred_process.send_signal(signal.SIGKILL)
+        deferred_process.wait(timeout=10)
         fell_back = wait_more("the fallback", r"behavior=Damping runtime=Damping ",
                               falling, 15)
         if re.search(r"behavior=Fault", fell_back):
@@ -616,9 +622,21 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
     # identity the two share. This is what a run's recording is joined to
     # the source that produced it; the runtime's record cannot say it, since
     # the runtime never reads a deployment contract.
-    sidecar = work / "runs" / "policy_sessions.jsonl"
-    if not sidecar.is_file():
-        fail("the session sidecar was not written")
+    # The application writes its own run directory (`app_run_*`), and the
+    # session sidecar lives inside it beside the independent velocity stream.
+    # The directory is found by the schema its metadata declares, never by the
+    # old shared path.
+    app_runs = sorted(
+        path
+        for path in (work / "runs").iterdir()
+        if path.is_dir() and path.name.startswith("app_run_")
+    )
+    sidecar = app_runs[0] / "policy_sessions.jsonl" if app_runs else None
+    if len(app_runs) != 1 or sidecar is None or not sidecar.is_file():
+        fail(
+            "the application run directory with its session sidecar was not "
+            f"written; runs/{sorted(path.name for path in (work / 'runs').iterdir())}"
+        )
     else:
         events = [
             json.loads(line)
@@ -651,6 +669,11 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
                 fail(f"a sidecar line is not this schema: {event.get('schema')} v{event.get('version')}")
             if event.get("source") != "external":
                 fail(f"an external run recorded source={event.get('source')}")
+            if (event.get("model") or {}).get("name") != "":
+                fail(
+                    "an external run invented a model name: "
+                    f"{(event.get('model') or {}).get('name')}"
+                )
             key = (event["session_id"], int(event["epoch"]), event["producer_process_id"])
             if key not in joined:
                 fail(

@@ -821,6 +821,7 @@ add_library(
   src/telemetry/record_context.cpp
   src/telemetry/record_reader.cpp
   src/telemetry/recorder.cpp
+  src/telemetry/velocity_record.cpp
 )
 target_compile_features(irmv_telemetry PUBLIC cxx_std_17)
 target_include_directories(
@@ -917,6 +918,30 @@ target_link_libraries(record_context_test PRIVATE irmv_telemetry)
 
 add_test(NAME record_context_test COMMAND record_context_test)
 set_tests_properties(record_context_test PROPERTIES LABELS core TIMEOUT 60)
+
+# The application's independent velocity stream: a second bounded handoff and a
+# worker of its own, with the reader that names rows, losses and truncation
+# separately. The test injects a blocked/torn writer, so it never depends on a
+# real disk being slow.
+add_executable(velocity_record_test tests/unit/velocity_record_test.cpp)
+target_compile_features(velocity_record_test PRIVATE cxx_std_17)
+target_include_directories(
+  velocity_record_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(
+  velocity_record_test PRIVATE irmv_telemetry irmv_configuration
+                            Threads::Threads nlohmann_json::nlohmann_json
+)
+
+add_test(NAME velocity_record_test COMMAND velocity_record_test)
+set_tests_properties(
+  velocity_record_test
+  PROPERTIES LABELS core TIMEOUT 120
+  WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
 
 # The generator is exercised through a temporary repository, so its own view of
 # Git - including the no-repository case - is proven without touching this tree.
@@ -1122,8 +1147,9 @@ target_link_libraries(
 # It owns the supervision loop no other target needs, so its loop source is
 # compiled into the executable instead of a library of its own. It links the
 # application host libraries and never irmv_runtime (the lower layer is another
-# process, reached through DDS alone) and never irmv_telemetry (phase two ships
-# no application logging; the status goes to stdout).
+# process, reached through DDS alone). The application core stays free of the
+# telemetry library; the executable links it only for the independent
+# application-run velocity recorder that owns its own directory and worker.
 if(IRMV_BUILD_APPLICATION)
 add_executable(application src/application/main.cpp
                            src/application/application_loop.cpp)
@@ -1140,6 +1166,8 @@ target_link_libraries(
     irmv_configuration
     irmv_protocol
     irmv_build_identity
+    irmv_telemetry
+    nlohmann_json::nlohmann_json
     # The policy layer is linked into the application executable and into
     # nothing else: ONNX Runtime reaches the supervising process and never the
     # runtime process, which the build verifies afterwards with `ldd`.
@@ -1647,7 +1675,7 @@ target_include_directories(
 target_link_libraries(
   real_backend_runtime
   PRIVATE irmv_runtime irmv_transport irmv_telemetry irmv_hardware
-          nlohmann_json::nlohmann_json Threads::Threads)
+          irmv_build_identity nlohmann_json::nlohmann_json Threads::Threads)
 
 add_test(
   NAME real_backend_contract_test

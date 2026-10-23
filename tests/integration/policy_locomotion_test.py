@@ -199,9 +199,21 @@ def main() -> int:
         # authorized, carrying the model that was armed, the contract it
         # declared, the one gain this deployment overrode and the identity
         # it shares with the runtime's own session record.
-        sidecar = work / "runs" / "policy_sessions.jsonl"
-        if not sidecar.is_file():
-            fail("the session sidecar was not written")
+        # The application writes its own run directory (`app_run_*`), and the
+        # session sidecar lives inside it beside the independent velocity
+        # stream. The directory is found by the schema its metadata declares,
+        # never by the old shared path.
+        app_runs = sorted(
+            path
+            for path in (work / "runs").iterdir()
+            if path.is_dir() and path.name.startswith("app_run_")
+        )
+        sidecar = app_runs[0] / "policy_sessions.jsonl" if app_runs else None
+        if len(app_runs) != 1 or not sidecar.is_file():
+            fail(
+                "the application run directory with its session sidecar was "
+                f"not written; runs/{sorted(path.name for path in (work / 'runs').iterdir())}"
+            )
         else:
             events = [
                 json.loads(line)
@@ -221,6 +233,11 @@ def main() -> int:
                     fail(f"the session names model {model.get('sha256')}, not {model_sha256}")
                 if model.get("path") != str((work / "policy.onnx").resolve()):
                     fail(f"the session names the model at {model.get('path')}")
+                if model.get("name") != "policy.onnx":
+                    fail(
+                        "the session does not name the loaded model's file: "
+                        f"{model.get('name')}"
+                    )
                 if model.get("input") != "obs" or model.get("output") != "actions":
                     fail("the session does not name the model's own I/O")
                 if len(model.get("contract_sha256") or "") != 64:

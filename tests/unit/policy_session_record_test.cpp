@@ -57,6 +57,7 @@ PolicySessionEvent MakeLocalEvent() {
   event.runtime_id = MakeId(0x11);
   event.session_id = MakeId(0x22);
   event.external = false;
+  event.model_name = "policy.onnx";
   event.model_sha256 = std::string(64, 'a');
   event.model_path = "/models/policy.onnx";
   event.model_input = "obs";
@@ -131,6 +132,9 @@ int RoundTrip() {
   CHECK(first["producer_process_id"] == std::string(32, '3'));
   CHECK(first["epoch"] == 7);
   CHECK(first["source"] == "external");
+  // The external event names no model: the record states that absence instead
+  // of inventing a file name from the path or the digest.
+  CHECK(first["model"]["name"] == "");
   CHECK(first["model"]["sha256"] == std::string(64, 'a'));
   CHECK(first["model"]["path"] == "/models/policy.onnx");
   CHECK(first["model"]["input"] == "obs");
@@ -159,6 +163,7 @@ int RoundTrip() {
   CHECK(second["gains"].empty());
   CHECK(second["runtime_id"] == std::string(32, '1'));
   CHECK(second["session_id"] == std::string(32, '2'));
+  CHECK(second["model"]["name"] == "policy.onnx");
 
   std::filesystem::remove_all(directory);
   return 0;

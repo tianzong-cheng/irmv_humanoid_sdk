@@ -12,7 +12,9 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <filesystem>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <thread>
 
@@ -21,11 +23,14 @@
 #include "irmv/application/policy_session_record.hpp"
 #include "irmv/application/producer_supervisor.hpp"
 #include "irmv/application/robot_client.hpp"
+#include "irmv/build_identity.hpp"
 #include "irmv/configuration/application_config.hpp"
 #include "irmv/policy/action.hpp"
 #include "irmv/policy/inference.hpp"
 #include "irmv/policy/observation.hpp"
 #include "irmv/policy/onnx_model.hpp"
+#include "irmv/telemetry/record_context.hpp"
+#include "irmv/telemetry/velocity_record.hpp"
 #include "irmv/transport/client_transport.hpp"
 #include "irmv/transport/producer_transport.hpp"
 
@@ -249,20 +254,6 @@ protocol::TimeUs LoopPeriodUs(const configuration::ApplicationConfig &config) {
   return period == 0 ? 1 : period;
 }
 
-// The terminal wait of one iteration, clamped: the wait is the pacing of the
-// loop, so it is never longer than a second even for a configurably long
-// period, which then simply means more idle iterations.
-int PollTimeoutMs(protocol::TimeUs period_us) {
-  const protocol::TimeUs milliseconds = (period_us + 999) / 1000;
-  if (milliseconds < 1) {
-    return 1;
-  }
-  if (milliseconds > 1000) {
-    return 1000;
-  }
-  return static_cast<int>(milliseconds);
-}
-
 // Reads everything the terminal has, bounded per iteration. Returns true when
 // the input device is lost, which is an EOF or a terminal error and asks for
 // the ordered exit - never for an emergency stop and never for a claim that the
@@ -445,6 +436,75 @@ int LoadConfiguration(const ApplicationOptions &options,
 
 }  // namespace
 
+// The metadata of one application run's velocity directory. It is what makes
+// the directory self-describing: the schema identity, the build revision, the
+// two configuration digests, the clock the stamps are taken from, the sampling
+// rate, the units of the three values, and the explicit model status. The model
+// block never invents a name: a local run names the file name of the model that
+// was actually loaded, while an external or sourceless run states that absence
+// with a null name, and a local run without a loaded model says `unloaded`.
+std::string BuildVelocityMetadata(
+    const configuration::ApplicationConfig &config, LocomotionSource source,
+    const policy::OnnxModel *model, const telemetry::RecordClockIdentity &clock,
+    const std::string &clock_error, protocol::TimeUs loop_period_us,
+    protocol::TimeUs sample_period_us) {
+  using nlohmann::json;
+  json metadata;
+  metadata["schema"] = std::string(telemetry::kVelocitySchema);
+  metadata["version"] = telemetry::kVelocitySchemaVersion;
+  metadata["sdk_git_sha"] = std::string(irmv::SdkGitSha());
+  metadata["application_config_id"] = config.application_config_id;
+  metadata["config_id"] = config.runtime_config_id();
+  metadata["layout_id"] = config.layout_id();
+  metadata["joint_count"] = config.joint_count();
+  metadata["sample_hz"] = config.runtime.telemetry.recorder.sample_hz;
+  // The application's own pacing, so a reader can see whether the sample
+  // deadline or the nominal loop period determined the cadence. Neither is
+  // guessed: both come from the configuration and the schedule in effect.
+  metadata["loop_period_us"] = loop_period_us;
+  metadata["sampling"] = {
+      {"paced_by_deadline", loop_period_us > sample_period_us}};
+  metadata["source"] =
+      source == LocomotionSource::Local
+          ? "local"
+          : (source == LocomotionSource::External ? "external" : "none");
+  metadata["clock"] = {{"clock", clock.clock},
+                       {"boot_id", clock.boot_id},
+                       {"available", clock.available}};
+  if (!clock.available) {
+    metadata["clock"]["diagnostic"] = clock_error;
+  }
+  metadata["units"] = {
+      {"forward", "m_s"}, {"lateral", "m_s"}, {"yaw", "rad_s"}, {"time", "us"}};
+  json model_info;
+  if (source == LocomotionSource::Local && model != nullptr) {
+    model_info["status"] = "loaded";
+    model_info["name"] =
+        std::filesystem::path(config.policy.model_path).filename().string();
+    model_info["path"] = config.policy.model_path.string();
+    model_info["sha256"] = model->sha256();
+    model_info["contract_sha256"] = model->contract_sha256();
+  } else {
+    // An external source is its own producer and this application loaded no
+    // model; a sourceless run has none either. Both are explicit states with no
+    // fabricated name or digest.
+    model_info["status"] = source == LocomotionSource::Local
+                               ? "unloaded"
+                               : metadata["source"].get<std::string>();
+    model_info["name"] = nullptr;
+    model_info["path"] = nullptr;
+    model_info["sha256"] = nullptr;
+    model_info["contract_sha256"] = nullptr;
+  }
+  metadata["model"] = std::move(model_info);
+  metadata["row"] =
+      "one due body-velocity intent sample: the values the application held, "
+      "the runtime/session identity and latest state sequence in force, and "
+      "the "
+      "monotonic host stamp; a due deadline missed by the loop is not replayed";
+  return metadata.dump(1);
+}
+
 // One line of the session sidecar, written the moment a locomotion context is
 // confirmed - the point at which the model, the gains and the identity the
 // runtime granted are all known at once. An external context is recorded from
@@ -470,6 +530,10 @@ void RecordPolicySession(application::PolicySessionRecorder *recorder,
     application::FillFrameGains(first_frame, config.joint_names(),
                                 &event.gains);
   } else if (model != nullptr) {
+    // The name is the file name of the model path that was actually loaded -
+    // never a title invented for the run and never derived from the digest.
+    event.model_name =
+        std::filesystem::path(config.policy.model_path).filename().string();
     event.model_sha256 = model->sha256();
     event.model_path = config.policy.model_path;
     event.model_input = model->contract().input.name;
@@ -627,24 +691,88 @@ int RunApplication(const ApplicationOptions &options,
     std::fflush(stdout);
   }
 
-  // The session sidecar: one line per confirmed locomotion context, carrying
-  // the model that was armed and the gains this deployment applied - facts the
-  // runtime's own session event cannot know, because the runtime never reads
-  // the deployment contract. It follows the recorder's own switch, so a run
-  // that records no samples writes no sidecar either, and it lands in the
-  // directory the recorder was configured with - beside the run directories it
-  // writes - so a reader finds the two records of one context by the identity
-  // they share rather than by where they were put.
+  // The application's own recording. The velocity recorder comes first: it
+  // owns the `app_run_*` directory and the independent sample stream, and the
+  // policy session sidecar is written beside it in that same directory so two
+  // applications can never share one sessions file. Recording is best-effort:
+  // a run it cannot record still supervises the link, and the failure is
+  // reported instead of turning into a startup error.
+  const protocol::TimeUs period_us = LoopPeriodUs(config);
+  telemetry::SampleSchedule velocity_schedule(
+      config.runtime.telemetry.recorder.sample_hz);
+  std::unique_ptr<telemetry::VelocityRecorder> velocity_recorder;
   std::unique_ptr<application::PolicySessionRecorder> session_recorder;
+  std::uint64_t velocity_sample_seq = 0;
+
   if (config.runtime.telemetry.recorder.enabled) {
-    session_recorder = std::make_unique<application::PolicySessionRecorder>(
-        config.runtime.telemetry.recorder.directory.string());
-    if (!session_recorder->started()) {
-      // A sidecar that cannot be written does not stop the run: the samples are
-      // the recording, and this is the note that says why the model a run
-      // belongs to is missing from it.
-      std::fprintf(stderr, "application: session record unavailable: %s\n",
-                   session_recorder->error().c_str());
+    telemetry::RecordClockIdentity record_clock;
+    std::string record_clock_error;
+    if (!telemetry::LoadRecordClockIdentity(&record_clock,
+                                            &record_clock_error)) {
+      // The run may still be saved, but it cannot be merged automatically with
+      // another process's stamps: an identity is what proves both share a boot.
+      std::fprintf(stderr,
+                   "application: velocity record clock identity unavailable: "
+                   "%s\n",
+                   record_clock_error.c_str());
+      std::fflush(stderr);
+    }
+    if (!velocity_schedule.Enabled()) {
+      std::fprintf(stderr,
+                   "application: velocity record unavailable: sample_hz %u "
+                   "is not representable\n",
+                   config.runtime.telemetry.recorder.sample_hz);
+      std::fflush(stderr);
+    } else if (!CanServeSampleRate(period_us, velocity_schedule.PeriodUs())) {
+      // The poll floor cannot wake the loop once per sample period; recording
+      // slower than the metadata would claim is refused rather than faked.
+      std::fprintf(stderr,
+                   "application: velocity record unavailable: loop period "
+                   "%llu us cannot serve %u Hz\n",
+                   static_cast<unsigned long long>(period_us),
+                   config.runtime.telemetry.recorder.sample_hz);
+      std::fflush(stderr);
+    } else {
+      if (period_us > velocity_schedule.PeriodUs()) {
+        // The loop's nominal period is longer than the sample period; the wait
+        // cap below is what wakes it once per sample instead of leaving the
+        // stream short of the configured rate.
+        std::printf(
+            "[application] velocity record sample_hz=%u loop_period_us=%llu "
+            "paced_by_sample_deadline=yes\n",
+            config.runtime.telemetry.recorder.sample_hz,
+            static_cast<unsigned long long>(period_us));
+        std::fflush(stdout);
+      }
+      velocity_recorder = std::make_unique<telemetry::VelocityRecorder>();
+      std::string error;
+      if (!velocity_recorder->Start(
+              config.runtime.telemetry.recorder,
+              BuildVelocityMetadata(config, source, model.get(), record_clock,
+                                    record_clock_error, period_us,
+                                    velocity_schedule.PeriodUs()),
+              &error)) {
+        std::fprintf(stderr, "application: velocity record unavailable: %s\n",
+                     error.c_str());
+        std::fflush(stderr);
+        velocity_recorder.reset();
+      }
+    }
+    if (velocity_recorder) {
+      // The sidecar lands in this run's own directory, not the shared recorder
+      // base: two applications writing the same file would merge their
+      // sessions into one stream no identity could separate.
+      session_recorder = std::make_unique<application::PolicySessionRecorder>(
+          velocity_recorder->run_directory().string());
+      if (!session_recorder->started()) {
+        std::fprintf(stderr, "application: session record unavailable: %s\n",
+                     session_recorder->error().c_str());
+        std::fflush(stderr);
+      }
+    } else {
+      std::fprintf(stderr,
+                   "application: session record unavailable: the application "
+                   "run directory was not created\n");
       std::fflush(stderr);
     }
   }
@@ -680,8 +808,6 @@ int RunApplication(const ApplicationOptions &options,
   bool locomotion_previously = false;
   protocol::Id announced_producer = protocol::kNoId;
 
-  const protocol::TimeUs period_us = LoopPeriodUs(config);
-  const int poll_timeout_ms = PollTimeoutMs(period_us);
   std::array<char, kReadChunk> bytes{};
 
   StatusFields last{};
@@ -811,6 +937,33 @@ int RunApplication(const ApplicationOptions &options,
     }
     if (sends_us > worst_tx_us) {
       worst_tx_us = sends_us;
+    }
+
+    // (5a) The independent velocity sample. It is taken after this iteration's
+    // input and expiry processing, so the intent it stores is the one the
+    // iteration acted on, and it is gated by its own schedule rather than by
+    // the loop's period: a due deadline missed by a stall yields one sample
+    // with this iteration's real stamp, never a replayed burst of fabricated
+    // rows. `decision_now` is the iteration's own clock read; sampling adds
+    // none.
+    if (velocity_recorder && velocity_schedule.Due(decision_now)) {
+      telemetry::VelocitySample sample;
+      sample.stamp_us = decision_now;
+      sample.sample_seq = velocity_sample_seq++;
+      sample.identity_known = client.runtime_id() != protocol::kNoId &&
+                              client.session_id() != protocol::kNoId;
+      if (sample.identity_known) {
+        sample.runtime_id = client.runtime_id();
+        sample.session_id = client.session_id();
+      }
+      sample.latest_state_seq = view.state_known ? view.state.state_seq : 0;
+      const VelocityIntent &intent = router.velocity_intent();
+      sample.forward = intent.forward;
+      sample.lateral = intent.lateral;
+      sample.yaw = intent.yaw;
+      // A full handoff or a stopped recorder costs the sample, never the
+      // iteration; the recorder counts it and names the loss in its index.
+      static_cast<void>(velocity_recorder->TryRecord(sample));
     }
 
     // (5b) The local policy source. The behaviour above decided whether it is
@@ -1267,7 +1420,20 @@ int RunApplication(const ApplicationOptions &options,
       static_cast<void>(std::fflush(stdout));
       // Nothing of this process keeps running behind the exit line: the
       // transport thread is joined here, and the runtime is not touched - its
-      // own watchdog owns the link this process leaves behind.
+      // own watchdog owns the link this process leaves behind. The session
+      // sidecar is closed first, then the velocity recorder finalizes its
+      // directory and index: the two records of a run are complete in that
+      // order, and the run directory is final before the process leaves.
+      if (session_recorder) {
+        session_recorder->Stop();
+      }
+      if (velocity_recorder && !velocity_recorder->Stop()) {
+        std::fprintf(stderr,
+                     "application: velocity record did not finalize inside "
+                     "%u ms; its worker will finish on its own\n",
+                     telemetry::kVelocityStopTimeoutMs);
+        std::fflush(stderr);
+      }
       if (worker) {
         worker->Stop();
       }
@@ -1291,17 +1457,27 @@ int RunApplication(const ApplicationOptions &options,
 
     // The wait that paces the iteration, and the terminal wait with it. Once
     // the input device is gone the descriptor reports it forever, so the
-    // pacing becomes a plain sleep instead of a spin.
+    // pacing becomes a plain sleep instead of a spin. In both forms the wait is
+    // the loop's own period capped at the next velocity sample deadline: the
+    // cap can only shorten this idle stretch, so every heartbeat and FSM
+    // deadline - judged at the next iteration's decision instant - keeps the
+    // same bound it had before.
+    const protocol::TimeUs next_sample_us =
+        velocity_recorder ? velocity_schedule.NextDeadlineUs() : 0;
     if (input_lost) {
-      std::this_thread::sleep_for(std::chrono::microseconds(period_us));
+      const protocol::TimeUs budget =
+          WaitBudgetUs(period_us, next_sample_us, decision_now);
+      std::this_thread::sleep_for(std::chrono::microseconds(budget));
     } else {
       struct pollfd descriptor {};
       descriptor.fd = STDIN_FILENO;
       descriptor.events = POLLIN;
+      const int wait_timeout_ms =
+          WaitTimeoutMs(period_us, next_sample_us, decision_now);
       // An interrupted wait and every other result just end the wait: the next
       // iteration re-reads the clock and re-runs its checks, which is also what
       // keeps a signalled exit bounded.
-      static_cast<void>(::poll(&descriptor, 1, poll_timeout_ms));
+      static_cast<void>(::poll(&descriptor, 1, wait_timeout_ms));
     }
   }
 }
