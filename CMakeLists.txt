@@ -461,6 +461,7 @@ endif()
 add_library(
   irmv_runtime
   src/runtime/safety.cpp
+  src/runtime/fault_tracker.cpp
   src/runtime/command_gate.cpp
   src/runtime/execution_fsm.cpp
   src/runtime/states/boot.cpp
@@ -494,6 +495,22 @@ target_link_libraries(safety_test PRIVATE irmv_runtime)
 add_test(NAME safety_test COMMAND safety_test)
 set_tests_properties(
   safety_test PROPERTIES LABELS core WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
+add_executable(fault_tracker_test tests/unit/fault_tracker_test.cpp)
+target_compile_features(fault_tracker_test PRIVATE cxx_std_17)
+target_include_directories(
+  fault_tracker_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(fault_tracker_test PRIVATE irmv_runtime)
+
+add_test(NAME fault_tracker_test COMMAND fault_tracker_test)
+set_tests_properties(
+  fault_tracker_test PROPERTIES LABELS core
+  WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
 add_executable(command_gate_test tests/unit/command_gate_test.cpp)

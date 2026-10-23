@@ -7,6 +7,7 @@
 #include "irmv/hardware/backend.hpp"
 #include "irmv/protocol/types.hpp"
 #include "irmv/protocol/validation.hpp"
+#include "irmv/runtime/fault_tracker.hpp"
 
 namespace irmv::runtime {
 
@@ -51,7 +52,14 @@ struct SafetyReport {
   bool imu_invalid{false};
   bool damping_eligible{false};
   protocol::FaultReason reason{protocol::FaultReason::None};
+  // The bounded, published view. Appended in priority order and dropped at
+  // capacity, exactly as before.
   protocol::FaultReport details;
+  // The complete internal diagnostic of the same check: every established
+  // condition separately, never derived from the truncated details above.
+  // CheckFeedback resets `count` and rewrites entries as they are appended; a
+  // caller that reuses the report must read only the first `count` entries.
+  FaultObservationBatch observations;
 };
 
 struct ControlOutput {
@@ -88,10 +96,16 @@ protocol::ValidationResult ValidateTrackingCommand(
 // observed: once a joint or the required IMU has delivered a sample, a later
 // absent or invalid sample is an observation of a failure and faults
 // immediately, inside the grace window as well.
-SafetyReport CheckFeedback(const configuration::RuntimeConfig &config,
-                           const protocol::FeedbackSnapshot &feedback,
-                           protocol::TimeUs now_us, bool boot_grace,
-                           const FeedbackObservation &observed);
+//
+// `report` is caller-owned storage. Only the scalar verdict fields and the two
+// container counts are reset; the preallocated detail storage is rewritten as
+// entries are appended, so a caller that keeps one report across ticks does not
+// reconstruct the 1024-entry observation batch on every tick. The unused tail
+// is never read.
+void CheckFeedback(const configuration::RuntimeConfig &config,
+                   const protocol::FeedbackSnapshot &feedback,
+                   protocol::TimeUs now_us, bool boot_grace,
+                   const FeedbackObservation &observed, SafetyReport &report);
 
 // Computes the torque command for tracking. Any malformed, out of range or
 // non-finite input rejects the whole command: no partial output is produced.

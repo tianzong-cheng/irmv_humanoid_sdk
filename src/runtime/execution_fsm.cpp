@@ -68,8 +68,9 @@ TickResult ExecutionFsm::Tick(protocol::TimeUs now_us,
   if (boot_grace) {
     observed_.Observe(feedback, config_.joint_count());
   }
-  const SafetyReport report =
-      CheckFeedback(config_, feedback, now_us, boot_grace, observed_);
+  CheckFeedback(config_, feedback, now_us, boot_grace, observed_,
+                safety_report_);
+  const SafetyReport &report = safety_report_;
   scope.report = &report;
   gate_.RecordState(published_seq, now_us);
 

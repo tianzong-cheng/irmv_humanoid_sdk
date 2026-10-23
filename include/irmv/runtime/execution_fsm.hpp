@@ -409,6 +409,11 @@ class ExecutionFsm {
   // required IMU that goes missing after its first frame faults immediately.
   FeedbackObservation observed_{};
 
+  // Caller-owned storage for one safety check. CheckFeedback resets the
+  // verdict fields and the container counts only, so the preallocated detail
+  // storage is not reconstructed on every tick.
+  SafetyReport safety_report_;
+
   protocol::Id session_id_{};
   protocol::Id session_supervisor_id_{};
   protocol::TimeUs last_heartbeat_rx_us_{0};

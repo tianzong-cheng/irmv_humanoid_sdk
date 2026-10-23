@@ -113,25 +113,30 @@ bool IsStale(protocol::TimeUs rx_stamp_us, protocol::TimeUs now_us,
   return rx_stamp_us > now_us || now_us - rx_stamp_us > timeout_us;
 }
 
+protocol::FaultDetail MakeFaultDetail(
+    protocol::FaultReason reason, protocol::FaultCondition condition,
+    std::uint32_t joint_index, std::uint32_t error_code, double observed_value,
+    double limit, protocol::TimeUs sample_stamp_us, std::string_view message) {
+  protocol::FaultDetail detail;
+  detail.reason = reason;
+  detail.condition = condition;
+  detail.joint_index = joint_index;
+  detail.error_code = error_code;
+  detail.observed_value = observed_value;
+  detail.limit = limit;
+  detail.sample_stamp_us = sample_stamp_us;
+  static_cast<void>(detail.message.Assign(message));
+  return detail;
+}
+
 // detected_stamp_us and output_action are filled in once the whole snapshot has
 // been evaluated and the damping decision is known.
-void AppendDetail(protocol::FaultReport *report, protocol::FaultReason reason,
-                  std::uint32_t joint_index, std::uint32_t error_code,
-                  double observed_value, double limit,
-                  protocol::TimeUs sample_stamp_us, std::string_view message) {
+void AppendDetail(protocol::FaultReport *report,
+                  const protocol::FaultDetail &detail) {
   if (report->count >= kDetailCapacity) {
     return;
   }
-
-  protocol::FaultDetail *detail = &report->details[report->count];
-  *detail = protocol::FaultDetail{};
-  detail->reason = reason;
-  detail->joint_index = joint_index;
-  detail->error_code = error_code;
-  detail->observed_value = observed_value;
-  detail->limit = limit;
-  detail->sample_stamp_us = sample_stamp_us;
-  static_cast<void>(detail->message.Assign(message));
+  report->details[report->count] = detail;
   ++report->count;
 }
 
@@ -170,18 +175,47 @@ void FeedbackObservation::Observe(const protocol::FeedbackSnapshot &feedback,
   }
 }
 
-SafetyReport CheckFeedback(const configuration::RuntimeConfig &config,
-                           const protocol::FeedbackSnapshot &feedback,
-                           protocol::TimeUs now_us, bool boot_grace,
-                           const FeedbackObservation &observed) {
-  SafetyReport report;
+void CheckFeedback(const configuration::RuntimeConfig &config,
+                   const protocol::FeedbackSnapshot &feedback,
+                   protocol::TimeUs now_us, bool boot_grace,
+                   const FeedbackObservation &observed, SafetyReport &report) {
+  // Reset only the verdict fields and the container lengths. The detail
+  // storage is overwritten entry by entry as observations are appended, so a
+  // reused report neither reconstructs the 1024-entry batch on every tick nor
+  // exposes a stale tail: only the first `count` entries are ever read.
+  report.healthy = false;
+  report.fault = false;
+  report.awaiting_feedback = false;
+  report.stale_feedback = false;
+  report.frequency_low = false;
+  report.feedback_invalid = false;
+  report.driver_error = false;
+  report.position_exceeded = false;
+  report.velocity_exceeded = false;
+  report.imu_invalid = false;
+  report.damping_eligible = false;
+  report.reason = protocol::FaultReason::None;
+  report.details.count = 0;
+  report.observations.count = 0;
+  report.observations.dropped = 0;
+
   const std::size_t joint_count = config.joint_count();
   if (joint_count == 0 || joint_count > protocol::kMaxJoints ||
       feedback.count != joint_count) {
     report.fault = true;
     report.feedback_invalid = true;
     report.reason = protocol::FaultReason::FeedbackInvalid;
-    return report;
+    // The published report has no slot for a shape fault, but the complete
+    // diagnostic keeps it as one observation without a joint.
+    AppendFaultObservation(
+        report.observations,
+        MakeFaultDetail(protocol::FaultReason::FeedbackInvalid,
+                        protocol::FaultCondition::FeedbackShapeInvalid,
+                        protocol::kNoJointIndex, 0,
+                        static_cast<double>(feedback.count),
+                        static_cast<double>(joint_count), feedback.stamp_us,
+                        "feedback snapshot shape invalid"));
+    return;
   }
 
   protocol::FaultReason reason = protocol::FaultReason::None;
@@ -205,31 +239,79 @@ SafetyReport CheckFeedback(const configuration::RuntimeConfig &config,
       continue;
     }
 
-    if (!joint.valid || !joint.connected || !IsJointSampleFinite(joint)) {
+    const bool disconnected = !joint.connected;
+    const bool invalid = !joint.valid;
+    const bool non_finite = !IsJointSampleFinite(joint);
+    if (disconnected || invalid || non_finite) {
       report.feedback_invalid = true;
       fault = true;
       RaiseReason(&reason, protocol::FaultReason::FeedbackInvalid);
-      AppendDetail(&report.details, protocol::FaultReason::FeedbackInvalid,
-                   joint_index, 0, 0.0, 0.0, joint.rx_stamp_us,
-                   "invalid joint feedback sample");
+      // The published report keeps one combined entry per joint, named after
+      // the first established cause. The complete diagnostic records every
+      // established cause separately, so a disconnected sample and a
+      // non-finite value on a healthy connection stay distinguishable.
+      protocol::FaultCondition first_condition =
+          protocol::FaultCondition::JointDisconnected;
+      std::string_view first_message = "joint disconnected";
+      if (!disconnected && invalid) {
+        first_condition = protocol::FaultCondition::JointFeedbackInvalid;
+        first_message = "invalid joint feedback sample";
+      } else if (!disconnected) {
+        first_condition = protocol::FaultCondition::JointFeedbackNonFinite;
+        first_message = "non-finite joint feedback sample";
+      }
+      AppendDetail(&report.details,
+                   MakeFaultDetail(protocol::FaultReason::FeedbackInvalid,
+                                   first_condition, joint_index, 0, 0.0, 0.0,
+                                   joint.rx_stamp_us, first_message));
+      if (disconnected) {
+        AppendFaultObservation(
+            report.observations,
+            MakeFaultDetail(protocol::FaultReason::FeedbackInvalid,
+                            protocol::FaultCondition::JointDisconnected,
+                            joint_index, 0, 0.0, 0.0, joint.rx_stamp_us,
+                            "joint disconnected"));
+      }
+      if (invalid) {
+        AppendFaultObservation(
+            report.observations,
+            MakeFaultDetail(protocol::FaultReason::FeedbackInvalid,
+                            protocol::FaultCondition::JointFeedbackInvalid,
+                            joint_index, 0, 0.0, 0.0, joint.rx_stamp_us,
+                            "invalid joint feedback sample"));
+      }
+      if (non_finite) {
+        AppendFaultObservation(
+            report.observations,
+            MakeFaultDetail(protocol::FaultReason::FeedbackInvalid,
+                            protocol::FaultCondition::JointFeedbackNonFinite,
+                            joint_index, 0, 0.0, 0.0, joint.rx_stamp_us,
+                            "non-finite joint feedback sample"));
+      }
     }
     if (IsStale(joint.rx_stamp_us, now_us, config.timeouts.feedback_us)) {
       report.stale_feedback = true;
       if (!boot_grace) {
         fault = true;
         RaiseReason(&reason, protocol::FaultReason::FeedbackInvalid);
-        AppendDetail(&report.details, protocol::FaultReason::FeedbackInvalid,
-                     joint_index, 0, 0.0, 0.0, joint.rx_stamp_us,
-                     "stale joint feedback sample");
+        const protocol::FaultDetail stale = MakeFaultDetail(
+            protocol::FaultReason::FeedbackInvalid,
+            protocol::FaultCondition::JointFeedbackStale, joint_index, 0, 0.0,
+            0.0, joint.rx_stamp_us, "stale joint feedback sample");
+        AppendDetail(&report.details, stale);
+        AppendFaultObservation(report.observations, stale);
       }
     }
     if (joint.error_code != 0) {
       report.driver_error = true;
       fault = true;
       RaiseReason(&reason, protocol::FaultReason::DriverError);
-      AppendDetail(&report.details, protocol::FaultReason::DriverError,
-                   joint_index, joint.error_code, 0.0, 0.0, joint.rx_stamp_us,
-                   "driver error");
+      const protocol::FaultDetail driver = MakeFaultDetail(
+          protocol::FaultReason::DriverError,
+          protocol::FaultCondition::JointDriverError, joint_index,
+          joint.error_code, 0.0, 0.0, joint.rx_stamp_us, "driver error");
+      AppendDetail(&report.details, driver);
+      AppendFaultObservation(report.observations, driver);
     }
     if (joint.freq_hz < config.boot.minimum_frequency_hz) {
       report.frequency_low = true;
@@ -237,10 +319,13 @@ SafetyReport CheckFeedback(const configuration::RuntimeConfig &config,
         report.feedback_invalid = true;
         fault = true;
         RaiseReason(&reason, protocol::FaultReason::FeedbackInvalid);
-        AppendDetail(&report.details, protocol::FaultReason::FeedbackInvalid,
-                     joint_index, 0, joint.freq_hz,
-                     config.boot.minimum_frequency_hz, joint.rx_stamp_us,
-                     "control frequency below minimum");
+        const protocol::FaultDetail slow = MakeFaultDetail(
+            protocol::FaultReason::FeedbackInvalid,
+            protocol::FaultCondition::JointFrequencyLow, joint_index, 0,
+            joint.freq_hz, config.boot.minimum_frequency_hz, joint.rx_stamp_us,
+            "control frequency below minimum");
+        AppendDetail(&report.details, slow);
+        AppendFaultObservation(report.observations, slow);
       }
     }
   }
@@ -259,10 +344,13 @@ SafetyReport CheckFeedback(const configuration::RuntimeConfig &config,
       const double limit = joint.q < config.position_min[index]
                                ? config.position_min[index]
                                : config.position_max[index];
-      AppendDetail(&report.details,
-                   protocol::FaultReason::JointPositionExceeded,
-                   static_cast<std::uint32_t>(index), 0, joint.q, limit,
-                   joint.rx_stamp_us, "joint position limit exceeded");
+      const protocol::FaultDetail position =
+          MakeFaultDetail(protocol::FaultReason::JointPositionExceeded,
+                          protocol::FaultCondition::JointPositionExceeded,
+                          static_cast<std::uint32_t>(index), 0, joint.q, limit,
+                          joint.rx_stamp_us, "joint position limit exceeded");
+      AppendDetail(&report.details, position);
+      AppendFaultObservation(report.observations, position);
     }
   }
 
@@ -278,10 +366,13 @@ SafetyReport CheckFeedback(const configuration::RuntimeConfig &config,
       report.velocity_exceeded = true;
       fault = true;
       RaiseReason(&reason, protocol::FaultReason::JointVelocityExceeded);
-      AppendDetail(&report.details,
-                   protocol::FaultReason::JointVelocityExceeded,
-                   static_cast<std::uint32_t>(index), 0, joint.dq, limit,
-                   joint.rx_stamp_us, "joint velocity limit exceeded");
+      const protocol::FaultDetail velocity =
+          MakeFaultDetail(protocol::FaultReason::JointVelocityExceeded,
+                          protocol::FaultCondition::JointVelocityExceeded,
+                          static_cast<std::uint32_t>(index), 0, joint.dq, limit,
+                          joint.rx_stamp_us, "joint velocity limit exceeded");
+      AppendDetail(&report.details, velocity);
+      AppendFaultObservation(report.observations, velocity);
     }
   }
 
@@ -292,16 +383,56 @@ SafetyReport CheckFeedback(const configuration::RuntimeConfig &config,
       // absent joint; an observed invalid, missing or stale IMU keeps faulting.
       report.awaiting_feedback = true;
     } else {
-      const bool imu_invalid = !imu.valid || !IsImuSampleFinite(imu) ||
-                               (!boot_grace && IsStale(imu.rx_stamp_us, now_us,
-                                                       config.timeouts.imu_us));
-      if (imu_invalid) {
+      const bool invalid = !imu.valid;
+      const bool non_finite = !IsImuSampleFinite(imu);
+      const bool stale = !boot_grace && IsStale(imu.rx_stamp_us, now_us,
+                                                config.timeouts.imu_us);
+      if (invalid || non_finite || stale) {
         report.imu_invalid = true;
         fault = true;
         RaiseReason(&reason, protocol::FaultReason::ImuInvalid);
-        AppendDetail(&report.details, protocol::FaultReason::ImuInvalid,
-                     protocol::kNoJointIndex, 0, 0.0, 0.0, imu.rx_stamp_us,
-                     "imu feedback invalid");
+        // Like a joint, the published report carries one combined entry named
+        // after the first established cause, while the complete diagnostic
+        // reports invalid, non-finite and stale samples separately.
+        protocol::FaultCondition first_condition =
+            protocol::FaultCondition::ImuFeedbackInvalid;
+        std::string_view first_message = "imu feedback invalid";
+        if (!invalid && non_finite) {
+          first_condition = protocol::FaultCondition::ImuFeedbackNonFinite;
+          first_message = "imu feedback non-finite";
+        } else if (!invalid) {
+          first_condition = protocol::FaultCondition::ImuFeedbackStale;
+          first_message = "imu feedback stale";
+        }
+        AppendDetail(
+            &report.details,
+            MakeFaultDetail(protocol::FaultReason::ImuInvalid, first_condition,
+                            protocol::kNoJointIndex, 0, 0.0, 0.0,
+                            imu.rx_stamp_us, first_message));
+        if (invalid) {
+          AppendFaultObservation(
+              report.observations,
+              MakeFaultDetail(protocol::FaultReason::ImuInvalid,
+                              protocol::FaultCondition::ImuFeedbackInvalid,
+                              protocol::kNoJointIndex, 0, 0.0, 0.0,
+                              imu.rx_stamp_us, "imu feedback invalid"));
+        }
+        if (non_finite) {
+          AppendFaultObservation(
+              report.observations,
+              MakeFaultDetail(protocol::FaultReason::ImuInvalid,
+                              protocol::FaultCondition::ImuFeedbackNonFinite,
+                              protocol::kNoJointIndex, 0, 0.0, 0.0,
+                              imu.rx_stamp_us, "imu feedback non-finite"));
+        }
+        if (stale) {
+          AppendFaultObservation(
+              report.observations,
+              MakeFaultDetail(protocol::FaultReason::ImuInvalid,
+                              protocol::FaultCondition::ImuFeedbackStale,
+                              protocol::kNoJointIndex, 0, 0.0, 0.0,
+                              imu.rx_stamp_us, "imu feedback stale"));
+        }
       }
     }
   }
@@ -323,7 +454,6 @@ SafetyReport CheckFeedback(const configuration::RuntimeConfig &config,
     report.details.details[index].detected_stamp_us = now_us;
     report.details.details[index].output_action = action;
   }
-  return report;
 }
 
 protocol::ValidationResult ValidateTrackingCommand(
