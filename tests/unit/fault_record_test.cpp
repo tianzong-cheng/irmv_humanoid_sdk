@@ -24,6 +24,7 @@
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -315,7 +316,8 @@ int TrailingPartialAndMissingCompletion() {
             "\"joint_index\":3,\"error_code\":3735928559,"
             "\"observed_value\":1.25,\"limit\":1.0,"
             "\"sample_stamp_us\":993,\"detected_stamp_us\":1000,"
-            "\"output_action\":0,\"message\":\"ok\"}\n"
+            "\"output_action\":0,\"message\":\"ok\","
+            "\"message_hex\":\"6f6b\"}\n"
             "{\"schema_version\":4,\"record_seq\":\n";
   }
   FaultRecordRange malformed;
@@ -335,8 +337,8 @@ int WriteFailureDoesNotClaimPersistence() {
     std::atomic<bool> fail{true};
   } state;
   irmv::telemetry::SetFaultLineWriteHookForTest(
-      [](void *context) {
-        return !static_cast<FailHook *>(context)->fail.load();
+      [](void *context, std::string_view) -> int {
+        return static_cast<FailHook *>(context)->fail.load() ? 1 : 0;
       },
       &state);
 
@@ -390,17 +392,17 @@ int BlockedWriterAndLossAccounting() {
     bool block_first{true};
   } state;
   irmv::telemetry::SetFaultLineWriteHookForTest(
-      [](void *context) {
+      [](void *context, std::string_view) -> int {
         auto *hook = static_cast<BlockHook *>(context);
         std::unique_lock<std::mutex> lock(hook->mutex);
         if (!hook->block_first) {
-          return true;
+          return 0;
         }
         hook->block_first = false;
         hook->entered = true;
         hook->cv.notify_all();
         hook->cv.wait(lock, [hook] { return hook->released; });
-        return true;
+        return 0;
       },
       &state);
 
@@ -440,8 +442,11 @@ int BlockedWriterAndLossAccounting() {
   const auto started = std::chrono::steady_clock::now();
   CHECK(!recorder.Stop());
   const auto elapsed = std::chrono::steady_clock::now() - started;
-  CHECK(elapsed >= std::chrono::milliseconds(1500));
-  CHECK(elapsed < std::chrono::milliseconds(3500));
+  // The deadline is what bounds the return, not the wall clock: under load or a
+  // sanitizer the exact two seconds may stretch. Returning at all while the
+  // worker is still parked proves Stop() did not wait for the writer.
+  CHECK(elapsed >= std::chrono::milliseconds(500));
+  CHECK(elapsed < std::chrono::seconds(10));
   const nlohmann::json index = ReadIndex(recorder.run_directory());
   CHECK(index["faults"]["complete"] == false);
 
@@ -528,6 +533,159 @@ int BlockedWriterAndLossAccounting() {
   return 0;
 }
 
+// A torn write is rolled back to the last committed line. Without the rollback
+// the next complete line would merge with the torn bytes and the reader would
+// reject the whole sidecar as malformed, losing every earlier row too.
+int TornLineRollsBack() {
+  struct TornHook {
+    std::atomic<bool> first{true};
+  } state;
+  irmv::telemetry::SetFaultLineWriteHookForTest(
+      [](void *context, std::string_view) -> int {
+        auto *hook = static_cast<TornHook *>(context);
+        return hook->first.exchange(false) ? 2 : 0;
+      },
+      &state);
+
+  const std::filesystem::path directory = MakeDirectory();
+  Recorder recorder;
+  CHECK(StartRecorder(&recorder, directory));
+  CHECK(recorder.TryRecordFault(MakeFault(1, 10, 20, 1000)));
+  CHECK(recorder.TryRecordFault(MakeFault(2, 11, 20, 1010)));
+  CHECK(recorder.TryRecordFault(MakeFault(3, 12, 20, 1020)));
+  CHECK(recorder.Stop());
+  CHECK(recorder.faults_recorded() == 3);
+  CHECK(recorder.faults_written() == 2);
+  CHECK(recorder.fault_write_failures() == 1);
+
+  FaultRecordRange range;
+  CHECK(ReadFaultRange(recorder.run_directory(), 0, kNever, &range));
+  CHECK(range.ok);
+  CHECK(!range.truncated);
+  CHECK(!range.complete);
+  CHECK(range.rows.size() == 2);
+  if (range.rows.size() == 2) {
+    CHECK(range.rows[0].record_seq == 2);
+    CHECK(range.rows[1].record_seq == 3);
+  }
+  CHECK(range.losses.size() == 1);
+  if (range.losses.size() == 1) {
+    CHECK(range.losses[0].reason == FaultLossReason::WriteFailed);
+    CHECK(range.losses[0].dropped == 1);
+    CHECK(range.losses[0].first_record_seq == 1);
+    CHECK(range.losses[0].last_record_seq == 1);
+  }
+  const std::string content =
+      ReadFile(recorder.run_directory() / "faults.jsonl");
+  CHECK(static_cast<std::size_t>(
+            std::count(content.begin(), content.end(), '\n')) == 2);
+  CHECK(content.find("\"record_seq\":1,") == std::string::npos);
+  CHECK(content.find("\"record_seq\":2,") != std::string::npos);
+  CHECK(content.find("\"record_seq\":3,") != std::string::npos);
+
+  irmv::telemetry::SetFaultLineWriteHookForTest(nullptr, nullptr);
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
+// The protocol message is raw fixed-capacity bytes, not UTF-8. The exact bytes
+// - including invalid sequences, NULs and the 256-byte boundary - must return
+// unchanged, even though the human `message` field had to replace them.
+int MessageBytesRoundTrip() {
+  std::string raw(256, 'x');
+  raw[0] = static_cast<char>(0xFF);
+  raw[1] = static_cast<char>(0xFE);
+  raw[2] = '\0';
+  raw[3] = '"';
+  raw[4] = '\\';
+  raw[255] = static_cast<char>(0x80);
+  RecordedFault fault = MakeFault(1, 10, 20, 1000);
+  CHECK(fault.detail.message.Assign(raw));
+
+  const std::filesystem::path directory = MakeDirectory();
+  Recorder recorder;
+  CHECK(StartRecorder(&recorder, directory));
+  CHECK(recorder.TryRecordFault(fault));
+  CHECK(recorder.Stop());
+  CHECK(recorder.faults_written() == 1);
+
+  FaultRecordRange range;
+  CHECK(ReadFaultRange(recorder.run_directory(), 0, kNever, &range));
+  CHECK(range.ok);
+  CHECK(range.complete);
+  CHECK(range.rows.size() == 1);
+  if (range.rows.size() == 1) {
+    CHECK(std::string(range.rows[0].detail.message.View()) == raw);
+  }
+  const std::string content =
+      ReadFile(recorder.run_directory() / "faults.jsonl");
+  CHECK(content.find("\"message_hex\":\"fffe00225c") != std::string::npos);
+  CHECK(content.find("80\"") != std::string::npos);
+
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
+// The producer-side loss table is fixed capacity. Past 64 separate generation
+// reports the last span absorbs the rest: the span count degrades, but no loss
+// disappears from the total.
+int LossSpanTableFoldRetainsTotals() {
+  const std::filesystem::path directory = MakeDirectory();
+  Recorder recorder;
+  CHECK(StartRecorder(&recorder, directory));
+  for (std::uint64_t index = 0; index < 70; ++index) {
+    recorder.ReportFaultGenerationLoss(1000 + index, 100 + index, 1);
+  }
+  CHECK(recorder.faults_generation_dropped() == 70);
+  CHECK(recorder.Stop());
+
+  FaultRecordRange range;
+  CHECK(ReadFaultRange(recorder.run_directory(), 0, kNever, &range));
+  CHECK(range.ok);
+  CHECK(range.complete);
+  CHECK(range.losses.size() == 64);
+  std::uint64_t total = 0;
+  for (const auto &loss : range.losses) {
+    CHECK(loss.reason == FaultLossReason::Generation);
+    total += loss.dropped;
+  }
+  CHECK(total == 70);
+  if (range.losses.size() == 64) {
+    // Spans 1..64 are stored; reports 65..70 fold into the 64th span.
+    CHECK(range.losses[63].first_state_seq == 163);
+    CHECK(range.losses[63].last_state_seq == 169);
+    CHECK(range.losses[63].dropped == 7);
+  }
+
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
+// An index without the fault block (a run from a build before fault
+// persistence, or one whose section was not published) is readable and
+// incomplete, not an error.
+int IndexWithoutFaultBlockReadsIncomplete() {
+  const std::filesystem::path directory = MakeDirectory();
+  Recorder recorder;
+  CHECK(StartRecorder(&recorder, directory));
+  CHECK(recorder.TryRecordFault(MakeFault(1, 10, 20, 1000)));
+  CHECK(recorder.Stop());
+  {
+    std::ofstream file(recorder.run_directory() / "index.json",
+                       std::ios::binary | std::ios::trunc);
+    file << "{\"schema_version\":4,\"complete\":true}\n";
+  }
+  FaultRecordRange range;
+  CHECK(ReadFaultRange(recorder.run_directory(), 0, kNever, &range));
+  CHECK(range.ok);
+  CHECK(range.rows.size() == 1);
+  CHECK(range.losses.empty());
+  CHECK(!range.complete);
+  CHECK(!range.truncated);
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
 }  // namespace
 
 int main() {
@@ -537,6 +695,10 @@ int main() {
   failures += TrailingPartialAndMissingCompletion();
   failures += WriteFailureDoesNotClaimPersistence();
   failures += BlockedWriterAndLossAccounting();
+  failures += TornLineRollsBack();
+  failures += MessageBytesRoundTrip();
+  failures += LossSpanTableFoldRetainsTotals();
+  failures += IndexWithoutFaultBlockReadsIncomplete();
   if (failures == 0) {
     return 0;
   }

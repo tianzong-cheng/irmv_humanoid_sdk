@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include "irmv/telemetry/fault_record.hpp"
 
@@ -25,19 +26,32 @@ class FaultWriter {
 
   // Appends one line and flushes it. Returns false when the hook refused the
   // write or the device failed; the caller counts and reports the loss, and
-  // never treats the occurrence as persisted. Reopens the file on the next call
-  // after a failure.
+  // never treats the occurrence as persisted. On any failure the writer rolls
+  // the file back to its last committed byte, so a torn line can never merge
+  // with the next one into a malformed complete line. It reopens the file on
+  // the next call after a failure.
   bool Write(const RecordedFault &fault);
 
  private:
   struct State;
+  // Closes the stream and truncates the file back to the last line that was
+  // written and flushed in full.
+  void RollBack() noexcept;
+
   std::unique_ptr<State> state_;
 };
 
-// Test-only seam: called on the worker immediately before one line is written.
-// A test can block inside it (a blocked device) or return false (a failed
-// write). Production never sets it.
-void SetFaultLineWriteHookForTest(bool (*hook)(void *context),
+// Test-only seam: called on the worker before one line is written, with the
+// serialized line. It returns the action:
+//   0 - write the whole line;
+//   1 - refuse it (no bytes are written);
+//   2 - simulate a torn write (a prefix is written, then the sink fails).
+// A test can also block inside the hook (a blocked device). Production never
+// sets it. The function and its context are read as one pair under a mutex; a
+// test must keep the context alive until the worker is quiescent, because an
+// in-flight call may already hold the pair after removal.
+void SetFaultLineWriteHookForTest(int (*hook)(void *context,
+                                              std::string_view line),
                                   void *context) noexcept;
 
 }  // namespace irmv::telemetry

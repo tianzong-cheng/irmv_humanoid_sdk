@@ -42,7 +42,8 @@
 //     "sample_stamp_us": 993,
 //     "detected_stamp_us": 1000,
 //     "output_action": 0,
-//     "message": "..."
+//     "message": "...",                       // human form, UTF-8 replaced
+//     "message_hex": "<2*N lower-case hex>"   // the exact N <= 256 bytes
 //   }
 //
 // JSON has no representation for a non-finite double, and null would lose the
@@ -51,6 +52,12 @@
 // "NaN", "+Inf" and "-Inf"; the reader restores them. Null is never used for a
 // double. The numeric reason and condition travel with their stable protocol
 // names, so a consumer can read the line without this build's enum table.
+//
+// The protocol's message is fixed raw bytes, not UTF-8: a driver may put any
+// byte in it. JSON strings cannot carry every byte sequence losslessly, so
+// `message_hex` always carries the exact bytes and the reader restores the
+// message from it. `message` is the human-readable form, with invalid UTF-8
+// replaced by U+FFFD; it is informational and never the source of truth.
 namespace irmv::telemetry {
 
 // The fault sidecar of a run.
@@ -84,10 +91,9 @@ enum class FaultLossReason : std::uint32_t {
   // The recorder's bounded fault handoff was full, or the recorder was already
   // stopped, when the runtime offered the occurrence.
   QueueFull = 2,
-  // The worker accepted the occurrence but could not write its line.
+  // The worker accepted the occurrence but could not write its line. The
+  // writer rolls a torn line back, so a later line never joins its bytes.
   WriteFailed = 3,
-  // The recorder stopped with occurrences still in the handoff.
-  Stopped = 4,
 };
 
 // One stretch of lost fault occurrences, in the runtime's own ordinals and the

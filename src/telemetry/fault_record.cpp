@@ -1,12 +1,12 @@
 #include "irmv/telemetry/fault_record.hpp"
 
 #include <algorithm>
-#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
@@ -303,8 +303,31 @@ bool DecodeFault(const Json &line, RecordedFault *fault, std::string *why) {
     *why = "message is missing or not a string";
     return false;
   }
-  if (!fault->detail.message.Assign(message)) {
-    *why = "message is longer than the protocol's fixed capacity";
+  // The exact bytes live in `message_hex`; `message` is the human form and may
+  // have had invalid UTF-8 replaced. Both are part of the schema, but only the
+  // hex preserves the protocol's fixed byte array.
+  std::string message_hex;
+  if (!FieldString(line, "message_hex", &message_hex)) {
+    *why = "message_hex is missing or not a string";
+    return false;
+  }
+  if (message_hex.size() % 2 != 0 ||
+      message_hex.size() > 2 * protocol::kMaxReasonBytes) {
+    *why = "message_hex is not a bounded even-length hex string";
+    return false;
+  }
+  std::string raw(message_hex.size() / 2, '\0');
+  for (std::size_t index = 0; index < raw.size(); ++index) {
+    std::uint64_t byte = 0;
+    if (!HexValue(std::string_view(message_hex).substr(2 * index, 2), 2,
+                  &byte)) {
+      *why = "message_hex is not lower-case hex";
+      return false;
+    }
+    raw[index] = static_cast<char>(byte);
+  }
+  if (!fault->detail.message.Assign(raw)) {
+    *why = "message_hex is longer than the protocol's fixed capacity";
     return false;
   }
   return true;
@@ -336,8 +359,6 @@ bool DecodeLoss(const Json &entry, FaultLossSpan *loss, std::string *why) {
     loss->reason = FaultLossReason::QueueFull;
   } else if (reason == "write_failed") {
     loss->reason = FaultLossReason::WriteFailed;
-  } else if (reason == "stopped") {
-    loss->reason = FaultLossReason::Stopped;
   } else {
     *why = "a loss entry names an unknown reason";
     return false;
@@ -357,27 +378,24 @@ const char *FaultLossReasonName(FaultLossReason reason) noexcept {
       return "queue_full";
     case FaultLossReason::WriteFailed:
       return "write_failed";
-    case FaultLossReason::Stopped:
-      return "stopped";
   }
   return "unknown";
 }
 
-// The line hook is read on the worker for every line. The context is published
-// before the hook so a test that installs one sees the matching context; the
-// hook is cleared first on removal for the same reason.
-std::atomic<bool (*)(void *)> g_fault_line_hook{nullptr};
-std::atomic<void *> g_fault_line_hook_context{nullptr};
+// The hook and its context are replaced as one pair under a mutex, so the
+// worker can never observe a function from one installation and the context of
+// another. A call already in flight keeps the pair it copied; a test must keep
+// its context alive until the worker is quiescent.
+std::mutex g_fault_line_hook_mutex;
+int (*g_fault_line_hook)(void *, std::string_view) = nullptr;
+void *g_fault_line_hook_context = nullptr;
 
-void SetFaultLineWriteHookForTest(bool (*hook)(void *context),
+void SetFaultLineWriteHookForTest(int (*hook)(void *context,
+                                              std::string_view line),
                                   void *context) noexcept {
-  if (hook == nullptr) {
-    g_fault_line_hook.store(nullptr, std::memory_order_release);
-    g_fault_line_hook_context.store(nullptr, std::memory_order_relaxed);
-    return;
-  }
-  g_fault_line_hook_context.store(context, std::memory_order_relaxed);
-  g_fault_line_hook.store(hook, std::memory_order_release);
+  const std::lock_guard<std::mutex> lock(g_fault_line_hook_mutex);
+  g_fault_line_hook = hook;
+  g_fault_line_hook_context = context;
 }
 
 struct FaultWriter::State {
@@ -386,12 +404,24 @@ struct FaultWriter::State {
 
   std::filesystem::path path;
   std::ofstream file;
+  // Bytes of complete, flushed lines. A failed write rolls the file back to
+  // this boundary, so a torn object can never be joined by a later line.
+  std::uint64_t committed_bytes{0};
 };
 
 FaultWriter::FaultWriter(std::filesystem::path path)
     : state_(std::make_unique<State>(std::move(path))) {}
 
 FaultWriter::~FaultWriter() = default;
+
+void FaultWriter::RollBack() noexcept {
+  if (state_->file.is_open()) {
+    state_->file.close();
+  }
+  state_->file.clear();
+  std::error_code ignored;
+  std::filesystem::resize_file(state_->path, state_->committed_bytes, ignored);
+}
 
 bool FaultWriter::Prepare(std::string *error) {
   std::ofstream file(state_->path, std::ios::binary | std::ios::trunc);
@@ -408,15 +438,11 @@ bool FaultWriter::Prepare(std::string *error) {
     }
     return false;
   }
+  state_->committed_bytes = 0;
   return true;
 }
 
 bool FaultWriter::Write(const RecordedFault &fault) {
-  bool (*hook)(void *) = g_fault_line_hook.load(std::memory_order_acquire);
-  if (hook != nullptr &&
-      !hook(g_fault_line_hook_context.load(std::memory_order_relaxed))) {
-    return false;
-  }
   Json line;
   line["schema_version"] = kRecordSchemaVersion;
   line["record_seq"] = fault.record_seq;
@@ -439,26 +465,55 @@ bool FaultWriter::Write(const RecordedFault &fault) {
   line["detected_stamp_us"] = fault.detail.detected_stamp_us;
   line["output_action"] =
       static_cast<std::uint32_t>(fault.detail.output_action);
-  line["message"] = std::string(fault.detail.message.View());
+  // The protocol's message is raw bytes. JSON text cannot carry every byte
+  // sequence losslessly, so the exact bytes travel as hex and the human form is
+  // informational only.
+  const std::string_view message = fault.detail.message.View();
+  line["message"] = std::string(message);
+  line["message_hex"] = HexBytes(
+      reinterpret_cast<const std::uint8_t *>(message.data()), message.size());
   const std::string text =
       line.dump(-1, ' ', false, Json::error_handler_t::replace);
+
+  int (*hook)(void *, std::string_view) = nullptr;
+  void *hook_context = nullptr;
+  {
+    const std::lock_guard<std::mutex> lock(g_fault_line_hook_mutex);
+    hook = g_fault_line_hook;
+    hook_context = g_fault_line_hook_context;
+  }
+  const int action = hook == nullptr ? 0 : hook(hook_context, text);
+  if (action == 1) {
+    // A refused write leaves no bytes behind.
+    RollBack();
+    return false;
+  }
 
   if (!state_->file.is_open()) {
     state_->file.open(state_->path, std::ios::binary | std::ios::app);
     if (!state_->file) {
+      RollBack();
       return false;
     }
+  }
+  if (action == 2) {
+    // A torn write: put a prefix (without a newline) on the device, then fail.
+    // The rollback removes it, so the next complete line starts at a boundary.
+    const std::size_t prefix = text.empty() ? 0 : text.size() / 2;
+    if (prefix != 0) {
+      state_->file.write(text.data(), static_cast<std::streamsize>(prefix));
+    }
+    RollBack();
+    return false;
   }
   state_->file.write(text.data(), static_cast<std::streamsize>(text.size()));
   state_->file.put('\n');
   state_->file.flush();
   if (!state_->file.good()) {
-    // The stream is unusable; close it so the next occurrence tries a fresh
-    // open instead of failing forever on the same sticky error state.
-    state_->file.close();
-    state_->file.clear();
+    RollBack();
     return false;
   }
+  state_->committed_bytes += static_cast<std::uint64_t>(text.size() + 1);
   return true;
 }
 

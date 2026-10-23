@@ -149,17 +149,21 @@ class Recorder {
   bool TryRecordSession(const RecordSessionEvent &event) noexcept;
 
   // Offers one fault occurrence on the recorder's third bounded handoff. Like
-  // TryRecord it never blocks, allocates or throws: the recorder is disabled or
-  // stopped, or the fault channel is full, costs the occurrence - counted in
-  // faults_dropped() and reported as a queue-side loss span. It does not
-  // deduplicate: the state machine decides which conditions are new, and a
-  // repeated occurrence is a second event.
+  // TryRecord it never blocks, allocates or throws. Every refusal is counted in
+  // faults_dropped(): a full channel or an offer after Stop() began. While the
+  // run is still open a refusal also opens a queue-side loss span; an offer
+  // refused after shutdown started is counted only, because the final loss
+  // table may already have been published. It does not deduplicate: the state
+  // machine decides which conditions are new, and a repeated occurrence is a
+  // second event.
   bool TryRecordFault(const RecordedFault &fault) noexcept;
 
   // Reports occurrences the runtime's observation batch could not even
   // enumerate (`FaultObservationBatch::dropped`). This is not a queue refusal:
-  // the control thread never offered them. The count is kept separately in
-  // faults_generation_dropped() and in a loss span whose reason is Generation.
+  // the control thread never offered them. The count is always added to
+  // faults_generation_dropped(); while the run is still open it is also
+  // published as a loss span whose reason is Generation. After shutdown started
+  // the count is not in a span, for the same reason as a late fault offer.
   // Never blocks or allocates.
   void ReportFaultGenerationLoss(protocol::TimeUs stamp_us,
                                  protocol::Sequence state_seq,
