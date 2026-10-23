@@ -201,6 +201,12 @@ int main(int argc, char **argv) {
   if (!reader.metadata().units_json.empty()) {
     summary["units"] = Json::parse(reader.metadata().units_json);
   }
+  // The IMU convention object travels with the archive: an unknown axis frame
+  // or gravity convention is part of what the run declares, and a consumer
+  // that receives only the exported rows must not lose it.
+  if (!reader.metadata().imu_json.empty()) {
+    summary["imu_conventions"] = Json::parse(reader.metadata().imu_json);
+  }
   summary["chunks"] = reader.chunks().size();
   summary["rows_in_range"] = range.samples.size();
   // A run that was killed before its worker finalized has no final loss table,

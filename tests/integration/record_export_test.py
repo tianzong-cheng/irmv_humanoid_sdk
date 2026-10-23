@@ -341,19 +341,28 @@ def main() -> int:
         imu_metadata = metadata.get("imu")
         if not isinstance(imu_metadata, dict):
             fail("the run's metadata does not state its IMU conventions")
+        if "imu_conventions" not in data:
+            fail("the archive does not carry the run's IMU conventions")
+            imu_conventions = {}
         else:
-            orientation = imu_metadata.get("orientation_rpy", {})
-            if orientation.get("order") != "roll,pitch,yaw" or orientation.get("unit") != "rad":
-                fail("the run does not state RPY as roll,pitch,yaw in rad")
-            acceleration = imu_metadata.get("linear_acceleration", {})
-            if acceleration.get("unit") != "m_s2":
-                fail("the run does not state linear acceleration in m/s^2")
-            if acceleration.get("includes_gravity") != "unknown":
-                fail("the run claims a gravity convention the driver does not define")
-            for vector in ("orientation_rpy", "angular_velocity", "linear_acceleration"):
-                entry = imu_metadata.get(vector, {})
-                if entry.get("axis_frame") != "unknown" or entry.get("axis_order") != "unknown":
-                    fail(f"the run states an axis convention for {vector} the driver does not define")
+            archived_conventions = json.loads(str(data["imu_conventions"]))
+            imu_conventions = archived_conventions
+            if archived_conventions != imu_metadata:
+                fail("the archive IMU conventions are not the run's own declaration")
+        # The archive itself - not the run directory it came from - must carry
+        # the declared order, units and the conventions marked unknown.
+        orientation = imu_conventions.get("orientation_rpy", {})
+        if orientation.get("order") != "roll,pitch,yaw" or orientation.get("unit") != "rad":
+            fail("the archive does not state RPY as roll,pitch,yaw in rad")
+        acceleration = imu_conventions.get("linear_acceleration", {})
+        if acceleration.get("unit") != "m_s2":
+            fail("the archive does not state linear acceleration in m/s^2")
+        if acceleration.get("includes_gravity") != "unknown":
+            fail("the archive claims a gravity convention the driver does not define")
+        for vector in ("orientation_rpy", "angular_velocity", "linear_acceleration"):
+            entry = imu_conventions.get(vector, {})
+            if entry.get("axis_frame") != "unknown" or entry.get("axis_order") != "unknown":
+                fail(f"the archive states an axis convention for {vector} the driver does not define")
 
         # Every column is checked against the reader's own output row by row:
         # the archive is a copy of a read, so a value it changed is a value it

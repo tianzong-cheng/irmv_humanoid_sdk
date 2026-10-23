@@ -40,6 +40,10 @@ struct RunMetadata {
   std::uint32_t joint_count{0};
   std::vector<std::string> joints;
   std::string units_json;
+  // The run's own IMU convention object, copied verbatim from meta.json. It is
+  // opaque to the reader - the axis frame and gravity conventions may be
+  // "unknown" - so a consumer sees exactly what the run declared.
+  std::string imu_json;
 };
 
 // One chunk as the index describes it.

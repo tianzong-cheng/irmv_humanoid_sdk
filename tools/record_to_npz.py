@@ -25,9 +25,10 @@ reader prints, and only the joint columns, the IMU vectors and the control rate
 are floating point. The 16-byte ``producer_id`` is an identity
 rather than a number: it crosses as the reader's own 32 lower-case hex digits,
 one ``U32`` string per row, so every bit of it survives and two rows are
-comparable as text. ``units`` is stored as the JSON text of the units object the
-run declared, copied from the reader's summary rather than re-derived, so a
-consumer reads exactly what the run said about its own numbers.
+comparable as text. ``units`` and ``imu_conventions`` are stored as the JSON
+text of the objects the run declared, copied from the reader's summary rather
+than re-derived, so a consumer reads exactly what the run said about its own
+numbers - including an axis frame or gravity convention it marked unknown.
 
 The tool only reads: it opens no DDS endpoint and publishes nothing.
 """
@@ -209,6 +210,16 @@ def to_archive(rows, summary) -> dict:
     if "units" not in summary:
         raise SystemExit("record_to_npz: the reader reported no units for this run")
     arrays["units"] = np.array(json.dumps(summary["units"], sort_keys=True))
+    # The IMU convention object is copied verbatim for the same reason: an
+    # archive moved away from its run directory must still say that an axis
+    # frame or gravity convention is unknown, not lose the declaration.
+    if "imu_conventions" not in summary:
+        raise SystemExit(
+            "record_to_npz: the reader reported no IMU conventions for this run"
+        )
+    arrays["imu_conventions"] = np.array(
+        json.dumps(summary["imu_conventions"], sort_keys=True)
+    )
 
     arrays["joint_names"] = np.array(summary["joints"])
     arrays["schema_version"] = np.int64(summary["schema_version"])

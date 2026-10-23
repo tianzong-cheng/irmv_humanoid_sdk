@@ -15,6 +15,7 @@
 #include <cmath>
 #include <csignal>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -534,9 +535,9 @@ int CorruptPayload() {
 
   const irmv::telemetry::ChunkInfo broken = reader.chunks().front();
   const std::filesystem::path chunk = run / broken.file;
-  // The first byte of the first row's first applied-target value, in the
-  // column-major joint columns: a reader that trusted it would hand out a joint
-  // target this run never stored.
+  // The first byte of the second row's fixed-width fields - the low byte of
+  // its stamp. It is inside the payload, and a reader that trusted it would
+  // hand out a tick time this run never stored.
   CHECK(FlipByte(chunk, kChunkHeaderBytes + kFixedRowBytes));
 
   RecordRange range;
@@ -849,6 +850,98 @@ int CorruptValidityBlock() {
   return 0;
 }
 
+// The raw chunk bytes, not a round trip, pin where the validity block sits:
+// after the ninth double column and row-major at
+// `rows * 9 * J + (row * J + joint)`. A writer and reader that both switched to
+// a column-major block would still round-trip, so this test reads the file the
+// writer really produced and checks the offset and the byte of every value.
+int ValidityBlockByteLayout() {
+  const std::filesystem::path directory = MakeDirectory();
+  Recorder recorder;
+  CHECK(StartReaderRecorder(&recorder, directory));
+  RecordSample first = MakeSample(1);
+  first.joint_valid[0] = true;
+  first.joint_valid[1] = false;
+  first.joint_valid[2] = true;
+  first.joint_valid[3] = false;
+  RecordSample second = MakeSample(2);
+  second.joint_valid[0] = false;
+  second.joint_valid[1] = true;
+  second.joint_valid[2] = false;
+  second.joint_valid[3] = true;
+  for (const RecordSample &sample : {first, second}) {
+    bool accepted = false;
+    for (int attempt = 0; attempt < 500 && !accepted; ++attempt) {
+      accepted = recorder.TryRecord(sample);
+      if (!accepted) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+    }
+    CHECK(accepted);
+  }
+  CHECK(recorder.Stop());
+
+  RecordReader reader;
+  std::string error;
+  CHECK(RecordReader::Open(recorder.run_directory(), &reader, &error));
+  CHECK(reader.chunks().size() == 1);
+  CHECK(reader.chunks().front().rows == 2);
+  const std::filesystem::path chunk =
+      recorder.run_directory() / reader.chunks().front().file;
+  std::vector<std::uint8_t> bytes(
+      static_cast<std::size_t>(std::filesystem::file_size(chunk)));
+  {
+    std::ifstream file(chunk, std::ios::binary);
+    CHECK(static_cast<bool>(file));
+    file.read(reinterpret_cast<char *>(bytes.data()),
+              static_cast<std::streamsize>(bytes.size()));
+  }
+  const std::uint64_t rows = reader.chunks().front().rows;
+  const std::uint64_t values = rows * kJoints;
+  const std::uint64_t block_start =
+      kChunkHeaderBytes + rows * kFixedRowBytes + 9 * values * sizeof(double);
+  CHECK(block_start + values == bytes.size());
+
+  const auto read_u64 = [&bytes](std::uint64_t offset) {
+    std::uint64_t value = 0;
+    for (int index = 0; index < 8; ++index) {
+      value |=
+          static_cast<std::uint64_t>(bytes[static_cast<std::size_t>(offset) +
+                                           static_cast<std::size_t>(index)])
+          << (8 * index);
+    }
+    return value;
+  };
+  const auto bits_of = [](double value) {
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+  };
+
+  // Fixed rows come first, then the double columns, then the validity block:
+  // the byte before the block is the last value of the ninth column (the
+  // second row's last torque estimate), and the first column starts where the
+  // fixed rows end.
+  CHECK(read_u64(kChunkHeaderBytes) == first.stamp_us);
+  CHECK(read_u64(kChunkHeaderBytes + kFixedRowBytes) == second.stamp_us);
+  CHECK(read_u64(block_start - sizeof(double)) ==
+        bits_of(second.measured_tau_est[kJoints - 1]));
+  CHECK(read_u64(kChunkHeaderBytes + rows * kFixedRowBytes) ==
+        bits_of(first.q[0]));
+
+  const std::array<bool, 2 * kJoints> expected{true,  false, true,  false,
+                                               false, true,  false, true};
+  for (std::uint64_t row = 0; row < rows; ++row) {
+    for (std::uint64_t joint = 0; joint < kJoints; ++joint) {
+      const std::uint8_t byte =
+          bytes[static_cast<std::size_t>(block_start + row * kJoints + joint)];
+      CHECK(byte == (expected[row * kJoints + joint] ? 1U : 0U));
+    }
+  }
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
 // A header whose payload length omits the validity block - the length a schema
 // 3 writer declared - is named as a length the current rows cannot hold, not
 // read as a short file: the validity bytes are part of this schema's payload.
@@ -1031,6 +1124,7 @@ int main() {
   failures += NaNAndInvalidJointKeepOriginalValues();
   failures += TruncatedValidityBlock();
   failures += CorruptValidityBlock();
+  failures += ValidityBlockByteLayout();
   failures += PayloadLengthOmittingValidity();
   failures += ReadDuringRecording();
   failures += RecoverCommittedChunkWithoutIndex();

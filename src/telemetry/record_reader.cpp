@@ -502,6 +502,11 @@ bool RecordReader::Open(const std::filesystem::path &run_directory,
   if (metadata.contains("units") && metadata["units"].is_object()) {
     opened.metadata_.units_json = metadata["units"].dump();
   }
+  // The IMU conventions are carried as the run's own object: the reader never
+  // fills in an axis frame or a gravity convention the run did not state.
+  if (metadata.contains("imu") && metadata["imu"].is_object()) {
+    opened.metadata_.imu_json = metadata["imu"].dump();
+  }
 
   Json index;
   const bool have_index =
