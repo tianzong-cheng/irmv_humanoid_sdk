@@ -333,15 +333,16 @@ new authorization, which is the next section.
 
 A recorded run carries a second file beside the samples: on every confirmed
 locomotion context the application appends one line to
-`<telemetry.recorder.directory>/policy_sessions.jsonl` with the identity the
-runtime granted the context (`runtime_id`, `session_id`, `producer_process_id`,
-`epoch`) and what produced it - for a local model, its digest, its path, its I/O
-names, the digest of the `irmv.deployment` document it declared and one row per
-gain the operator overrode, with the model's value and the value that was sent;
-for an external producer, the process the runtime gated and the gains its first
-frame declared. The runtime's own `sessions.json` cannot carry that: the runtime
-never reads a deployment contract and links no inference, so it names the model
-`unknown` and the application's file is what a reader joins it to.
+`<telemetry.recorder.directory>/app_run_<UTC>_<unique>/policy_sessions.jsonl`
+with the identity the runtime granted the context (`runtime_id`, `session_id`,
+`producer_process_id`, `epoch`) and what produced it - for a local model, its
+digest, its path, its I/O names, the digest of the `irmv.deployment` document it
+declared and one row per gain the operator overrode, with the model's value and
+the value that was sent; for an external producer, the process the runtime gated
+and the gains its first frame declared. The runtime's own `sessions.json` cannot
+carry that: the runtime never reads a deployment contract and links no
+inference, so it names the model `unknown` and the application's file is what a
+reader joins it to.
 
 `tools/verify_policy.py` is the gate between the training export and this
 deployment: it checks the model with the ONNX checker, refuses a model whose
@@ -389,6 +390,118 @@ program: the gains, amplitudes and tolerances it uses are demonstration values
 of the Fake deployment and are not a validated machine limit. It is also the
 peer of the external acceptance test, which drives the whole lifecycle through
 the real application, the real runtime and this process over real DDS.
+
+## Recorded runs
+
+Recording is disabled in the shipped configuration; it writes megabytes per
+minute and is an explicit choice. Enable it in the shared `telemetry.recorder`
+section (the runtime and the application read the same one):
+
+```json
+"telemetry": {
+  "recorder": {
+    "enabled": true,
+    "sample_hz": 100,
+    "queue_capacity": 256,
+    "directory": "logs/runs"
+  }
+}
+```
+
+`sample_hz` must divide `runtime.control_hz` for the runtime recorder; the
+application's velocity recorder uses the same rate with its own schedule. Both
+processes write independent directories under `directory` (a `null` directory
+means the log directory):
+
+* the runtime writes `run_<monotonic-microseconds>/` with `meta.json`,
+  `index.json`, `chunk_<n>.bin`, `sessions.json` and `faults.jsonl`;
+* the application writes `app_run_<UTC>_<unique>/` with `meta.json`,
+  `velocity.jsonl`, `index.json` and `policy_sessions.jsonl`.
+
+The runtime's chunks are **schema 4**; a run whose metadata, index or chunk
+declares schema 3 or an unknown version is refused by name, never reinterpreted.
+Each row is one coherent control tick: the published state, the command in
+force, the feedback that tick used and the output it produced. Joint target and
+measurement columns are in the configuration's joint order (`q`/`dq`/`tau_ff`,
+`kp`/`kd`, `measured_q`/`measured_dq`, `measured_tau_est`, `output_torque`,
+plus the per-joint `joint_valid` flag). IMU columns are
+`imu_orientation_rpy` (roll, pitch, yaw; rad), `imu_angular_velocity` (rad/s),
+`imu_linear_acceleration` (m/s²) and `imu_rx_stamp_us`. Three limits matter:
+
+* the driver contract fixes neither the IMU axis frame/order nor whether the
+  acceleration includes gravity; `meta.json` records those as `unknown` and the
+  recorder never transforms a measurement;
+* `measured_tau_est` is the feedback's torque *estimate*, not a torque-sensor
+  reading and not the commanded torque;
+* `joint_valid` is the raw per-joint flag; it does not replace `feedback_valid`
+  or the freshness checks. `send_accepted` is the host send path's answer, never
+  a device acknowledgement.
+
+The two directories are **never joined by row index**. Both metadata files carry
+`{linux_clock_monotonic, boot_id, available}`; association requires the same
+clock and boot, and an application row with `identity_known: true` whose
+`runtime_id`/`session_id` appears in the runtime run's `sessions.json`. Rows of
+another boot, instance, session or unknown identity are excluded and counted.
+There is no cross-host clock synchronisation and no interpolation of a missed
+sample.
+
+`faults.jsonl` is the complete occurrence history, separate from the wire:
+`RobotState.faults` remains the **first latched fault** and does not change until
+a matching Reset. The sidecar records the first appearance of each key
+(`{condition, joint_index}`, plus `error_code` for driver and write failures), a
+sustained condition only once, and a recurrence after it disappears as a new
+line. Non-finite values are the explicit strings `"NaN"`, `"+Inf"` and `"-Inf"`.
+The index's `faults` block carries generation/queue/write loss spans and a
+`complete` marker; a killed run is incomplete (`complete: false`), and a
+`faults.jsonl` line that was cut short is reported as truncation, not data.
+There is no fsync or durability promise.
+
+Both metadata files carry `sdk_git_sha`: the commit `HEAD` of the build's source
+tree when that tree is the Git root, or `unknown` without Git/a commit. It
+identifies the build's commit, **not** a clean or exact source tree - uncommitted
+changes are not captured. The application's metadata states
+`model.status = loaded | external | none | unloaded`; only `loaded` carries a
+model name, path and SHA-256, and that SHA-256 is the application's own loaded
+model. An external source is a producer process and leaves the application's
+model block null rather than inventing a name.
+
+Read and export a recorded run with the installed reader and the Python tool
+(the exporter consumes `read_record`'s output; it is a source tool, not an
+installed binary, and needs `numpy`):
+
+```bash
+# Runtime run: rows in [from_us, to_us) and the summary.
+build/read_record --run logs/runs/run_<id> --summary-only
+build/read_record --run logs/runs/run_<id> --from-us 1000000 --to-us 2000000
+
+# Application run: velocity and policy-session rows.
+build/read_record --run logs/runs/app_run_<UTC>_<unique> --summary-only
+
+# NPZ of the runtime run, optionally associated with the application run.
+python3 tools/record_to_npz.py logs/runs/run_<id> run.npz \
+  --reader build/read_record
+python3 tools/record_to_npz.py logs/runs/run_<id> run.npz \
+  --reader build/read_record \
+  --application-record logs/runs/app_run_<UTC>_<unique> \
+  --from-us 1000000 --to-us 2000000
+```
+
+`--from-us` is inclusive and `--to-us` exclusive, both on the monotonic row
+stamp. A window does not change association: the exporter associates and
+computes hold-forward over the whole application run first, then selects the
+rows to write. `velocity_*` arrays keep their own length;
+`velocity_hold_forward/lateral/yaw` are attached to the runtime rows and are
+`NaN` outside a contiguous recorded segment (before the first sample, past one
+period after the last, across a gap or an indexed loss). `fault_*` arrays also
+have their own length and use `-1` for a joint-less fault.
+`association_ok`/`association_reason` state whether the application stream
+joined; a refused association still writes the runtime archive.
+
+A recorded run is evidence about this host, this boot and the code that wrote
+it, not a device: the Fake backend has no physical-execution evidence. See
+[`docs/runtime-protocol.md`](docs/runtime-protocol.md) for the complete schema,
+association rules and fault-history contract, and
+[`docs/testing.md`](docs/testing.md) for the tests that prove them.
 
 ## Install
 

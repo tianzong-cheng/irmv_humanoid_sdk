@@ -19,8 +19,8 @@ ctest --test-dir build -R integration_normal --output-on-failure
 ```
 
 The whole matrix takes a few minutes on a developer machine
-(`ctest -N` reports the current entry count; the hardware additions are 64 in
-the default configuration) and each integration
+(`ctest -N` reports the current entry count; the default configuration registers
+73 entries: 35 `core` and 38 `integration`) and each integration
 entry is bounded by its own CTest timeout (30 s for `dds_codec_test`, 180 s for
 `runtime_cli_test` and `application_cli_test`, 300 s for `application_client_test`
 and per scenario, 600 s for `application_flow_test`).
@@ -135,7 +135,7 @@ for the cross-process cases.
 The scenario entry points are also what CI runs; `--all` is a convenience for
 manual runs and is never used by CTest.
 
-## Deterministic core suite (`-L core`, 23 tests)
+## Deterministic core suite (`-L core`, 35 tests)
 
 | Test | What it proves | Design §9 |
 |---|---|---|
@@ -147,6 +147,13 @@ manual runs and is never used by CTest.
 | `execution_fsm_test` | The state machine: every legal and rejected transition, boot grace/deadline rules with the per-input observation history (an observed joint or required IMU that goes missing faults inside the grace window, a never-observed one keeps waiting to the deadline), the full normal path, write failure, request idempotency and conflicts, stop ordering and the authorization watermark (including a stop that does not change the state), session takeover and lease expiry, a heartbeat batch that mixes the owner's sample with a foreign or reordered one refreshing the lease, first-frame continuity, foreign packets, fault output degradation latching to zero torque, the recovery window with an explicit Reset, epoch exhaustion, the session's supervisor binding, same-tick stop ownership, a guarded same-producer epoch change, and the runtime's own trusted stop. | "all legal and rejected transitions, boot grace/deadline, explicit Reset", "pure feedforward, PD + feedforward with the total torque limit", "request retry/different payload/out-of-order, atomic first-frame and gain switch, stop preemption", "fault first-tick output, damping disqualification degrades permanently to zero torque" |
 | `recorder_test` | The run recorder: a recorder that was never started accepts nothing and creates nothing, while a started one creates exactly one run directory with its metadata and refuses a directory that does not exist; a paced run of 910 samples is written as one full chunk and one remainder, every chunk renamed into place with no partial file left behind, and the index reports the rows, the joint count and each chunk's sequence and time range; a deliberate hole in the published sequence becomes a gap with its exact range; a burst that fills the bounded handoff costs the refused samples, which are counted *and* reported as a gap of their own, because the worker never saw them and they could not show up as a hole between two samples it did write; stopping twice is harmless and keeps naming the run. | §8.2, §8.4 |
 | `record_reader_test` | The read side of a recorded run, on bytes the *recorder* really produced rather than on a fixture: a run read whole returns the metadata it declares and every field of every row, a time range returns exactly the rows inside it and reports the gap that overlaps it on the recorded grid (with a stride of five, two missing samples are reported as two, not as the eight ticks between them), an empty range is an empty answer and not an error, a chunk that was cut short is reported as a truncation with the rows it did hold, one byte flipped inside a chunk's payload is reported as corruption (not as a truncation) with none of that chunk's rows returned while the intact chunks beside it are still read, one byte flipped in the chunk's length field is reported the same way, and a run of another schema version is refused whole instead of reinterpreted. | §8.2, §8.4 |
+| `fault_tracker_test` | The one-shot fault tracker: a condition is new when it was absent in the previous tick, a sustained condition is not repeated on later ticks, two observations of one key inside a tick are deduplicated, and a recurrence after a tick of absence is new again. Driver errors and write failures are keyed by error code as well, so a different error is a new occurrence while the same error persists; a slot table with every active key refuses to report an untracked key as new and counts the loss; a generation wrap clears the table; and the whole observe path allocates nothing. | §9 fault history |
+| `fault_record_test` | The fault sidecar: `TryRecordFault` never blocks, allocates or touches a file; the worker writes one JSON line per occurrence with the exact `message_hex`, the numeric and named reason/condition, a null joint index where none applies, and the explicit `"NaN"`/`"+Inf"`/`"-Inf"` strings; the reader returns rows by `detected_stamp_us` range and restores the non-finite values, reports a trailing partial line as truncation, a malformed complete line as an error, a missing `faults.jsonl` as an empty stream, and the index's completion marker and generation/queue/write loss spans as separate facts; `Stop()` returns at its deadline while a writer is blocked. | §9 fault history, §8.2 |
+| `record_context_test` | The independent sample plan and the clock identity: a 100 Hz plan emits exactly on its integer grid (the first call is the phase origin, a stalled call does not replay missed deadlines), an exact deadline is due and one microsecond before it is not, a zero or unrepresentable rate disables the plan; and the boot id is read from an injected file, with an empty, malformed or unreadable file reported as unavailable rather than turned into an identity. | §8.2, §11.1 |
+| `velocity_record_test` | The application's independent velocity stream: an `app_run_*` directory with its metadata, one row per accepted sample (including the all-zero initial intent) carrying `sample_seq`, `identity_known`, the runtime/session identity and the latest state sequence, 64-bit values surviving JSON; queue and write losses named in the index; a torn final line, a malformed complete line and an unknown schema reported as the different facts they are; and no allocation or file work on the caller's thread. | §11.1 application recording |
+| `record_alignment_test` | The association between a runtime run and an application velocity run: two runs of one boot match by monotonic stamp even with different phases (a row index is never the join key); another boot, another runtime instance, an unknown identity and foreign rows are excluded and counted; and hold-forward is valid only inside a contiguous recorded segment - a cadence gap, an indexed loss and the end of the recording yield `NaN` instead of a value carried past what was recorded. | §11.1 association |
+| `build_identity_test` | The generated SDK revision through the real `cmake/BuildIdentity.cmake` path: a fresh repository embeds its commit, rebuilding the same revision leaves the generated file untouched, a new commit is picked up without reconfiguring, the source repository's `HEAD` is never changed, and a source copy whose `.git` was removed embeds `unknown` rather than inheriting the containing repository's revision. | §8.2 identity |
+| `scenario_test` | The fake-scenario parser and its IMU override: optional `orientation_rpy`, `angular_velocity` and `linear_acceleration` vectors are accepted only as exactly three finite numbers each, apply to the injected feedback snapshot, and every existing field stays optional; malformed vectors are rejected with the offending field path. | Fake fixture contract |
 | `logger_test` | The bounded asynchronous logger: queue bound and drop accounting, level filtering, FIFO order, the drain on stop, an event racing with the stop, the 256-byte message bound, rotation of the default sink, the formatted line and the error path - plus the bounded diagnostic writer the sink and the exit path share, against a pipe the test fills itself. | §8 (bounded telemetry) |
 | `channel_test` | The bounded handoff between the control thread and the transport thread: FIFO order, capacity, the untouched state of a refused push, the keep-last-1 handoff of the latest-value channels (a published value is replaced and counted only while no consumer holds it, and a taken one is never counted as a loss), a separate stop lane, and two-thread stress on both shapes whose payloads each carry their own generator, so a torn or overwritten copy fails the test. This is the entry that is also run under ThreadSanitizer; the eviction race it used to hide was found that way. | §2 (thread model), §4 (lane separation) |
 | `config_schema_contract_test` | The shipped `config/sdk.schema.json` against the shipped `config/sdk.json`, the custom `irmv-joint-name` format (non-empty, at most 64 **UTF-8 bytes**), and that standard JSON Schema validity and the loader's own checks agree. | "the configuration is executable and versioned" |
@@ -164,11 +171,12 @@ manual runs and is never used by CTest.
 | `onnx_model_test` | The model loader against ten generated models: the valid one loads with its contract, mapping and digest, and one inference returns a finite action; a model with no contract, another schema version, an input width or output name the graph contradicts, a dynamic width, two inputs, an unknown joint or a non-finite output is refused, as is a file that does not exist and a model whose observation is of the wrong width. The fixtures are generated from the frozen document, so no binary blob is checked in. | §3.4, review focus 1 |
 | `inference_test` | The inference worker: a new worker runs nothing until something is submitted, one request produces one response that carries the identity of its request (generation, epoch, state sequence and stamp, submission instant), a burst of submissions never blocks and is compressed rather than queued (every accepted request is either replaced or run, and replaced ones are counted), a model that cannot answer produces a failed step rather than a silent zero action, and the judgement of one result is pinned at its boundaries (`JudgePolicyResult`: the whole step identity, the deadline inclusive at the edge and failing one microsecond past it; `PolicySourceStateUsable`: a sequence ahead of the newest state, a zero sequence or stamp, and a source exactly at the runtime's window and one microsecond past it). `Stop()` is idempotent and joins. | §3.4, §8.4 |
 
-All twenty-three run without a peer, without a network and without a wall-clock
+All thirty-five run without a peer, without a network and without a wall-clock
 deadline: they assert exact tick semantics and counter values, and the only
-wall-clock waits in `logger_test` are hang guards.
+wall-clock waits in the recorder, fault-record, velocity-record and logger
+entries are hang guards.
 
-## Real-DDS suite (`-L integration`, 32 tests)
+## Real-DDS suite (`-L integration`, 38 tests)
 
 ### Process-level entries
 
@@ -176,7 +184,7 @@ wall-clock waits in `logger_test` are hang guards.
 |---|---|
 | `dds_codec_test` | Against a live endpoint: the codec round trip and field-by-field equality of the core types - including the empty, unused first command of a session, stop or reset request and the rejection of an over-long or missing joint vector - codec rejection of malformed samples, that the running transport's readers and writers really carry the frozen QoS (durability, reliability, history depth and kind, resource limits, and `max_blocking_time` on the reliable channels) as read back from the endpoints, and that a peer process sees the published samples. It also proves the transport's own lane policy for heartbeats: a batch that receives a foreign sample after the owner's still hands the owner sample over first, and a lane that is full refuses what does not fit and counts it instead of displacing an older entry. |
 | `runtime_cli_test` | The process contract of `robot_runtime`: every startup rejection (missing/malformed configuration, `backend: real`, a broken scenario, unknown argument, out-of-range domain) exits non-zero with a message and without starting DDS; the normal path reaches `ZeroTorque` and exits 0 with a clean shutdown on `SIGTERM`; an unsupervised runtime keeps running; a latched fault keeps running and refuses to leave, and a hard kill is reported as such. |
-| `record_export_test` | The recorded run, exported end to end: a real runtime records for four seconds with the recorder enabled, `tools/read_record` reads the run back and `tools/record_to_npz.py` turns it into an archive. The archive must carry every column by name, the joint table in the order the joint columns use, the units, the schema version, the configuration and layout digests and both rates; the row rate must be the configured 100 Hz rather than the 500 Hz control rate; the sampling stride must be constant; and a window of the run must return exactly the rows of that window - the same data, not a different run. | §8.2, §8.4, §11.1 |
+| `record_export_test` | The schema-4 runtime run, exported end to end: a real runtime records for four seconds, `tools/read_record` reads the run and `tools/record_to_npz.py` builds a NumPy archive. Every column is carried by name and shape - including the IMU vectors, `imu_rx_stamp_us`, `measured_tau_est` and the `joint_valid` matrix - with `uint64` stamps/sequences that survive above 2**53, `bool` flags, `float64` joint/IMU columns and the 16-byte producer identity as text; the units, IMU convention object, schema, digests and both rates are present; the row rate is the configured 100 Hz, not the 500 Hz control rate; a window returns exactly the rows of that window; and a synthetic fault sidecar and application run prove the independent `fault_*`/`velocity_*` arrays, the association rules and the hold-forward `NaN` boundaries. | §8.2, §8.4, §11.1 |
 | `producer_codec_test` | The external producer interface: the six messages round-trip field by field, and every malformed one is refused whole - another protocol version, an unknown status or reason, a text count above the wire capacity, a preparation number of zero, a velocity intent with no validity period, a `READY` result without a first frame, a nested frame the execution codec refuses, and a `READY` producer that reports a failure reason at the same time. It also pins the six frozen topic names and QoS, and reads the policies back from a writer and a reader built with the frozen descriptors (a lifecycle endpoint is reliable, volatile, keep-last eight with a 10 ms blocking time; the velocity intent is best effort, volatile, keep-last one), then publishes a real `PrepareRequest` and receives it. The transport section drives the application's own `ProducerTransport` against a raw producer peer: the peer's announcement and `READY` result arrive through `TakeEvents` with their fields intact, the preparation request, the authorization, the stop notice and the velocity intent arrive at the peer, only the newest intent is written, and a publish on a stopped transport is refused and counted. | §6.3 |
 | `policy_package_test` | The SDK half of the ONNX deployment contract: `tools/verify_policy.py` accepts a package whose document agrees with the model it is embedded in and is numerically unchanged, and refuses a model without the contract, with the contract twice, with a document of another policy type, a document claiming another input, a document with an unsupported observation frame, a model whose weights moved, and a model saved at an ONNX IR version above the one the pinned runtime loads. The models are built in a temporary directory, so the check needs no simulator and no checked-in binary. | §3.4, §11.1 |
 | `policy_locomotion_test` | The acceptance of the local policy, end to end: a generated twelve-joint Fake deployment (a configuration and a policy ONNX whose document commands exactly those joints) is started as a real runtime and a real application, and the application is driven through its terminal from Standby into Damping, through Initializing into Ready, into Locomotion, and out through the ordered exit. It asserts that the policy was loaded from the configured path, that the runtime really entered Tracking, that holding the behaviour for far longer than the target and source-state deadlines produces neither a `LocalPolicyFailed` latch nor a runtime target timeout, and that the exit is confirmed. The model's weights are small on purpose: its first frame has to be a continuous target, and the runtime's own continuity guard - never a relaxed test configuration - is what enforces that. | §11 and §11.1 (local ONNX locomotion) |
@@ -186,7 +194,8 @@ wall-clock waits in `logger_test` are hang guards.
 | `application_flow_test` | The cross-process phase acceptance: a runtime replaced under a running application (the upper reports `Fault`, binds the new instance and never returns to a tracking behaviour by itself), a `SIGSTOP`/`SIGCONT` of the runtime (the upper reports `Unknown` inside the state window plus slack, latches its own `Fault` and stays latched while the runtime keeps running), a `SIGSTOP`ped application (the runtime falls back on its own command timeout, measured from its own log) and a `SIGKILL`ed application (the runtime expires the supervisor lease, proven by its own event and by the all-zero session of its per-tick trace), a normal application exit with the runtime surviving (run through the harness on `application_normal`), the phase invariant that no run ever shows `behavior=Locomotion` (recorded as the third-phase boundary, not as a pass), and that every case claimed its own domain and left no process behind. |
 
 | `external_producer_test` | The external producer acceptance: the real application, the real runtime and `examples/external_producer.cpp` as three processes over real DDS. The application is driven from Damping into Ready, the producer registers, is selected and prepares a first frame, the locomotion key authorizes the context, and the producer's own stream is compared with the runtime's output trace: 104 adopted frames with strictly increasing sequences under the granted producer identity, none of them before the authorization, the target moving under a forward intent, and the stop that ends it. |
-| `application_record_test` | The application-driven recorded run (§11.1): the recorder is enabled in a copy of the shipped configuration, the real application supervises one session, and the run is read back - 381 rows at 100 Hz on the 500 Hz loop with the command in force, the feedback and the output of the same tick in every tracking row, and the authorization contexts in the run's own `sessions.json`. |
+| `application_record_test` | The application-driven recorded run (§11.1): the recorder is enabled in a copy of the shipped configuration, the real application supervises one session, and both directories are read back - the runtime run at schema 4 (the command in force, the feedback, the schema-4 IMU vectors and the output of the same tick in every tracking row, and the authorization contexts in `sessions.json`), the independent `app_run_*` velocity stream at 100 Hz with its own schema and model status, and the association by clock/boot/runtime-session identity. | §11.1 |
+| `fault_recording_test` | The fault history of a real recorded run, on the wire and on disk at once: a fake scenario disconnects joint 0, disconnects joint 1 while the first fault stays latched, lets both recover and disconnects joint 0 again, while a real DDS peer records every published `RobotState`. The published `faults` report stays the first latched fault and never changes; `faults.jsonl` carries the sustained episode once, the second condition on another joint and the recurrence after recovery, with `record_seq` increasing, and the run's index marks the stream complete. | §9 fault history, §11.1 |
 | `policy_reference_test` | The SDK half of the training-side reference sample (§11.1): the model the training repository exported and the state/command/observation/action/target it recorded for four deterministic cases, compared element by element against this SDK's observation builder, model session and action pipeline. Registered only when the artifact is present (a configure-time variable names its directory), so its absence is a configure-time statement and not a silent pass. |
 | `application_stability_test` | The state-switching stability run (§11.1): `Standby -> Damping -> Ready` in a loop for a configurable wall-clock time, with the memory, thread and descriptor counts of both processes sampled from `/proc`. The CTest entry runs it for twenty seconds as a regression guard; the thirty minutes of the acceptance are the same driver with `--duration-s 1800`. |
 
@@ -365,13 +374,36 @@ the gains land on the joints the document names).
   context, the producer's own frame stream, the intent lane and the revocation
   (`integration_application_external_absent` for the mode with nobody to run
   it, `external_producer_test` for the stream itself).
-* The recorder and the run reader: one coherent sample per sampled tick with the
-  measured feedback and the final output of that tick, per-stretch gaps, a
-  versioned columnar chunk carrying an explicit payload length and a CRC-32 over
-  its header and its payload, so a chunk corrupted in place is refused by name
-  instead of being read as rows, a `sessions.json` sidecar for the authorization
-  contexts, time-range reading and the NPZ export (`recorder_test`,
-  `record_reader_test`, `record_export_test`).
+* The recorder and the run reader at schema 4: one coherent sample per sampled
+  tick with the measured feedback, the schema-4 IMU vectors and receive stamp,
+  `measured_tau_est`, the per-joint `joint_valid` flag and the final output of
+  that tick, per-stretch gaps, a versioned columnar chunk carrying an explicit
+  payload length and a CRC-32 over its header and its payload, so a chunk
+  corrupted in place is refused by name instead of being read as rows, a
+  `sessions.json` sidecar for the authorization contexts, time-range reading and
+  the NPZ export; a schema-3 or unknown run is refused whole, never
+  reinterpreted (`recorder_test`, `record_reader_test`, `record_export_test`).
+* The fault history: the state machine reports each distinct condition once
+  (keyed by condition and joint, plus the error code for driver and write
+  failures), a sustained condition is not repeated, a recurrence after recovery
+  is a new occurrence; the recorder persists the occurrences to `faults.jsonl`
+  with generation/queue/write loss spans and a completion marker, while the
+  published `RobotState.faults` stays the first latched report
+  (`fault_tracker_test`, `fault_record_test`, `fault_recording_test`).
+* The application's independent recording: `app_run_<UTC>_<unique>` owns a
+  `velocity.jsonl` stream at the configured `sample_hz` with its own sampling
+  phase, identity (`identity_known`, runtime/session, latest state sequence) and
+  loss/completion accounting, plus the policy-session sidecar in the same
+  directory; association with the runtime run requires the same monotonic clock
+  and boot id and a matching runtime/session identity, never a row index
+  (`velocity_record_test`, `record_alignment_test`, `application_record_test`).
+  The export follows the same rule: `velocity_*` keep their own length and
+  `velocity_hold_forward/*` are `NaN` outside a contiguous recorded segment
+  (`record_export_test`).
+* The SDK revision and clock identity: the build embeds the commit `HEAD` of a
+  source tree that is the Git root, `unknown` otherwise, and both metadata files
+  carry `sdk_git_sha` plus `{linux_clock_monotonic, boot_id, available}`
+  (`build_identity_test`, `record_context_test`).
 * The session record: what produced the context a run was recorded under. The
   runtime records *that* a session was authorized - its instance, session,
   producer, epoch and the gains of the first command it adopted - and it records
@@ -379,15 +411,18 @@ the gains land on the joints the document names).
   contract and links no inference. The model, its contract and the gains the
   operator overrode are facts only the application holds, so the application
   writes them itself, one JSON object per confirmed locomotion context, to
-  `<telemetry.recorder.directory>/policy_sessions.jsonl`, and every line carries
-  the same `{runtime_id, session_id, producer_process_id, epoch}` the runtime
-  uses. A local context carries the model's file digest, its path and I/O names,
-  the digest of the `irmv.deployment` document it declared, and one row per
-  overridden gain with both sides of the difference; an external one carries the
-  producer process the runtime gated and the gains its first frame declared.
-  `policy_locomotion_test` and `external_producer_test` each drive a real run
-  with the recorder on and check the sidecar against the runtime's own per-tick
-  trace, so the join is checked against what the runtime published.
+  `<telemetry.recorder.directory>/app_run_<UTC>_<unique>/policy_sessions.jsonl`,
+  and every line carries the same `{runtime_id, session_id,
+  producer_process_id, epoch}` the runtime uses. A local context carries the
+  model's file digest, its path and I/O names, the digest of the
+  `irmv.deployment` document it declared, and one row per overridden gain with
+  both sides of the difference; an external one carries the producer process
+  the runtime gated and the gains its first frame declared. The run metadata's
+  model block states `loaded`, `external`, `none` or `unloaded` explicitly and
+  never fabricates a model name. `policy_locomotion_test` and
+  `external_producer_test` each drive a real run with the recorder on and check
+  the sidecar against the runtime's own per-tick trace, so the join is checked
+  against what the runtime published.
 * `ldd build/robot_runtime` names no ONNX Runtime: the lower process still loads
   nothing but its own configuration. `ldd build/external_producer` names none
   either.
@@ -404,6 +439,16 @@ CycloneDDS pair, the pinned ONNX Runtime and the configuration under
   Runtime at all (`ldd`);
 * every installed artifact's only rpath entry is that relative one, which the
   install rules check with `file(RPATH_CHECK)`;
+* the installed `bin/read_record` is present, starts from a directory that is
+  neither the source nor the build tree, and links only the C++ runtime (no DDS,
+  ONNX or policy library); the archive exporter `tools/record_to_npz.py` is a
+  source tool (needs `numpy`) and consumes the installed reader through
+  `--reader`;
+* `libirmv_telemetry.a` is a build-tree static library linked into
+  `robot_runtime`, `application` and `read_record`; it is not a shipped shared
+  library. `libirmv_application.a` has no `irmv::policy` or `irmv::runtime`
+  undefined symbol, so the application core stays policy-free and the ONNX
+  Runtime is reached only by the `application` executable;
 * the installed configuration has no model path, so the installed application
   starts with no locomotion source - `policy=none source=none` - and supervises
   the runtime through its ordered states.
@@ -773,17 +818,22 @@ needed.
 `tests/integration/application_record_test.py` turns the recorder on in a copy
 of the shipped configuration, supervises one session with the real application
 (`Standby -> Damping -> Initializing -> Ready -> hold -> Damping -> exit`) and
-reads the run back:
+reads both directories back:
 
-| Measure | Value |
+| Measure | Assertion |
 |---|---|
-| rows | 381 at 100 Hz on the 500 Hz control loop, schema version 2 |
-| authorized window | 266 tracking rows, one producer identity and one non-zero epoch |
-| per row | the command in force (identity, epoch, sequence, source state), the feedback of that tick and the output it produced, all valid and host-accepted |
-| session table | 4 events in `sessions.json`, one per authorization context, with the epoch, the producer, the gains and the model digest written as `unknown` |
+| runtime schema | `schema_version` 4, 100 Hz on the 500 Hz control loop, no corrupt chunk, a positive row count the reader and the archive agree on |
+| authorized window | tracking rows name one producer and one non-zero epoch; the command in force is present and its sequence never goes backwards |
+| per row | the feedback snapshot and the output of the same tick, both valid and host-accepted; `measured_tau_est`, all `joint_valid` flags and the injected IMU vectors (`0.1/-0.2/0.3`, `0.4/-0.5/0.6`, `0.7/-0.8/9.81`) equal the fixture, with a non-zero `imu_rx_stamp_us` |
+| fault stream | `faults.complete` is true, no fault row and `rows_in_range` 0 - a healthy run publishes completion rather than leaving it to be inferred |
+| session table | one event per authorization context in `sessions.json`, each with the epoch, producer, gains and `model_sha256` written as `unknown` |
+| application run | an `app_run_*` directory with `schema` `irmv.application_velocity` v1, a positive 100 Hz stream with strictly increasing stamps, known-identity rows naming the runtime/session in `sessions.json`, and a time window that selects exactly the reader's rows |
+| association | the runtime and application runs agree on `linux_clock_monotonic` and `boot_id`; the exported velocity rows carry the runtime identity, and hold-forward is bounded to the recorded segments |
 
-The run's rows and its session table join on `{producer_id, epoch}`, which is
-what makes a recorded stretch traceable to the context that produced it.
+The run's tracking rows and its session table join on `{producer_id, epoch}`,
+which is what makes a recorded stretch traceable to the context that produced
+it; the application run joins the runtime run on the clock/boot identity and
+the runtime/session identity, never on a row index.
 
 ### The external producer acceptance (Task 6)
 

@@ -15,7 +15,9 @@ messages or topics on this page.
 ## Encoding and bounds
 
 * `protocol_version` is `2`. A packet with any other value is rejected
-  (`VersionMismatch`) and never changes runtime state.
+  (`VersionMismatch`) and never changes runtime state. Version 2 adds the
+  `condition` field to `FaultDetail`; the layout, the topics and the rest of
+  the wire format are unchanged.
 * Up to **64 joints** per packet. Collections are fixed-size IDL arrays
   (`JointValues[64]`, `JointFeedback[64]`, `FaultDetail[64]`, `Text64Bytes[64]`,
   `Text256Bytes[256]`) plus an explicit count, so a receiver never allocates for
@@ -445,3 +447,223 @@ answered by an `ExecutionResult`, it never displaces a received stop, and it
 never clears a latched fault. It reaches `ZERO_TORQUE` from `DAMPING` and
 `TRACKING` only, and the process leaves only after that state and the torque
 write of its tick were accepted.
+
+## Recorded runs
+
+Recording is local and is not part of the wire contract. When
+`telemetry.recorder.enabled` is true, the runtime and the application each open
+an independent recorder under `telemetry.recorder.directory` (a `null`
+directory means the log directory), and each writes a run directory of its own.
+Neither process waits for the other's disk, and neither stream is a superset of
+the other.
+
+| Writer | Directory | Contents |
+|---|---|---|
+| `robot_runtime` | `run_<monotonic-microseconds>` | `meta.json`, `index.json`, `chunk_<n>.bin`, `sessions.json`, `faults.jsonl` |
+| `application` | `app_run_<UTC>_<process-id>-<counter>` | `meta.json`, `velocity.jsonl`, `index.json`, `policy_sessions.jsonl` |
+
+Both use the configured `telemetry.recorder.sample_hz`, which must divide
+`runtime.control_hz` exactly when the runtime records. That shared number is
+**not** a shared clock: the runtime records control ticks on its own stride, and
+the application records the body-velocity intent it held on its own sampling
+deadlines. The two phases start independently, and a dropped or delayed sample
+is never replayed. Rows of the two directories are therefore never paired by
+row index; association uses the monotonic stamps plus the identities below.
+
+### Runtime run: schema 4
+
+`meta.json` declares `schema_version: 4`, the configuration and layout digests,
+the backend, `control_hz`, `sample_hz`, the joint count and names, the units,
+the build revision, and the clock identity. A reader that finds schema 3 or any
+other value refuses the run by name instead of reinterpreting its bytes; the
+chunk layout, the row width and the validity block changed in schema 4.
+
+Each chunk row is one coherent control tick: the published state, the command
+in force, the feedback that tick used and the output it produced. The exported
+columns and their units are:
+
+| Columns | Meaning and unit |
+|---|---|
+| `stamp_us`, `state_seq` | controller monotonic time (µs) and published state sequence |
+| `execution_state`, `output_action`, `stop_reason` | protocol enums, numeric |
+| `fault_id`, `healthy`, `damping_eligible` | latched fault identity and the tick's gate results |
+| `command_present`, `producer_id`, `epoch`, `command_seq`, `source_state_seq`, `command_rx_us` | the command identity in force; `command_rx_us` is the host receive time (µs) |
+| `feedback_seq`, `feedback_stamp_us`, `feedback_valid`, `imu_valid` | feedback identity and validity |
+| `imu_orientation_rpy` | roll, pitch, yaw in that order, rad |
+| `imu_angular_velocity` | rad/s |
+| `imu_linear_acceleration` | m/s² |
+| `imu_rx_stamp_us` | host monotonic receive time of the IMU frame, µs |
+| `send_accepted`, `output_valid` | the host send path's answer and whether this tick produced an output |
+| `q`, `dq`, `tau_ff` | applied target: rad, rad/s, Nm |
+| `kp`, `kd` | gains: Nm/rad, Nm·s/rad |
+| `measured_q`, `measured_dq` | measured feedback: rad, rad/s |
+| `measured_tau_est` | torque estimate the feedback carried, Nm |
+| `output_torque` | torque the output stage asked the backend to apply, Nm |
+| `joint_valid` | the raw per-joint validity flag, one byte per joint in the chunk |
+
+The metadata states the limits of what the recorder knows:
+
+* **IMU conventions.** `orientation_rpy` is roll, pitch, yaw in radians and the
+  other two vectors are rad/s and m/s², but the driver contract fixes neither
+  their axis frame, their axis order, nor whether `linear_acceleration`
+  includes gravity. `meta.json` writes those as `unknown`; the recorder does not
+  transform or guess at a measurement.
+* **Torque estimate.** `measured_tau_est` is the estimate carried by the
+  feedback snapshot, not a torque sensor reading. It is not the commanded
+  torque (`output_torque`) and not evidence that a motor produced anything.
+* **Validity.** `joint_valid` is the raw per-joint flag. It does not replace
+  `feedback_valid`, the freshness checks or the per-input observation history:
+  a run consumer must still treat a value behind a false flag as not a
+  measurement.
+* **Send result.** `send_accepted` is the host send path's answer, never a
+  device acknowledgement. `output_torque` is what this tick asked the backend
+  to apply.
+
+`sessions.json` records the authorization contexts the runtime adopted (runtime,
+session, producer, epoch, first-command gains and timestamps). The runtime holds
+no model, so its `model_sha256` is always the literal `unknown`; the model
+digest belongs to the application and travels in the application's own sidecar.
+
+### Application run: velocity schema 1
+
+The application's `meta.json` declares `schema` = `irmv.application_velocity`,
+`version` = `1`, `sdk_git_sha`, the application and runtime configuration
+digests, the layout, the sample rate, the loop period and whether sampling was
+paced by the deadline, the clock identity, the units and an explicit model
+block. `model.status` is `loaded` (local model: the actual file name, path and
+SHA-256), `external` (a producer process supplied the stream), `none` (no
+locomotion source) or `unloaded` (local source without a loaded model). Only
+`loaded` carries a name, path or digest; the others carry `null` rather than a
+fabricated model identity.
+
+`velocity.jsonl` has one row per accepted sampling deadline: `stamp_us`,
+`sample_seq`, `identity_known`, `runtime_id`, `session_id`,
+`latest_state_seq`, `forward` (m/s), `lateral` (m/s) and `yaw` (rad/s). Before
+the runtime is discovered, or before a session exists, `identity_known` is false
+and the identities are the all-zero value. The index reports the rows, the loss
+spans (`queue_full`, `write_failed`) and a final `complete` marker.
+`policy_sessions.jsonl` sits in the same `app_run_*` directory and carries the
+application's own model/gain/identity facts per confirmed context.
+
+### Association and clock identity
+
+Both metadata files carry
+`clock = {"clock": "linux_clock_monotonic", "boot_id": "<kernel boot id>",
+"available": true|false}`. `linux_clock_monotonic` is a per-boot counter, so
+stamps are comparable only when the two runs declare the same clock and the same
+boot id. Association additionally requires the runtime record's own session
+identity (`runtime_id`, `session_id` in `sessions.json`) to appear in an
+application row with `identity_known: true`. The tools apply exactly these
+rules:
+
+* both metadata files must declare the same boot id, and both clock identities
+  must be available;
+* rows of another runtime instance, session or unknown identity are excluded
+  and counted, never merged;
+* if no row matches, association is refused with the reason, and the runtime
+  archive is still written without application columns.
+
+There is **no cross-host clock synchronisation**. Two hosts have unrelated
+monotonic counters even if their boot-id strings happen to match, and a run
+whose boot id could not be read cannot be associated automatically. Nor is
+there any retry, interpolation or padding of a missed sample: an absent sample
+is a gap, not fabricated history.
+
+### Fault history
+
+`RobotState.faults` remains the protocol's state of record: it reports the
+**first latched fault** (one identity and its detail) and does not change until a
+matching Reset clears it. `faults.jsonl` is the runtime's separate observation
+history of every distinct condition established by the safety checks:
+
+* it is an occurrence stream, not a level: the first appearance of a key is a
+  line; a sustained condition is not repeated on later ticks; after it
+  disappears for at least one tick, a recurrence is a new line;
+* the key is `{condition, joint_index}`; driver-error and write-failure keys
+  additionally include `error_code`, so a different driver error is a new
+  occurrence while the same one persists;
+* each line carries `schema_version: 4`, `record_seq` (the runtime's ordinal),
+  the published `runtime_id`/`state_seq`/`fault_id`, the numeric reason and
+  condition with their stable names, the full `FaultDetail`, and both the
+  human-readable `message` and `message_hex` (the exact raw bytes);
+* non-finite `observed_value`/`limit` values are the explicit JSON strings
+  `"NaN"`, `"+Inf"` and `"-Inf"`; `null` is never used for a measurement.
+
+The index's `faults` block accounts for what did not become a row:
+`generation_dropped` (the observation batch could not enumerate it),
+`queue_dropped` (the recorder handoff was full) and `write_failures` (the line
+was accepted but could not be written), each with its loss spans in `losses`.
+A fault occurrence can therefore be missing while the run is otherwise readable;
+the loss table names the record-sequence range and the reason.
+
+The completion marker means the worker finalized the stream: the index carries
+`faults.complete: true` and no accepted line failed to write. A killed run has no
+finalized marker (its index says `complete: false` and carries an empty fault
+loss table), so its fault history must be treated as incomplete even when the
+lines that exist are well-formed. The same rule applies to the sample chunks:
+`read_record` reports `complete`, `truncated` and `corrupt` separately, and a
+chunk that fails its header or payload CRC contributes no rows.
+
+### Reading and exporting
+
+`read_record` dispatches on the run's `meta.json` and prints one JSON object per
+row followed by a summary line. It refuses an unknown schema or a metadata file
+that declares neither stream rather than guessing. It only reads; it opens no
+DDS endpoint.
+
+```bash
+# Runtime run: sample and fault rows in [from, to), then the summary.
+build/read_record --run logs/run_<id> --from-us 1000000 --to-us 2000000
+build/read_record --run logs/run_<id> --summary-only
+
+# Application run: velocity and policy-session rows, then the summary.
+build/read_record --run logs/app_run_<UTC>_<unique> --from-us 1000000 --to-us 2000000
+build/read_record --run logs/app_run_<UTC>_<unique> --summary-only
+```
+
+`--from-us` is inclusive and `--to-us` exclusive, both on the row's monotonic
+`stamp_us`; omitting them reads the whole run. Fault rows are filtered by
+`detected_stamp_us`; a velocity row by its `stamp_us`. The summary reports
+`rows_in_range`, the first and last stamps and sequences, every gap or loss,
+`complete`, `truncated` and `corrupt`; non-finite values in rows are the same
+explicit strings the fault file uses.
+
+`tools/record_to_npz.py` converts a runtime run through `read_record` (never a
+second decoder) into a NumPy archive:
+
+```bash
+# Runtime run alone.
+python3 tools/record_to_npz.py logs/run_<id> run.npz --reader build/read_record
+
+# Runtime run plus an associated application run.
+python3 tools/record_to_npz.py logs/run_<id> run.npz \
+  --reader build/read_record \
+  --application-record logs/app_run_<UTC>_<unique> \
+  --from-us 1000000 --to-us 2000000
+```
+
+The window selects the exported runtime, fault and application rows exactly as
+`read_record` does. Association and hold-forward are computed over the whole
+application recording first, so a runtime row at the start of the window can
+still use an application sample taken before it. `velocity_*` arrays carry the
+selected application rows (each with its own length, not the runtime row count);
+`velocity_hold_forward/lateral/yaw` are attached to the runtime rows and are
+`NaN` outside a contiguous recorded segment, including before the first sample,
+past one planned period after the last, and across an indexed loss or cadence
+gap. `fault_*` arrays likewise have their own length, and a joint-less fault uses
+`-1` rather than an object. `association_ok` and `association_reason` state
+whether the application stream joined; a refused association still exports the
+runtime archive and names the reason.
+
+### What a run does not prove
+
+* `sdk_git_sha` identifies the commit `HEAD` of the build's source tree when
+  that tree is the Git root; it does **not** describe a clean or exact source
+  tree. Uncommitted changes are not captured. Without Git, a repository root or a
+  commit, the value is `unknown`, never a guessed hash.
+* No write is fsynced. A crash can lose recent lines and leaves the completion
+  marker false; durability is not promised.
+* The recorder and the exported stamps describe this host and this boot. They
+  are not synchronised with another host, a device clock or a wall clock.
+* The Fake backend has no physical-execution evidence: `send_accepted` and
+  `output_torque` describe the host send path, never a motor.
