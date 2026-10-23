@@ -21,11 +21,12 @@ using Json = nlohmann::json;
 
 // Column order of a chunk, fixed by the schema version. The joint columns are
 // `rows * joint_count` wide: a deployment with twelve joints does not pay for
-// the sixty-four the protocol allows. Version 2 writes eight columns - the
+// the sixty-four the protocol allows. Version 4 writes nine of them - the
 // applied target (`q`, `dq`, `tau_ff`, `kp`, `kd`), the measured feedback
-// (`measured_q`, `measured_dq`) and the output stage's torque (`output_torque`)
-// - so a reader can see what the machine measured and what it was asked to
-// apply in the same tick.
+// (`measured_q`, `measured_dq`), the output stage's torque (`output_torque`)
+// and the per-joint torque estimate (`measured_tau_est`) appended last -
+// followed by a row-major validity block of one byte per value (`joint_valid`).
+// A byte that is not 0 is true; the wire never carries a bool's memory image.
 void AppendU8(std::vector<std::uint8_t> *out, std::uint8_t value) {
   out->push_back(value);
 }
@@ -371,6 +372,16 @@ void Recorder::Impl::WriteChunk() {
     AppendU64(&payload, sample.command_rx_us);
     AppendU64(&payload, sample.feedback_seq);
     AppendU64(&payload, sample.feedback_stamp_us);
+    for (const double value : sample.imu_orientation_rpy) {
+      AppendDouble(&payload, value);
+    }
+    for (const double value : sample.imu_angular_velocity) {
+      AppendDouble(&payload, value);
+    }
+    for (const double value : sample.imu_linear_acceleration) {
+      AppendDouble(&payload, value);
+    }
+    AppendU64(&payload, sample.imu_rx_stamp_us);
   }
   // The joint columns, one column at a time and only as wide as the run needs.
   for (const RecordSample &sample : buffer) {
@@ -411,6 +422,19 @@ void Recorder::Impl::WriteChunk() {
   for (const RecordSample &sample : buffer) {
     for (std::uint32_t joint = 0; joint < joint_count; ++joint) {
       AppendDouble(&payload, sample.output_torque[joint]);
+    }
+  }
+  // The ninth double column: the feedback's per-joint torque estimate.
+  for (const RecordSample &sample : buffer) {
+    for (std::uint32_t joint = 0; joint < joint_count; ++joint) {
+      AppendDouble(&payload, sample.measured_tau_est[joint]);
+    }
+  }
+  // The validity block is row-major - one byte per joint of a row, after every
+  // double column - and writes the boolean's value, never its memory image.
+  for (const RecordSample &sample : buffer) {
+    for (std::uint32_t joint = 0; joint < joint_count; ++joint) {
+      AppendU8(&payload, sample.joint_valid[joint] ? 1U : 0U);
     }
   }
 

@@ -1756,6 +1756,13 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
   // The metadata of one recorded run: what a reader needs to interpret its rows
   // without any other file. The digests identify the configuration and the
   // joint layout in effect, and the units are the protocol's own.
+  //
+  // The IMU convention the runtime can state is the one the feedback contract
+  // fixes: `orientation_rpy` is roll, pitch, yaw in that order in radians,
+  // angular velocity is rad/s and linear acceleration is m/s^2. The driver
+  // contract does not fix the axis frame or order of those vectors, nor whether
+  // the acceleration includes gravity, so those are written as "unknown" - the
+  // recorder never guesses at or transforms a measurement.
   const auto record_metadata = [](const configuration::RuntimeConfig &config) {
     Json metadata;
     metadata["schema_version"] = telemetry::kRecordSchemaVersion;
@@ -1766,9 +1773,30 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
     metadata["sample_hz"] = config.telemetry.recorder.sample_hz;
     metadata["joint_count"] = config.joint_count();
     metadata["joints"] = config.joint_names;
-    metadata["units"] = {{"position", "rad"},    {"velocity", "rad_s"},
-                         {"torque", "Nm"},       {"kp", "Nm_per_rad"},
-                         {"kd", "Nm_s_per_rad"}, {"time", "us"}};
+    metadata["units"] = {{"position", "rad"},
+                         {"velocity", "rad_s"},
+                         {"torque", "Nm"},
+                         {"kp", "Nm_per_rad"},
+                         {"kd", "Nm_s_per_rad"},
+                         {"time", "us"},
+                         {"imu_orientation_rpy", "rad"},
+                         {"imu_angular_velocity", "rad_s"},
+                         {"imu_linear_acceleration", "m_s2"}};
+    metadata["imu"] = {{"orientation_rpy",
+                        {{"order", "roll,pitch,yaw"},
+                         {"unit", "rad"},
+                         {"axis_frame", "unknown"},
+                         {"axis_order", "unknown"}}},
+                       {"angular_velocity",
+                        {{"unit", "rad_s"},
+                         {"axis_frame", "unknown"},
+                         {"axis_order", "unknown"}}},
+                       {"linear_acceleration",
+                        {{"unit", "m_s2"},
+                         {"axis_frame", "unknown"},
+                         {"axis_order", "unknown"},
+                         {"includes_gravity", "unknown"}}},
+                       {"rx_stamp_us", "host_monotonic_receive_time_us"}};
     metadata["row"] =
         "one control tick: the published state, the target in force, the "
         "feedback it used and the host send result; the joint columns follow "

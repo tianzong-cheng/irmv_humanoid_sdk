@@ -1,6 +1,7 @@
 #include "irmv/telemetry/record_reader.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -324,16 +325,25 @@ bool DecodeChunk(const std::vector<std::uint8_t> &bytes,
     std::uint64_t command_rx_us = 0;
     std::uint64_t feedback_seq = 0;
     std::uint64_t feedback_stamp_us = 0;
-    if (!cursor.U64(&stamp) || !cursor.U64(&state_seq) || !cursor.U32(&state) ||
-        !cursor.U32(&output) || !cursor.U32(&stop) || !cursor.U64(&fault_id) ||
-        !cursor.U8(&healthy) || !cursor.U8(&damping_eligible) ||
-        !cursor.U8(&command_present) || !cursor.U8(&feedback_valid) ||
-        !cursor.U8(&imu_valid) || !cursor.U8(&send_accepted) ||
-        !cursor.U8(&output_valid) ||
-        !cursor.Bytes(sample.producer_id.data(), sample.producer_id.size()) ||
-        !cursor.U64(&epoch) || !cursor.U64(&command_seq) ||
-        !cursor.U64(&source_state_seq) || !cursor.U64(&command_rx_us) ||
-        !cursor.U64(&feedback_seq) || !cursor.U64(&feedback_stamp_us)) {
+    std::array<double, 9> imu_values{};
+    std::uint64_t imu_rx_stamp_us = 0;
+    bool fixed_ok =
+        cursor.U64(&stamp) && cursor.U64(&state_seq) && cursor.U32(&state) &&
+        cursor.U32(&output) && cursor.U32(&stop) && cursor.U64(&fault_id) &&
+        cursor.U8(&healthy) && cursor.U8(&damping_eligible) &&
+        cursor.U8(&command_present) && cursor.U8(&feedback_valid) &&
+        cursor.U8(&imu_valid) && cursor.U8(&send_accepted) &&
+        cursor.U8(&output_valid) &&
+        cursor.Bytes(sample.producer_id.data(), sample.producer_id.size()) &&
+        cursor.U64(&epoch) && cursor.U64(&command_seq) &&
+        cursor.U64(&source_state_seq) && cursor.U64(&command_rx_us) &&
+        cursor.U64(&feedback_seq) && cursor.U64(&feedback_stamp_us);
+    for (std::size_t index = 0; fixed_ok && index < imu_values.size();
+         ++index) {
+      fixed_ok = cursor.Double(&imu_values[index]);
+    }
+    fixed_ok = fixed_ok && cursor.U64(&imu_rx_stamp_us);
+    if (!fixed_ok) {
       *rows = std::move(decoded);
       return true;
     }
@@ -357,21 +367,28 @@ bool DecodeChunk(const std::vector<std::uint8_t> &bytes,
     sample.command_rx_us = command_rx_us;
     sample.feedback_seq = feedback_seq;
     sample.feedback_stamp_us = feedback_stamp_us;
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      sample.imu_orientation_rpy[axis] = imu_values[axis];
+      sample.imu_angular_velocity[axis] = imu_values[3 + axis];
+      sample.imu_linear_acceleration[axis] = imu_values[6 + axis];
+    }
+    sample.imu_rx_stamp_us = imu_rx_stamp_us;
     sample.joint_count = joint_count;
     decoded.push_back(sample);
   }
   // The joint columns follow, one column at a time, in the order the writer
-  // wrote them: the applied target (`q`, `dq`, `tau_ff`, `kp`, `kd`), then the
-  // measured feedback (`measured_q`, `measured_dq`) and the output stage's
-  // torque (`output_torque`). Each column is `row_count * joint_count` values
-  // wide, so a truncation part-way through it leaves the tail of that column -
-  // and every column after it - missing from *every* row. There is therefore no
-  // row that was decoded whole, and none is returned: a half-read column would
+  // wrote them: the applied target (`q`, `dq`, `tau_ff`, `kp`, `kd`), the
+  // measured feedback (`measured_q`, `measured_dq`), the output stage's torque
+  // (`output_torque`) and the ninth column, the torque estimate
+  // (`measured_tau_est`). Each column is `row_count * joint_count` values wide,
+  // so a truncation part-way through it leaves the tail of that column - and
+  // every column after it - missing from *every* row. There is therefore no row
+  // that was decoded whole, and none is returned: a half-read column would
   // otherwise leave the zero a row never received indistinguishable from a
   // stored zero, which is exactly what a reader cannot afford. The chunk is
   // still reported through `complete` false, so the caller learns the run is
   // short.
-  for (int column = 0; column < 8; ++column) {
+  for (int column = 0; column < 9; ++column) {
     for (std::uint32_t row = 0; row < row_count; ++row) {
       for (std::uint32_t joint = 0; joint < joint_count; ++joint) {
         double value = 0.0;
@@ -402,11 +419,28 @@ bool DecodeChunk(const std::vector<std::uint8_t> &bytes,
           case 6:
             sample.measured_dq[joint] = value;
             break;
-          default:
+          case 7:
             sample.output_torque[joint] = value;
+            break;
+          default:
+            sample.measured_tau_est[joint] = value;
             break;
         }
       }
+    }
+  }
+  // The validity block is row-major, after every double column: one byte per
+  // joint of a row. A truncation here leaves the validity of that row and every
+  // row after it unknown, so no row is returned - a value behind a guessed flag
+  // would be indistinguishable from a measurement.
+  for (std::uint32_t row = 0; row < row_count; ++row) {
+    for (std::uint32_t joint = 0; joint < joint_count; ++joint) {
+      std::uint8_t valid = 0;
+      if (!cursor.U8(&valid)) {
+        rows->clear();
+        return true;
+      }
+      decoded[row].joint_valid[joint] = valid != 0;
     }
   }
   // `whole` is the length's verdict, not the CRC's: a short file whose rows

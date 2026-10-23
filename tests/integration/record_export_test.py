@@ -51,6 +51,10 @@ COLUMNS = (
     "feedback_stamp_us",
     "feedback_valid",
     "imu_valid",
+    "imu_orientation_rpy",
+    "imu_angular_velocity",
+    "imu_linear_acceleration",
+    "imu_rx_stamp_us",
     "send_accepted",
     "output_valid",
     "q",
@@ -61,6 +65,8 @@ COLUMNS = (
     "measured_q",
     "measured_dq",
     "output_torque",
+    "measured_tau_est",
+    "joint_valid",
 )
 
 # The dtype each column must keep in the archive: a 64-bit count that came back
@@ -76,6 +82,7 @@ UINT64_COLUMNS = (
     "command_rx_us",
     "feedback_seq",
     "feedback_stamp_us",
+    "imu_rx_stamp_us",
 )
 UINT32_COLUMNS = ("execution_state", "output_action", "stop_reason")
 BOOL_COLUMNS = (
@@ -96,7 +103,17 @@ FLOAT_COLUMNS = (
     "measured_q",
     "measured_dq",
     "output_torque",
+    "measured_tau_est",
 )
+
+# The IMU vectors are (rows, 3) float64 and the per-joint validity flag is a
+# (rows, joints) bool matrix, so neither shape nor dtype is inferred.
+IMU_COLUMNS = (
+    "imu_orientation_rpy",
+    "imu_angular_velocity",
+    "imu_linear_acceleration",
+)
+JOINT_BOOL_COLUMNS = ("joint_valid",)
 
 # The producer identity is 16 opaque bytes, rendered the way the reader prints
 # it: 32 lower-case hex digits, one string per row.
@@ -234,6 +251,12 @@ def main() -> int:
         for column in FLOAT_COLUMNS:
             if data[column].dtype != np.float64:
                 fail(f"{column} is {data[column].dtype}, expected float64")
+        for column in IMU_COLUMNS:
+            if data[column].dtype != np.float64:
+                fail(f"{column} is {data[column].dtype}, expected float64")
+        for column in JOINT_BOOL_COLUMNS:
+            if data[column].dtype != np.bool_:
+                fail(f"{column} is {data[column].dtype}, expected bool")
         if data["producer_id"].dtype.kind != "U":
             fail(f"producer_id is {data['producer_id'].dtype}, expected a hex string")
         # A run with no gap at all still has the gap table, and its columns must
@@ -251,8 +274,16 @@ def main() -> int:
         for column in FLOAT_COLUMNS:
             if data[column].shape != (rows_written, joints):
                 fail(f"{column} has shape {data[column].shape}, expected ({rows_written}, {joints})")
+        for column in IMU_COLUMNS:
+            if data[column].shape != (rows_written, 3):
+                fail(f"{column} has shape {data[column].shape}, expected ({rows_written}, 3)")
+        for column in JOINT_BOOL_COLUMNS:
+            if data[column].shape != (rows_written, joints):
+                fail(f"{column} has shape {data[column].shape}, expected ({rows_written}, {joints})")
+        if int(data["imu_rx_stamp_us"].shape[0]) != rows_written:
+            fail("imu_rx_stamp_us does not have one value per row")
 
-        if int(data["schema_version"]) != 3:
+        if int(data["schema_version"]) != 4:
             fail("the archive does not carry the schema version")
         # The recorded run is intact, so the two damage flags are false: a run
         # that was never cut short and never corrupted says so.
@@ -296,6 +327,34 @@ def main() -> int:
         if archived_units != metadata["units"]:
             fail(f"the archive units {archived_units} are not the run's {metadata['units']}")
 
+        # The IMU convention the run can state is written down, and what the
+        # driver contract does not fix is marked unknown rather than guessed at:
+        # the archive must let a consumer see the difference.
+        imu_units = {
+            "imu_orientation_rpy": "rad",
+            "imu_angular_velocity": "rad_s",
+            "imu_linear_acceleration": "m_s2",
+        }
+        for key, unit in imu_units.items():
+            if archived_units.get(key) != unit:
+                fail(f"the run's units do not declare {key} as {unit}")
+        imu_metadata = metadata.get("imu")
+        if not isinstance(imu_metadata, dict):
+            fail("the run's metadata does not state its IMU conventions")
+        else:
+            orientation = imu_metadata.get("orientation_rpy", {})
+            if orientation.get("order") != "roll,pitch,yaw" or orientation.get("unit") != "rad":
+                fail("the run does not state RPY as roll,pitch,yaw in rad")
+            acceleration = imu_metadata.get("linear_acceleration", {})
+            if acceleration.get("unit") != "m_s2":
+                fail("the run does not state linear acceleration in m/s^2")
+            if acceleration.get("includes_gravity") != "unknown":
+                fail("the run claims a gravity convention the driver does not define")
+            for vector in ("orientation_rpy", "angular_velocity", "linear_acceleration"):
+                entry = imu_metadata.get(vector, {})
+                if entry.get("axis_frame") != "unknown" or entry.get("axis_order") != "unknown":
+                    fail(f"the run states an axis convention for {vector} the driver does not define")
+
         # Every column is checked against the reader's own output row by row:
         # the archive is a copy of a read, so a value it changed is a value it
         # invented. The producer identity is 16 opaque bytes and the stamp is a
@@ -325,6 +384,26 @@ def main() -> int:
                 bool(value) for value in data["output_valid"]
             ]:
                 fail("the archive does not carry the reader's output_valid flags")
+            # The schema-4 columns: the IMU snapshot, the receive stamp, the
+            # torque estimate and the per-joint validity flags. Each is compared
+            # with the reader's own row, so the archive carries what was read.
+            for column in IMU_COLUMNS:
+                if [row[column] for row in rows_read] != [
+                    list(value) for value in data[column]
+                ]:
+                    fail(f"the archive does not carry the reader's {column} vectors")
+            if [row["imu_rx_stamp_us"] for row in rows_read] != [
+                int(value) for value in data["imu_rx_stamp_us"]
+            ]:
+                fail("the archive does not carry the reader's IMU receive stamps")
+            if [row["measured_tau_est"] for row in rows_read] != [
+                list(value) for value in data["measured_tau_est"]
+            ]:
+                fail("the archive does not carry the reader's measured_tau_est column")
+            if [row["joint_valid"] for row in rows_read] != [
+                [bool(value) for value in row] for row in data["joint_valid"]
+            ]:
+                fail("the archive does not carry the reader's joint_valid flags")
 
             # The session table is carried whole and in order, with the digest
             # the runtime wrote - "unknown" here, because the runtime holds no
@@ -352,7 +431,9 @@ def main() -> int:
             above_two_53 = (1 << 53) + 1
             synthetic_row = dict(rows_read[0])
             synthetic_row["stamp_us"] = above_two_53
+            synthetic_row["imu_rx_stamp_us"] = above_two_53 + 2
             synthetic_row["producer_id"] = PRODUCER_ID
+            synthetic_row["joint_valid"] = [index % 2 == 0 for index in range(joints)]
             synthetic_path = work / "synthetic.npz"
             np.savez_compressed(
                 synthetic_path, **record_to_npz.to_archive([synthetic_row], run_summary)
@@ -363,8 +444,38 @@ def main() -> int:
                     f"a stamp above 2**53 came back as {synthetic['stamp_us'][0]!r} "
                     f"of dtype {synthetic['stamp_us'].dtype}"
                 )
+            if synthetic["imu_rx_stamp_us"].dtype != np.uint64 or int(
+                synthetic["imu_rx_stamp_us"][0]
+            ) != above_two_53 + 2:
+                fail(
+                    f"an IMU stamp above 2**53 came back as "
+                    f"{synthetic['imu_rx_stamp_us'][0]!r} of dtype "
+                    f"{synthetic['imu_rx_stamp_us'].dtype}"
+                )
+            if synthetic["joint_valid"].dtype != np.bool_ or list(
+                synthetic["joint_valid"][0]
+            ) != [index % 2 == 0 for index in range(joints)]:
+                fail("the per-joint validity flags did not survive the export as booleans")
             if str(synthetic["producer_id"][0]) != PRODUCER_ID:
                 fail(f"the producer identity came back as {str(synthetic['producer_id'][0])!r}")
+
+            # An empty run keeps every column's shape: (0, 3) for the IMU
+            # vectors, (0, joints) for the joint matrices and validity block,
+            # and a one-dimensional uint64 stamp column.
+            empty = record_to_npz.to_archive([], run_summary)
+            for column in IMU_COLUMNS:
+                if empty[column].shape != (0, 3) or empty[column].dtype != np.float64:
+                    fail(f"an empty run exported {column} with shape "
+                         f"{empty[column].shape} and dtype {empty[column].dtype}")
+            for column in (*FLOAT_COLUMNS, *JOINT_BOOL_COLUMNS):
+                expected_dtype = np.bool_ if column in JOINT_BOOL_COLUMNS else np.float64
+                if empty[column].shape != (0, joints) or empty[column].dtype != expected_dtype:
+                    fail(f"an empty run exported {column} with shape "
+                         f"{empty[column].shape} and dtype {empty[column].dtype}")
+            if empty["imu_rx_stamp_us"].shape != (0,) or empty["imu_rx_stamp_us"].dtype != np.uint64:
+                fail(f"an empty run exported imu_rx_stamp_us with shape "
+                     f"{empty['imu_rx_stamp_us'].shape} and dtype "
+                     f"{empty['imu_rx_stamp_us'].dtype}")
 
         # A 100 Hz recording over a four second run: the row rate is the
         # configured one and not the control rate, and the spacing is even.

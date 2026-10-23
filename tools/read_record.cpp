@@ -72,6 +72,14 @@ Json RowToJson(const RecordSample &sample) {
   row["feedback_stamp_us"] = sample.feedback_stamp_us;
   row["feedback_valid"] = sample.feedback_valid;
   row["imu_valid"] = sample.imu_valid;
+  // The IMU snapshot of the tick: three axes per vector, in the driver
+  // contract's order, and the host receive time as an unsigned microsecond
+  // count. nlohmann writes the u64 as an unsigned integer, so a stamp above
+  // 2**53 keeps its low bit.
+  row["imu_orientation_rpy"] = sample.imu_orientation_rpy;
+  row["imu_angular_velocity"] = sample.imu_angular_velocity;
+  row["imu_linear_acceleration"] = sample.imu_linear_acceleration;
+  row["imu_rx_stamp_us"] = sample.imu_rx_stamp_us;
   row["send_accepted"] = sample.send_accepted;
   row["output_valid"] = sample.output_valid;
   row["joint_count"] = sample.joint_count;
@@ -82,7 +90,9 @@ Json RowToJson(const RecordSample &sample) {
   Json kd = Json::array();
   Json measured_q = Json::array();
   Json measured_dq = Json::array();
+  Json measured_tau_est = Json::array();
   Json output_torque = Json::array();
+  Json joint_valid = Json::array();
   for (std::uint32_t index = 0; index < sample.joint_count; ++index) {
     q.push_back(sample.q[index]);
     dq.push_back(sample.dq[index]);
@@ -91,7 +101,9 @@ Json RowToJson(const RecordSample &sample) {
     kd.push_back(sample.kd[index]);
     measured_q.push_back(sample.measured_q[index]);
     measured_dq.push_back(sample.measured_dq[index]);
+    measured_tau_est.push_back(sample.measured_tau_est[index]);
     output_torque.push_back(sample.output_torque[index]);
+    joint_valid.push_back(sample.joint_valid[index]);
   }
   row["q"] = std::move(q);
   row["dq"] = std::move(dq);
@@ -100,7 +112,9 @@ Json RowToJson(const RecordSample &sample) {
   row["kd"] = std::move(kd);
   row["measured_q"] = std::move(measured_q);
   row["measured_dq"] = std::move(measured_dq);
+  row["measured_tau_est"] = std::move(measured_tau_est);
   row["output_torque"] = std::move(output_torque);
+  row["joint_valid"] = std::move(joint_valid);
   return row;
 }
 

@@ -38,13 +38,17 @@ using irmv::protocol::ExecutionState;
 using irmv::protocol::OutputAction;
 using irmv::protocol::Sequence;
 using irmv::protocol::TimeUs;
+using irmv::telemetry::ChunkPayloadBytes;
+using irmv::telemetry::kChunkHeaderBytes;
 using irmv::telemetry::kRecordChunkRows;
 using irmv::telemetry::kRecordGapSegments;
 using irmv::telemetry::kRecordQueueCapacity;
+using irmv::telemetry::kRecordSchemaVersion;
 using irmv::telemetry::Recorder;
 using irmv::telemetry::RecorderConfig;
 using irmv::telemetry::RecordGap;
 using irmv::telemetry::RecordGapReason;
+using irmv::telemetry::RecordRange;
 using irmv::telemetry::RecordReader;
 using irmv::telemetry::RecordSample;
 
@@ -64,6 +68,10 @@ RecordSample MakeSample(Sequence state_seq) {
   sample.feedback_seq = state_seq;
   sample.feedback_valid = true;
   sample.imu_valid = true;
+  sample.imu_orientation_rpy = {0.1, 0.2, 0.3};
+  sample.imu_angular_velocity = {0.4, 0.5, 0.6};
+  sample.imu_linear_acceleration = {0.7, 0.8, 0.9};
+  sample.imu_rx_stamp_us = sample.stamp_us + 7;
   sample.send_accepted = true;
   sample.joint_count = static_cast<std::uint32_t>(kJoints);
   for (std::size_t index = 0; index < kJoints; ++index) {
@@ -72,6 +80,9 @@ RecordSample MakeSample(Sequence state_seq) {
     sample.tau_ff[index] = 0.0;
     sample.kp[index] = 50.0;
     sample.kd[index] = 2.0;
+    sample.measured_tau_est[index] =
+        0.02 * static_cast<double>(index) + 0.002 * state_seq;
+    sample.joint_valid[index] = (index % 3) != 0;
   }
   return sample;
 }
@@ -945,6 +956,135 @@ int ProducerAfterDecrementDoesNotTouchSharedState() {
   return 0;
 }
 
+// A metadata document a reader can open for a run of `count` joints. The
+// recorder takes the joint count from the first sample it is offered, so the
+// run's metadata has to agree with the samples a test writes.
+std::string MetadataWithJoints(std::uint32_t count) {
+  nlohmann::json metadata;
+  metadata["schema_version"] = kRecordSchemaVersion;
+  metadata["config_id"] = "cfg";
+  metadata["layout_id"] = "lay";
+  metadata["backend"] = "fake";
+  metadata["control_hz"] = 500.0;
+  metadata["sample_hz"] = 100;
+  metadata["joint_count"] = count;
+  std::vector<std::string> joints;
+  for (std::uint32_t index = 0; index < count; ++index) {
+    joints.push_back("j" + std::to_string(index));
+  }
+  metadata["joints"] = std::move(joints);
+  metadata["units"] = {{"position", "rad"}};
+  return metadata.dump();
+}
+
+// The chunk a schema-4 recorder writes holds the new fixed-width fields, the
+// ninth joint column and the row-major validity block, and the reader returns
+// every one of them exactly as written.
+int SchemaFourChunkRoundTrip() {
+  const std::filesystem::path directory = MakeDirectory();
+  Recorder recorder;
+  RecorderConfig config;
+  config.enabled = true;
+  config.sample_hz = 100;
+  config.directory = directory;
+  std::string error;
+  CHECK(recorder.Start(config, MetadataWithJoints(kJoints), &error));
+  std::vector<RecordSample> written;
+  for (Sequence seq = 1; seq <= 3; ++seq) {
+    const RecordSample sample = MakeSample(seq);
+    CHECK(recorder.TryRecord(sample));
+    written.push_back(sample);
+  }
+  CHECK(recorder.Stop());
+
+  const nlohmann::json index = ReadIndex(recorder.run_directory());
+  CHECK(index["schema_version"] == kRecordSchemaVersion);
+  CHECK(index["joint_count"] == kJoints);
+  const std::filesystem::path chunk =
+      recorder.run_directory() / index["chunks"][0]["file"].get<std::string>();
+  CHECK(std::filesystem::file_size(chunk) ==
+        kChunkHeaderBytes + ChunkPayloadBytes(3, kJoints));
+
+  RecordReader reader;
+  CHECK(RecordReader::Open(recorder.run_directory(), &reader, &error));
+  RecordRange range;
+  CHECK(reader.ReadRange(0, ~0ULL, &range));
+  CHECK(range.samples.size() == written.size());
+  for (std::size_t row = 0; row < written.size(); ++row) {
+    CHECK(range.samples[row] == written[row]);
+    const RecordSample &sample = range.samples[row];
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      CHECK(sample.imu_orientation_rpy[axis] ==
+            written[row].imu_orientation_rpy[axis]);
+      CHECK(sample.imu_angular_velocity[axis] ==
+            written[row].imu_angular_velocity[axis]);
+      CHECK(sample.imu_linear_acceleration[axis] ==
+            written[row].imu_linear_acceleration[axis]);
+    }
+    CHECK(sample.imu_rx_stamp_us == written[row].imu_rx_stamp_us);
+    for (std::uint32_t joint = 0; joint < kJoints; ++joint) {
+      CHECK(sample.measured_tau_est[joint] ==
+            written[row].measured_tau_est[joint]);
+      CHECK(sample.joint_valid[joint] == written[row].joint_valid[joint]);
+    }
+  }
+  // The three IMU axes are distinct values, so a reader that shifted one axis
+  // into another cannot pass by accident.
+  CHECK(range.samples[0].imu_orientation_rpy[0] !=
+        range.samples[0].imu_orientation_rpy[1]);
+  CHECK(range.samples[0].imu_angular_velocity[1] !=
+        range.samples[0].imu_angular_velocity[2]);
+  CHECK(!range.samples[0].joint_valid[0]);
+  CHECK(range.samples[0].joint_valid[1]);
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
+// Timestamps above 2**53 and the per-joint validity flag survive the writer and
+// reader unchanged: a double would have lost the low microsecond, and a byte
+// image of a bool would not be the wire value this schema fixes.
+int WideTimestampsAndJointValidity() {
+  const std::filesystem::path directory = MakeDirectory();
+  Recorder recorder;
+  RecorderConfig config;
+  config.enabled = true;
+  config.sample_hz = 100;
+  config.directory = directory;
+  std::string error;
+  CHECK(recorder.Start(config, MetadataWithJoints(2), &error));
+  RecordSample sample = MakeSample(1);
+  sample.joint_count = 2;
+  sample.stamp_us = (1ULL << 53) + 11;
+  sample.imu_rx_stamp_us = (1ULL << 53) + 13;
+  sample.imu_orientation_rpy = {1.1, 2.2, 3.3};
+  sample.imu_angular_velocity = {4.4, 5.5, 6.6};
+  sample.imu_linear_acceleration = {7.7, 8.8, 9.9};
+  sample.measured_tau_est[0] = 1.25;
+  sample.measured_tau_est[1] = -2.5;
+  sample.joint_valid[0] = true;
+  sample.joint_valid[1] = false;
+  CHECK(recorder.TryRecord(sample));
+  CHECK(recorder.Stop());
+
+  RecordReader reader;
+  CHECK(RecordReader::Open(recorder.run_directory(), &reader, &error));
+  RecordRange range;
+  CHECK(reader.ReadRange(0, ~0ULL, &range));
+  CHECK(range.samples.size() == 1);
+  const RecordSample &read = range.samples.front();
+  CHECK(read.stamp_us == (1ULL << 53) + 11);
+  CHECK(read.imu_rx_stamp_us == (1ULL << 53) + 13);
+  CHECK(read.measured_tau_est[0] == 1.25);
+  CHECK(read.measured_tau_est[1] == -2.5);
+  CHECK(read.joint_valid[0]);
+  CHECK(!read.joint_valid[1]);
+  CHECK(read.imu_orientation_rpy[0] == 1.1);
+  CHECK(read.imu_angular_velocity[2] == 6.6);
+  CHECK(read.imu_linear_acceleration[1] == 8.8);
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
 int main() {
   int failures = 0;
   failures += Lifecycle();
@@ -960,6 +1100,8 @@ int main() {
   failures += SessionEventIsWritten();
   failures += SessionChannelIsBounded();
   failures += Disabled();
+  failures += SchemaFourChunkRoundTrip();
+  failures += WideTimestampsAndJointValidity();
   failures += BlockedWriterDoesNotBlockStop();
   failures += ProducerAfterDecrementDoesNotTouchSharedState();
   if (failures == 0) {

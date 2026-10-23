@@ -10,12 +10,15 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <array>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
@@ -46,8 +49,9 @@ constexpr TimeUs kStampStepUs = 10000;
 // eight-byte magic, then the schema version, joint count, row count and payload
 // length as u32, the first and last stamp and sequence as u64, the payload and
 // header CRC-32s as u32 - a 64-byte header - then the fixed-width per-row
-// fields, then the column-major joint columns, eight columns of
-// `rows * joint_count` doubles.
+// fields, then the column-major joint columns, nine columns of
+// `rows * joint_count` doubles, then the row-major validity block of one byte
+// per value.
 constexpr std::size_t kChunkHeaderBytes =
     sizeof("IRMVCH01") - 1 + 4 * sizeof(std::uint32_t) +
     4 * sizeof(std::uint64_t) + 2 * sizeof(std::uint32_t);
@@ -59,16 +63,19 @@ constexpr std::uint64_t kChunkLengthOffset =
 constexpr std::size_t kFixedRowBytes =
     2 * sizeof(std::uint64_t) + 3 * sizeof(std::uint32_t) +
     sizeof(std::uint64_t) + 7 * sizeof(std::uint8_t) + irmv::protocol::kIdSize +
-    6 * sizeof(std::uint64_t);
+    6 * sizeof(std::uint64_t) + 9 * sizeof(double) + sizeof(std::uint64_t);
 
 // The number of bytes the joint columns of a chunk of `rows` rows take: the
-// applied target's five columns plus the measured position and velocity and the
-// output stage's torque, one double per joint per row.
+// applied target's five columns, the measured position, velocity and torque
+// estimate, and the output stage's torque - nine doubles per joint per row -
+// followed by the row-major validity block, one byte per value.
 std::uint64_t JointColumnBytes(std::uint64_t rows) {
-  return 8 * rows * kJoints * sizeof(double);
+  return 9 * rows * kJoints * sizeof(double) +
+         rows * kJoints * sizeof(std::uint8_t);
 }
 
-RecordSample MakeSample(Sequence state_seq) {
+RecordSample MakeSample(Sequence state_seq,
+                        std::uint32_t joint_count = kJoints) {
   RecordSample sample;
   sample.stamp_us = 1000 + state_seq * kStampStepUs;
   sample.state_seq = state_seq;
@@ -88,10 +95,16 @@ RecordSample MakeSample(Sequence state_seq) {
   sample.feedback_stamp_us = sample.stamp_us - 100;
   sample.feedback_valid = true;
   sample.imu_valid = true;
+  // Three distinct axes per IMU vector: a decoder that shifted an axis into a
+  // neighbour cannot agree with these values by accident.
+  sample.imu_orientation_rpy = {0.11, -0.22, 0.33};
+  sample.imu_angular_velocity = {1.1, -2.2, 3.3};
+  sample.imu_linear_acceleration = {4.4, -5.5, 6.6};
+  sample.imu_rx_stamp_us = sample.stamp_us + 7;
   sample.send_accepted = true;
   sample.output_valid = true;
-  sample.joint_count = static_cast<std::uint32_t>(kJoints);
-  for (std::size_t index = 0; index < kJoints; ++index) {
+  sample.joint_count = joint_count;
+  for (std::uint32_t index = 0; index < joint_count; ++index) {
     sample.q[index] = 0.5 + 0.001 * state_seq + 0.01 * index;
     sample.dq[index] = 0.25 + 0.002 * state_seq;
     sample.tau_ff[index] = 0.125 + 0.003 * state_seq;
@@ -101,7 +114,9 @@ RecordSample MakeSample(Sequence state_seq) {
     // of this same tick: the two column groups a v1 run could not carry.
     sample.measured_q[index] = 0.75 + 0.004 * state_seq + 0.02 * index;
     sample.measured_dq[index] = 0.35 + 0.005 * state_seq;
+    sample.measured_tau_est[index] = 0.45 + 0.007 * state_seq + 0.03 * index;
     sample.output_torque[index] = 0.15 + 0.006 * state_seq;
+    sample.joint_valid[index] = (index % 2) == 0;
   }
   return sample;
 }
@@ -136,6 +151,37 @@ bool FlipByte(const std::filesystem::path &path, std::uint64_t offset) {
   return file.good();
 }
 
+// Rewrites a chunk header's payload length and its own checksum, so the
+// decoder reaches the structural check with a header that is internally
+// consistent but describes a payload its rows cannot hold. The header checksum
+// is over the first 60 bytes, the length field among them.
+bool SetPayloadLength(const std::filesystem::path &path, std::uint32_t length) {
+  std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out);
+  if (!file) {
+    return false;
+  }
+  std::array<std::uint8_t, irmv::telemetry::kChunkHeaderBytes> header{};
+  file.read(reinterpret_cast<char *>(header.data()),
+            static_cast<std::streamsize>(header.size()));
+  if (!file) {
+    return false;
+  }
+  for (int index = 0; index < 4; ++index) {
+    header[20 + static_cast<std::size_t>(index)] =
+        static_cast<std::uint8_t>((length >> (8 * index)) & 0xFFU);
+  }
+  const std::uint32_t crc = irmv::telemetry::ChunkCrc32(
+      header.data(), irmv::telemetry::kChunkHeaderCrcOffset);
+  for (int index = 0; index < 4; ++index) {
+    header[irmv::telemetry::kChunkHeaderCrcOffset + index] =
+        static_cast<std::uint8_t>((crc >> (8 * index)) & 0xFFU);
+  }
+  file.seekp(0);
+  file.write(reinterpret_cast<const char *>(header.data()),
+             static_cast<std::streamsize>(header.size()));
+  return file.good();
+}
+
 // The rows of every chunk but `broken`, which is what a reader must still
 // return when one chunk is refused: the run is bigger than the damaged file.
 std::size_t RowsOutsideChunk(const irmv::telemetry::RecordReader &reader,
@@ -162,21 +208,37 @@ bool TookRowsFromChunk(const irmv::telemetry::RecordRange &range,
   return false;
 }
 
+// The metadata of a run of `joint_count` joints, as the recorder passes it
+// through to meta.json. The reader checks the joint table against the chunks,
+// so every run a test reads back has to declare the table it really wrote.
+std::string ReaderMetadata(std::uint32_t joint_count) {
+  std::string joints;
+  for (std::uint32_t index = 0; index < joint_count; ++index) {
+    if (index != 0) {
+      joints += ",";
+    }
+    joints += "\"j" + std::to_string(index) + "\"";
+  }
+  return std::string(R"({"schema_version":)") +
+         std::to_string(irmv::telemetry::kRecordSchemaVersion) +
+         R"(,"config_id":"cfg","layout_id":"lay","backend":"fake","control_hz":500.0,"sample_hz":100,"joint_count":)" +
+         std::to_string(joint_count) + R"(,"joints":[)" + joints +
+         R"(],"units":{"position":"rad"}})";
+}
+
 // Starts a recorder whose metadata a reader can open and whose samples are the
 // four-joint run this file reads.
 bool StartReaderRecorder(Recorder *recorder,
                          const std::filesystem::path &directory,
-                         std::uint32_t stride = kStride) {
+                         std::uint32_t stride = kStride,
+                         std::uint32_t joint_count = kJoints) {
   RecorderConfig config;
   config.enabled = true;
   config.sample_hz = 100;
   config.stride = stride;
   config.directory = directory;
   std::string error;
-  const std::string metadata =
-      std::string(R"({"schema_version":)") +
-      std::to_string(irmv::telemetry::kRecordSchemaVersion) +
-      R"(,"config_id":"cfg","layout_id":"lay","backend":"fake","control_hz":500.0,"sample_hz":100,"joint_count":4,"joints":["j1","j2","j3","j4"],"units":{"position":"rad"}})";
+  const std::string metadata = ReaderMetadata(joint_count);
   if (!recorder->Start(config, metadata, &error)) {
     std::cerr << "recorder start failed: " << error << '\n';
     return false;
@@ -213,10 +275,7 @@ bool WriteRun(const std::filesystem::path &directory, int count,
   config.stride = kStride;
   config.directory = directory;
   std::string error;
-  const std::string metadata =
-      std::string(R"({"schema_version":)") +
-      std::to_string(irmv::telemetry::kRecordSchemaVersion) +
-      R"(,"config_id":"cfg","layout_id":"lay","backend":"fake","control_hz":500.0,"sample_hz":100,"joint_count":4,"joints":["j1","j2","j3","j4"],"units":{"position":"rad"}})";
+  const std::string metadata = ReaderMetadata(kJoints);
   if (!recorder.Start(config, metadata, &error)) {
     std::cerr << "recorder start failed: " << error << '\n';
     return false;
@@ -285,7 +344,7 @@ int FullRead() {
   CHECK(reader.metadata().sample_hz == 100);
   CHECK(reader.metadata().joint_count == kJoints);
   CHECK(reader.metadata().joints.size() == kJoints);
-  CHECK(reader.metadata().joints[0] == "j1");
+  CHECK(reader.metadata().joints[0] == "j0");
   CHECK(reader.chunks().size() == 1);
   CHECK(reader.gaps().empty());
 
@@ -302,9 +361,21 @@ int FullRead() {
   // layout would leave behind.
   const RecordSample &first = range.samples.front();
   CHECK(first.output_valid);
+  CHECK(first.imu_rx_stamp_us == written.front().imu_rx_stamp_us);
+  for (std::size_t axis = 0; axis < 3; ++axis) {
+    CHECK(first.imu_orientation_rpy[axis] ==
+          written.front().imu_orientation_rpy[axis]);
+    CHECK(first.imu_angular_velocity[axis] ==
+          written.front().imu_angular_velocity[axis]);
+    CHECK(first.imu_linear_acceleration[axis] ==
+          written.front().imu_linear_acceleration[axis]);
+  }
   for (std::uint32_t joint = 0; joint < kJoints; ++joint) {
     CHECK(first.measured_q[joint] == written.front().measured_q[joint]);
     CHECK(first.measured_dq[joint] == written.front().measured_dq[joint]);
+    CHECK(first.measured_tau_est[joint] ==
+          written.front().measured_tau_est[joint]);
+    CHECK(first.joint_valid[joint] == written.front().joint_valid[joint]);
     CHECK(first.output_torque[joint] == written.front().output_torque[joint]);
   }
   std::filesystem::remove_all(directory);
@@ -562,22 +633,22 @@ int UnknownVersion() {
   return 0;
 }
 
-// A v1 run - the schema before this build - is refused by name, never read with
-// the v3 layout: its bytes mean something else, and its chunk has fewer flags
-// and fewer columns, so decoding it would misalign every field.
-int VersionOneRun() {
+// A schema-3 run - the layout before this build - is refused by name, never
+// read with the schema-4 layout: its fixed rows and joint columns are shorter,
+// so decoding it would misalign every field after the new columns.
+int SchemaThreeRun() {
   const std::filesystem::path directory = MakeDirectory();
   std::filesystem::path run;
   CHECK(WriteRun(directory, 5, 0, 0, nullptr, &run));
   std::ofstream file(run / "meta.json", std::ios::trunc);
-  file << R"({"schema_version":1})";
+  file << R"({"schema_version":3})";
   file.close();
   RecordReader reader;
   std::string error;
   CHECK(!RecordReader::Open(run, &reader, &error));
   // The refusal names both the version the run declares and the one this build
-  // implements; it never assumes the bytes are v3.
-  CHECK(error.find("1") != std::string::npos);
+  // implements; it never assumes the bytes are the current layout.
+  CHECK(error.find("3") != std::string::npos);
   CHECK(error.find(std::to_string(irmv::telemetry::kRecordSchemaVersion)) !=
         std::string::npos);
   std::filesystem::remove_all(directory);
@@ -585,9 +656,9 @@ int VersionOneRun() {
 }
 
 // A chunk that declares another schema version is refused with that version in
-// the message, and yields no rows - rather than being decoded with the v3
-// layout, which would silently misalign every field after the header.
-int VersionOneChunk() {
+// the message, and yields no rows - rather than being decoded with the
+// schema-4 layout, which would silently misalign every field after the header.
+int SchemaThreeChunk() {
   const std::filesystem::path directory = MakeDirectory();
   std::filesystem::path run;
   CHECK(WriteRun(directory, 5, 0, 0, nullptr, &run));
@@ -596,19 +667,214 @@ int VersionOneChunk() {
   CHECK(RecordReader::Open(run, &reader, &error));
   const std::filesystem::path chunk = run / reader.chunks().front().file;
   // The schema version is the u32 right after the eight-byte magic. Patch it to
-  // 1, the version this build no longer reads.
+  // 3, the version this build no longer reads.
   std::fstream file(chunk, std::ios::binary | std::ios::in | std::ios::out);
   CHECK(static_cast<bool>(file));
   file.seekp(8);
-  const char version_one[4] = {1, 0, 0, 0};
-  file.write(version_one, sizeof(version_one));
+  const char version_three[4] = {3, 0, 0, 0};
+  file.write(version_three, sizeof(version_three));
   file.close();
 
   RecordRange range;
   CHECK(reader.ReadRange(0, ~0ULL, &range));
   CHECK(range.truncated);
   CHECK(range.samples.empty());
-  CHECK(range.error.find("1") != std::string::npos);
+  CHECK(range.error.find("3") != std::string::npos);
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
+// A run that recorded no samples has no chunks, and reading it is an empty
+// answer rather than an error: the metadata and a complete index are enough to
+// say the run holds zero rows.
+int ZeroRowRun() {
+  const std::filesystem::path directory = MakeDirectory();
+  std::filesystem::path run;
+  CHECK(WriteRun(directory, 0, 0, 0, nullptr, &run));
+  RecordReader reader;
+  std::string error;
+  CHECK(RecordReader::Open(run, &reader, &error));
+  CHECK(reader.complete());
+  CHECK(reader.chunks().empty());
+  RecordRange range;
+  CHECK(reader.ReadRange(0, ~0ULL, &range));
+  CHECK(range.ok);
+  CHECK(range.samples.empty());
+  CHECK(range.gaps.empty());
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
+// The protocol's maximum of 64 joints: the row and column sizes scale to the
+// count the run declares, and every value of the widest chunk comes back.
+int MaximumJoints() {
+  const std::filesystem::path directory = MakeDirectory();
+  constexpr std::uint32_t kAllJoints = irmv::protocol::kMaxJoints;
+  Recorder recorder;
+  CHECK(StartReaderRecorder(&recorder, directory, kStride, kAllJoints));
+  std::vector<RecordSample> written;
+  for (Sequence seq = 1; seq <= 2; ++seq) {
+    const RecordSample sample = MakeSample(seq, kAllJoints);
+    for (int attempt = 0; attempt < 500; ++attempt) {
+      if (recorder.TryRecord(sample)) {
+        written.push_back(sample);
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  }
+  CHECK(written.size() == 2);
+  CHECK(recorder.Stop());
+
+  RecordReader reader;
+  std::string error;
+  CHECK(RecordReader::Open(recorder.run_directory(), &reader, &error));
+  CHECK(reader.metadata().joint_count == kAllJoints);
+  RecordRange range;
+  CHECK(reader.ReadRange(0, ~0ULL, &range));
+  CHECK(range.samples.size() == written.size());
+  for (std::size_t index = 0; index < written.size(); ++index) {
+    CHECK(range.samples[index] == written[index]);
+    CHECK(range.samples[index].joint_count == kAllJoints);
+    CHECK(range.samples[index].measured_tau_est[kAllJoints - 1] ==
+          written[index].measured_tau_est[kAllJoints - 1]);
+    CHECK(range.samples[index].joint_valid[kAllJoints - 1] ==
+          written[index].joint_valid[kAllJoints - 1]);
+  }
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
+// A NaN the driver reported and a validity flag of false cross the writer and
+// reader unchanged: the archive never substitutes a value for a failed
+// measurement, and the flag stays the run's own.
+int NaNAndInvalidJointKeepOriginalValues() {
+  const std::filesystem::path directory = MakeDirectory();
+  Recorder recorder;
+  CHECK(StartReaderRecorder(&recorder, directory));
+  RecordSample sample = MakeSample(1);
+  sample.imu_valid = false;
+  sample.imu_orientation_rpy[2] = std::numeric_limits<double>::quiet_NaN();
+  sample.measured_tau_est[0] = std::numeric_limits<double>::quiet_NaN();
+  sample.measured_tau_est[1] = 0.0;
+  sample.joint_valid[0] = false;
+  sample.joint_valid[1] = true;
+  for (int attempt = 0; attempt < 500; ++attempt) {
+    if (recorder.TryRecord(sample)) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  CHECK(recorder.Stop());
+
+  RecordReader reader;
+  std::string error;
+  CHECK(RecordReader::Open(recorder.run_directory(), &reader, &error));
+  RecordRange range;
+  CHECK(reader.ReadRange(0, ~0ULL, &range));
+  CHECK(range.samples.size() == 1);
+  const RecordSample &read = range.samples.front();
+  CHECK(!read.imu_valid);
+  CHECK(std::isnan(read.imu_orientation_rpy[2]));
+  CHECK(std::isnan(read.measured_tau_est[0]));
+  CHECK(!read.joint_valid[0]);
+  CHECK(read.joint_valid[1]);
+  CHECK(read.measured_tau_est[1] == 0.0);
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
+// A chunk cut inside the validity block yields no rows at all: a row whose
+// validity is unknown cannot be handed out, and the run is reported as short.
+int TruncatedValidityBlock() {
+  const std::filesystem::path directory = MakeDirectory();
+  std::filesystem::path run;
+  CHECK(WriteRun(directory, 30, 0, 0, nullptr, &run));
+  RecordReader reader;
+  std::string error;
+  CHECK(RecordReader::Open(run, &reader, &error));
+  const std::filesystem::path chunk = run / reader.chunks().front().file;
+  const std::uint64_t rows = reader.chunks().front().rows;
+  const std::uint64_t validity_bytes =
+      rows * static_cast<std::uint64_t>(kJoints);
+  const auto size = std::filesystem::file_size(chunk);
+  CHECK(size > validity_bytes);
+  // Cut halfway through the row-major validity block, so every row is missing
+  // at least the flags of its later joints.
+  std::filesystem::resize_file(chunk, size - validity_bytes / 2);
+
+  RecordRange range;
+  CHECK(reader.ReadRange(0, ~0ULL, &range));
+  CHECK(range.ok);
+  CHECK(range.truncated);
+  CHECK(!range.corrupt);
+  CHECK(range.samples.empty());
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
+// A byte flipped inside the validity block is corruption: the payload checksum
+// covers the new block, so a validity flag edited in place is named and none of
+// the damaged chunk's rows are returned.
+int CorruptValidityBlock() {
+  const std::filesystem::path directory = MakeDirectory();
+  std::filesystem::path run;
+  const int count =
+      2 * static_cast<int>(irmv::telemetry::kRecordChunkRows) + 10;
+  CHECK(WriteRun(directory, count, 0, 0, nullptr, &run));
+  RecordReader reader;
+  std::string error;
+  CHECK(RecordReader::Open(run, &reader, &error));
+  CHECK(reader.chunks().size() == 3);
+
+  const irmv::telemetry::ChunkInfo broken = reader.chunks().front();
+  const std::filesystem::path chunk = run / broken.file;
+  const std::uint64_t double_column_bytes =
+      9 * static_cast<std::uint64_t>(broken.rows) * kJoints * sizeof(double);
+  const std::uint64_t validity_offset = kChunkHeaderBytes +
+                                        broken.rows * kFixedRowBytes +
+                                        double_column_bytes + 5;
+  CHECK(FlipByte(chunk, validity_offset));
+
+  RecordRange range;
+  CHECK(reader.ReadRange(0, ~0ULL, &range));
+  CHECK(range.ok);
+  CHECK(range.corrupt);
+  CHECK(!range.truncated);
+  CHECK(range.error.find(broken.file) != std::string::npos);
+  CHECK(range.error.find("checksum") != std::string::npos);
+  CHECK(range.samples.size() == RowsOutsideChunk(reader, 0));
+  CHECK(!TookRowsFromChunk(range, broken));
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
+// A header whose payload length omits the validity block - the length a schema
+// 3 writer declared - is named as a length the current rows cannot hold, not
+// read as a short file: the validity bytes are part of this schema's payload.
+int PayloadLengthOmittingValidity() {
+  const std::filesystem::path directory = MakeDirectory();
+  std::filesystem::path run;
+  CHECK(WriteRun(directory, 30, 0, 0, nullptr, &run));
+  RecordReader reader;
+  std::string error;
+  CHECK(RecordReader::Open(run, &reader, &error));
+  const irmv::telemetry::ChunkInfo broken = reader.chunks().front();
+  const std::filesystem::path chunk = run / broken.file;
+  const std::uint64_t old_payload =
+      std::filesystem::file_size(chunk) - kChunkHeaderBytes;
+  const std::uint64_t without_validity =
+      old_payload - static_cast<std::uint64_t>(broken.rows) * kJoints;
+  CHECK(SetPayloadLength(chunk, static_cast<std::uint32_t>(without_validity)));
+
+  RecordRange range;
+  CHECK(reader.ReadRange(0, ~0ULL, &range));
+  CHECK(range.ok);
+  CHECK(range.corrupt);
+  CHECK(!range.truncated);
+  CHECK(range.error.find(broken.file) != std::string::npos);
+  CHECK(range.error.find("payload length") != std::string::npos);
+  CHECK(range.samples.empty());
   std::filesystem::remove_all(directory);
   return 0;
 }
@@ -758,8 +1024,14 @@ int main() {
   failures += CorruptLength();
   failures += IntactRunUnchanged();
   failures += UnknownVersion();
-  failures += VersionOneRun();
-  failures += VersionOneChunk();
+  failures += SchemaThreeRun();
+  failures += SchemaThreeChunk();
+  failures += ZeroRowRun();
+  failures += MaximumJoints();
+  failures += NaNAndInvalidJointKeepOriginalValues();
+  failures += TruncatedValidityBlock();
+  failures += CorruptValidityBlock();
+  failures += PayloadLengthOmittingValidity();
   failures += ReadDuringRecording();
   failures += RecoverCommittedChunkWithoutIndex();
   failures += DamagedRecoveredChunkIsReported();

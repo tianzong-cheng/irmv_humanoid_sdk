@@ -19,9 +19,10 @@ its data, not a footnote.
 The dtype of a column is part of that contract rather than something numpy
 infers. A stamp, a sequence number or a gap count is a 64-bit unsigned count and
 stays ``uint64``: a microsecond stamp above 2**53, which a ``float64`` could not
-hold to the microsecond, survives exactly. A flag stays ``bool``, the enum
-columns stay the ``uint32`` the reader prints, and only the joint columns and
-the control rate are floating point. The 16-byte ``producer_id`` is an identity
+hold to the microsecond, survives exactly. A flag stays ``bool`` - including
+the per-joint ``joint_valid`` matrix - the enum columns stay the ``uint32`` the
+reader prints, and only the joint columns, the IMU vectors and the control rate
+are floating point. The 16-byte ``producer_id`` is an identity
 rather than a number: it crosses as the reader's own 32 lower-case hex digits,
 one ``U32`` string per row, so every bit of it survives and two rows are
 comparable as text. ``units`` is stored as the JSON text of the units object the
@@ -63,6 +64,7 @@ SCALAR_DTYPES = {
     "feedback_stamp_us": np.uint64,
     "feedback_valid": np.bool_,
     "imu_valid": np.bool_,
+    "imu_rx_stamp_us": np.uint64,
     "send_accepted": np.bool_,
     "output_valid": np.bool_,
 }
@@ -74,9 +76,18 @@ SCALAR_DTYPES = {
 PRODUCER_COLUMN = "producer_id"
 PRODUCER_DTYPE = np.dtype("<U32")
 
+# The IMU vectors, each of shape (rows, 3) in the driver contract's axis
+# order. They are floating point like the joint columns, never a string or an
+# object: the archive carries the numbers the run recorded.
+IMU_COLUMNS = (
+    "imu_orientation_rpy",
+    "imu_angular_velocity",
+    "imu_linear_acceleration",
+)
+
 # The joint columns, each of shape (rows, joints). The first five are the
-# applied target; the last three are the measured feedback and the output
-# stage's torque of the same tick.
+# applied target; then the measured feedback and the output stage's torque of
+# the same tick, with the torque estimate appended as the ninth column.
 JOINT_COLUMNS = (
     "q",
     "dq",
@@ -86,7 +97,13 @@ JOINT_COLUMNS = (
     "measured_q",
     "measured_dq",
     "output_torque",
+    "measured_tau_est",
 )
+
+# The per-joint validity flag, shape (rows, joints), one bool per value. It is
+# its own column group because a bool matrix is not a float matrix: numpy would
+# silently promote one to the other if the dtype were inferred.
+JOINT_BOOL_COLUMNS = ("joint_valid",)
 
 # The session sidecar's columns. A run's session table is one entry per
 # authorization context the runtime adopted, so it is a different length from
@@ -155,6 +172,30 @@ def to_archive(rows, summary) -> dict:
             arrays[column] = np.zeros((0, joint_count), dtype=np.float64)
             continue
         matrix = np.array([row[column] for row in rows], dtype=np.float64)
+        if matrix.shape != (count, joint_count):
+            raise SystemExit(
+                f"record_to_npz: the {column} column has shape {matrix.shape}, expected "
+                f"({count}, {joint_count})"
+            )
+        arrays[column] = matrix
+
+    for column in IMU_COLUMNS:
+        if count == 0:
+            arrays[column] = np.zeros((0, 3), dtype=np.float64)
+            continue
+        matrix = np.array([row[column] for row in rows], dtype=np.float64)
+        if matrix.shape != (count, 3):
+            raise SystemExit(
+                f"record_to_npz: the {column} column has shape {matrix.shape}, expected "
+                f"({count}, 3)"
+            )
+        arrays[column] = matrix
+
+    for column in JOINT_BOOL_COLUMNS:
+        if count == 0:
+            arrays[column] = np.zeros((0, joint_count), dtype=np.bool_)
+            continue
+        matrix = np.array([row[column] for row in rows], dtype=np.bool_)
         if matrix.shape != (count, joint_count):
             raise SystemExit(
                 f"record_to_npz: the {column} column has shape {matrix.shape}, expected "

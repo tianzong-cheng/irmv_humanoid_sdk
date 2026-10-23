@@ -24,6 +24,12 @@ namespace irmv::telemetry {
 // The version of the on-disk sample layout. A reader refuses a run of another
 // version instead of reinterpreting its bytes.
 //
+// 4 added the IMU snapshot of the tick (orientation, angular velocity, linear
+// acceleration and its receive stamp), the per-joint torque estimate the
+// feedback carried and a per-joint validity flag. Version 3 fixed rows and
+// columns are shorter and hold no validity block, so a version 3 run is
+// refused, never reinterpreted.
+//
 // 3 gave every chunk an explicit payload length and a CRC-32 over its own
 // header and over its payload, so a chunk that was corrupted in place - a torn
 // write, a bad sector, a stray edit - is named as corrupt and contributes no
@@ -36,7 +42,7 @@ namespace irmv::telemetry {
 // sidecar (`sessions.json`). Version 1 carried only the target and the
 // feedback's identity, so a reader could not see what the machine measured or
 // what it was asked to apply; version 1 runs are refused, never reinterpreted.
-inline constexpr std::uint32_t kRecordSchemaVersion = 3;
+inline constexpr std::uint32_t kRecordSchemaVersion = 4;
 
 // A SHA-256 digest rendered as 64 lower-case hex digits, plus a terminator. A
 // session event carries one as fixed storage so the control thread can push it
@@ -80,6 +86,17 @@ struct RecordSample {
   bool feedback_valid{false};
   bool imu_valid{false};
 
+  // The IMU snapshot of this tick, meaningful only while `imu_valid` holds.
+  // `imu_orientation_rpy` is roll, pitch, yaw in radians in that order;
+  // `imu_angular_velocity` is rad/s and `imu_linear_acceleration` is m/s^2, in
+  // the axis frame and order the driver contract defines, which the recorder
+  // neither knows nor transforms. `imu_rx_stamp_us` is the host monotonic
+  // receive time of the frame the snapshot came from.
+  std::array<double, 3> imu_orientation_rpy{};
+  std::array<double, 3> imu_angular_velocity{};
+  std::array<double, 3> imu_linear_acceleration{};
+  protocol::TimeUs imu_rx_stamp_us{0};
+
   // The final output of this very tick and the host send path's answer to it.
   // `send_accepted` is the host path's answer and is never a device
   // acknowledgement; `output_torque` is the torque the output stage asked the
@@ -100,6 +117,13 @@ struct RecordSample {
   // `feedback_seq`, and are meaningful only while `feedback_valid` holds.
   std::array<double, protocol::kMaxJoints> measured_q{};
   std::array<double, protocol::kMaxJoints> measured_dq{};
+  // The per-joint torque estimate the feedback carried in the same snapshot as
+  // `measured_q`/`measured_dq`, in the configuration's joint order.
+  std::array<double, protocol::kMaxJoints> measured_tau_est{};
+  // Whether each joint's feedback value was usable this tick. The flag is the
+  // contract, not the number: a value behind a false flag is whatever the
+  // snapshot held and is not a measurement.
+  std::array<bool, protocol::kMaxJoints> joint_valid{};
   // The torques the output stage produced for the backend this tick, meaningful
   // only while `output_valid` holds.
   std::array<double, protocol::kMaxJoints> output_torque{};
@@ -121,11 +145,17 @@ struct RecordSample {
            feedback_stamp_us == other.feedback_stamp_us &&
            feedback_valid == other.feedback_valid &&
            imu_valid == other.imu_valid &&
+           imu_orientation_rpy == other.imu_orientation_rpy &&
+           imu_angular_velocity == other.imu_angular_velocity &&
+           imu_linear_acceleration == other.imu_linear_acceleration &&
+           imu_rx_stamp_us == other.imu_rx_stamp_us &&
            send_accepted == other.send_accepted &&
            output_valid == other.output_valid &&
            joint_count == other.joint_count && q == other.q && dq == other.dq &&
            tau_ff == other.tau_ff && kp == other.kp && kd == other.kd &&
            measured_q == other.measured_q && measured_dq == other.measured_dq &&
+           measured_tau_est == other.measured_tau_est &&
+           joint_valid == other.joint_valid &&
            output_torque == other.output_torque;
   }
 };
@@ -204,9 +234,10 @@ struct RecordGap {
 // field is rather than each holding its own copy of the offsets.
 //
 // A chunk is a fixed header, then the payload: the fixed-width per-row fields,
-// then the column-major joint columns. The header carries the payload's exact
-// length and two CRC-32 checksums, so a reader can tell a corrupt chunk from a
-// truncated one before it trusts a single row:
+// then nine column-major joint columns of doubles, then one row-major byte of
+// joint validity per value. The header carries the payload's exact length and
+// two CRC-32 checksums, so a reader can tell a corrupt chunk from a truncated
+// one before it trusts a single row:
 //
 //   offset  size  field
 //   0       8     magic (`kChunkMagic`)
@@ -234,20 +265,24 @@ inline constexpr std::size_t kChunkHeaderBytes = 64;
 inline constexpr std::size_t kChunkPayloadCrcOffset = 56;
 inline constexpr std::size_t kChunkHeaderCrcOffset = 60;
 // The fixed-width part of one row, before the column-major joint columns: two
-// u64, three u32, a u64, seven flag bytes, the producer identity and six u64.
+// u64, three u32, a u64, seven flag bytes, the producer identity, six u64, the
+// nine IMU doubles (orientation, angular velocity, linear acceleration) and the
+// IMU receive stamp as a u64.
 inline constexpr std::size_t kChunkFixedRowBytes =
     2 * sizeof(std::uint64_t) + 3 * sizeof(std::uint32_t) +
     sizeof(std::uint64_t) + 7 * sizeof(std::uint8_t) + protocol::kIdSize +
-    6 * sizeof(std::uint64_t);
+    6 * sizeof(std::uint64_t) + 9 * sizeof(double) + sizeof(std::uint64_t);
 
 // The payload length a chunk of `rows` rows and `joint_count` joints must
-// declare: the fixed-width rows plus eight column-major double columns of
-// `rows * joint_count` values. A header that declares another length cannot
-// describe those rows, and the reader refuses it rather than reading past it.
+// declare: the fixed-width rows, nine column-major double columns of
+// `rows * joint_count` values, and the row-major validity block of one byte per
+// value. A header that declares another length cannot describe those rows, and
+// the reader refuses it rather than reading past it.
 inline constexpr std::uint64_t ChunkPayloadBytes(std::uint32_t rows,
                                                  std::uint32_t joint_count) {
+  const std::uint64_t values = static_cast<std::uint64_t>(rows) * joint_count;
   return static_cast<std::uint64_t>(rows) * kChunkFixedRowBytes +
-         8 * static_cast<std::uint64_t>(rows) * joint_count * sizeof(double);
+         9 * values * sizeof(double) + values * sizeof(std::uint8_t);
 }
 
 // The CRC-32 of the buffer (the IEEE 802.3 polynomial, reflected). A chunk
