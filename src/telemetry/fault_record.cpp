@@ -321,7 +321,7 @@ bool DecodeFault(const Json &line, RecordedFault *fault, std::string *why) {
     std::uint64_t byte = 0;
     if (!HexValue(std::string_view(message_hex).substr(2 * index, 2), 2,
                   &byte)) {
-      *why = "message_hex is not lower-case hex";
+      *why = "message_hex is not hex";
       return false;
     }
     raw[index] = static_cast<char>(byte);
@@ -386,14 +386,23 @@ const char *FaultLossReasonName(FaultLossReason reason) noexcept {
 // worker can never observe a function from one installation and the context of
 // another. A call already in flight keeps the pair it copied; a test must keep
 // its context alive until the worker is quiescent.
-std::mutex g_fault_line_hook_mutex;
+//
+// The mutex is immortal: after a timed-out Stop() the worker is detached and
+// may still be finalizing while static destruction runs, so a namespace-scope
+// mutex could be destroyed under it. A leaked function-local mutex (with a
+// trivially destructible pointer) is safe to lock for the life of the process.
+std::mutex &FaultLineHookMutex() {
+  static std::mutex *const mutex = new std::mutex;
+  return *mutex;
+}
+
 int (*g_fault_line_hook)(void *, std::string_view) = nullptr;
 void *g_fault_line_hook_context = nullptr;
 
 void SetFaultLineWriteHookForTest(int (*hook)(void *context,
                                               std::string_view line),
                                   void *context) noexcept {
-  const std::lock_guard<std::mutex> lock(g_fault_line_hook_mutex);
+  const std::lock_guard<std::mutex> lock(FaultLineHookMutex());
   g_fault_line_hook = hook;
   g_fault_line_hook_context = context;
 }
@@ -419,8 +428,17 @@ void FaultWriter::RollBack() noexcept {
     state_->file.close();
   }
   state_->file.clear();
-  std::error_code ignored;
-  std::filesystem::resize_file(state_->path, state_->committed_bytes, ignored);
+  // Truncate only when the file is larger than the committed boundary. If it
+  // was externally truncated or replaced, resizing up would pad NULs and the
+  // next line could still merge with a broken tail; leaving a shorter file
+  // makes the reader report it as truncated, which is the truth.
+  std::error_code code;
+  const std::uintmax_t size = std::filesystem::file_size(state_->path, code);
+  if (!code && size > state_->committed_bytes) {
+    std::error_code ignored;
+    std::filesystem::resize_file(state_->path, state_->committed_bytes,
+                                 ignored);
+  }
 }
 
 bool FaultWriter::Prepare(std::string *error) {
@@ -478,7 +496,7 @@ bool FaultWriter::Write(const RecordedFault &fault) {
   int (*hook)(void *, std::string_view) = nullptr;
   void *hook_context = nullptr;
   {
-    const std::lock_guard<std::mutex> lock(g_fault_line_hook_mutex);
+    const std::lock_guard<std::mutex> lock(FaultLineHookMutex());
     hook = g_fault_line_hook;
     hook_context = g_fault_line_hook_context;
   }

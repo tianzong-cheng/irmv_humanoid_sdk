@@ -88,8 +88,10 @@ enum class FaultLossReason : std::uint32_t {
   // The state machine's observation batch was full: the runtime could not even
   // enumerate these occurrences. There is no record sequence for them.
   Generation = 1,
-  // The recorder's bounded fault handoff was full, or the recorder was already
-  // stopped, when the runtime offered the occurrence.
+  // The recorder's bounded fault handoff was full when the runtime offered the
+  // occurrence. An offer refused after Stop() began is still counted in
+  // faults_dropped(), but it has no span: the final loss table may already have
+  // been published.
   QueueFull = 2,
   // The worker accepted the occurrence but could not write its line. The
   // writer rolls a torn line back, so a later line never joins its bytes.

@@ -49,7 +49,9 @@ class FaultWriter {
 // A test can also block inside the hook (a blocked device). Production never
 // sets it. The function and its context are read as one pair under a mutex; a
 // test must keep the context alive until the worker is quiescent, because an
-// in-flight call may already hold the pair after removal.
+// in-flight call may already hold the pair after removal. The `line` view is
+// valid only for the duration of the call; a hook that needs the text must copy
+// it.
 void SetFaultLineWriteHookForTest(int (*hook)(void *context,
                                               std::string_view line),
                                   void *context) noexcept;

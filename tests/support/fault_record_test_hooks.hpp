@@ -11,7 +11,8 @@
 //   2 - simulate a torn write (a prefix is written, then the sink fails).
 // The function and context are read as one pair under a mutex; keep the context
 // alive until the worker is quiescent, because an in-flight call may already
-// hold the pair after removal.
+// hold the pair after removal. The `line` view is valid only for the duration
+// of the call; copy it if the hook needs to keep it.
 namespace irmv::telemetry {
 
 void SetFaultLineWriteHookForTest(int (*hook)(void *context,
