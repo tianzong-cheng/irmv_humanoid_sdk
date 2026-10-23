@@ -53,16 +53,6 @@ bool RejectedAt(const std::string &name, const std::string &text,
   return false;
 }
 
-bool Rejected(const std::string &name, const std::string &text,
-              const RuntimeConfig &config) {
-  try {
-    static_cast<void>(LoadText(name, text, config));
-  } catch (const ScenarioError &) {
-    return true;
-  }
-  return false;
-}
-
 bool Near(double left, double right) {
   return std::fabs(left - right) <= 1e-12;
 }
@@ -139,11 +129,13 @@ int main(int argc, char **argv) {
   CHECK(Near(legacy_snapshot.imu.angular_velocity[1], 0.0));
   CHECK(Near(legacy_snapshot.imu.linear_acceleration[2], 0.0));
 
-  // Wrong shapes are refused at load time, naming the offending vector. A
-  // value that overflows a double is refused too: this JSON library rejects
-  // the literal at parse time, and the parser's finite-number check rejects
-  // any non-finite value it can represent. Either way no such value reaches
-  // the injected snapshot.
+  // Wrong shapes are refused at load time, naming the offending vector. JSON
+  // itself cannot represent NaN or infinity, so the only file-level way to
+  // offer one is an overflowing literal such as 1e999; this library rejects
+  // that at parse time and the parser reports the document as `$` (invalid
+  // JSON), not as the vector field. The finite-value guard in NumberValue
+  // remains for any non-finite value constructed in memory, but it is not
+  // reachable from a JSON document and this test does not claim otherwise.
   CHECK(RejectedAt("short.json",
                    R"({"entries":[{"elapsed_us":0,"feedback":{"imu":)"
                    R"({"orientation_rpy":[0.1,0.2]}}}]})",
@@ -156,10 +148,10 @@ int main(int argc, char **argv) {
                    R"({"entries":[{"elapsed_us":0,"feedback":{"imu":)"
                    R"({"linear_acceleration":9.81}}}]})",
                    config, "linear_acceleration"));
-  CHECK(Rejected("nonfinite.json",
-                 R"({"entries":[{"elapsed_us":0,"feedback":{"imu":)"
-                 R"({"orientation_rpy":[0.1,0.2,1e999]}}}]})",
-                 config));
+  CHECK(RejectedAt("nonfinite.json",
+                   R"({"entries":[{"elapsed_us":0,"feedback":{"imu":)"
+                   R"({"orientation_rpy":[0.1,0.2,1e999]}}}]})",
+                   config, "$"));
 
   std::filesystem::remove_all(g_directory, code);
   std::puts("scenario_test: IMU vectors parsed, applied and validated");

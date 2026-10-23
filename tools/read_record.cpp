@@ -414,15 +414,26 @@ void PrintJsonLine(const Json &line) {
 enum class RunKind { Runtime, Application };
 
 bool Dispatch(const Json &meta, RunKind *kind, std::string *error) {
+  // A declared schema is authoritative. Falling through to the runtime reader
+  // because a document also happens to carry a numeric `schema_version` would
+  // reinterpret a run of an unknown format as this build's chunks.
   const auto schema = meta.find("schema");
-  if (schema != meta.end() && schema->is_string() &&
-      schema->get<std::string>() == irmv::telemetry::kVelocitySchema) {
+  if (schema != meta.end()) {
+    if (!schema->is_string()) {
+      *error = "meta.json carries a schema that is not a string";
+      return false;
+    }
+    const std::string name = schema->get<std::string>();
+    if (name != irmv::telemetry::kVelocitySchema) {
+      *error = "meta.json declares the unknown schema \"" + name +
+               "\"; the run is not interpreted";
+      return false;
+    }
     const auto version = meta.find("version");
     if (version == meta.end() || !version->is_number_unsigned() ||
         version->get<std::uint64_t>() !=
             irmv::telemetry::kVelocitySchemaVersion) {
-      *error = "meta.json declares " + schema->get<std::string>() +
-               " with an unsupported version";
+      *error = "meta.json declares " + name + " with an unsupported version";
       return false;
     }
     *kind = RunKind::Application;

@@ -1246,6 +1246,51 @@ def main() -> int:
         if result.returncode == 0:
             fail("an unknown application schema version was accepted")
 
+        # A declared schema name is authoritative. In particular, an unknown
+        # schema that also carries a numeric `schema_version` must not be
+        # reinterpreted as a runtime run of this build's chunk format.
+        for name, meta_document in (
+            ("unknown-schema-plain", {"schema": "irmv.bogus", "version": 1}),
+            (
+                "unknown-schema-versioned",
+                {"schema": "irmv.bogus", "schema_version": 4},
+            ),
+        ):
+            directory = work / name
+            directory.mkdir()
+            write_json(directory / "meta.json", meta_document)
+            result = subprocess.run(
+                [str(reader), "--run", str(directory)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0:
+                fail(f"the viewer accepted the unknown schema in {name}")
+            elif "irmv.bogus" not in result.stderr:
+                fail(
+                    f"the viewer's refusal for {name} does not name the schema: "
+                    f"{result.stderr.strip()}"
+                )
+            archive = work / f"{name}.npz"
+            export = subprocess.run(
+                [
+                    sys.executable,
+                    str(source_root / "tools" / "record_to_npz.py"),
+                    str(directory),
+                    str(archive),
+                    "--reader",
+                    str(reader),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if export.returncode == 0:
+                fail(f"the exporter accepted the unknown schema in {name}")
+            if archive.exists():
+                fail(f"the exporter wrote an archive for the unknown schema in {name}")
+
         corrupt_app = work / "corrupt-app"
         shutil.copytree(app_run, corrupt_app)
         with (corrupt_app / "velocity.jsonl").open("a", encoding="utf-8") as stream:
