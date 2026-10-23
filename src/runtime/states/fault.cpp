@@ -164,12 +164,15 @@ bool ExecutionFsm::RecoveryTickHealthy(TickScope &scope) const {
 }
 
 void ExecutionFsm::DegradeForWriteFailure(TickScope &scope,
+                                          protocol::FaultCondition condition,
                                           std::uint32_t error_code) {
+  const protocol::FaultReport report =
+      MakeFaultReport(protocol::FaultReason::WriteFailed, condition,
+                      scope.now_us, error_code, "primary torque write refused");
+  ObserveFault(scope, report.details[0]);
   if (state_ != protocol::ExecutionState::Fault) {
     LatchFault(scope, protocol::FaultReason::WriteFailed,
-               EventCode::FaultLatched, false,
-               MakeFaultReport(protocol::FaultReason::WriteFailed, scope.now_us,
-                               error_code, "torque write refused"));
+               EventCode::FaultLatched, false, report);
     return;
   }
   if (fault_damping_eligible_) {
@@ -180,14 +183,21 @@ void ExecutionFsm::DegradeForWriteFailure(TickScope &scope,
   }
 }
 
+void ExecutionFsm::ObserveFault(TickScope &scope,
+                                const protocol::FaultDetail &detail) noexcept {
+  static_cast<void>(scope);
+  static_cast<void>(fault_tracker_.Observe(detail));
+}
+
 protocol::FaultReport ExecutionFsm::MakeFaultReport(
-    protocol::FaultReason reason, protocol::TimeUs now_us,
-    std::uint32_t error_code, const char *message) {
+    protocol::FaultReason reason, protocol::FaultCondition condition,
+    protocol::TimeUs now_us, std::uint32_t error_code, const char *message) {
   protocol::FaultReport report;
   report.count = 1;
   protocol::FaultDetail &detail = report.details[0];
   detail = protocol::FaultDetail{};
   detail.reason = reason;
+  detail.condition = condition;
   detail.joint_index = protocol::kNoJointIndex;
   detail.error_code = error_code;
   detail.detected_stamp_us = now_us;

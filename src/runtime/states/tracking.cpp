@@ -19,10 +19,13 @@ hardware::TorqueOutput ExecutionFsm::StepTracking(TickScope &scope) {
     // Without an accepted frame there is nothing to hold: the state must never
     // keep commanding a stale or partial target.
     output_action_ = protocol::OutputAction::ZeroTorque;
+    const protocol::FaultReport report =
+        MakeFaultReport(protocol::FaultReason::CommandInvalid,
+                        protocol::FaultCondition::CommandInvalid, scope.now_us,
+                        0, "no accepted tracking target");
+    ObserveFault(scope, report.details[0]);
     LatchFault(scope, protocol::FaultReason::CommandInvalid,
-               EventCode::FaultLatched, false,
-               MakeFaultReport(protocol::FaultReason::CommandInvalid,
-                               scope.now_us, 0, "no accepted tracking target"));
+               EventCode::FaultLatched, false, report);
     return ZeroTorqueOutput();
   }
   const ControlOutput control =
@@ -30,11 +33,13 @@ hardware::TorqueOutput ExecutionFsm::StepTracking(TickScope &scope) {
   if (!control.valid) {
     // A target that can no longer be executed rejects the whole command.
     output_action_ = protocol::OutputAction::ZeroTorque;
-    LatchFault(
-        scope, protocol::FaultReason::CommandInvalid, EventCode::FaultLatched,
-        DampingEligible(*scope.report),
-        MakeFaultReport(protocol::FaultReason::CommandInvalid, scope.now_us, 0,
-                        "accepted tracking target not executable"));
+    const protocol::FaultReport report =
+        MakeFaultReport(protocol::FaultReason::CommandInvalid,
+                        protocol::FaultCondition::CommandInvalid, scope.now_us,
+                        0, "accepted tracking target not executable");
+    ObserveFault(scope, report.details[0]);
+    LatchFault(scope, protocol::FaultReason::CommandInvalid,
+               EventCode::FaultLatched, DampingEligible(*scope.report), report);
     return ZeroTorqueOutput();
   }
   output_action_ = protocol::OutputAction::Tracking;

@@ -368,9 +368,19 @@ class ExecutionFsm {
   // is fully usable and the torque write path accepted the last attempt.
   bool RecoveryTickHealthy(TickScope &scope) const;
 
-  // Handles a refused torque write: latches WriteFailed, or permanently
-  // degrades the output of an already latched fault to zero torque.
-  void DegradeForWriteFailure(TickScope &scope, std::uint32_t error_code);
+  // Records one fault condition in this tick's observation batch. The tracker
+  // keeps the condition active until a tick goes by without observing it, so a
+  // sustained fault is recorded once and a condition that disappears and
+  // returns is a new occurrence. Never touches the latched report.
+  void ObserveFault(TickScope &scope,
+                    const protocol::FaultDetail &detail) noexcept;
+
+  // Handles a refused torque write: records and latches the failure condition,
+  // or permanently degrades the output of an already latched fault to zero
+  // torque. `condition` names the write stage that refused.
+  void DegradeForWriteFailure(TickScope &scope,
+                              protocol::FaultCondition condition,
+                              std::uint32_t error_code);
 
   // Highest damping eligibility a latched fault may hold: the measured state
   // must still be fully usable. This is deliberately independent of the fault
@@ -378,10 +388,9 @@ class ExecutionFsm {
   // while the measured state was healthy keeps commanding damping torque.
   static bool DampingEligible(const SafetyReport &report);
 
-  static protocol::FaultReport MakeFaultReport(protocol::FaultReason reason,
-                                               protocol::TimeUs now_us,
-                                               std::uint32_t error_code,
-                                               const char *message);
+  static protocol::FaultReport MakeFaultReport(
+      protocol::FaultReason reason, protocol::FaultCondition condition,
+      protocol::TimeUs now_us, std::uint32_t error_code, const char *message);
 
   const configuration::RuntimeConfig &config_;
   protocol::Id runtime_id_;
@@ -413,6 +422,11 @@ class ExecutionFsm {
   // verdict fields and the container counts only, so the preallocated detail
   // storage is not reconstructed on every tick.
   SafetyReport safety_report_;
+
+  // Which fault conditions are currently present and which appeared this tick.
+  // Its slot table and observation batch are members, so the tick path only
+  // copies the details of newly appeared conditions.
+  FaultTracker fault_tracker_;
 
   protocol::Id session_id_{};
   protocol::Id session_supervisor_id_{};

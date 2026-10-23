@@ -20,10 +20,13 @@ hardware::TorqueOutput ExecutionFsm::StepDamping(TickScope &scope) {
     // The measured state cannot be damped: no partial or unclamped torque is
     // produced, and the unusable input fault disables damping output.
     output_action_ = protocol::OutputAction::ZeroTorque;
+    const protocol::FaultReport report =
+        MakeFaultReport(protocol::FaultReason::FeedbackInvalid,
+                        protocol::FaultCondition::Unspecified, scope.now_us, 0,
+                        "damping output unavailable");
+    ObserveFault(scope, report.details[0]);
     LatchFault(scope, protocol::FaultReason::FeedbackInvalid,
-               EventCode::FaultLatched, false,
-               MakeFaultReport(protocol::FaultReason::FeedbackInvalid,
-                               scope.now_us, 0, "damping output unavailable"));
+               EventCode::FaultLatched, false, report);
     return ZeroTorqueOutput();
   }
   output_action_ = protocol::OutputAction::Damping;

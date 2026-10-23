@@ -7,6 +7,7 @@
 #include "irmv/hardware/backend.hpp"
 #include "irmv/protocol/types.hpp"
 #include "irmv/runtime/command_gate.hpp"
+#include "irmv/runtime/fault_tracker.hpp"
 
 namespace irmv::runtime {
 
@@ -97,6 +98,13 @@ struct TickResult {
   hardware::WriteResult write_result;
   std::uint64_t dropped_result_count{0};
   std::uint64_t dropped_event_count{0};
+  // Fault conditions that newly appeared in this tick's observations; an empty
+  // batch when none did. `dropped` counts the occurrences this tick could not
+  // report. The pointed-to storage is owned by the state machine and stays
+  // valid only until the next Tick call: a caller that keeps the batch past
+  // that point must copy it. It is a non-owning view so that the ~1024-entry
+  // batch is never constructed or copied on the tick path.
+  const FaultObservationBatch *new_faults{nullptr};
 };
 
 }  // namespace irmv::runtime

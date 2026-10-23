@@ -43,6 +43,7 @@ TickResult ExecutionFsm::Tick(protocol::TimeUs now_us,
                               const TickInput &input,
                               hardware::Backend &backend) {
   TickResult out;
+  fault_tracker_.BeginTick();
   TickScope scope;
   scope.now_us = now_us;
   scope.feedback = &feedback;
@@ -72,6 +73,15 @@ TickResult ExecutionFsm::Tick(protocol::TimeUs now_us,
                 safety_report_);
   const SafetyReport &report = safety_report_;
   scope.report = &report;
+  // The complete diagnostic of this tick, not the bounded published view: a
+  // first faulty tick records every established condition. The safety check
+  // stamps neither the detection time nor the output action, so the detection
+  // time is this tick; the sample time stays the feedback stamp.
+  for (std::uint32_t index = 0; index < report.observations.count; ++index) {
+    protocol::FaultDetail detail = report.observations.details[index];
+    detail.detected_stamp_us = now_us;
+    ObserveFault(scope, detail);
+  }
   gate_.RecordState(published_seq, now_us);
 
   // 3. Safety decision first: an observed fault is latched before any request
@@ -113,19 +123,35 @@ TickResult ExecutionFsm::Tick(protocol::TimeUs now_us,
   out.write_result = write;
   last_write_accepted_ = write.accepted;
   if (!write.accepted) {
-    DegradeForWriteFailure(scope, write.error_code);
+    DegradeForWriteFailure(scope, protocol::FaultCondition::PrimaryWriteFailed,
+                           write.error_code);
     const hardware::TorqueOutput fallback = ZeroTorqueOutput();
     output_action_ = protocol::OutputAction::ZeroTorque;
     out.output = fallback;
     // The safe fallback is attempted in the same tick; the failure itself is
     // what the latch reports.
     out.write_result = backend.Write(now_us, fallback);
+    if (!out.write_result.accepted) {
+      protocol::FaultDetail detail;
+      detail.reason = protocol::FaultReason::WriteFailed;
+      detail.condition = protocol::FaultCondition::FallbackWriteFailed;
+      detail.joint_index = protocol::kNoJointIndex;
+      detail.error_code = out.write_result.error_code;
+      detail.sample_stamp_us = now_us;
+      detail.detected_stamp_us = now_us;
+      detail.output_action = protocol::OutputAction::ZeroTorque;
+      static_cast<void>(
+          detail.message.Assign("zero torque fallback write refused"));
+      ObserveFault(scope, detail);
+    }
   }
   CommitPendingResults(scope, write.accepted);
 
   // 11. Publish the state of this tick.
   PublishState(scope);
 
+  fault_tracker_.EndTick();
+  out.new_faults = &fault_tracker_.NewObservations();
   out.dropped_result_count = dropped_results_;
   out.dropped_event_count = dropped_events_;
   return out;
@@ -165,11 +191,14 @@ void ExecutionFsm::ProcessCommands(TickScope &scope, const TickInput &input) {
     // Only the authorized owner can produce an invalid owner command; a foreign
     // or stale packet is dropped by the gate without a fault.
     if (gate_result.invalid_owner_command()) {
-      LatchFault(
-          scope, protocol::FaultReason::CommandInvalid, EventCode::FaultLatched,
-          DampingEligible(*scope.report),
-          MakeFaultReport(protocol::FaultReason::CommandInvalid, scope.now_us,
-                          0, "authorized joint command rejected"));
+      const protocol::FaultReport report =
+          MakeFaultReport(protocol::FaultReason::CommandInvalid,
+                          protocol::FaultCondition::CommandInvalid,
+                          scope.now_us, 0, "authorized joint command rejected");
+      ObserveFault(scope, report.details[0]);
+      LatchFault(scope, protocol::FaultReason::CommandInvalid,
+                 EventCode::FaultLatched, DampingEligible(*scope.report),
+                 report);
     }
   }
 }
@@ -311,10 +340,12 @@ void ExecutionFsm::PublishState(TickScope &scope) {
   if (state_ == protocol::ExecutionState::Fault) {
     // A latch without details, such as an incomplete measured snapshot, still
     // reports the reason it latched with.
-    state.faults = fault_report_.count > 0
-                       ? fault_report_
-                       : MakeFaultReport(fault_reason_, scope.now_us, 0,
-                                         "latched fault without details");
+    state.faults =
+        fault_report_.count > 0
+            ? fault_report_
+            : MakeFaultReport(fault_reason_,
+                              protocol::FaultCondition::Unspecified,
+                              scope.now_us, 0, "latched fault without details");
   } else {
     state.faults = scope.report->details;
   }
@@ -956,11 +987,13 @@ bool ExecutionFsm::RevokeMotion(TickScope &scope) {
 
 bool ExecutionFsm::AdvanceWatermark(TickScope &scope) {
   if (epoch_ == std::numeric_limits<protocol::Sequence>::max()) {
-    LatchFault(
-        scope, protocol::FaultReason::ProtocolExhausted,
-        EventCode::ProtocolExhausted, false,
-        MakeFaultReport(protocol::FaultReason::ProtocolExhausted, scope.now_us,
-                        0, "authorization epoch watermark exhausted"));
+    const protocol::FaultReport report = MakeFaultReport(
+        protocol::FaultReason::ProtocolExhausted,
+        protocol::FaultCondition::ProtocolExhausted, scope.now_us, 0,
+        "authorization epoch watermark exhausted");
+    ObserveFault(scope, report.details[0]);
+    LatchFault(scope, protocol::FaultReason::ProtocolExhausted,
+               EventCode::ProtocolExhausted, false, report);
     return false;
   }
   ++epoch_;

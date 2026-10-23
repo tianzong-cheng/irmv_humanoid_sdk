@@ -1,7 +1,9 @@
 #include "irmv/runtime/execution_fsm.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <limits>
 
 #include "irmv/configuration/config.hpp"
@@ -15,11 +17,18 @@
 namespace {
 
 using irmv::configuration::RuntimeConfig;
+using irmv::hardware::Backend;
 using irmv::hardware::TorqueOutput;
+using irmv::hardware::WriteResult;
 using irmv::protocol::ExecutionRequest;
 using irmv::protocol::ExecutionState;
+using irmv::protocol::FaultCondition;
+using irmv::protocol::FaultDetail;
+using irmv::protocol::FaultReason;
+using irmv::protocol::FaultReport;
 using irmv::protocol::Id;
 using irmv::protocol::JointCommand;
+using irmv::protocol::kNoJointIndex;
 using irmv::protocol::Operation;
 using irmv::protocol::OutputAction;
 using irmv::protocol::RejectReason;
@@ -28,8 +37,10 @@ using irmv::protocol::Sequence;
 using irmv::protocol::StopReason;
 using irmv::protocol::TimeUs;
 using irmv::runtime::EventCode;
+using irmv::runtime::ExecutionFsm;
 using irmv::runtime::HeartbeatReject;
 using irmv::runtime::RuntimeEvent;
+using irmv::runtime::TickInput;
 using irmv::runtime::TickResult;
 using irmv::test::FixtureResult;
 using irmv::test::RuntimeFixture;
@@ -67,6 +78,40 @@ int CountEvents(const TickResult &tick, EventCode code) {
     }
   }
   return count;
+}
+
+const FaultDetail *FindNewFault(const TickResult &tick,
+                                FaultCondition condition,
+                                std::uint32_t joint_index) {
+  if (tick.new_faults == nullptr) {
+    return nullptr;
+  }
+  for (std::uint32_t index = 0; index < tick.new_faults->count; ++index) {
+    const FaultDetail &detail = tick.new_faults->details[index];
+    if (detail.condition == condition && detail.joint_index == joint_index) {
+      return &detail;
+    }
+  }
+  return nullptr;
+}
+
+// The latch identity is the whole published report: a later occurrence must
+// never rewrite it.
+bool SameFaultReport(const FaultReport &left, const FaultReport &right) {
+  if (left.count != right.count) {
+    return false;
+  }
+  for (std::uint32_t index = 0; index < left.count; ++index) {
+    const FaultDetail &a = left.details[index];
+    const FaultDetail &b = right.details[index];
+    if (a.reason != b.reason || a.condition != b.condition ||
+        a.joint_index != b.joint_index || a.error_code != b.error_code ||
+        a.detected_stamp_us != b.detected_stamp_us ||
+        a.message.View() != b.message.View()) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool IsZeroTorque(const TorqueOutput &output) {
@@ -2464,6 +2509,235 @@ int CheckBootObservedThenLostFaults() {
   return 0;
 }
 
+// ---- (z) new fault observations ------------------------------------------
+
+int CheckFaultNewObservations() {
+  RuntimeFixture f;
+  f.BootToZeroTorque();
+  f.Acquire();
+  CHECK(f.Request(Operation::Damping).applied());
+
+  // The first tick that establishes a fault reports every condition it found,
+  // not just the first one the published report holds.
+  f.SetDriverError();
+  f.Advance(f.ControlPeriodUs());
+  CHECK(f.state().execution_state == kFault);
+  const TickResult &latched = f.last_tick();
+  CHECK(latched.new_faults != nullptr);
+  CHECK(latched.new_faults->count == 2);
+  CHECK(latched.new_faults->dropped == 0);
+  const FaultDetail *driver0 =
+      FindNewFault(latched, FaultCondition::JointDriverError, 0);
+  const FaultDetail *driver1 =
+      FindNewFault(latched, FaultCondition::JointDriverError, 1);
+  CHECK(driver0 != nullptr);
+  CHECK(driver1 != nullptr);
+  CHECK(driver0->error_code == irmv::test::kDriverErrorCode);
+  CHECK(driver0->reason == FaultReason::DriverError);
+  CHECK(driver0->detected_stamp_us == f.now_us());
+  CHECK(driver0->sample_stamp_us == f.now_us());
+  const Sequence fault_id = f.state().fault_id;
+  CHECK(fault_id != 0);
+  const FaultReport latched_report = f.state().faults;
+  CHECK(latched_report.count == 2);
+
+  // A sustained condition is never re-reported.
+  f.Advance(f.ControlPeriodUs());
+  CHECK(f.last_tick().new_faults != nullptr);
+  CHECK(f.last_tick().new_faults->count == 0);
+  CHECK(f.last_tick().new_faults->dropped == 0);
+
+  // A further joint condition appearing after the latch is new even though the
+  // latch itself is not.
+  f.mutable_feedback().joints[0].connected = false;
+  f.Advance(f.ControlPeriodUs());
+  CHECK(f.state().execution_state == kFault);
+  CHECK(f.last_tick().new_faults->count == 1);
+  CHECK(FindNewFault(f.last_tick(), FaultCondition::JointDisconnected, 0) !=
+        nullptr);
+  CHECK(f.state().fault_id == fault_id);
+  CHECK(SameFaultReport(f.state().faults, latched_report));
+
+  // The same condition reconnects and disconnects again after a tick without
+  // it: only actual inactivity followed by a new observation is a recurrence.
+  f.mutable_feedback().joints[0].connected = true;
+  f.ClearDriverError();
+  f.Advance(f.ControlPeriodUs());
+  CHECK(f.last_tick().new_faults->count == 0);
+  CHECK(f.state().execution_state == kFault);
+  f.mutable_feedback().joints[0].connected = false;
+  f.Advance(f.ControlPeriodUs());
+  CHECK(f.last_tick().new_faults->count == 1);
+  CHECK(FindNewFault(f.last_tick(), FaultCondition::JointDisconnected, 0) !=
+        nullptr);
+  CHECK(f.state().fault_id == fault_id);
+  CHECK(SameFaultReport(f.state().faults, latched_report));
+  return 0;
+}
+
+// A backend whose two writes of one tick can be refused independently. The
+// fixture owns a FakeBackend whose acceptance applies to both calls, so the
+// primary/fallback split is tested through the public Tick interface here.
+class ScriptedWriteBackend final : public Backend {
+ public:
+  void Initialize() override {}
+
+  irmv::protocol::FeedbackSnapshot Read(TimeUs) override { return feedback; }
+
+  WriteResult Write(TimeUs, const TorqueOutput &) override {
+    if (script_index_ < script_size_) {
+      return script_[script_index_++];
+    }
+    WriteResult accepted;
+    accepted.accepted = true;
+    return accepted;
+  }
+
+  void Close() override {}
+
+  void PlanPrimaryRefused(std::uint32_t error_code) {
+    SetScript({{false, error_code}});
+  }
+
+  void PlanBothRefused(std::uint32_t primary_error,
+                       std::uint32_t fallback_error) {
+    SetScript({{false, primary_error}, {false, fallback_error}});
+  }
+
+  irmv::protocol::FeedbackSnapshot feedback;
+
+ private:
+  void SetScript(std::initializer_list<WriteResult> results) {
+    script_size_ = 0;
+    script_index_ = 0;
+    for (const WriteResult &result : results) {
+      if (script_size_ < script_.size()) {
+        script_[script_size_++] = result;
+      }
+    }
+  }
+
+  std::array<WriteResult, 2> script_{};
+  std::size_t script_size_{0};
+  std::size_t script_index_{0};
+};
+
+// Minimal direct driver for the FSM: a healthy feedback template and the
+// scripted write backend, advanced on the configured control period.
+struct WriteFaultHarness {
+  WriteFaultHarness() : fsm(config, irmv::test::FixtureRuntimeId()) {
+    feedback.count = static_cast<std::uint32_t>(config.joint_count());
+    for (std::size_t index = 0; index < config.joint_count(); ++index) {
+      irmv::protocol::JointFeedback &joint = feedback.joints[index];
+      joint.valid = true;
+      joint.connected = true;
+      joint.q = irmv::test::kFixtureQ[index];
+      joint.dq = irmv::test::kFixtureDq[index];
+      joint.freq_hz = irmv::test::kFixtureFrequencyHz;
+      joint.rx_stamp_us = now;
+    }
+    feedback.imu.valid = true;
+    feedback.imu.rx_stamp_us = now;
+    backend.feedback = feedback;
+  }
+
+  TickResult Step() {
+    now += config.control_period_us;
+    for (std::size_t index = 0; index < config.joint_count(); ++index) {
+      feedback.joints[index].rx_stamp_us = now;
+    }
+    feedback.imu.rx_stamp_us = now;
+    feedback.stamp_us = now;
+    backend.feedback = feedback;
+    return fsm.Tick(now, feedback, TickInput{}, backend);
+  }
+
+  RuntimeConfig config{RuntimeFixture::LoadFixtureConfig()};
+  ScriptedWriteBackend backend;
+  ExecutionFsm fsm;
+  irmv::protocol::FeedbackSnapshot feedback{};
+  TimeUs now{irmv::test::kFixtureStartUs};
+};
+
+int CheckWriteFailureObservations() {
+  {  // The primary refusal is saved even when the fallback is accepted.
+    WriteFaultHarness f;
+    f.backend.PlanPrimaryRefused(7);
+    const TickResult first = f.Step();
+    CHECK(f.fsm.execution_state() == kFault);
+    CHECK(first.new_faults != nullptr);
+    CHECK(first.new_faults->count == 1);
+    CHECK(first.new_faults->dropped == 0);
+    const FaultDetail *primary =
+        FindNewFault(first, FaultCondition::PrimaryWriteFailed, kNoJointIndex);
+    CHECK(primary != nullptr);
+    CHECK(primary->reason == FaultReason::WriteFailed);
+    CHECK(primary->error_code == 7);
+    CHECK(first.state.faults.count == 1);
+    CHECK(first.state.faults.details[0].condition ==
+          FaultCondition::PrimaryWriteFailed);
+    CHECK(first.state.faults.details[0].error_code == 7);
+    const Sequence fault_id = f.fsm.fault_id();
+    CHECK(fault_id != 0);
+
+    // An accepted primary write was not a failure, and the fallback was not
+    // attempted: both slots close without a new observation.
+    const TickResult recovered = f.Step();
+    CHECK(recovered.new_faults != nullptr);
+    CHECK(recovered.new_faults->count == 0);
+    CHECK(f.fsm.fault_id() == fault_id);
+  }
+
+  {  // Both writes refused: each refusal is its own condition and error code.
+    WriteFaultHarness f;
+    f.backend.PlanBothRefused(11, 12);
+    const TickResult both = f.Step();
+    CHECK(both.new_faults != nullptr);
+    CHECK(both.new_faults->count == 2);
+    CHECK(both.new_faults->dropped == 0);
+    const FaultDetail *primary =
+        FindNewFault(both, FaultCondition::PrimaryWriteFailed, kNoJointIndex);
+    const FaultDetail *fallback =
+        FindNewFault(both, FaultCondition::FallbackWriteFailed, kNoJointIndex);
+    CHECK(primary != nullptr);
+    CHECK(fallback != nullptr);
+    CHECK(primary->error_code == 11);
+    CHECK(fallback->error_code == 12);
+    CHECK(primary->reason == FaultReason::WriteFailed);
+    CHECK(fallback->reason == FaultReason::WriteFailed);
+    CHECK(both.state.faults.count == 1);
+    CHECK(both.state.faults.details[0].condition ==
+          FaultCondition::PrimaryWriteFailed);
+    CHECK(both.state.faults.details[0].error_code == 11);
+    const Sequence fault_id = f.fsm.fault_id();
+    const FaultReport latched_report = both.state.faults;
+
+    // Repeating the same refusals is the same occurrence, not new events.
+    f.backend.PlanBothRefused(11, 12);
+    const TickResult sustained = f.Step();
+    CHECK(sustained.new_faults != nullptr);
+    CHECK(sustained.new_faults->count == 0);
+
+    // A tick that does not attempt the fallback closes its slot; the next
+    // refused pair is a recurrence of both conditions.
+    const TickResult accepted = f.Step();
+    CHECK(accepted.new_faults != nullptr);
+    CHECK(accepted.new_faults->count == 0);
+    f.backend.PlanBothRefused(11, 12);
+    const TickResult recurring = f.Step();
+    CHECK(recurring.new_faults != nullptr);
+    CHECK(recurring.new_faults->count == 2);
+    CHECK(FindNewFault(recurring, FaultCondition::PrimaryWriteFailed,
+                       kNoJointIndex) != nullptr);
+    CHECK(FindNewFault(recurring, FaultCondition::FallbackWriteFailed,
+                       kNoJointIndex) != nullptr);
+    CHECK(f.fsm.execution_state() == kFault);
+    CHECK(f.fsm.fault_id() == fault_id);
+    CHECK(SameFaultReport(recurring.state.faults, latched_report));
+  }
+  return 0;
+}
+
 }  // namespace
 
 int main() {
@@ -2515,5 +2789,7 @@ int main() {
   CHECK(CheckBootWaitsForFirstFrame() == 0);
   CHECK(CheckBootWithoutFirstFrameFaults() == 0);
   CHECK(CheckBootObservedThenLostFaults() == 0);
+  CHECK(CheckFaultNewObservations() == 0);
+  CHECK(CheckWriteFailureObservations() == 0);
   return 0;
 }
