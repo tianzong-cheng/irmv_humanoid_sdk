@@ -355,8 +355,7 @@ bool Same(const FeedbackSnapshot &left, const FeedbackSnapshot &right) {
 }
 
 bool Same(const FaultDetail &left, const FaultDetail &right) {
-  return left.reason == right.reason &&
-         left.condition == right.condition &&
+  return left.reason == right.reason && left.condition == right.condition &&
          left.joint_index == right.joint_index &&
          left.error_code == right.error_code &&
          left.observed_value == right.observed_value &&
@@ -608,26 +607,25 @@ bool RoundTripSamples() {
     }
   }
 
-  const FaultCondition conditions[] = {
-      FaultCondition::None,
-      FaultCondition::Unspecified,
-      FaultCondition::JointDisconnected,
-      FaultCondition::JointFeedbackInvalid,
-      FaultCondition::JointFeedbackNonFinite,
-      FaultCondition::JointFeedbackStale,
-      FaultCondition::JointFrequencyLow,
-      FaultCondition::JointDriverError,
-      FaultCondition::JointPositionExceeded,
-      FaultCondition::JointVelocityExceeded,
-      FaultCondition::ImuFeedbackInvalid,
-      FaultCondition::ImuFeedbackNonFinite,
-      FaultCondition::ImuFeedbackStale,
-      FaultCondition::FeedbackShapeInvalid,
-      FaultCondition::BootFailed,
-      FaultCondition::CommandInvalid,
-      FaultCondition::ProtocolExhausted,
-      FaultCondition::PrimaryWriteFailed,
-      FaultCondition::FallbackWriteFailed};
+  const FaultCondition conditions[] = {FaultCondition::None,
+                                       FaultCondition::Unspecified,
+                                       FaultCondition::JointDisconnected,
+                                       FaultCondition::JointFeedbackInvalid,
+                                       FaultCondition::JointFeedbackNonFinite,
+                                       FaultCondition::JointFeedbackStale,
+                                       FaultCondition::JointFrequencyLow,
+                                       FaultCondition::JointDriverError,
+                                       FaultCondition::JointPositionExceeded,
+                                       FaultCondition::JointVelocityExceeded,
+                                       FaultCondition::ImuFeedbackInvalid,
+                                       FaultCondition::ImuFeedbackNonFinite,
+                                       FaultCondition::ImuFeedbackStale,
+                                       FaultCondition::FeedbackShapeInvalid,
+                                       FaultCondition::BootFailed,
+                                       FaultCondition::CommandInvalid,
+                                       FaultCondition::ProtocolExhausted,
+                                       FaultCondition::PrimaryWriteFailed,
+                                       FaultCondition::FallbackWriteFailed};
   static_assert(sizeof(conditions) / sizeof(conditions[0]) == 19);
   for (const FaultCondition value : conditions) {
     RobotState expected = MakeState(kStateSeq);
