@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <string>
 
 #include "irmv/configuration/config.hpp"
@@ -70,21 +71,21 @@ FeedbackSnapshot AbsentFeedback(const RuntimeConfig &config) {
   return feedback;
 }
 
-const FaultDetail *FindDetail(const FaultReport &report, FaultReason reason,
+const FaultDetail *FindDetail(const FaultReport &faults, FaultReason reason,
                               std::uint32_t joint_index) {
-  for (std::uint32_t i = 0; i < report.count; ++i) {
-    if (report.details[i].reason == reason &&
-        report.details[i].joint_index == joint_index) {
-      return &report.details[i];
+  for (std::uint32_t i = 0; i < faults.count; ++i) {
+    if (faults.details[i].reason == reason &&
+        faults.details[i].joint_index == joint_index) {
+      return &faults.details[i];
     }
   }
   return nullptr;
 }
 
-std::uint32_t CountDetails(const FaultReport &report, FaultReason reason) {
+std::uint32_t CountDetails(const FaultReport &faults, FaultReason reason) {
   std::uint32_t count = 0;
-  for (std::uint32_t i = 0; i < report.count; ++i) {
-    if (report.details[i].reason == reason) {
+  for (std::uint32_t i = 0; i < faults.count; ++i) {
+    if (faults.details[i].reason == reason) {
       ++count;
     }
   }
@@ -116,27 +117,22 @@ std::uint32_t CountObservations(const FaultObservationBatch &batch,
 
 // Mirrors the state machine: the observation history is updated from the
 // snapshot before the check, so a tick that carries the first sample of an
-// input already judges it.
-SafetyReport Check(const RuntimeConfig &config,
-                   const FeedbackSnapshot &feedback, TimeUs now_us,
-                   bool boot_grace) {
+// input already judges it. The caller owns the report because the batch makes
+// it far too large to return by value inside the sanitizer's stack frames.
+void Check(SafetyReport &report, const RuntimeConfig &config,
+           const FeedbackSnapshot &feedback, TimeUs now_us, bool boot_grace) {
   irmv::runtime::FeedbackObservation observed;
   observed.Observe(feedback, config.joint_count());
-  SafetyReport report;
   CheckFeedback(config, feedback, now_us, boot_grace, observed, report);
-  return report;
 }
 
 // One machine over several ticks: the observation history survives between the
 // steps, exactly as it does inside ExecutionFsm.
 struct ObservedSequence {
-  SafetyReport Step(const RuntimeConfig &config,
-                    const FeedbackSnapshot &feedback, TimeUs now_us,
-                    bool boot_grace) {
+  void Step(SafetyReport &report, const RuntimeConfig &config,
+            const FeedbackSnapshot &feedback, TimeUs now_us, bool boot_grace) {
     observed.Observe(feedback, config.joint_count());
-    SafetyReport report;
     CheckFeedback(config, feedback, now_us, boot_grace, observed, report);
-    return report;
   }
 
   irmv::runtime::FeedbackObservation observed;
@@ -187,73 +183,78 @@ int main() {
 
   // ---- CheckFeedback: healthy baseline ----
   FeedbackSnapshot feedback = HealthyFeedback(config);
-  SafetyReport report = Check(config, feedback, kNowUs, false);
-  CHECK(report.healthy);
-  CHECK(!report.fault);
-  CHECK(!report.awaiting_feedback);
-  CHECK(!report.stale_feedback);
-  CHECK(!report.frequency_low);
-  CHECK(!report.feedback_invalid);
-  CHECK(!report.driver_error);
-  CHECK(!report.position_exceeded);
-  CHECK(!report.velocity_exceeded);
-  CHECK(!report.imu_invalid);
-  CHECK(!report.damping_eligible);
-  CHECK(report.reason == FaultReason::None);
-  CHECK(report.details.count == 0);
-  CHECK(report.observations.count == 0);
-  CHECK(report.observations.dropped == 0);
+  // The report carries the preallocated 1024-entry observation batch. Keep it
+  // on the heap: under ASan a few return-by-value copies would exhaust the
+  // test's stack, and the production path reuses one report as well.
+  auto report = std::make_unique<SafetyReport>();
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->healthy);
+  CHECK(!report->fault);
+  CHECK(!report->awaiting_feedback);
+  CHECK(!report->stale_feedback);
+  CHECK(!report->frequency_low);
+  CHECK(!report->feedback_invalid);
+  CHECK(!report->driver_error);
+  CHECK(!report->position_exceeded);
+  CHECK(!report->velocity_exceeded);
+  CHECK(!report->imu_invalid);
+  CHECK(!report->damping_eligible);
+  CHECK(report->reason == FaultReason::None);
+  CHECK(report->details.count == 0);
+  CHECK(report->observations.count == 0);
+  CHECK(report->observations.dropped == 0);
 
   // CheckFeedback fills caller-owned storage: a reused report is reset to the
   // new verdict and never exposes the previous tick's entries or counters.
   {
-    SafetyReport reused;
+    auto reused = std::make_unique<SafetyReport>();
     irmv::runtime::FeedbackObservation reused_observed;
     FeedbackSnapshot faulty = HealthyFeedback(config);
     faulty.joints[0].valid = false;
     faulty.joints[1].dq = 20.0;
     reused_observed.Observe(faulty, config.joint_count());
-    CheckFeedback(config, faulty, kNowUs, false, reused_observed, reused);
-    CHECK(reused.fault);
-    CHECK(reused.details.count > 0);
-    CHECK(reused.observations.count > 0);
-    CHECK(reused.observations.dropped == 0);
+    CheckFeedback(config, faulty, kNowUs, false, reused_observed, *reused);
+    CHECK(reused->fault);
+    CHECK(reused->details.count > 0);
+    CHECK(reused->observations.count > 0);
+    CHECK(reused->observations.dropped == 0);
 
     FeedbackSnapshot healthy = HealthyFeedback(config);
     reused_observed.Observe(healthy, config.joint_count());
-    CheckFeedback(config, healthy, kNowUs, false, reused_observed, reused);
-    CHECK(reused.healthy);
-    CHECK(!reused.fault);
-    CHECK(!reused.awaiting_feedback);
-    CHECK(!reused.feedback_invalid);
-    CHECK(reused.reason == FaultReason::None);
-    CHECK(reused.details.count == 0);
-    CHECK(reused.observations.count == 0);
-    CHECK(reused.observations.dropped == 0);
+    CheckFeedback(config, healthy, kNowUs, false, reused_observed, *reused);
+    CHECK(reused->healthy);
+    CHECK(!reused->fault);
+    CHECK(!reused->awaiting_feedback);
+    CHECK(!reused->feedback_invalid);
+    CHECK(reused->reason == FaultReason::None);
+    CHECK(reused->details.count == 0);
+    CHECK(reused->observations.count == 0);
+    CHECK(reused->observations.dropped == 0);
   }
 
   // IMU is ignored entirely when the config does not require it.
   feedback.imu.valid = false;
   feedback.imu.rx_stamp_us = 0;
-  report = Check(config, feedback, kNowUs, false);
-  CHECK(report.healthy);
-  CHECK(!report.imu_invalid);
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->healthy);
+  CHECK(!report->imu_invalid);
 
   // ---- CheckFeedback: count mismatch ----
   feedback = HealthyFeedback(config);
   feedback.count = 3;
-  report = Check(config, feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(!report.healthy);
-  CHECK(report.feedback_invalid);
-  CHECK(report.reason == FaultReason::FeedbackInvalid);
-  CHECK(!report.damping_eligible);
-  CHECK(report.details.count == 0);
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(!report->healthy);
+  CHECK(report->feedback_invalid);
+  CHECK(report->reason == FaultReason::FeedbackInvalid);
+  CHECK(!report->damping_eligible);
+  CHECK(report->details.count == 0);
   // The published report drops the shape fault, but the internal diagnostics
   // keep it: a shape mismatch is one observation without a joint.
-  CHECK(report.observations.count == 1);
-  const FaultDetail *shape = FindObservation(
-      report.observations, FaultCondition::FeedbackShapeInvalid, kNoJointIndex);
+  CHECK(report->observations.count == 1);
+  const FaultDetail *shape =
+      FindObservation(report->observations,
+                      FaultCondition::FeedbackShapeInvalid, kNoJointIndex);
   CHECK(shape != nullptr);
   CHECK(shape->reason == FaultReason::FeedbackInvalid);
   CHECK(shape->observed_value == 3.0);
@@ -262,31 +263,31 @@ int main() {
 
   feedback = HealthyFeedback(config);
   feedback.count = 0;
-  report = Check(config, feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.feedback_invalid);
-  CHECK(report.reason == FaultReason::FeedbackInvalid);
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->feedback_invalid);
+  CHECK(report->reason == FaultReason::FeedbackInvalid);
 
   // ---- CheckFeedback: invalid samples ----
   feedback = HealthyFeedback(config);
   feedback.joints[1].valid = false;
-  report = Check(config, feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.feedback_invalid);
-  CHECK(report.reason == FaultReason::FeedbackInvalid);
-  CHECK(!report.damping_eligible);
-  CHECK(report.details.count == 1);
-  CHECK(report.details.details[0].reason == FaultReason::FeedbackInvalid);
-  CHECK(report.details.details[0].joint_index == 1);
-  CHECK(report.details.details[0].sample_stamp_us == kFreshUs);
-  CHECK(report.details.details[0].detected_stamp_us == kNowUs);
-  CHECK(report.details.details[0].output_action == OutputAction::ZeroTorque);
-  CHECK(!report.details.details[0].message.View().empty());
-  CHECK(report.details.details[0].condition ==
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->feedback_invalid);
+  CHECK(report->reason == FaultReason::FeedbackInvalid);
+  CHECK(!report->damping_eligible);
+  CHECK(report->details.count == 1);
+  CHECK(report->details.details[0].reason == FaultReason::FeedbackInvalid);
+  CHECK(report->details.details[0].joint_index == 1);
+  CHECK(report->details.details[0].sample_stamp_us == kFreshUs);
+  CHECK(report->details.details[0].detected_stamp_us == kNowUs);
+  CHECK(report->details.details[0].output_action == OutputAction::ZeroTorque);
+  CHECK(!report->details.details[0].message.View().empty());
+  CHECK(report->details.details[0].condition ==
         FaultCondition::JointFeedbackInvalid);
-  CHECK(report.observations.count == 1);
+  CHECK(report->observations.count == 1);
   const FaultDetail *invalid_observation = FindObservation(
-      report.observations, FaultCondition::JointFeedbackInvalid, 1);
+      report->observations, FaultCondition::JointFeedbackInvalid, 1);
   CHECK(invalid_observation != nullptr);
   CHECK(invalid_observation->message.View() == "invalid joint feedback sample");
 
@@ -294,81 +295,81 @@ int main() {
   // invalid feedback sample.
   feedback = HealthyFeedback(config);
   feedback.joints[0].connected = false;
-  report = Check(config, feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.feedback_invalid);
-  CHECK(report.details.count == 1);
-  CHECK(report.details.details[0].joint_index == 0);
-  CHECK(report.details.details[0].condition ==
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->feedback_invalid);
+  CHECK(report->details.count == 1);
+  CHECK(report->details.details[0].joint_index == 0);
+  CHECK(report->details.details[0].condition ==
         FaultCondition::JointDisconnected);
-  CHECK(report.details.details[0].message.View() == "joint disconnected");
-  CHECK(report.observations.count == 1);
+  CHECK(report->details.details[0].message.View() == "joint disconnected");
+  CHECK(report->observations.count == 1);
   const FaultDetail *disconnected = FindObservation(
-      report.observations, FaultCondition::JointDisconnected, 0);
+      report->observations, FaultCondition::JointDisconnected, 0);
   CHECK(disconnected != nullptr);
   CHECK(disconnected->message.View() == "joint disconnected");
 
   // A normal connection with a non-finite value is a third, distinct cause.
   feedback = HealthyFeedback(config);
   feedback.joints[0].q = kNaN;
-  report = Check(config, feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.feedback_invalid);
-  CHECK(report.reason == FaultReason::FeedbackInvalid);
-  CHECK(report.details.details[0].condition ==
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->feedback_invalid);
+  CHECK(report->reason == FaultReason::FeedbackInvalid);
+  CHECK(report->details.details[0].condition ==
         FaultCondition::JointFeedbackNonFinite);
-  CHECK(report.details.details[0].message.View() ==
+  CHECK(report->details.details[0].message.View() ==
         "non-finite joint feedback sample");
-  CHECK(report.observations.count == 1);
-  CHECK(FindObservation(report.observations,
+  CHECK(report->observations.count == 1);
+  CHECK(FindObservation(report->observations,
                         FaultCondition::JointFeedbackNonFinite, 0) != nullptr);
-  CHECK(FindObservation(report.observations, FaultCondition::JointDisconnected,
+  CHECK(FindObservation(report->observations, FaultCondition::JointDisconnected,
                         0) == nullptr);
 
   feedback = HealthyFeedback(config);
   feedback.joints[0].dq = kInf;
-  report = Check(config, feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.feedback_invalid);
-  CHECK(report.reason == FaultReason::FeedbackInvalid);
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->feedback_invalid);
+  CHECK(report->reason == FaultReason::FeedbackInvalid);
 
   feedback = HealthyFeedback(config);
   feedback.joints[1].tau_est = kNaN;
-  report = Check(config, feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.feedback_invalid);
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->feedback_invalid);
 
   feedback = HealthyFeedback(config);
   feedback.joints[1].freq_hz = kNaN;
-  report = Check(config, feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.feedback_invalid);
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->feedback_invalid);
 
   // An observed disconnection (valid=false while still connected) and a
   // non-finite value are observations, so the boot grace window never excuses
   // them and they are not "waiting for feedback".
   feedback = HealthyFeedback(config);
   feedback.joints[0].valid = false;
-  report = Check(config, feedback, kNowUs, true);
-  CHECK(report.fault);
-  CHECK(report.feedback_invalid);
-  CHECK(!report.damping_eligible);
-  CHECK(!report.awaiting_feedback);
+  Check(*report, config, feedback, kNowUs, true);
+  CHECK(report->fault);
+  CHECK(report->feedback_invalid);
+  CHECK(!report->damping_eligible);
+  CHECK(!report->awaiting_feedback);
 
   feedback = HealthyFeedback(config);
   feedback.joints[0].connected = false;
-  report = Check(config, feedback, kNowUs, true);
-  CHECK(report.fault);
-  CHECK(report.feedback_invalid);
-  CHECK(!report.awaiting_feedback);
+  Check(*report, config, feedback, kNowUs, true);
+  CHECK(report->fault);
+  CHECK(report->feedback_invalid);
+  CHECK(!report->awaiting_feedback);
 
   feedback = HealthyFeedback(config);
   feedback.joints[0].valid = true;
   feedback.joints[0].q = kNaN;
-  report = Check(config, feedback, kNowUs, true);
-  CHECK(report.fault);
-  CHECK(report.feedback_invalid);
-  CHECK(!report.awaiting_feedback);
+  Check(*report, config, feedback, kNowUs, true);
+  CHECK(report->fault);
+  CHECK(report->feedback_invalid);
+  CHECK(!report->awaiting_feedback);
 
   // ---- CheckFeedback: boot grace waiting for a first frame ----
   // A freshly initialized backend returns a snapshot with the right joint
@@ -376,30 +377,31 @@ int main() {
   // not faulty and not healthy: the zero-valued defaults are not a
   // measurement, so no observed-sample flag may be raised from them.
   feedback = AbsentFeedback(config);
-  report = Check(config, feedback, kNowUs, true);
-  CHECK(!report.fault);
-  CHECK(!report.healthy);
-  CHECK(report.awaiting_feedback);
-  CHECK(!report.stale_feedback);
-  CHECK(!report.frequency_low);
-  CHECK(!report.feedback_invalid);
-  CHECK(!report.driver_error);
-  CHECK(!report.position_exceeded);
-  CHECK(!report.velocity_exceeded);
-  CHECK(!report.imu_invalid);
-  CHECK(!report.damping_eligible);
-  CHECK(report.reason == FaultReason::None);
-  CHECK(report.details.count == 0);
+  Check(*report, config, feedback, kNowUs, true);
+  CHECK(!report->fault);
+  CHECK(!report->healthy);
+  CHECK(report->awaiting_feedback);
+  CHECK(!report->stale_feedback);
+  CHECK(!report->frequency_low);
+  CHECK(!report->feedback_invalid);
+  CHECK(!report->driver_error);
+  CHECK(!report->position_exceeded);
+  CHECK(!report->velocity_exceeded);
+  CHECK(!report->imu_invalid);
+  CHECK(!report->damping_eligible);
+  CHECK(report->reason == FaultReason::None);
+  CHECK(report->details.count == 0);
 
   // The same snapshot outside the grace window is invalid feedback: a machine
   // that never receives a frame faults at the configured startup limit.
-  report = Check(config, feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(!report.healthy);
-  CHECK(report.feedback_invalid);
-  CHECK(!report.awaiting_feedback);
-  CHECK(report.reason == FaultReason::FeedbackInvalid);
-  CHECK(FindDetail(report.details, FaultReason::FeedbackInvalid, 0) != nullptr);
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(!report->healthy);
+  CHECK(report->feedback_invalid);
+  CHECK(!report->awaiting_feedback);
+  CHECK(report->reason == FaultReason::FeedbackInvalid);
+  CHECK(FindDetail(report->details, FaultReason::FeedbackInvalid, 0) !=
+        nullptr);
 
   // A driver error is a status the driver reported, so an unobserved sample
   // carrying one is not "absent": it faults at once inside the grace window.
@@ -408,14 +410,14 @@ int main() {
   feedback = HealthyFeedback(config);
   feedback.joints[1] = irmv::protocol::JointFeedback{};
   feedback.joints[1].error_code = 7;
-  report = Check(config, feedback, kNowUs, true);
-  CHECK(report.fault);
-  CHECK(report.driver_error);
-  CHECK(report.feedback_invalid);
-  CHECK(report.reason == FaultReason::FeedbackInvalid);
-  CHECK(!report.awaiting_feedback);
+  Check(*report, config, feedback, kNowUs, true);
+  CHECK(report->fault);
+  CHECK(report->driver_error);
+  CHECK(report->feedback_invalid);
+  CHECK(report->reason == FaultReason::FeedbackInvalid);
+  CHECK(!report->awaiting_feedback);
   const FaultDetail *boot_driver =
-      FindDetail(report.details, FaultReason::DriverError, 1);
+      FindDetail(report->details, FaultReason::DriverError, 1);
   CHECK(boot_driver != nullptr);
   CHECK(boot_driver->error_code == 7);
 
@@ -424,10 +426,10 @@ int main() {
   feedback = HealthyFeedback(config);
   feedback.joints[1] = irmv::protocol::JointFeedback{};
   feedback.joints[1].q = kInf;
-  report = Check(config, feedback, kNowUs, true);
-  CHECK(report.fault);
-  CHECK(report.feedback_invalid);
-  CHECK(!report.awaiting_feedback);
+  Check(*report, config, feedback, kNowUs, true);
+  CHECK(report->fault);
+  CHECK(report->feedback_invalid);
+  CHECK(!report->awaiting_feedback);
 
   // A sample that claims absence while carrying values was observed as
   // something, so it is judged by those values inside the grace window as well:
@@ -436,38 +438,38 @@ int main() {
   feedback = HealthyFeedback(config);
   feedback.joints[0] = irmv::protocol::JointFeedback{};
   feedback.joints[0].q = config.position_max[0] + 1.0;
-  report = Check(config, feedback, kNowUs, true);
-  CHECK(report.fault);
-  CHECK(report.position_exceeded);
-  CHECK(!report.awaiting_feedback);
-  CHECK(FindDetail(report.details, FaultReason::JointPositionExceeded, 0) !=
+  Check(*report, config, feedback, kNowUs, true);
+  CHECK(report->fault);
+  CHECK(report->position_exceeded);
+  CHECK(!report->awaiting_feedback);
+  CHECK(FindDetail(report->details, FaultReason::JointPositionExceeded, 0) !=
         nullptr);
 
   feedback = HealthyFeedback(config);
   feedback.joints[1] = irmv::protocol::JointFeedback{};
   feedback.joints[1].dq = config.joint_velocity_limits[1] + 1.0;
-  report = Check(config, feedback, kNowUs, true);
-  CHECK(report.fault);
-  CHECK(report.velocity_exceeded);
-  CHECK(!report.awaiting_feedback);
+  Check(*report, config, feedback, kNowUs, true);
+  CHECK(report->fault);
+  CHECK(report->velocity_exceeded);
+  CHECK(!report->awaiting_feedback);
 
   feedback = HealthyFeedback(config);
   feedback.joints[0] = irmv::protocol::JointFeedback{};
   feedback.joints[0].freq_hz = config.boot.minimum_frequency_hz - 1.0;
-  report = Check(config, feedback, kNowUs, true);
-  CHECK(report.fault);
-  CHECK(report.frequency_low);
-  CHECK(report.feedback_invalid);
-  CHECK(!report.awaiting_feedback);
+  Check(*report, config, feedback, kNowUs, true);
+  CHECK(report->fault);
+  CHECK(report->frequency_low);
+  CHECK(report->feedback_invalid);
+  CHECK(!report->awaiting_feedback);
 
   // A healthy snapshot inside the grace window really is healthy: nothing is
   // waiting anymore.
   feedback = HealthyFeedback(config);
-  report = Check(config, feedback, kNowUs, true);
-  CHECK(report.healthy);
-  CHECK(!report.fault);
-  CHECK(!report.awaiting_feedback);
-  CHECK(report.details.count == 0);
+  Check(*report, config, feedback, kNowUs, true);
+  CHECK(report->healthy);
+  CHECK(!report->fault);
+  CHECK(!report->awaiting_feedback);
+  CHECK(report->details.count == 0);
 
   // ---- CheckFeedback: an observed input that then goes missing ----
   // A frame that has arrived is an observation: once a joint has delivered a
@@ -476,20 +478,20 @@ int main() {
   // excused as "no first frame yet".
   {
     ObservedSequence observed;
-    report = observed.Step(config, HealthyFeedback(config), kNowUs, true);
-    CHECK(report.healthy);
+    observed.Step(*report, config, HealthyFeedback(config), kNowUs, true);
+    CHECK(report->healthy);
 
     FeedbackSnapshot lost = HealthyFeedback(config);
     lost.joints[1] = irmv::protocol::JointFeedback{};
-    report = observed.Step(config, lost, kNowUs + 2'000, true);
-    CHECK(report.fault);
-    CHECK(!report.healthy);
-    CHECK(report.feedback_invalid);
-    CHECK(!report.awaiting_feedback);
-    CHECK(report.reason == FaultReason::FeedbackInvalid);
-    CHECK(FindDetail(report.details, FaultReason::FeedbackInvalid, 1) !=
+    observed.Step(*report, config, lost, kNowUs + 2'000, true);
+    CHECK(report->fault);
+    CHECK(!report->healthy);
+    CHECK(report->feedback_invalid);
+    CHECK(!report->awaiting_feedback);
+    CHECK(report->reason == FaultReason::FeedbackInvalid);
+    CHECK(FindDetail(report->details, FaultReason::FeedbackInvalid, 1) !=
           nullptr);
-    CHECK(!report.damping_eligible);
+    CHECK(!report->damping_eligible);
   }
 
   // The excuse is per input, not per snapshot: a joint that was never observed
@@ -499,24 +501,24 @@ int main() {
     ObservedSequence observed;
     FeedbackSnapshot partial = HealthyFeedback(config);
     partial.joints[1] = irmv::protocol::JointFeedback{};
-    report = observed.Step(config, partial, kNowUs, true);
-    CHECK(!report.fault);
-    CHECK(report.awaiting_feedback);
-    CHECK(!report.healthy);
+    observed.Step(*report, config, partial, kNowUs, true);
+    CHECK(!report->fault);
+    CHECK(report->awaiting_feedback);
+    CHECK(!report->healthy);
 
-    report = observed.Step(config, partial, kNowUs + 2'000, true);
-    CHECK(!report.fault);
-    CHECK(report.awaiting_feedback);
+    observed.Step(*report, config, partial, kNowUs + 2'000, true);
+    CHECK(!report->fault);
+    CHECK(report->awaiting_feedback);
 
     // The first frame of the missing joint arrives; the grace does not survive
     // it, so the very next absent snapshot faults.
-    report =
-        observed.Step(config, HealthyFeedback(config), kNowUs + 4'000, true);
-    CHECK(report.healthy);
-    report = observed.Step(config, partial, kNowUs + 6'000, true);
-    CHECK(report.fault);
-    CHECK(report.feedback_invalid);
-    CHECK(!report.awaiting_feedback);
+    observed.Step(*report, config, HealthyFeedback(config), kNowUs + 4'000,
+                  true);
+    CHECK(report->healthy);
+    observed.Step(*report, config, partial, kNowUs + 6'000, true);
+    CHECK(report->fault);
+    CHECK(report->feedback_invalid);
+    CHECK(!report->awaiting_feedback);
   }
 
   // A first frame that is erroneous is an observation too: it faults at once
@@ -526,10 +528,10 @@ int main() {
     FeedbackSnapshot garbage = HealthyFeedback(config);
     garbage.joints[0] = irmv::protocol::JointFeedback{};
     garbage.joints[0].q = kNaN;
-    report = observed.Step(config, garbage, kNowUs, true);
-    CHECK(report.fault);
-    CHECK(report.feedback_invalid);
-    CHECK(!report.awaiting_feedback);
+    observed.Step(*report, config, garbage, kNowUs, true);
+    CHECK(report->fault);
+    CHECK(report->feedback_invalid);
+    CHECK(!report->awaiting_feedback);
   }
 
   // The required IMU obeys the same rule: an observed IMU that goes missing
@@ -538,19 +540,19 @@ int main() {
     RuntimeConfig imu_config = config;
     imu_config.imu_required = true;
     ObservedSequence observed;
-    report =
-        observed.Step(imu_config, HealthyFeedback(imu_config), kNowUs, true);
-    CHECK(report.healthy);
+    observed.Step(*report, imu_config, HealthyFeedback(imu_config), kNowUs,
+                  true);
+    CHECK(report->healthy);
 
     FeedbackSnapshot lost = HealthyFeedback(imu_config);
     lost.imu = irmv::protocol::ImuFeedback{};
-    report = observed.Step(imu_config, lost, kNowUs + 2'000, true);
-    CHECK(report.fault);
-    CHECK(!report.healthy);
-    CHECK(report.imu_invalid);
-    CHECK(!report.awaiting_feedback);
-    CHECK(report.reason == FaultReason::ImuInvalid);
-    CHECK(FindDetail(report.details, FaultReason::ImuInvalid, kNoJointIndex) !=
+    observed.Step(*report, imu_config, lost, kNowUs + 2'000, true);
+    CHECK(report->fault);
+    CHECK(!report->healthy);
+    CHECK(report->imu_invalid);
+    CHECK(!report->awaiting_feedback);
+    CHECK(report->reason == FaultReason::ImuInvalid);
+    CHECK(FindDetail(report->details, FaultReason::ImuInvalid, kNoJointIndex) !=
           nullptr);
   }
 
@@ -561,10 +563,10 @@ int main() {
     imu_config.imu_required = true;
     FeedbackSnapshot without_imu = HealthyFeedback(imu_config);
     without_imu.imu = irmv::protocol::ImuFeedback{};
-    report = Check(imu_config, without_imu, kNowUs, true);
-    CHECK(!report.fault);
-    CHECK(!report.healthy);
-    CHECK(report.awaiting_feedback);
+    Check(*report, imu_config, without_imu, kNowUs, true);
+    CHECK(!report->fault);
+    CHECK(!report->healthy);
+    CHECK(report->awaiting_feedback);
   }
 
   // The real backend at boot: Initialize() leaves a snapshot with the
@@ -574,126 +576,126 @@ int main() {
   boot_backend.Initialize();
   const FeedbackSnapshot boot_feedback = boot_backend.Read(kNowUs);
   CHECK(boot_feedback.count == config.joint_count());
-  report = Check(config, boot_feedback, kNowUs, true);
-  CHECK(!report.fault);
-  CHECK(!report.healthy);
-  CHECK(report.awaiting_feedback);
-  CHECK(report.reason == FaultReason::None);
-  CHECK(report.details.count == 0);
-  CHECK(report.observations.count == 0);
-  CHECK(!report.damping_eligible);
+  Check(*report, config, boot_feedback, kNowUs, true);
+  CHECK(!report->fault);
+  CHECK(!report->healthy);
+  CHECK(report->awaiting_feedback);
+  CHECK(report->reason == FaultReason::None);
+  CHECK(report->details.count == 0);
+  CHECK(report->observations.count == 0);
+  CHECK(!report->damping_eligible);
 
   // Once the grace window has expired the same never-observed snapshot faults
   // like any other invalid feedback.
-  report = Check(config, boot_feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.feedback_invalid);
-  CHECK(!report.awaiting_feedback);
+  Check(*report, config, boot_feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->feedback_invalid);
+  CHECK(!report->awaiting_feedback);
 
   // ---- CheckFeedback: freshness ----
   feedback = HealthyFeedback(config);
   feedback.joints[0].rx_stamp_us = kNowUs - config.timeouts.feedback_us - 1;
-  report = Check(config, feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.stale_feedback);
-  CHECK(!report.feedback_invalid);
-  CHECK(report.reason == FaultReason::FeedbackInvalid);
-  CHECK(!report.damping_eligible);
-  CHECK(report.details.count == 1);
-  CHECK(report.details.details[0].reason == FaultReason::FeedbackInvalid);
-  CHECK(report.details.details[0].joint_index == 0);
-  CHECK(report.details.details[0].condition ==
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->stale_feedback);
+  CHECK(!report->feedback_invalid);
+  CHECK(report->reason == FaultReason::FeedbackInvalid);
+  CHECK(!report->damping_eligible);
+  CHECK(report->details.count == 1);
+  CHECK(report->details.details[0].reason == FaultReason::FeedbackInvalid);
+  CHECK(report->details.details[0].joint_index == 0);
+  CHECK(report->details.details[0].condition ==
         FaultCondition::JointFeedbackStale);
-  CHECK(report.details.details[0].message.View() ==
+  CHECK(report->details.details[0].message.View() ==
         "stale joint feedback sample");
-  CHECK(report.details.details[0].sample_stamp_us ==
+  CHECK(report->details.details[0].sample_stamp_us ==
         kNowUs - config.timeouts.feedback_us - 1);
-  CHECK(report.observations.count == 1);
+  CHECK(report->observations.count == 1);
   const FaultDetail *stale = FindObservation(
-      report.observations, FaultCondition::JointFeedbackStale, 0);
+      report->observations, FaultCondition::JointFeedbackStale, 0);
   CHECK(stale != nullptr);
   CHECK(stale->message.View() == "stale joint feedback sample");
 
   feedback = HealthyFeedback(config);
   feedback.joints[0].rx_stamp_us = kNowUs + 1;
-  report = Check(config, feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.stale_feedback);
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->stale_feedback);
 
   // Exactly at the timeout is still fresh.
   feedback = HealthyFeedback(config);
   feedback.joints[0].rx_stamp_us = kNowUs - config.timeouts.feedback_us;
-  report = Check(config, feedback, kNowUs, false);
-  CHECK(report.healthy);
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->healthy);
 
   // Boot grace tolerates staleness but records it and never enables damping.
   feedback = HealthyFeedback(config);
   feedback.joints[0].rx_stamp_us = kNowUs - config.timeouts.feedback_us - 1;
-  report = Check(config, feedback, kNowUs, true);
-  CHECK(!report.fault);
-  CHECK(report.healthy);
-  CHECK(report.stale_feedback);
-  CHECK(!report.damping_eligible);
-  CHECK(report.reason == FaultReason::None);
-  CHECK(report.details.count == 0);
+  Check(*report, config, feedback, kNowUs, true);
+  CHECK(!report->fault);
+  CHECK(report->healthy);
+  CHECK(report->stale_feedback);
+  CHECK(!report->damping_eligible);
+  CHECK(report->reason == FaultReason::None);
+  CHECK(report->details.count == 0);
   // A tolerated grace-window condition is recorded in the flag but is not a
   // fault occurrence, so the observation batch stays empty.
-  CHECK(report.observations.count == 0);
+  CHECK(report->observations.count == 0);
 
   // ---- CheckFeedback: control frequency ----
   feedback = HealthyFeedback(config);
   feedback.joints[1].freq_hz = config.boot.minimum_frequency_hz - 1.0;
-  report = Check(config, feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.frequency_low);
-  CHECK(report.feedback_invalid);
-  CHECK(report.reason == FaultReason::FeedbackInvalid);
-  CHECK(!report.damping_eligible);
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->frequency_low);
+  CHECK(report->feedback_invalid);
+  CHECK(report->reason == FaultReason::FeedbackInvalid);
+  CHECK(!report->damping_eligible);
   const FaultDetail *slow =
-      FindDetail(report.details, FaultReason::FeedbackInvalid, 1);
+      FindDetail(report->details, FaultReason::FeedbackInvalid, 1);
   CHECK(slow != nullptr);
   CHECK(slow->observed_value == config.boot.minimum_frequency_hz - 1.0);
   CHECK(slow->limit == config.boot.minimum_frequency_hz);
   CHECK(slow->message.View() == "control frequency below minimum");
   CHECK(slow->condition == FaultCondition::JointFrequencyLow);
-  CHECK(report.observations.count == 1);
-  CHECK(FindObservation(report.observations, FaultCondition::JointFrequencyLow,
+  CHECK(report->observations.count == 1);
+  CHECK(FindObservation(report->observations, FaultCondition::JointFrequencyLow,
                         1) != nullptr);
 
   feedback = HealthyFeedback(config);
   feedback.joints[1].freq_hz = config.boot.minimum_frequency_hz;
-  report = Check(config, feedback, kNowUs, false);
-  CHECK(report.healthy);
-  CHECK(!report.frequency_low);
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->healthy);
+  CHECK(!report->frequency_low);
 
   feedback = HealthyFeedback(config);
   feedback.joints[1].freq_hz = config.boot.minimum_frequency_hz - 1.0;
-  report = Check(config, feedback, kNowUs, true);
-  CHECK(!report.fault);
-  CHECK(report.frequency_low);
-  CHECK(report.reason == FaultReason::None);
-  CHECK(!report.damping_eligible);
-  CHECK(report.observations.count == 0);
+  Check(*report, config, feedback, kNowUs, true);
+  CHECK(!report->fault);
+  CHECK(report->frequency_low);
+  CHECK(report->reason == FaultReason::None);
+  CHECK(!report->damping_eligible);
+  CHECK(report->observations.count == 0);
 
   // ---- CheckFeedback: driver errors ----
   feedback = HealthyFeedback(config);
   feedback.joints[0].error_code = 0x80000000u;
-  report = Check(config, feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.driver_error);
-  CHECK(!report.feedback_invalid);
-  CHECK(report.reason == FaultReason::DriverError);
-  CHECK(!report.damping_eligible);
-  CHECK(report.details.count == 1);
-  CHECK(report.details.details[0].reason == FaultReason::DriverError);
-  CHECK(report.details.details[0].joint_index == 0);
-  CHECK(report.details.details[0].error_code == 0x80000000u);
-  CHECK(report.details.details[0].sample_stamp_us == kFreshUs);
-  CHECK(report.details.details[0].condition ==
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->driver_error);
+  CHECK(!report->feedback_invalid);
+  CHECK(report->reason == FaultReason::DriverError);
+  CHECK(!report->damping_eligible);
+  CHECK(report->details.count == 1);
+  CHECK(report->details.details[0].reason == FaultReason::DriverError);
+  CHECK(report->details.details[0].joint_index == 0);
+  CHECK(report->details.details[0].error_code == 0x80000000u);
+  CHECK(report->details.details[0].sample_stamp_us == kFreshUs);
+  CHECK(report->details.details[0].condition ==
         FaultCondition::JointDriverError);
-  CHECK(report.observations.count == 1);
-  const FaultDetail *driver_observation =
-      FindObservation(report.observations, FaultCondition::JointDriverError, 0);
+  CHECK(report->observations.count == 1);
+  const FaultDetail *driver_observation = FindObservation(
+      report->observations, FaultCondition::JointDriverError, 0);
   CHECK(driver_observation != nullptr);
   CHECK(driver_observation->error_code == 0x80000000u);
   CHECK(driver_observation->sample_stamp_us == kFreshUs);
@@ -702,102 +704,105 @@ int main() {
   feedback = HealthyFeedback(config);
   feedback.joints[0].error_code = 0x80000000u;
   feedback.joints[1].rx_stamp_us = kNowUs - config.timeouts.feedback_us - 1;
-  report = Check(config, feedback, kNowUs, false);
-  CHECK(report.reason == FaultReason::FeedbackInvalid);
-  CHECK(report.driver_error);
-  CHECK(report.stale_feedback);
-  CHECK(report.details.count == 2);
-  CHECK(FindDetail(report.details, FaultReason::DriverError, 0) != nullptr);
-  CHECK(FindDetail(report.details, FaultReason::FeedbackInvalid, 1) != nullptr);
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->reason == FaultReason::FeedbackInvalid);
+  CHECK(report->driver_error);
+  CHECK(report->stale_feedback);
+  CHECK(report->details.count == 2);
+  CHECK(FindDetail(report->details, FaultReason::DriverError, 0) != nullptr);
+  CHECK(FindDetail(report->details, FaultReason::FeedbackInvalid, 1) !=
+        nullptr);
 
   // The boot grace window does not excuse driver errors.
   feedback = HealthyFeedback(config);
   feedback.joints[1].error_code = 5;
-  report = Check(config, feedback, kNowUs, true);
-  CHECK(report.fault);
-  CHECK(report.driver_error);
-  CHECK(report.reason == FaultReason::DriverError);
-  CHECK(!report.damping_eligible);
+  Check(*report, config, feedback, kNowUs, true);
+  CHECK(report->fault);
+  CHECK(report->driver_error);
+  CHECK(report->reason == FaultReason::DriverError);
+  CHECK(!report->damping_eligible);
 
   // ---- CheckFeedback: position limits ----
   feedback = HealthyFeedback(config);
   feedback.joints[0].q = config.position_max[0] + 0.5;
-  report = Check(config, feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.position_exceeded);
-  CHECK(!report.feedback_invalid);
-  CHECK(!report.velocity_exceeded);
-  CHECK(report.reason == FaultReason::JointPositionExceeded);
-  CHECK(report.details.count == 1);
-  CHECK(report.details.details[0].reason == FaultReason::JointPositionExceeded);
-  CHECK(report.details.details[0].joint_index == 0);
-  CHECK(report.details.details[0].observed_value == 2.5);
-  CHECK(report.details.details[0].limit == 2.0);
-  CHECK(report.details.details[0].sample_stamp_us == kFreshUs);
-  CHECK(report.details.details[0].detected_stamp_us == kNowUs);
-  CHECK(report.details.details[0].output_action == OutputAction::Damping);
-  CHECK(report.details.details[0].condition ==
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->position_exceeded);
+  CHECK(!report->feedback_invalid);
+  CHECK(!report->velocity_exceeded);
+  CHECK(report->reason == FaultReason::JointPositionExceeded);
+  CHECK(report->details.count == 1);
+  CHECK(report->details.details[0].reason ==
+        FaultReason::JointPositionExceeded);
+  CHECK(report->details.details[0].joint_index == 0);
+  CHECK(report->details.details[0].observed_value == 2.5);
+  CHECK(report->details.details[0].limit == 2.0);
+  CHECK(report->details.details[0].sample_stamp_us == kFreshUs);
+  CHECK(report->details.details[0].detected_stamp_us == kNowUs);
+  CHECK(report->details.details[0].output_action == OutputAction::Damping);
+  CHECK(report->details.details[0].condition ==
         FaultCondition::JointPositionExceeded);
-  CHECK(report.observations.count == 1);
+  CHECK(report->observations.count == 1);
   const FaultDetail *position = FindObservation(
-      report.observations, FaultCondition::JointPositionExceeded, 0);
+      report->observations, FaultCondition::JointPositionExceeded, 0);
   CHECK(position != nullptr);
   CHECK(position->observed_value == 2.5);
   CHECK(position->limit == 2.0);
   CHECK(position->sample_stamp_us == kFreshUs);
   CHECK(position->detected_stamp_us == 0);
-  CHECK(report.damping_eligible);
+  CHECK(report->damping_eligible);
 
   feedback = HealthyFeedback(config);
   feedback.joints[0].q = config.position_min[0] - 0.5;
-  report = Check(config, feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.position_exceeded);
-  CHECK(report.details.count == 1);
-  CHECK(report.details.details[0].observed_value == -2.5);
-  CHECK(report.details.details[0].limit == -2.0);
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->position_exceeded);
+  CHECK(report->details.count == 1);
+  CHECK(report->details.details[0].observed_value == -2.5);
+  CHECK(report->details.details[0].limit == -2.0);
 
   feedback = HealthyFeedback(config);
   feedback.joints[0].q = config.position_min[0];
   feedback.joints[1].q = config.position_max[1];
-  report = Check(config, feedback, kNowUs, false);
-  CHECK(report.healthy);
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->healthy);
 
   // The boot grace window does not excuse an observed position violation.
   feedback = HealthyFeedback(config);
   feedback.joints[0].q = config.position_max[0] + 0.5;
-  report = Check(config, feedback, kNowUs, true);
-  CHECK(report.fault);
-  CHECK(report.position_exceeded);
-  CHECK(!report.awaiting_feedback);
+  Check(*report, config, feedback, kNowUs, true);
+  CHECK(report->fault);
+  CHECK(report->position_exceeded);
+  CHECK(!report->awaiting_feedback);
 
   // ---- CheckFeedback: velocity limits ----
   feedback = HealthyFeedback(config);
   feedback.joints[0].dq = config.joint_velocity_limits[0];
   feedback.joints[1].dq = -config.joint_velocity_limits[1];
-  report = Check(config, feedback, kNowUs, false);
-  CHECK(report.healthy);
-  CHECK(!report.velocity_exceeded);
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->healthy);
+  CHECK(!report->velocity_exceeded);
 
   feedback = HealthyFeedback(config);
   feedback.joints[0].dq = config.joint_velocity_limits[0] + 0.01;
-  report = Check(config, feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.velocity_exceeded);
-  CHECK(!report.feedback_invalid);
-  CHECK(report.reason == FaultReason::JointVelocityExceeded);
-  CHECK(report.details.count == 1);
-  CHECK(report.details.details[0].reason == FaultReason::JointVelocityExceeded);
-  CHECK(report.details.details[0].joint_index == 0);
-  CHECK(report.details.details[0].observed_value == 10.01);
-  CHECK(report.details.details[0].limit == 10.0);
-  CHECK(report.details.details[0].condition ==
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->velocity_exceeded);
+  CHECK(!report->feedback_invalid);
+  CHECK(report->reason == FaultReason::JointVelocityExceeded);
+  CHECK(report->details.count == 1);
+  CHECK(report->details.details[0].reason ==
+        FaultReason::JointVelocityExceeded);
+  CHECK(report->details.details[0].joint_index == 0);
+  CHECK(report->details.details[0].observed_value == 10.01);
+  CHECK(report->details.details[0].limit == 10.0);
+  CHECK(report->details.details[0].condition ==
         FaultCondition::JointVelocityExceeded);
-  CHECK(report.damping_eligible);
-  CHECK(report.details.details[0].output_action == OutputAction::Damping);
-  CHECK(report.observations.count == 1);
+  CHECK(report->damping_eligible);
+  CHECK(report->details.details[0].output_action == OutputAction::Damping);
+  CHECK(report->observations.count == 1);
   const FaultDetail *velocity = FindObservation(
-      report.observations, FaultCondition::JointVelocityExceeded, 0);
+      report->observations, FaultCondition::JointVelocityExceeded, 0);
   CHECK(velocity != nullptr);
   CHECK(velocity->observed_value == 10.01);
   CHECK(velocity->limit == 10.0);
@@ -805,152 +810,153 @@ int main() {
 
   feedback = HealthyFeedback(config);
   feedback.joints[1].dq = -config.joint_velocity_limits[1] - 0.01;
-  report = Check(config, feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.velocity_exceeded);
-  CHECK(report.details.count == 1);
-  CHECK(report.details.details[0].joint_index == 1);
-  CHECK(report.details.details[0].observed_value == -10.01);
-  CHECK(report.details.details[0].limit == 10.0);
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->velocity_exceeded);
+  CHECK(report->details.count == 1);
+  CHECK(report->details.details[0].joint_index == 1);
+  CHECK(report->details.details[0].observed_value == -10.01);
+  CHECK(report->details.details[0].limit == 10.0);
 
   // Non-finite velocity is a feedback fault, never a zero velocity.
   feedback = HealthyFeedback(config);
   feedback.joints[0].dq = kNaN;
-  report = Check(config, feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.feedback_invalid);
-  CHECK(report.reason == FaultReason::FeedbackInvalid);
-  CHECK(!report.damping_eligible);
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->feedback_invalid);
+  CHECK(report->reason == FaultReason::FeedbackInvalid);
+  CHECK(!report->damping_eligible);
 
   // Stale velocity is still evaluated against the limit (not treated as zero)
   // and the stale signal blocks damping eligibility.
   feedback = HealthyFeedback(config);
   feedback.joints[1].dq = 12.0;
   feedback.joints[1].rx_stamp_us = kNowUs - config.timeouts.feedback_us - 1;
-  report = Check(config, feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.stale_feedback);
-  CHECK(report.velocity_exceeded);
-  CHECK(FindDetail(report.details, FaultReason::JointVelocityExceeded, 1) !=
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->stale_feedback);
+  CHECK(report->velocity_exceeded);
+  CHECK(FindDetail(report->details, FaultReason::JointVelocityExceeded, 1) !=
         nullptr);
-  CHECK(!report.damping_eligible);
+  CHECK(!report->damping_eligible);
 
   // The boot grace window does not excuse an observed velocity violation.
   feedback = HealthyFeedback(config);
   feedback.joints[0].dq = config.joint_velocity_limits[0] + 0.01;
-  report = Check(config, feedback, kNowUs, true);
-  CHECK(report.fault);
-  CHECK(report.velocity_exceeded);
-  CHECK(!report.awaiting_feedback);
+  Check(*report, config, feedback, kNowUs, true);
+  CHECK(report->fault);
+  CHECK(report->velocity_exceeded);
+  CHECK(!report->awaiting_feedback);
 
   // ---- CheckFeedback: IMU ----
   RuntimeConfig imu_config = config;
   imu_config.imu_required = true;
   feedback = HealthyFeedback(imu_config);
-  report = Check(imu_config, feedback, kNowUs, false);
-  CHECK(report.healthy);
-  CHECK(!report.imu_invalid);
+  Check(*report, imu_config, feedback, kNowUs, false);
+  CHECK(report->healthy);
+  CHECK(!report->imu_invalid);
 
   feedback = HealthyFeedback(imu_config);
   feedback.imu.valid = false;
-  report = Check(imu_config, feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.imu_invalid);
-  CHECK(!report.feedback_invalid);
-  CHECK(report.reason == FaultReason::ImuInvalid);
-  CHECK(report.details.count == 1);
-  CHECK(report.details.details[0].reason == FaultReason::ImuInvalid);
-  CHECK(report.details.details[0].joint_index == kNoJointIndex);
-  CHECK(report.details.details[0].condition ==
+  Check(*report, imu_config, feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->imu_invalid);
+  CHECK(!report->feedback_invalid);
+  CHECK(report->reason == FaultReason::ImuInvalid);
+  CHECK(report->details.count == 1);
+  CHECK(report->details.details[0].reason == FaultReason::ImuInvalid);
+  CHECK(report->details.details[0].joint_index == kNoJointIndex);
+  CHECK(report->details.details[0].condition ==
         FaultCondition::ImuFeedbackInvalid);
-  CHECK(report.damping_eligible);
-  CHECK(report.details.details[0].output_action == OutputAction::Damping);
-  CHECK(report.observations.count == 1);
-  CHECK(FindObservation(report.observations, FaultCondition::ImuFeedbackInvalid,
+  CHECK(report->damping_eligible);
+  CHECK(report->details.details[0].output_action == OutputAction::Damping);
+  CHECK(report->observations.count == 1);
+  CHECK(FindObservation(report->observations,
+                        FaultCondition::ImuFeedbackInvalid,
                         kNoJointIndex) != nullptr);
 
   feedback = HealthyFeedback(imu_config);
   feedback.imu.angular_velocity[1] = kInf;
-  report = Check(imu_config, feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.imu_invalid);
-  CHECK(report.reason == FaultReason::ImuInvalid);
-  CHECK(report.details.details[0].condition ==
+  Check(*report, imu_config, feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->imu_invalid);
+  CHECK(report->reason == FaultReason::ImuInvalid);
+  CHECK(report->details.details[0].condition ==
         FaultCondition::ImuFeedbackNonFinite);
-  CHECK(report.observations.count == 1);
-  CHECK(FindObservation(report.observations,
+  CHECK(report->observations.count == 1);
+  CHECK(FindObservation(report->observations,
                         FaultCondition::ImuFeedbackNonFinite,
                         kNoJointIndex) != nullptr);
 
   feedback = HealthyFeedback(imu_config);
   feedback.imu.linear_acceleration[2] = kNaN;
-  report = Check(imu_config, feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.imu_invalid);
+  Check(*report, imu_config, feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->imu_invalid);
 
   feedback = HealthyFeedback(imu_config);
   feedback.imu.rx_stamp_us = kNowUs - imu_config.timeouts.imu_us - 1;
-  report = Check(imu_config, feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.imu_invalid);
-  CHECK(report.reason == FaultReason::ImuInvalid);
-  CHECK(report.details.details[0].condition ==
+  Check(*report, imu_config, feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->imu_invalid);
+  CHECK(report->reason == FaultReason::ImuInvalid);
+  CHECK(report->details.details[0].condition ==
         FaultCondition::ImuFeedbackStale);
-  CHECK(report.details.details[0].message.View() == "imu feedback stale");
-  CHECK(report.observations.count == 1);
-  CHECK(FindObservation(report.observations, FaultCondition::ImuFeedbackStale,
+  CHECK(report->details.details[0].message.View() == "imu feedback stale");
+  CHECK(report->observations.count == 1);
+  CHECK(FindObservation(report->observations, FaultCondition::ImuFeedbackStale,
                         kNoJointIndex) != nullptr);
 
   feedback = HealthyFeedback(imu_config);
   feedback.imu.rx_stamp_us = kNowUs - imu_config.timeouts.imu_us;
-  report = Check(imu_config, feedback, kNowUs, false);
-  CHECK(report.healthy);
+  Check(*report, imu_config, feedback, kNowUs, false);
+  CHECK(report->healthy);
 
   // Boot grace tolerates stale IMU samples but not invalid ones.
   feedback = HealthyFeedback(imu_config);
   feedback.imu.rx_stamp_us = kNowUs - imu_config.timeouts.imu_us - 1;
-  report = Check(imu_config, feedback, kNowUs, true);
-  CHECK(!report.fault);
-  CHECK(!report.imu_invalid);
-  CHECK(!report.awaiting_feedback);
-  CHECK(report.observations.count == 0);
+  Check(*report, imu_config, feedback, kNowUs, true);
+  CHECK(!report->fault);
+  CHECK(!report->imu_invalid);
+  CHECK(!report->awaiting_feedback);
+  CHECK(report->observations.count == 0);
 
   feedback = HealthyFeedback(imu_config);
   feedback.imu.valid = false;
-  report = Check(imu_config, feedback, kNowUs, true);
-  CHECK(report.fault);
-  CHECK(report.imu_invalid);
-  CHECK(!report.awaiting_feedback);
+  Check(*report, imu_config, feedback, kNowUs, true);
+  CHECK(report->fault);
+  CHECK(report->imu_invalid);
+  CHECK(!report->awaiting_feedback);
 
   // A required IMU that has never delivered a sample is waiting inside the
   // grace window: no fault, not healthy, and no observed-sample flag.
   feedback = HealthyFeedback(imu_config);
   feedback.imu = {};
-  report = Check(imu_config, feedback, kNowUs, true);
-  CHECK(!report.fault);
-  CHECK(!report.healthy);
-  CHECK(report.awaiting_feedback);
-  CHECK(!report.imu_invalid);
-  CHECK(report.reason == FaultReason::None);
-  CHECK(report.details.count == 0);
-  CHECK(report.observations.count == 0);
+  Check(*report, imu_config, feedback, kNowUs, true);
+  CHECK(!report->fault);
+  CHECK(!report->healthy);
+  CHECK(report->awaiting_feedback);
+  CHECK(!report->imu_invalid);
+  CHECK(report->reason == FaultReason::None);
+  CHECK(report->details.count == 0);
+  CHECK(report->observations.count == 0);
 
   // Outside the grace window the same absent IMU is invalid feedback.
-  report = Check(imu_config, feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.imu_invalid);
-  CHECK(!report.awaiting_feedback);
-  CHECK(report.reason == FaultReason::ImuInvalid);
+  Check(*report, imu_config, feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->imu_invalid);
+  CHECK(!report->awaiting_feedback);
+  CHECK(report->reason == FaultReason::ImuInvalid);
 
   // A required IMU that claims absence while carrying a value is judged by that
   // value inside the grace window too.
   feedback = HealthyFeedback(imu_config);
   feedback.imu = {};
   feedback.imu.orientation_rpy[0] = 0.5;
-  report = Check(imu_config, feedback, kNowUs, true);
-  CHECK(report.fault);
-  CHECK(report.imu_invalid);
-  CHECK(!report.awaiting_feedback);
+  Check(*report, imu_config, feedback, kNowUs, true);
+  CHECK(report->fault);
+  CHECK(report->imu_invalid);
+  CHECK(!report->awaiting_feedback);
 
   // ---- CheckFeedback: simultaneous offenders and priority ----
   const RuntimeConfig three_joint = ManyJointConfig(3);
@@ -958,43 +964,43 @@ int main() {
   feedback.joints[0].dq = 10.5;
   feedback.joints[1].dq = -12.0;
   feedback.joints[2].error_code = 0x80000000u;
-  report = Check(three_joint, feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.velocity_exceeded);
-  CHECK(report.driver_error);
-  CHECK(report.reason == FaultReason::DriverError);
-  CHECK(!report.damping_eligible);
-  CHECK(report.details.count == 3);
-  CHECK(CountDetails(report.details, FaultReason::DriverError) == 1);
-  CHECK(CountDetails(report.details, FaultReason::JointVelocityExceeded) == 2);
+  Check(*report, three_joint, feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->velocity_exceeded);
+  CHECK(report->driver_error);
+  CHECK(report->reason == FaultReason::DriverError);
+  CHECK(!report->damping_eligible);
+  CHECK(report->details.count == 3);
+  CHECK(CountDetails(report->details, FaultReason::DriverError) == 1);
+  CHECK(CountDetails(report->details, FaultReason::JointVelocityExceeded) == 2);
   const FaultDetail *driver =
-      FindDetail(report.details, FaultReason::DriverError, 2);
+      FindDetail(report->details, FaultReason::DriverError, 2);
   CHECK(driver != nullptr);
   CHECK(driver->error_code == 0x80000000u);
   CHECK(driver->output_action == OutputAction::ZeroTorque);
-  CHECK(FindDetail(report.details, FaultReason::JointVelocityExceeded, 0) !=
+  CHECK(FindDetail(report->details, FaultReason::JointVelocityExceeded, 0) !=
         nullptr);
-  CHECK(FindDetail(report.details, FaultReason::JointVelocityExceeded, 1) !=
+  CHECK(FindDetail(report->details, FaultReason::JointVelocityExceeded, 1) !=
         nullptr);
-  CHECK(report.observations.count == 3);
-  CHECK(CountObservations(report.observations,
+  CHECK(report->observations.count == 3);
+  CHECK(CountObservations(report->observations,
                           FaultCondition::JointVelocityExceeded) == 2);
-  CHECK(CountObservations(report.observations,
+  CHECK(CountObservations(report->observations,
                           FaultCondition::JointDriverError) == 1);
 
   // Every simultaneous fresh overspeed joint is visible in the details.
   feedback = HealthyFeedback(config);
   feedback.joints[0].dq = 11.0;
   feedback.joints[1].dq = -11.0;
-  report = Check(config, feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.reason == FaultReason::JointVelocityExceeded);
-  CHECK(report.damping_eligible);
-  CHECK(report.details.count == 2);
-  CHECK(report.details.details[0].joint_index == 0);
-  CHECK(report.details.details[1].joint_index == 1);
-  CHECK(report.details.details[0].output_action == OutputAction::Damping);
-  CHECK(report.details.details[1].output_action == OutputAction::Damping);
+  Check(*report, config, feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->reason == FaultReason::JointVelocityExceeded);
+  CHECK(report->damping_eligible);
+  CHECK(report->details.count == 2);
+  CHECK(report->details.details[0].joint_index == 0);
+  CHECK(report->details.details[1].joint_index == 1);
+  CHECK(report->details.details[0].output_action == OutputAction::Damping);
+  CHECK(report->details.details[1].output_action == OutputAction::Damping);
 
   // ---- CheckFeedback: detail capacity ----
   const RuntimeConfig max_joint_config = ManyJointConfig(kMaxJoints);
@@ -1002,19 +1008,19 @@ int main() {
   for (std::size_t i = 0; i < kMaxJoints; ++i) {
     wide_feedback.joints[i].dq = 20.0;
   }
-  report = Check(max_joint_config, wide_feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.velocity_exceeded);
-  CHECK(report.reason == FaultReason::JointVelocityExceeded);
-  CHECK(report.damping_eligible);
-  CHECK(report.details.count == kMaxJoints);
-  CHECK(CountDetails(report.details, FaultReason::JointVelocityExceeded) ==
+  Check(*report, max_joint_config, wide_feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->velocity_exceeded);
+  CHECK(report->reason == FaultReason::JointVelocityExceeded);
+  CHECK(report->damping_eligible);
+  CHECK(report->details.count == kMaxJoints);
+  CHECK(CountDetails(report->details, FaultReason::JointVelocityExceeded) ==
         kMaxJoints);
   // The internal diagnostics are independent of the 64-entry report: every
   // overspeed joint is present even though the report is full.
-  CHECK(report.observations.count == kMaxJoints);
-  CHECK(report.observations.dropped == 0);
-  CHECK(CountObservations(report.observations,
+  CHECK(report->observations.count == kMaxJoints);
+  CHECK(report->observations.dropped == 0);
+  CHECK(CountObservations(report->observations,
                           FaultCondition::JointVelocityExceeded) == kMaxJoints);
 
   // Driver errors (higher-priority pass) keep their slots when overspeed
@@ -1024,26 +1030,27 @@ int main() {
     wide_feedback.joints[i].dq = 20.0;
     wide_feedback.joints[i].error_code = 0x10;
   }
-  report = Check(max_joint_config, wide_feedback, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.driver_error);
-  CHECK(report.velocity_exceeded);
-  CHECK(report.reason == FaultReason::DriverError);
-  CHECK(!report.damping_eligible);
-  CHECK(report.details.count == kMaxJoints);
-  CHECK(CountDetails(report.details, FaultReason::DriverError) == kMaxJoints);
-  CHECK(report.observations.count == 2 * kMaxJoints);
-  CHECK(report.observations.dropped == 0);
-  CHECK(CountObservations(report.observations,
+  Check(*report, max_joint_config, wide_feedback, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->driver_error);
+  CHECK(report->velocity_exceeded);
+  CHECK(report->reason == FaultReason::DriverError);
+  CHECK(!report->damping_eligible);
+  CHECK(report->details.count == kMaxJoints);
+  CHECK(CountDetails(report->details, FaultReason::DriverError) == kMaxJoints);
+  CHECK(report->observations.count == 2 * kMaxJoints);
+  CHECK(report->observations.dropped == 0);
+  CHECK(CountObservations(report->observations,
                           FaultCondition::JointDriverError) == kMaxJoints);
-  CHECK(CountObservations(report.observations,
+  CHECK(CountObservations(report->observations,
                           FaultCondition::JointVelocityExceeded) == kMaxJoints);
 
   // ---- CheckFeedback: every established condition is retained ----
   // One snapshot with every per-joint condition and every IMU condition
   // established exceeds the published report many times over. The report stays
   // bounded at 64 entries while the internal batch carries each established
-  // condition separately and never derives an entry from the truncated report.
+  // condition separately and never derives an entry from the truncated report
+  // itself.
   RuntimeConfig all_conditions_config = ManyJointConfig(kMaxJoints);
   all_conditions_config.imu_required = true;
   FeedbackSnapshot all_conditions = HealthyFeedback(all_conditions_config);
@@ -1061,61 +1068,62 @@ int main() {
   all_conditions.imu.valid = false;
   all_conditions.imu.angular_velocity[0] = kInf;
   all_conditions.imu.rx_stamp_us = 0;
-  report = Check(all_conditions_config, all_conditions, kNowUs, false);
-  CHECK(report.fault);
-  CHECK(report.details.count == kMaxJoints);
-  CHECK(report.observations.count == kMaxJoints * 8 + 3);
-  CHECK(report.observations.dropped == 0);
-  CHECK(CountObservations(report.observations,
+  Check(*report, all_conditions_config, all_conditions, kNowUs, false);
+  CHECK(report->fault);
+  CHECK(report->details.count == kMaxJoints);
+  CHECK(report->observations.count == kMaxJoints * 8 + 3);
+  CHECK(report->observations.dropped == 0);
+  CHECK(CountObservations(report->observations,
                           FaultCondition::JointDisconnected) == kMaxJoints);
-  CHECK(CountObservations(report.observations,
+  CHECK(CountObservations(report->observations,
                           FaultCondition::JointFeedbackInvalid) == kMaxJoints);
-  CHECK(CountObservations(report.observations,
+  CHECK(CountObservations(report->observations,
                           FaultCondition::JointFeedbackNonFinite) ==
         kMaxJoints);
-  CHECK(CountObservations(report.observations,
+  CHECK(CountObservations(report->observations,
                           FaultCondition::JointFeedbackStale) == kMaxJoints);
-  CHECK(CountObservations(report.observations,
+  CHECK(CountObservations(report->observations,
                           FaultCondition::JointFrequencyLow) == kMaxJoints);
-  CHECK(CountObservations(report.observations,
+  CHECK(CountObservations(report->observations,
                           FaultCondition::JointDriverError) == kMaxJoints);
-  CHECK(CountObservations(report.observations,
+  CHECK(CountObservations(report->observations,
                           FaultCondition::JointPositionExceeded) == kMaxJoints);
-  CHECK(CountObservations(report.observations,
+  CHECK(CountObservations(report->observations,
                           FaultCondition::JointVelocityExceeded) == kMaxJoints);
-  CHECK(CountObservations(report.observations,
+  CHECK(CountObservations(report->observations,
                           FaultCondition::ImuFeedbackInvalid) == 1);
-  CHECK(CountObservations(report.observations,
+  CHECK(CountObservations(report->observations,
                           FaultCondition::ImuFeedbackNonFinite) == 1);
-  CHECK(CountObservations(report.observations,
+  CHECK(CountObservations(report->observations,
                           FaultCondition::ImuFeedbackStale) == 1);
 
   // The published combined invalid entry still occupies exactly one slot per
   // joint and names the first established specific cause.
-  CHECK(FindDetail(report.details, FaultReason::FeedbackInvalid, 0) != nullptr);
-  CHECK(report.details.details[0].reason == FaultReason::FeedbackInvalid);
-  CHECK(report.details.details[0].condition ==
+  CHECK(FindDetail(report->details, FaultReason::FeedbackInvalid, 0) !=
+        nullptr);
+  CHECK(report->details.details[0].reason == FaultReason::FeedbackInvalid);
+  CHECK(report->details.details[0].condition ==
         FaultCondition::JointDisconnected);
-  CHECK(report.details.details[0].message.View() == "joint disconnected");
+  CHECK(report->details.details[0].message.View() == "joint disconnected");
 
   // Diagnostic values survive in the complete batch.
   const FaultDetail *wide_driver = FindObservation(
-      report.observations, FaultCondition::JointDriverError, kMaxJoints - 1);
+      report->observations, FaultCondition::JointDriverError, kMaxJoints - 1);
   CHECK(wide_driver != nullptr);
   CHECK(wide_driver->error_code == 3);
   CHECK(wide_driver->sample_stamp_us == 0);
   const FaultDetail *wide_position = FindObservation(
-      report.observations, FaultCondition::JointPositionExceeded, 7);
+      report->observations, FaultCondition::JointPositionExceeded, 7);
   CHECK(wide_position != nullptr);
   CHECK(wide_position->observed_value == 5.0);
   CHECK(wide_position->limit == 2.0);
   const FaultDetail *wide_velocity = FindObservation(
-      report.observations, FaultCondition::JointVelocityExceeded, 9);
+      report->observations, FaultCondition::JointVelocityExceeded, 9);
   CHECK(wide_velocity != nullptr);
   CHECK(wide_velocity->observed_value == 20.0);
   CHECK(wide_velocity->limit == 10.0);
   const FaultDetail *wide_stale = FindObservation(
-      report.observations, FaultCondition::JointFeedbackStale, 11);
+      report->observations, FaultCondition::JointFeedbackStale, 11);
   CHECK(wide_stale != nullptr);
   CHECK(wide_stale->sample_stamp_us == 0);
 
