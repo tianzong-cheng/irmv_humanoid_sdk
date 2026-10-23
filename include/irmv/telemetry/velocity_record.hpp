@@ -151,9 +151,10 @@ class VelocityRecorder {
   VelocityRecorder(const VelocityRecorder &) = delete;
   VelocityRecorder &operator=(const VelocityRecorder &) = delete;
 
-  // Creates the run directory, writes `meta_json` there and starts the worker.
+  // Creates the configured base directory recursively when it is missing, then
+  // creates the run directory, writes `meta_json` there and starts the worker.
   // Returns false - with `error` filled in - when the configuration or the
-  // metadata is refused or the run cannot be created; no recorder state is
+  // metadata is refused or a directory cannot be created; no recorder state is
   // left behind in that case. `meta_json` must be a JSON object declaring
   // `schema` = kVelocitySchema and `version` = kVelocitySchemaVersion; its
   // remaining fields are written verbatim and interpreted by readers.

@@ -665,7 +665,7 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
         }
         names = {joint["name"] for joint in document["robot"]["joints"]}
         for event in events:
-            if event.get("schema") != "irmv.policy_session" or event.get("version") != 1:
+            if event.get("schema") != "irmv.policy_session" or event.get("version") != 2:
                 fail(f"a sidecar line is not this schema: {event.get('schema')} v{event.get('version')}")
             if event.get("source") != "external":
                 fail(f"an external run recorded source={event.get('source')}")

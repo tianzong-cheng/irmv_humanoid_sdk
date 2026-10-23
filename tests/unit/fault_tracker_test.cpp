@@ -359,6 +359,26 @@ int TestFullTableEvictsKeyAbsentForAFullTick() {
   return 0;
 }
 
+int TestExternalDropIsCountedInTheTick() {
+  FaultTracker tracker;
+  tracker.BeginTick();
+  // A consumer that could not enumerate occurrences of its own adds them to
+  // the same tick counter the tracker uses for its batch overflow.
+  tracker.NoteDropped(3);
+  CHECK(tracker.NewObservations().dropped == 3);
+  tracker.NoteDropped(0);
+  CHECK(tracker.NewObservations().dropped == 3);
+  tracker.EndTick();
+
+  // The next tick starts from zero, exactly like the batch count.
+  tracker.BeginTick();
+  CHECK(tracker.NewObservations().dropped == 0);
+  tracker.NoteDropped(7);
+  CHECK(tracker.NewObservations().dropped == 7);
+  tracker.EndTick();
+  return 0;
+}
+
 int TestNoDynamicAllocation() {
   // Positive control: the monitor must observe a real allocation, otherwise a
   // broken override would let the zero-allocation assertion pass vacuously.
@@ -420,6 +440,10 @@ int main() {
     return result;
   }
   result = TestFullTableEvictsKeyAbsentForAFullTick();
+  if (result != 0) {
+    return result;
+  }
+  result = TestExternalDropIsCountedInTheTick();
   if (result != 0) {
     return result;
   }

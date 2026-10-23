@@ -682,6 +682,46 @@ int UnusableDirectoryIsReported() {
   return 0;
 }
 
+// A base directory that does not exist yet is created recursively: an
+// application can start before the logger or the runtime wrote the shared
+// directory, and that must not cost the run. The run directory below it is
+// still unique and complete.
+int MissingBaseDirectoryIsCreated() {
+  const std::filesystem::path parent = MakeDirectory();
+  const std::filesystem::path base = parent / "nested" / "records";
+  CHECK(!std::filesystem::exists(base));
+  {
+    VelocityRecorder recorder;
+    CHECK(StartRecorder(&recorder, base));
+    CHECK(recorder.started());
+    CHECK(recorder.error().empty());
+    CHECK(std::filesystem::is_directory(base));
+    CHECK(recorder.run_directory().parent_path() == base);
+    CHECK(recorder.run_directory().filename().string().rfind("app_run_", 0) ==
+          0);
+    CHECK(recorder.TryRecord(MakeSample(0, 100, 0.1, 0.0, 0.0)));
+    CHECK(recorder.Stop());
+  }
+  VelocityRecordRange range;
+  const std::filesystem::path run = [&base] {
+    for (const auto &entry : std::filesystem::directory_iterator(base)) {
+      if (entry.is_directory()) {
+        return entry.path();
+      }
+    }
+    return std::filesystem::path();
+  }();
+  CHECK(!run.empty());
+  if (!run.empty()) {
+    CHECK(ReadVelocityRange(run, 0, kNever, &range));
+    CHECK(range.ok);
+    CHECK(range.complete);
+    CHECK(range.rows.size() == 1);
+  }
+  std::filesystem::remove_all(parent);
+  return 0;
+}
+
 int main() {
   int failures = 0;
   failures += DirectoryMetadataAndEmptyStream();
@@ -692,6 +732,7 @@ int main() {
   failures += TornLineRollsBack();
   failures += TruncationCorruptAndUnknownVersion();
   failures += GapsAreNotBackfilled();
+  failures += MissingBaseDirectoryIsCreated();
   failures += UnusableDirectoryIsReported();
   if (failures == 0) {
     return 0;

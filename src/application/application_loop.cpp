@@ -1424,8 +1424,12 @@ int RunApplication(const ApplicationOptions &options,
       // sidecar is closed first, then the velocity recorder finalizes its
       // directory and index: the two records of a run are complete in that
       // order, and the run directory is final before the process leaves.
-      if (session_recorder) {
-        session_recorder->Stop();
+      if (session_recorder && !session_recorder->Stop()) {
+        std::fprintf(stderr,
+                     "application: policy session record did not finalize "
+                     "inside %u ms; its worker will finish on its own\n",
+                     kPolicySessionStopTimeoutMs);
+        std::fflush(stderr);
       }
       if (velocity_recorder && !velocity_recorder->Stop()) {
         std::fprintf(stderr,

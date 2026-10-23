@@ -721,8 +721,9 @@ void Recorder::Impl::Run() {
   }
   // Stop() signals shutdown on every path, including one where its own
   // deadline expired before the producers left. Finalization waits here until
-  // both producer counts are zero, so a paused producer that resumes sees the
-  // refusal and leaves before the worker reads the queue or the refusal table.
+  // the three producer counts (offering, session_offering, fault_offering) are
+  // zero, so a paused producer that resumes sees the refusal and leaves before
+  // the worker reads the queue or the refusal table.
   // The sequential-consistent handshake makes the zero observation final: a
   // producer that announces after it must load the refusal and not touch the
   // data.

@@ -61,9 +61,9 @@ void AppendFaultObservation(FaultObservationBatch &batch,
 // inside the same tick are deduplicated.
 //
 // The slot table and the new-observation batch are members, preallocated when
-// the tracker is embedded in the execution state machine. BeginTick, Observe
-// and EndTick allocate nothing, never block and never format text; they only
-// copy the details of newly appeared conditions into the batch.
+// the tracker is embedded in the execution state machine. BeginTick, Observe,
+// NoteDropped and EndTick allocate nothing, never block and never format text;
+// they only copy the details of newly appeared conditions into the batch.
 class FaultTracker {
  public:
   FaultTracker() noexcept = default;
@@ -85,6 +85,13 @@ class FaultTracker {
   // Closes the tick. Activity is recorded by Observe, so this only marks the
   // boundary at which the next BeginTick advances the tick counter.
   void EndTick() noexcept;
+
+  // Adds occurrences that a producer other than this tracker could not
+  // enumerate (for example a full safety report) to the tick's overflow
+  // counter. The loss is visible through NewObservations().dropped exactly
+  // like an observation this tracker could not store. Never allocates, blocks
+  // or throws.
+  void NoteDropped(std::uint64_t count) noexcept;
 
   // Observations that newly appeared in the tick just observed. Later
   // recorder stages copy only `count` entries, never the full capacity.

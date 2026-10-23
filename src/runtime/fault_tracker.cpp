@@ -123,4 +123,8 @@ bool FaultTracker::Observe(const protocol::FaultDetail &detail) noexcept {
 
 void FaultTracker::EndTick() noexcept {}
 
+void FaultTracker::NoteDropped(std::uint64_t count) noexcept {
+  observations_.dropped += count;
+}
+
 }  // namespace irmv::runtime

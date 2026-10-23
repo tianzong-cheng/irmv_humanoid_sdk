@@ -43,7 +43,12 @@ inline constexpr std::size_t kPolicySessionQueueCapacity = 16;
 // schema or version instead of reinterpreting its fields.
 inline constexpr std::string_view kPolicySessionFile = "policy_sessions.jsonl";
 inline constexpr std::string_view kPolicySessionSchema = "irmv.policy_session";
-inline constexpr std::uint32_t kPolicySessionSchemaVersion = 1;
+// Version 2 added `model.name`; version 1 lines are not reinterpreted.
+inline constexpr std::uint32_t kPolicySessionSchemaVersion = 2;
+
+// The bound Stop() gives the worker. A blocked device is left to the worker,
+// which owns its state, instead of holding the application exit.
+inline constexpr std::uint32_t kPolicySessionStopTimeoutMs = 2000;
 
 // Everything the record needs that lives on the control path at the moment a
 // locomotion context is confirmed. Plain data: the caller copies into it.
@@ -133,14 +138,26 @@ class PolicySessionRecorder {
   // Empty on success; otherwise why the sidecar is not running. Never thrown
   // from TryRecord.
   const std::string &error() const noexcept;
-  // Stops the worker after draining what it accepted, then closes the file.
-  // Idempotent, and called by the destructor.
-  void Stop();
+  // Stops accepting, asks the worker to drain and close the sidecar, and waits
+  // for it against kPolicySessionStopTimeoutMs. Returns true when the worker
+  // finished and was joined; false when the deadline expired, in which case
+  // the worker still owns the file and queue and finishes on its own. A second
+  // call while such a worker is still running returns false immediately
+  // instead of arming another deadline. Idempotent, and called by the
+  // destructor.
+  bool Stop();
 
  private:
   struct Impl;
 
-  std::unique_ptr<Impl> impl_;
+  std::shared_ptr<Impl> impl_;
 };
+
+// Test seam: called by the worker before it writes one line. Production code
+// never installs it; a test parks the writer here to prove Stop()'s deadline
+// and the worker's ownership after a detach. Pass nullptr to remove it.
+void SetPolicySessionLineWriteHookForTest(void (*hook)(void *context,
+                                                       std::string_view line),
+                                          void *context) noexcept;
 
 }  // namespace irmv::application

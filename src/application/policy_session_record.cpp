@@ -9,6 +9,7 @@
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <utility>
@@ -51,6 +52,18 @@ std::uint64_t MonotonicMicros() {
   return static_cast<std::uint64_t>(
       std::chrono::duration_cast<std::chrono::microseconds>(now).count());
 }
+
+// The hook and its context are replaced as one pair under a mutex, so the
+// worker never observes a function from one installation and the context of
+// another. The mutex is leaked on purpose: a timed-out Stop() detaches the
+// worker, which may still be writing during static destruction.
+std::mutex &PolicyLineHookMutex() {
+  static std::mutex *const mutex = new std::mutex;
+  return *mutex;
+}
+
+void (*g_policy_line_hook)(void *, std::string_view) = nullptr;
+void *g_policy_line_hook_context = nullptr;
 
 }  // namespace
 
@@ -121,17 +134,21 @@ struct PolicySessionRecorder::Impl {
   // complete records.
   void WriteLine(const Queued &queued);
 
+  // Shared ownership: the worker captures this state, not the recorder
+  // object, so a timed-out Stop() leaves the worker with everything it needs.
   std::string directory;
   std::ofstream file;
   std::thread worker;
   std::atomic<bool> started{false};
   std::atomic<bool> stop_requested{false};
-  // How many control-thread calls are inside TryRecord. Stop() waits for this
-  // to reach zero before it stops the worker, so no event can land behind the
-  // tail the worker takes.
-  std::atomic<std::uint32_t> offering{0};
   std::mutex mutex;
   std::condition_variable cv;
+  bool stop_signalled{false};
+  bool finished{false};
+  // How many control-thread calls are inside TryRecord. The worker waits for
+  // this to reach zero before its final drain, so no event can land behind the
+  // tail it takes.
+  std::atomic<std::uint32_t> offering{0};
   std::atomic<std::uint64_t> recorded{0};
   std::atomic<std::uint64_t> dropped{0};
   std::atomic<std::uint64_t> write_failures{0};
@@ -193,6 +210,16 @@ void PolicySessionRecorder::Impl::WriteLine(const Queued &queued) {
     write_failures.fetch_add(1, std::memory_order_relaxed);
     return;
   }
+  void (*hook)(void *, std::string_view) = nullptr;
+  void *hook_context = nullptr;
+  {
+    const std::lock_guard<std::mutex> lock(PolicyLineHookMutex());
+    hook = g_policy_line_hook;
+    hook_context = g_policy_line_hook_context;
+  }
+  if (hook != nullptr) {
+    hook(hook_context, line);
+  }
   file << line << '\n';
   file.flush();
   if (!file.good()) {
@@ -217,36 +244,54 @@ void PolicySessionRecorder::Impl::Run() {
     }
     Drain();
   }
-  // Stop() rejects new events before it signals, so what is left is exactly the
-  // accepted events no pass has written yet: the tail is not a loss.
+  // Stop() has already refused new events. Wait for a control thread that was
+  // inside TryRecord to leave, so what remains is exactly the accepted events
+  // no pass has written yet: the tail is not a loss. The sequential-consistent
+  // handshake makes this zero observation final; a caller that announced
+  // after it must have seen the refusal and never touched the queue.
+  for (;;) {
+    if (offering.load(std::memory_order_seq_cst) == 0) {
+      break;
+    }
+    std::unique_lock<std::mutex> lock(mutex);
+    cv.wait_for(lock, std::chrono::milliseconds(10));
+  }
   Drain();
+  file.flush();
+  // Publish completion. A Stop() that timed out has detached this thread; the
+  // shared state keeps the objects below alive until this point.
+  {
+    const std::lock_guard<std::mutex> lock(mutex);
+    finished = true;
+  }
+  cv.notify_all();
 }
 
 PolicySessionRecorder::PolicySessionRecorder(std::string directory)
-    : impl_(std::make_unique<Impl>()) {
-  Impl &impl = *impl_;
-  impl.directory = std::move(directory);
-  if (impl.directory.empty()) {
-    impl.error = "the policy session record has no directory";
+    : impl_(std::make_shared<Impl>()) {
+  const std::shared_ptr<Impl> impl = impl_;
+  impl->directory = std::move(directory);
+  if (impl->directory.empty()) {
+    impl->error = "the policy session record has no directory";
     return;
   }
   std::error_code code;
-  if (!std::filesystem::is_directory(impl.directory, code) || code) {
-    impl.error = "the policy session record directory " + impl.directory +
-                 " does not exist";
+  if (!std::filesystem::is_directory(impl->directory, code) || code) {
+    impl->error = "the policy session record directory " + impl->directory +
+                  " does not exist";
     return;
   }
   // The file is opened for append so a directory shared by two lifetimes of the
   // recorder still reads as one stream of sessions.
   const std::filesystem::path path =
-      std::filesystem::path(impl.directory) / std::string(kPolicySessionFile);
-  impl.file.open(path, std::ios::app);
-  if (!impl.file) {
-    impl.error = "the policy session record could not open " + path.string();
+      std::filesystem::path(impl->directory) / std::string(kPolicySessionFile);
+  impl->file.open(path, std::ios::app);
+  if (!impl->file) {
+    impl->error = "the policy session record could not open " + path.string();
     return;
   }
-  impl.started.store(true, std::memory_order_release);
-  impl.worker = std::thread([&impl] { impl.Run(); });
+  impl->started.store(true, std::memory_order_seq_cst);
+  impl->worker = std::thread([impl] { impl->Run(); });
 }
 
 PolicySessionRecorder::~PolicySessionRecorder() { Stop(); }
@@ -256,10 +301,11 @@ bool PolicySessionRecorder::TryRecord(
   Impl &impl = *impl_;
   // Announce before reading started_, so Stop() can tell a push that is already
   // under way from one that has not begun. The announcement is two lock-free
-  // increments and never waits.
-  impl.offering.fetch_add(1, std::memory_order_acquire);
+  // increments and never waits. The counts and the refusal store are
+  // sequentially consistent, so the worker's final zero observation is final.
+  impl.offering.fetch_add(1, std::memory_order_seq_cst);
   bool accepted = false;
-  if (impl.started.load(std::memory_order_acquire)) {
+  if (impl.started.load(std::memory_order_seq_cst)) {
     try {
       Impl::Queued queued;
       queued.event = event;
@@ -272,7 +318,7 @@ bool PolicySessionRecorder::TryRecord(
       accepted = false;
     }
   }
-  impl.offering.fetch_sub(1, std::memory_order_release);
+  impl.offering.fetch_sub(1, std::memory_order_seq_cst);
   if (accepted) {
     impl.recorded.fetch_add(1, std::memory_order_relaxed);
   } else {
@@ -294,31 +340,80 @@ std::uint64_t PolicySessionRecorder::write_failures() const noexcept {
 }
 
 bool PolicySessionRecorder::started() const noexcept {
-  return impl_->started.load(std::memory_order_acquire);
+  return impl_->started.load(std::memory_order_seq_cst);
 }
 
 const std::string &PolicySessionRecorder::error() const noexcept {
   return impl_->error;
 }
 
-void PolicySessionRecorder::Stop() {
-  Impl &impl = *impl_;
-  // Nothing is accepted from here on, and a control thread already inside
-  // TryRecord is waited out: that freezes the queue for the tail the worker
-  // takes next.
-  impl.started.store(false, std::memory_order_release);
-  while (impl.offering.load(std::memory_order_acquire) != 0) {
-    std::this_thread::yield();
+bool PolicySessionRecorder::Stop() {
+  if (!impl_) {
+    return true;
   }
+  const std::shared_ptr<Impl> impl = impl_;
   {
-    const std::lock_guard<std::mutex> lock(impl.mutex);
-    impl.stop_requested.store(true, std::memory_order_relaxed);
+    const std::lock_guard<std::mutex> lock(impl->mutex);
+    if (impl->finished) {
+      if (impl->worker.joinable()) {
+        impl->worker.join();
+      }
+      return true;
+    }
+    // A previous Stop already timed out and left the worker detached. Waiting
+    // again would give one exit path two full deadlines.
+    if (impl->stop_signalled && !impl->worker.joinable()) {
+      return false;
+    }
+    // A recorder whose construction failed has no worker to wait for.
+    if (!impl->worker.joinable() &&
+        !impl->started.load(std::memory_order_seq_cst)) {
+      impl->finished = true;
+      return true;
+    }
   }
-  impl.cv.notify_all();
-  if (impl.worker.joinable()) {
-    impl.worker.join();
+  const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(kPolicySessionStopTimeoutMs);
+  // Refuse every later event first. The worker waits for any control thread
+  // still inside TryRecord and then drains the accepted tail; this caller only
+  // waits for the worker against the deadline.
+  impl->started.store(false, std::memory_order_seq_cst);
+  {
+    const std::lock_guard<std::mutex> lock(impl->mutex);
+    if (!impl->stop_signalled) {
+      impl->stop_signalled = true;
+      impl->stop_requested.store(true, std::memory_order_relaxed);
+    }
   }
-  impl.file.flush();
+  impl->cv.notify_all();
+
+  bool finished = false;
+  {
+    std::unique_lock<std::mutex> lock(impl->mutex);
+    finished =
+        impl->cv.wait_until(lock, deadline, [&impl] { return impl->finished; });
+  }
+  if (finished) {
+    if (impl->worker.joinable()) {
+      impl->worker.join();
+    }
+    return true;
+  }
+  // A blocked writer must not hold the process exit. The worker only references
+  // this shared state, which it keeps alive itself, and it is the only writer
+  // from here on; Stop() returns without joining or touching the file.
+  if (impl->worker.joinable()) {
+    impl->worker.detach();
+  }
+  return false;
+}
+
+void SetPolicySessionLineWriteHookForTest(void (*hook)(void *context,
+                                                       std::string_view line),
+                                          void *context) noexcept {
+  const std::lock_guard<std::mutex> lock(PolicyLineHookMutex());
+  g_policy_line_hook = hook;
+  g_policy_line_hook_context = context;
 }
 
 }  // namespace irmv::application

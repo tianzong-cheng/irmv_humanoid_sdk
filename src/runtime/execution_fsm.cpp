@@ -87,6 +87,13 @@ TickResult ExecutionFsm::Tick(protocol::TimeUs now_us,
     detail.output_action = observed_action;
     ObserveFault(scope, detail);
   }
+  // A safety report that could not enumerate every established condition is a
+  // loss the tick's diagnostic must name, exactly like a batch this tracker
+  // could not store. The capacity makes it unreachable today; forwarding it
+  // keeps a future bound from becoming a silent loss.
+  if (report.observations.dropped != 0) {
+    fault_tracker_.NoteDropped(report.observations.dropped);
+  }
   gate_.RecordState(published_seq, now_us);
 
   // 3. Safety decision first: an observed fault is latched before any request

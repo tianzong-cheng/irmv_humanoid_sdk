@@ -28,7 +28,7 @@
 // line before it moves on (there is no fsync promise). The line is:
 //
 //   {
-//     "schema_version": 4,
+//     "schema_version": 1,
 //     "record_seq": 12,                       // decimal u64
 //     "runtime_id": "<32 lower-case hex>",
 //     "state_seq": "<16 lower-case hex>",     // hex so a 64-bit value
@@ -62,6 +62,11 @@ namespace irmv::telemetry {
 
 // The fault sidecar of a run.
 inline constexpr std::string_view kRecordFaultsFile = "faults.jsonl";
+// The schema version of one `faults.jsonl` line. It is independent of the
+// binary chunk schema (`kRecordSchemaVersion`): a fault line may gain a field
+// without changing a chunk layout, and a chunk layout change must not silently
+// relabel the fault stream.
+inline constexpr std::uint32_t kFaultRecordSchemaVersion = 1;
 
 struct RecordedFault {
   // The runtime's ordinal for this occurrence. It advances by one for every

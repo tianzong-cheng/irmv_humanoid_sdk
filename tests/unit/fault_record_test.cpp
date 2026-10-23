@@ -237,6 +237,14 @@ int ThreeFaultsInOrder() {
   CHECK(lines.find("\"+Inf\"") != std::string::npos);
   CHECK(lines.find("\"-Inf\"") != std::string::npos);
   CHECK(lines.find("\"state_seq\":\"8000000000000005\"") != std::string::npos);
+  // The line schema is the fault stream's own version, not the binary chunk
+  // schema the run metadata uses.
+  const nlohmann::json first_line =
+      nlohmann::json::parse(lines.substr(0, lines.find('\n')), nullptr, false);
+  CHECK(!first_line.is_discarded());
+  CHECK(first_line["schema_version"] ==
+        irmv::telemetry::kFaultRecordSchemaVersion);
+  CHECK(first_line["schema_version"] != irmv::telemetry::kRecordSchemaVersion);
 
   const nlohmann::json index = ReadIndex(recorder.run_directory());
   CHECK(index["faults"]["complete"] == true);
@@ -286,7 +294,7 @@ int TrailingPartialAndMissingCompletion() {
       recorder.run_directory() / "faults.jsonl";
   {
     std::ofstream file(faults_path, std::ios::app | std::ios::binary);
-    file << "{\"schema_version\":4,\"record_seq\":2";
+    file << "{\"schema_version\":1,\"record_seq\":2";
   }
   FaultRecordRange range;
   CHECK(ReadFaultRange(recorder.run_directory(), 0, kNever, &range));
@@ -308,7 +316,7 @@ int TrailingPartialAndMissingCompletion() {
   // a line to skip.
   {
     std::ofstream file(faults_path, std::ios::binary | std::ios::trunc);
-    file << "{\"schema_version\":4,\"record_seq\":1,\"runtime_id\":"
+    file << "{\"schema_version\":1,\"record_seq\":1,\"runtime_id\":"
             "\"ab0000000000000000000000000000cd\",\"state_seq\":"
             "\"000000000000000a\",\"fault_id\":\"0000000000000014\","
             "\"reason\":5,\"reason_name\":\"JointPositionExceeded\","
@@ -318,7 +326,7 @@ int TrailingPartialAndMissingCompletion() {
             "\"sample_stamp_us\":993,\"detected_stamp_us\":1000,"
             "\"output_action\":0,\"message\":\"ok\","
             "\"message_hex\":\"6f6b\"}\n"
-            "{\"schema_version\":4,\"record_seq\":\n";
+            "{\"schema_version\":1,\"record_seq\":\n";
   }
   FaultRecordRange malformed;
   CHECK(!ReadFaultRange(recorder.run_directory(), 0, kNever, &malformed));

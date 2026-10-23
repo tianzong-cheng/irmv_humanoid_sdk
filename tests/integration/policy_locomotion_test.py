@@ -224,7 +224,7 @@ def main() -> int:
                 fail(f"the sidecar holds {len(events)} session(s), not one for the one context")
             else:
                 event = events[0]
-                if event.get("schema") != "irmv.policy_session" or event.get("version") != 1:
+                if event.get("schema") != "irmv.policy_session" or event.get("version") != 2:
                     fail(f"the sidecar line is {event.get('schema')} v{event.get('version')}")
                 if event.get("source") != "local":
                     fail(f"a local run recorded source={event.get('source')}")

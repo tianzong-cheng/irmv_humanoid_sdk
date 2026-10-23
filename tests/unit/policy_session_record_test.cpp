@@ -8,13 +8,17 @@
 #include "irmv/application/policy_session_record.hpp"
 
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <string_view>
+#include <thread>
 #include <vector>
 
 #include "irmv/policy/action.hpp"
@@ -29,6 +33,7 @@ using irmv::application::kPolicySessionFile;
 using irmv::application::PolicyGainOverride;
 using irmv::application::PolicySessionEvent;
 using irmv::application::PolicySessionRecorder;
+using irmv::application::SetPolicySessionLineWriteHookForTest;
 using irmv::protocol::Id;
 using irmv::protocol::JointCommand;
 
@@ -114,9 +119,9 @@ int RoundTrip() {
     CHECK(recorder.TryRecord(local));
     CHECK(recorder.recorded() == 2);
     CHECK(recorder.dropped() == 0);
-    recorder.Stop();
+    CHECK(recorder.Stop());
     // Stopping twice is not an error.
-    recorder.Stop();
+    CHECK(recorder.Stop());
   }
 
   const std::vector<std::string> lines = ReadLines(SidecarPath(directory));
@@ -124,7 +129,7 @@ int RoundTrip() {
 
   const nlohmann::json first = nlohmann::json::parse(lines[0]);
   CHECK(first["schema"] == "irmv.policy_session");
-  CHECK(first["version"] == 1);
+  CHECK(first["version"] == 2);
   CHECK(first["host_us"].get<std::uint64_t>() > 0);
   CHECK(first["monotonic_us"].get<std::uint64_t>() > 0);
   CHECK(first["runtime_id"] == std::string(32, '1'));
@@ -202,7 +207,7 @@ int GainOverridesAreFilled() {
     PolicySessionEvent event = MakeLocalEvent();
     event.gains = gains;
     CHECK(recorder.TryRecord(event));
-    recorder.Stop();
+    CHECK(recorder.Stop());
   }
 
   const std::vector<std::string> lines = ReadLines(SidecarPath(directory));
@@ -266,7 +271,7 @@ int FrameGainsAreFilled() {
     event.epoch = 9;
     FillFrameGains(frame, names, &event.gains);
     CHECK(recorder.TryRecord(event));
-    recorder.Stop();
+    CHECK(recorder.Stop());
   }
 
   const std::vector<std::string> lines = ReadLines(SidecarPath(directory));
@@ -318,7 +323,7 @@ int BoundedQueueDropsAndCounts() {
   CHECK(recorder.dropped() == burst - accepted);
   CHECK(recorder.recorded() == accepted);
   CHECK(recorder.dropped() > 0);
-  recorder.Stop();
+  CHECK(recorder.Stop());
   // Every event that was accepted is written before the file closes: the
   // handoff drops, it does not lose.
   const std::vector<std::string> lines = ReadLines(SidecarPath(directory));
@@ -344,7 +349,8 @@ int UnusableDirectoryIsReported() {
     CHECK(!recorder.TryRecord(event));
     CHECK(recorder.dropped() == 1);
     CHECK(recorder.recorded() == 0);
-    recorder.Stop();
+    // A recorder that never started has nothing to wait for.
+    CHECK(recorder.Stop());
   }
   {
     // A regular file where the directory should be is refused the same way.
@@ -353,8 +359,97 @@ int UnusableDirectoryIsReported() {
     PolicySessionRecorder recorder(file_path.string());
     CHECK(!recorder.started());
     CHECK(!recorder.error().empty());
-    recorder.Stop();
+    CHECK(recorder.Stop());
   }
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
+// A writer parked in the sidecar must not hold the application exit: Stop()
+// returns at its deadline, a second call does not arm another deadline, and
+// the detached worker still owns the file and queue. When the device drains,
+// the accepted event is written exactly once and the worker finishes without
+// touching freed state.
+int BlockedWriterBoundsStop() {
+  struct BlockHook {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool entered{false};
+    bool released{false};
+  } state;
+  SetPolicySessionLineWriteHookForTest(
+      [](void *context, std::string_view) {
+        auto *hook = static_cast<BlockHook *>(context);
+        std::unique_lock<std::mutex> lock(hook->mutex);
+        hook->entered = true;
+        hook->cv.notify_all();
+        hook->cv.wait(lock, [hook] { return hook->released; });
+      },
+      &state);
+
+  const std::filesystem::path directory = MakeDirectory();
+  {
+    PolicySessionRecorder recorder(directory.string());
+    CHECK(recorder.started());
+    CHECK(recorder.TryRecord(MakeLocalEvent()));
+    {
+      std::unique_lock<std::mutex> lock(state.mutex);
+      CHECK(state.cv.wait_for(lock, std::chrono::seconds(2),
+                              [&state] { return state.entered; }));
+    }
+
+    const auto started = std::chrono::steady_clock::now();
+    CHECK(!recorder.Stop());
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    // Returning while the writer is still parked is the point; the exact
+    // two-second boundary may stretch under a sanitizer or a loaded host.
+    CHECK(elapsed >= std::chrono::milliseconds(500));
+    CHECK(elapsed < std::chrono::seconds(10));
+    CHECK(!recorder.started());
+
+    // A second Stop while the writer is still parked must not arm another full
+    // deadline: the first call already left the worker detached.
+    const auto retry_started = std::chrono::steady_clock::now();
+    CHECK(!recorder.Stop());
+    const auto retry_elapsed = std::chrono::steady_clock::now() - retry_started;
+    CHECK(retry_elapsed < std::chrono::milliseconds(500));
+
+    // A control path that runs after Stop is a counted refusal, never a block
+    // or a write.
+    const auto record_started = std::chrono::steady_clock::now();
+    CHECK(!recorder.TryRecord(MakeLocalEvent()));
+    CHECK(std::chrono::steady_clock::now() - record_started <
+          std::chrono::milliseconds(500));
+    CHECK(recorder.dropped() == 1);
+    CHECK(recorder.recorded() == 1);
+
+    {
+      const std::lock_guard<std::mutex> lock(state.mutex);
+      state.released = true;
+    }
+    state.cv.notify_all();
+
+    bool joined = false;
+    for (int attempt = 0; attempt < 500 && !joined; ++attempt) {
+      joined = recorder.Stop();
+      if (!joined) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+    }
+    CHECK(joined);
+    // The shared state the worker finished on is released when the recorder
+    // goes out of scope here; the sanitizer build proves the worker did not
+    // outlive its file or queue.
+  }
+
+  const std::vector<std::string> lines = ReadLines(SidecarPath(directory));
+  CHECK(lines.size() == 1);
+  if (lines.size() == 1) {
+    const nlohmann::json entry = nlohmann::json::parse(lines[0]);
+    CHECK(entry["version"] == 2);
+    CHECK(entry["source"] == "local");
+  }
+  SetPolicySessionLineWriteHookForTest(nullptr, nullptr);
   std::filesystem::remove_all(directory);
   return 0;
 }
@@ -365,6 +460,7 @@ int main() {
   failures += GainOverridesAreFilled();
   failures += FrameGainsAreFilled();
   failures += BoundedQueueDropsAndCounts();
+  failures += BlockedWriterBoundsStop();
   failures += UnusableDirectoryIsReported();
   if (failures == 0) {
     return 0;

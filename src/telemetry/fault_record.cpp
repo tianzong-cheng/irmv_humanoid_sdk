@@ -192,7 +192,7 @@ bool DecodeFault(const Json &line, RecordedFault *fault, std::string *why) {
     *why = "schema_version is missing or not a number";
     return false;
   }
-  if (schema_version != kRecordSchemaVersion) {
+  if (schema_version != kFaultRecordSchemaVersion) {
     *why = "the line declares schema " + std::to_string(schema_version);
     return false;
   }
@@ -462,7 +462,7 @@ bool FaultWriter::Prepare(std::string *error) {
 
 bool FaultWriter::Write(const RecordedFault &fault) {
   Json line;
-  line["schema_version"] = kRecordSchemaVersion;
+  line["schema_version"] = kFaultRecordSchemaVersion;
   line["record_seq"] = fault.record_seq;
   line["runtime_id"] = HexId(fault.runtime_id);
   line["state_seq"] = HexSequence(fault.state_seq);

@@ -172,7 +172,7 @@ def make_fault_run(
     ):
         faults.append(
             {
-                "schema_version": 4,
+                "schema_version": 1,
                 "record_seq": index + 1,
                 "runtime_id": RUNTIME_ID,
                 "state_seq": f"{index + 1:016x}",
@@ -307,7 +307,7 @@ def make_application_run(
     )
     policy_entry = {
         "schema": "irmv.policy_session",
-        "version": 1,
+        "version": 2,
         "host_us": t0,
         "monotonic_us": t0,
         "runtime_id": RUNTIME_ID,
@@ -1497,10 +1497,25 @@ def main() -> int:
         if result.returncode == 0:
             fail("a malformed complete policy-session line was accepted")
 
+        wrong_version_policy = work / "wrong-version-policy"
+        shutil.copytree(app_run, wrong_version_policy)
+        with (wrong_version_policy / "policy_sessions.jsonl").open(
+            "a", encoding="utf-8"
+        ) as stream:
+            stream.write('{"schema": "irmv.policy_session", "version": 1}\n')
+        result = subprocess.run(
+            [str(reader), "--run", str(wrong_version_policy)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            fail("a policy-session line of version 1 was accepted")
+
         corrupt_fault = work / "corrupt-fault"
         shutil.copytree(fault_run, corrupt_fault)
         with (corrupt_fault / "faults.jsonl").open("a", encoding="utf-8") as stream:
-            stream.write('{"schema_version": 4\n')
+            stream.write('{"schema_version": 1\n')
         result = subprocess.run(
             [str(reader), "--run", str(corrupt_fault)],
             capture_output=True,

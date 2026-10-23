@@ -16,8 +16,8 @@ messages or topics on this page.
 
 * `protocol_version` is `2`. A packet with any other value is rejected
   (`VersionMismatch`) and never changes runtime state. Version 2 adds the
-  `condition` field to `FaultDetail`; the layout, the topics and the rest of
-  the wire format are unchanged.
+  `condition` field to `FaultDetail`; the topic set, QoS and the remaining
+  message layouts are unchanged.
 * Up to **64 joints** per packet. Collections are fixed-size IDL arrays
   (`JointValues[64]`, `JointFeedback[64]`, `FaultDetail[64]`, `Text64Bytes[64]`,
   `Text256Bytes[256]`) plus an explicit count, so a receiver never allocates for
@@ -455,7 +455,9 @@ Recording is local and is not part of the wire contract. When
 an independent recorder under `telemetry.recorder.directory` (a `null`
 directory means the log directory), and each writes a run directory of its own.
 Neither process waits for the other's disk, and neither stream is a superset of
-the other.
+the other. The application's velocity recorder creates its configured base
+directory recursively when it is missing, then its own uniquely named run
+directory below it; the runtime recorder still requires its base to exist.
 
 | Writer | Directory | Contents |
 |---|---|---|
@@ -543,7 +545,9 @@ the runtime is discovered, or before a session exists, `identity_known` is false
 and the identities are the all-zero value. The index reports the rows, the loss
 spans (`queue_full`, `write_failed`) and a final `complete` marker.
 `policy_sessions.jsonl` sits in the same `app_run_*` directory and carries the
-application's own model/gain/identity facts per confirmed context.
+application's own model/gain/identity facts per confirmed context. Each line
+declares `schema` `irmv.policy_session` and `version` 2 (`model.name` was added
+in version 2; other versions are refused by the reader).
 
 ### Association and clock identity
 
@@ -582,7 +586,8 @@ history of every distinct condition established by the safety checks:
 * the key is `{condition, joint_index}`; driver-error and write-failure keys
   additionally include `error_code`, so a different driver error is a new
   occurrence while the same one persists;
-* each line carries `schema_version: 4`, `record_seq` (the runtime's ordinal),
+* each line carries `schema_version: 1`, the fault line's own version (separate
+  from the binary chunk schema 4), `record_seq` (the runtime's ordinal),
   the published `runtime_id`/`state_seq`/`fault_id`, the numeric reason and
   condition with their stable names, the full `FaultDetail`, and both the
   human-readable `message` and `message_hex` (the exact raw bytes);

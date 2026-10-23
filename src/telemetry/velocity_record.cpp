@@ -486,10 +486,21 @@ bool VelocityRecorder::Impl::Prepare(
     *error_out = "the velocity recorder has no directory";
     return false;
   }
+  // The configured base may not exist yet: an application can start before the
+  // logger or the runtime created its shared directory. Creating it here keeps
+  // the run directory (below) unique while making Start independent of who
+  // wrote the base first. A path that exists as a file, or a directory that
+  // cannot be created, is still a clear startup error.
   std::error_code code;
+  std::filesystem::create_directories(config.directory, code);
+  if (code) {
+    *error_out = "the velocity recorder could not create " +
+                 config.directory.string() + ": " + code.message();
+    return false;
+  }
   if (!std::filesystem::is_directory(config.directory, code) || code) {
     *error_out = "the velocity recorder directory " +
-                 config.directory.string() + " does not exist";
+                 config.directory.string() + " is not a directory";
     return false;
   }
 

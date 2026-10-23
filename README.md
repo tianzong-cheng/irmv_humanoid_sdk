@@ -332,7 +332,8 @@ No mode is a hot swap: changing the source is a stop, an initialization and a
 new authorization, which is the next section.
 
 A recorded run carries a second file beside the samples: on every confirmed
-locomotion context the application appends one line to
+locomotion context the application appends one line (schema
+`irmv.policy_session` v2) to
 `<telemetry.recorder.directory>/app_run_<UTC>_<unique>/policy_sessions.jsonl`
 with the identity the runtime granted the context (`runtime_id`, `session_id`,
 `producer_process_id`, `epoch`) and what produced it - for a local model, its
