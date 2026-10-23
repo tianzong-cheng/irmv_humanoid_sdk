@@ -1,0 +1,53 @@
+{
+  "$comment": [
+    "Fake deployment scenario of the application-driven acceptance",
+    "(tests/integration/application_record_test.py). It is the shipped static",
+    "scenario with two differences that make the recorded row informative:",
+    "each joint reports a nonzero torque estimate, and the IMU snapshot is",
+    "marked valid with a fresh receive stamp. The measured position stays at",
+    "zero so the initialization target is reached and the recorder's tracking",
+    "window is the same as in the static run.",
+    "",
+    "The fake backend does not model the IMU vectors themselves; their default",
+    "zero values are a valid measurement, and the test asserts the recorded",
+    "valid flag and receive stamp rather than inventing sample content.",
+    "",
+    "elapsed_us is monotonic from process start and mandatory; one entry is",
+    "enough because nothing changes."
+  ],
+  "entries": [
+    {
+      "elapsed_us": 0,
+      "feedback": {
+        "count": 2,
+        "joints": [
+          {
+            "q": 0.0,
+            "dq": 0.0,
+            "tau_est": 0.25,
+            "valid": true,
+            "connected": true,
+            "freq_hz": 500.0,
+            "error_code": 0
+          },
+          {
+            "q": 0.0,
+            "dq": 0.0,
+            "tau_est": -0.15,
+            "valid": true,
+            "connected": true,
+            "freq_hz": 500.0,
+            "error_code": 0
+          }
+        ],
+        "imu": {
+          "valid": true,
+          "rx_stamp_us": 0
+        }
+      },
+      "write_result": {
+        "accepted": true
+      }
+    }
+  ]
+}

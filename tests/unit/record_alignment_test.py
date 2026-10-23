@@ -1,0 +1,343 @@
+#!/usr/bin/env python3
+"""tests/unit/record_alignment_test.py
+
+The association rules between one runtime run and the application's independent
+velocity run. They are pure functions of the two readers' outputs, so this test
+builds both sides by hand: no DDS, no process, no files.
+
+What is proved here:
+
+* two runs of one boot match by monotonic time even when their phases differ -
+  a row index is never the join key;
+* an application row with no known identity, a different boot id, or another
+  runtime instance never takes part in the automatic merge;
+* a file that spans producer A and producer B contributes only the rows whose
+  runtime/session identity is the runtime run's own, and the excluded rows are
+  counted;
+* a held-forward velocity is valid only inside a contiguous recorded segment.
+  A gap in the cadence, a lost sample span, and the end of the recording all
+  yield NaN rather than a value carried past what was recorded.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import numpy as np
+
+SOURCE_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(SOURCE_ROOT / "tools"))
+
+import record_to_npz  # noqa: E402
+
+RUNTIME_ID_A = "a1" * 16
+SESSION_ID_A = "11" * 16
+RUNTIME_ID_B = "b2" * 16
+SESSION_ID_B = "22" * 16
+BOOT_ID = "boot-one"
+OTHER_BOOT_ID = "boot-two"
+
+failures: list[str] = []
+
+
+def check(condition: bool, note: str) -> None:
+    if not condition:
+        failures.append(note)
+        print(f"record_alignment_test: {note}", file=sys.stderr, flush=True)
+
+
+def runtime_summary(
+    *,
+    boot_id: str = BOOT_ID,
+    clock: str = "linux_clock_monotonic",
+    available: bool = True,
+    sessions: list[dict] | None = None,
+) -> dict:
+    if sessions is None:
+        sessions = [
+            {
+                "runtime_id": RUNTIME_ID_A,
+                "session_id": SESSION_ID_A,
+                "epoch": 7,
+                "producer_id": "",
+            }
+        ]
+    return {
+        "record_kind": "runtime",
+        "schema_version": 4,
+        "sample_hz": 100,
+        "joint_count": 2,
+        "clock": {"clock": clock, "boot_id": boot_id, "available": available},
+        "sessions": sessions,
+    }
+
+
+def application_summary(
+    *,
+    boot_id: str = BOOT_ID,
+    clock: str = "linux_clock_monotonic",
+    available: bool = True,
+) -> dict:
+    return {
+        "record_kind": "application",
+        "schema": "irmv.application_velocity",
+        "version": 1,
+        "sample_hz": 100,
+        "complete": True,
+        "truncated": False,
+        "losses": [],
+        "clock": {"clock": clock, "boot_id": boot_id, "available": available},
+    }
+
+
+def velocity_row(
+    stamp_us: int,
+    sample_seq: int,
+    *,
+    runtime_id: str = RUNTIME_ID_A,
+    session_id: str = SESSION_ID_A,
+    identity_known: bool = True,
+    forward: float = 0.1,
+    lateral: float = -0.2,
+    yaw: float = 0.3,
+) -> dict:
+    return {
+        "record_type": "velocity",
+        "stamp_us": stamp_us,
+        "sample_seq": sample_seq,
+        "identity_known": identity_known,
+        "runtime_id": runtime_id if identity_known else "",
+        "session_id": session_id if identity_known else "",
+        "latest_state_seq": sample_seq + 1,
+        "forward": forward,
+        "lateral": lateral,
+        "yaw": yaw,
+    }
+
+
+def runtime_row(stamp_us: int) -> dict:
+    return {"record_type": "sample", "stamp_us": stamp_us}
+
+
+def hold_values(runtime_rows, velocity_rows, sample_hz=100, losses=None) -> dict:
+    return record_to_npz.hold_forward(
+        runtime_rows, velocity_rows, sample_hz, losses or []
+    )
+
+
+def close(actual: float, expected: float) -> bool:
+    return abs(actual - expected) < 1e-12
+
+
+# ---------------------------------------------------------------------------
+# Phase: the same boot and identity, but the application's samples start at a
+# different phase. Only the monotonic stamp pairs a runtime row with a sample.
+# ---------------------------------------------------------------------------
+rows = [velocity_row(1_000_000, 0, forward=0.1)]
+rows.append(velocity_row(1_010_000, 1, forward=0.2))
+rows.append(velocity_row(1_020_000, 2, forward=0.3))
+association = record_to_npz.associate(
+    runtime_summary(), application_summary(), rows
+)
+check(association["ok"], f"the same boot/identity did not associate: {association['reason']}")
+check(association["excluded"] == 0, "the phase case excluded a matching row")
+holds = hold_values(
+    [
+        runtime_row(999_999),
+        runtime_row(1_000_000),
+        runtime_row(1_015_000),
+        runtime_row(1_020_000),
+    ],
+    rows,
+)
+check(np.isnan(holds["forward"][0]), "a value was invented before the recording began")
+check(close(float(holds["forward"][1]), 0.1), "the first sample was not held at its own stamp")
+check(close(float(holds["forward"][2]), 0.2), "the held value was paired by index, not by stamp")
+check(close(float(holds["forward"][3]), 0.3), "an exact sample stamp did not select its own sample")
+check(close(float(holds["lateral"][2]), -0.2), "the lateral value was not held with the sample")
+check(close(float(holds["yaw"][2]), 0.3), "the yaw value was not held with the sample")
+
+# ---------------------------------------------------------------------------
+# Refusals: each of these names a different merge the automatic path must not
+# make. None of them may silently export a subset as if it were associated.
+# ---------------------------------------------------------------------------
+for label, summary, app, app_rows, needle in (
+    (
+        "unknown identity",
+        runtime_summary(),
+        application_summary(),
+        [velocity_row(1_000_000, 0, identity_known=False)],
+        "identity",
+    ),
+    (
+        "different boot",
+        runtime_summary(),
+        application_summary(boot_id=OTHER_BOOT_ID),
+        [velocity_row(1_000_000, 0)],
+        "boot",
+    ),
+    (
+        "different clock",
+        runtime_summary(),
+        application_summary(clock="realtime"),
+        [velocity_row(1_000_000, 0)],
+        "clock",
+    ),
+    (
+        "unknown clock identity",
+        runtime_summary(available=False),
+        application_summary(available=False),
+        [velocity_row(1_000_000, 0)],
+        "clock",
+    ),
+    (
+        "different runtime id",
+        runtime_summary(),
+        application_summary(),
+        [velocity_row(1_000_000, 0, runtime_id=RUNTIME_ID_B, session_id=SESSION_ID_B)],
+        "no application",
+    ),
+    (
+        "no runtime session",
+        runtime_summary(sessions=[]),
+        application_summary(),
+        [velocity_row(1_000_000, 0)],
+        "runtime",
+    ),
+):
+    association = record_to_npz.associate(summary, app, app_rows)
+    check(not association["ok"], f"{label} was accepted as an automatic merge")
+    check(
+        needle in association["reason"],
+        f"{label}: the refusal does not name the cause ({association['reason']!r})",
+    )
+    check(
+        association["rows"] == [],
+        f"{label}: a refused association still selected rows",
+    )
+    check(
+        association["excluded"] == len(app_rows),
+        f"{label}: the refused rows were not counted as excluded",
+    )
+
+# ---------------------------------------------------------------------------
+# A file that spans A then B: only A's rows may join this runtime's record. The
+# B rows are not an error - they are excluded and counted.
+# ---------------------------------------------------------------------------
+spanned = [
+    velocity_row(2_000_000, 0, forward=0.5),
+    velocity_row(2_010_000, 1, forward=0.6),
+    velocity_row(2_020_000, 2, runtime_id=RUNTIME_ID_B, session_id=SESSION_ID_B, forward=9.0),
+    velocity_row(2_030_000, 3, runtime_id=RUNTIME_ID_B, session_id=SESSION_ID_B, forward=9.0),
+]
+association = record_to_npz.associate(
+    runtime_summary(), application_summary(), spanned
+)
+check(association["ok"], "the A-only part of a spanning file did not associate")
+check(
+    [row["runtime_id"] for row in association["rows"]]
+    == [RUNTIME_ID_A, RUNTIME_ID_A],
+    "the A/B file kept rows of the other runtime instance",
+)
+check(association["excluded"] == 2, "the A/B file did not count the excluded rows")
+check(association["total"] == 4, "the A/B file did not report its total row count")
+
+# A file that carries only B is refused, not merged from the wrong instance.
+association = record_to_npz.associate(
+    runtime_summary(),
+    application_summary(),
+    [row for row in spanned if row["runtime_id"] == RUNTIME_ID_B],
+)
+check(not association["ok"], "a file of another runtime instance was associated")
+
+# ---------------------------------------------------------------------------
+# Hold-forward boundaries. The sample period is 10 ms here.
+# ---------------------------------------------------------------------------
+losses = [
+    {
+        "first_sample_seq": 5,
+        "last_sample_seq": 9,
+        "first_stamp_us": 3_050_000,
+        "last_stamp_us": 3_090_000,
+        "dropped": 5,
+        "reason": "queue_full",
+    }
+]
+lost = [
+    velocity_row(3_000_000, 0, forward=1.0),
+    velocity_row(3_010_000, 1, forward=1.1),
+    velocity_row(3_100_000, 10, forward=1.2),
+    velocity_row(3_110_000, 11, forward=1.3),
+]
+runtime = [
+    runtime_row(3_000_000),  # first sample
+    runtime_row(3_009_999),  # inside the first sample's planned period
+    runtime_row(3_010_000),  # second sample
+    runtime_row(3_020_000),  # one period after the second
+    runtime_row(3_049_999),  # inside the lost span
+    runtime_row(3_050_000),  # first lost sample's deadline
+    runtime_row(3_095_000),  # still inside the lost span
+    runtime_row(3_100_000),  # the next recorded sample
+    runtime_row(3_110_000),  # last recorded sample
+    runtime_row(3_120_000),  # one period past the end of the recording
+]
+held = hold_values(runtime, lost, losses=losses)
+check(close(float(held["forward"][0]), 1.0), "the first sample was not held at its stamp")
+check(
+    close(float(held["forward"][1]), 1.0),
+    "a sample was not held to the next planned deadline",
+)
+check(close(float(held["forward"][2]), 1.1), "the second sample was not selected")
+check(
+    np.isnan(held["forward"][3]),
+    "a value was extrapolated past one planned sample period",
+)
+check(
+    np.isnan(held["forward"][4]) and np.isnan(held["forward"][5]),
+    "a value was held across an indexed loss",
+)
+check(
+    np.isnan(held["forward"][6]),
+    "a value was extrapolated across the gap to the next segment",
+)
+check(close(float(held["forward"][7]), 1.2), "the next segment was not used")
+check(close(float(held["forward"][8]), 1.3), "the last sample was not used")
+check(
+    np.isnan(held["forward"][9]),
+    "the last value was extrapolated beyond the recorded range",
+)
+
+# A time gap longer than the planned cadence ends the segment even when the
+# index carries no loss entry for it.
+gapped = [
+    velocity_row(4_000_000, 0, forward=2.0),
+    velocity_row(4_010_000, 1, forward=2.1),
+    velocity_row(4_200_000, 2, forward=2.2),
+]
+held = hold_values(
+    [
+        runtime_row(4_015_000),
+        runtime_row(4_020_000),
+        runtime_row(4_100_000),
+        runtime_row(4_200_000),
+    ],
+    gapped,
+)
+check(close(float(held["forward"][0]), 2.1), "a cadence-adjacent stamp lost its sample")
+check(np.isnan(held["forward"][1]), "a value crossed a cadence gap")
+check(np.isnan(held["forward"][2]), "a value was invented inside a cadence gap")
+check(close(float(held["forward"][3]), 2.2), "the sample after a gap was not used")
+
+if failures:
+    print(
+        f"record_alignment_test: {len(failures)} failure(s)",
+        file=sys.stderr,
+        flush=True,
+    )
+    raise SystemExit(1)
+
+print(
+    "record_alignment_test: association by boot/identity/time; "
+    "hold-forward bounded to contiguous recorded segments"
+)

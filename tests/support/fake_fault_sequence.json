@@ -1,0 +1,124 @@
+{
+  "$comment": [
+    "Fake deployment scenario of the fault-recording acceptance",
+    "(tests/integration/fault_recording_test.py). One runtime, no application,",
+    "no hardware.",
+    "",
+    "The machine reports healthy, connected joints long enough for the runtime to",
+    "start and for a DDS peer to discover the state writer. Then joint 0",
+    "disconnects and stays disconnected: the first latched fault. While that",
+    "fault is still latched, joint 1 disconnects too, so the recorder must add a",
+    "second occurrence with another joint while the published report keeps the",
+    "first one. Both reconnect, but the runtime stays in Fault until a Reset.",
+    "Finally joint 0 disconnects again, after the condition had recovered,",
+    "so the tracker reports it as a new occurrence. Both reconnect afterwards so",
+    "the harness can reset the latch into a healthy ZeroTorque and stop the",
+    "runtime cleanly; a reset with the condition still present would latch it",
+    "again on the next tick.",
+    "",
+    "`connected: false` with `valid: true` establishes exactly one condition per",
+    "joint (JointDisconnected); a false `valid` would add JointFeedbackInvalid",
+    "observations for the same joint and make the assertion ambiguous.",
+    "",
+    "elapsed_us is monotonic from process start and mandatory; an entry applies",
+    "from its time onwards. imu.valid is true so the recorded rows carry the IMU",
+    "snapshot the configuration collects even though imu_required stays false."
+  ],
+  "entries": [
+    {
+      "elapsed_us": 0,
+      "feedback": {
+        "count": 2,
+        "joints": [
+          {
+            "q": 0.0,
+            "dq": 0.0,
+            "tau_est": 0.0,
+            "valid": true,
+            "connected": true,
+            "freq_hz": 500.0,
+            "error_code": 0
+          },
+          {
+            "q": 0.0,
+            "dq": 0.0,
+            "tau_est": 0.0,
+            "valid": true,
+            "connected": true,
+            "freq_hz": 500.0,
+            "error_code": 0
+          }
+        ],
+        "imu": {
+          "valid": true,
+          "rx_stamp_us": 0
+        }
+      },
+      "write_result": {
+        "accepted": true
+      }
+    },
+    {
+      "elapsed_us": 3000000,
+      "feedback": {
+        "joints": [
+          {
+            "connected": false
+          },
+          {
+            "connected": true
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_us": 4500000,
+      "feedback": {
+        "joints": [
+          {
+            "connected": false
+          },
+          {
+            "connected": false
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_us": 6000000,
+      "feedback": {
+        "joints": [
+          {
+            "connected": true
+          },
+          {
+            "connected": true
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_us": 7500000,
+      "feedback": {
+        "joints": [
+          {
+            "connected": false
+          }
+        ]
+      }
+    },
+    {
+      "elapsed_us": 8500000,
+      "feedback": {
+        "joints": [
+          {
+            "connected": true
+          },
+          {
+            "connected": true
+          }
+        ]
+      }
+    }
+  ]
+}

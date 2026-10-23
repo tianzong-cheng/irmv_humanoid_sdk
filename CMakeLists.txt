@@ -691,6 +691,29 @@ set_tests_properties(
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
+# The fault sidecar of a real recorded run: a fake scenario injects two
+# sequential joint disconnections, a sustained episode and a recurrence, while
+# a real DDS peer records every published state. The published report must stay
+# the first latched fault; faults.jsonl must carry every distinct later
+# occurrence.
+add_test(
+  NAME fault_recording_test
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/integration/fault_recording_test.py"
+    "$<TARGET_FILE:robot_runtime>"
+    "$<TARGET_FILE:read_record>"
+    "$<TARGET_FILE:fault_recording_peer>"
+    "${PROJECT_SOURCE_DIR}"
+)
+set_tests_properties(
+  fault_recording_test
+  PROPERTIES
+    LABELS integration
+    TIMEOUT 180
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
 if(IRMV_BUILD_APPLICATION)
 add_test(
   NAME policy_locomotion_test
@@ -941,6 +964,25 @@ set_tests_properties(
   velocity_record_test
   PROPERTIES LABELS core TIMEOUT 120
   WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
+# The association rules between one runtime run and the application's
+# independent velocity run are pure functions of the two readers' output: the
+# clock/boot identity, the runtime/session identity, selection of the rows that
+# match it, and hold-forward bounded to a contiguous recorded segment. No DDS
+# and no process.
+add_test(
+  NAME record_alignment_test
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/unit/record_alignment_test.py"
+)
+set_tests_properties(
+  record_alignment_test
+  PROPERTIES
+    LABELS core
+    TIMEOUT 120
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
 # The generator is exercised through a temporary repository, so its own view of
@@ -1283,6 +1325,28 @@ target_include_directories(
 )
 target_link_libraries(
   runtime_client
+  PRIVATE
+    irmv_transport
+    irmv_configuration
+    irmv_protocol
+    nlohmann_json::nlohmann_json
+    Threads::Threads
+)
+
+# Listener of the fault-recording acceptance: it subscribes to robot_state on
+# one domain and prints every published fault report as JSON. It is a witness
+# of the wire, not a recorder, and it links only the protocol and transport
+# pieces the runtime publishes through.
+add_executable(fault_recording_peer tests/integration/fault_recording_peer.cpp)
+target_compile_features(fault_recording_peer PRIVATE cxx_std_17)
+target_include_directories(
+  fault_recording_peer
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(
+  fault_recording_peer
   PRIVATE
     irmv_transport
     irmv_configuration

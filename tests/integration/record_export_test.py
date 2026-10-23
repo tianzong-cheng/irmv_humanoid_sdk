@@ -21,6 +21,7 @@ Nothing here touches DDS on the reading side: the tools are file readers.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -118,6 +119,225 @@ JOINT_BOOL_COLUMNS = ("joint_valid",)
 # The producer identity is 16 opaque bytes, rendered the way the reader prints
 # it: 32 lower-case hex digits, one string per row.
 PRODUCER_ID = "f00d" * 8
+
+# The identity the synthetic runtime record authorizes. The application stream
+# is built around it so association is exercised on real reader output.
+RUNTIME_ID = "ab" * 16
+SESSION_ID = "cd" * 16
+OTHER_RUNTIME_ID = "ef" * 16
+OTHER_SESSION_ID = "12" * 16
+
+
+def write_json(path: Path, document) -> None:
+    path.write_text(json.dumps(document, ensure_ascii=False, indent=1) + "\n")
+
+
+def make_fault_run(
+    source: Path, target: Path, stamps: list[int], joint_count: int
+) -> None:
+    """Copy a real run and give it a session identity and a fault stream.
+
+    Copying keeps the committed chunks real: the reader still verifies their
+    headers, payload lengths and checksums. The sidecar and the index are
+    written in the exact schema the recorder publishes.
+    """
+
+    shutil.copytree(source, target)
+    write_json(
+        target / "sessions.json",
+        [
+            {
+                "schema_version": 4,
+                "runtime_id": RUNTIME_ID,
+                "session_id": SESSION_ID,
+                "producer_id": "00" * 16,
+                "epoch": 3,
+                "stamp_us": stamps[0],
+                "state_seq": 1,
+                "joint_count": joint_count,
+                "kp": [1.0] * joint_count,
+                "kd": [0.1] * joint_count,
+                "model_sha256": "unknown",
+            }
+        ],
+    )
+    message = "synthetic fault"
+    faults = []
+    for index, (condition, name, joint, observed, limit) in enumerate(
+        (
+            (2, "JointDisconnected", 0, "NaN", 0.0),
+            (3, "JointFeedbackInvalid", None, "+Inf", 1.0),
+            (4, "JointFeedbackNonFinite", 1, "-Inf", -1.0),
+        )
+    ):
+        faults.append(
+            {
+                "schema_version": 4,
+                "record_seq": index + 1,
+                "runtime_id": RUNTIME_ID,
+                "state_seq": f"{index + 1:016x}",
+                "fault_id": f"{7:016x}",
+                "reason": 2,
+                "reason_name": "FeedbackInvalid",
+                "condition": condition,
+                "condition_name": name,
+                "joint_index": joint,
+                "error_code": 10 + index,
+                "observed_value": observed,
+                "limit": limit,
+                "sample_stamp_us": stamps[index],
+                "detected_stamp_us": stamps[index] + 1,
+                "output_action": 0,
+                "message": message,
+                "message_hex": message.encode("utf-8").hex(),
+            }
+        )
+    (target / "faults.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in faults), encoding="utf-8"
+    )
+    index = json.loads((target / "index.json").read_text())
+    index["faults"] = {
+        "complete": True,
+        "recorded": len(faults),
+        "written": len(faults),
+        "queue_dropped": 0,
+        "generation_dropped": 0,
+        "write_failures": 0,
+        "losses": [],
+    }
+    write_json(target / "index.json", index)
+
+
+def make_application_run(
+    directory: Path, runtime_meta: dict, t0: int
+) -> dict:
+    """Write one application run with a loss, a gap and a foreign tail."""
+
+    directory.mkdir()
+    model_name = "模型-实验.onnx"
+    write_json(
+        directory / "meta.json",
+        {
+            "schema": "irmv.application_velocity",
+            "version": 1,
+            "sdk_git_sha": runtime_meta["sdk_git_sha"],
+            "application_config_id": "application-config-digest",
+            "config_id": runtime_meta["config_id"],
+            "layout_id": runtime_meta["layout_id"],
+            "joint_count": runtime_meta["joint_count"],
+            "sample_hz": 100,
+            "loop_period_us": 20000,
+            "sampling": {"paced_by_deadline": False},
+            "source": "local",
+            "clock": runtime_meta["clock"],
+            "units": {
+                "forward": "m_s",
+                "lateral": "m_s",
+                "yaw": "rad_s",
+                "time": "us",
+            },
+            "model": {
+                "status": "loaded",
+                "name": model_name,
+                "path": f"/opt/models/{model_name}",
+                "sha256": "a" * 64,
+                "contract_sha256": "b" * 64,
+            },
+        },
+    )
+
+    def row(
+        seq: int,
+        stamp: int,
+        *,
+        runtime_id=RUNTIME_ID,
+        session_id=SESSION_ID,
+        unknown=False,
+    ):
+        return {
+            "schema": "irmv.application_velocity",
+            "version": 1,
+            "host_us": stamp,
+            "stamp_us": stamp,
+            "sample_seq": f"{seq:016x}",
+            "identity_known": not unknown,
+            "runtime_id": "" if unknown else runtime_id,
+            "session_id": "" if unknown else session_id,
+            "latest_state_seq": f"{seq + 1:016x}",
+            "forward": 0.01 * (seq + 1),
+            "lateral": -0.002 * (seq + 1),
+            "yaw": 0.003 * (seq + 1),
+        }
+
+    rows = [row(index, t0 + index * 10_000) for index in range(20)]
+    # A ten-sample loss (20..29) followed by the next recorded segment at 30.
+    rows += [row(index, t0 + index * 10_000) for index in range(30, 40)]
+    # A foreign context at the tail, and one row whose identity was never known.
+    rows += [
+        row(
+            index,
+            t0 + index * 10_000,
+            runtime_id=OTHER_RUNTIME_ID,
+            session_id=OTHER_SESSION_ID,
+        )
+        for index in range(40, 43)
+    ]
+    rows.append(row(90, t0 + 900_000, unknown=True))
+    (directory / "velocity.jsonl").write_text(
+        "".join(json.dumps(entry) + "\n" for entry in rows), encoding="utf-8"
+    )
+    write_json(
+        directory / "index.json",
+        {
+            "schema": "irmv.application_velocity",
+            "version": 1,
+            "complete": True,
+            "write_failures": 0,
+            "losses": [
+                {
+                    "first_sample_seq": f"{20:016x}",
+                    "last_sample_seq": f"{29:016x}",
+                    "first_stamp_us": t0 + 20 * 10_000,
+                    "last_stamp_us": t0 + 29 * 10_000,
+                    "dropped": 10,
+                    "reason": "queue_full",
+                }
+            ],
+        },
+    )
+    policy_entry = {
+        "schema": "irmv.policy_session",
+        "version": 1,
+        "host_us": t0,
+        "monotonic_us": t0,
+        "runtime_id": RUNTIME_ID,
+        "session_id": SESSION_ID,
+        "producer_process_id": "00" * 16,
+        "epoch": 3,
+        "source": "local",
+        "model": {
+            "name": model_name,
+            "sha256": "a" * 64,
+            "path": f"/opt/models/{model_name}",
+            "input": "observation",
+            "output": "action",
+            "contract_sha256": "b" * 64,
+        },
+        "gains": [],
+    }
+    # The policy sidecar is one JSON object per line.
+    (directory / "policy_sessions.jsonl").write_text(
+        json.dumps(policy_entry, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    return {
+        "t0": t0,
+        "rows": rows,
+        "selected": 30,
+        "excluded": len(rows) - 30,
+        "model_name": model_name,
+        "gap_start": t0 + 20 * 10_000,
+        "gap_end": t0 + 30 * 10_000,
+    }
 
 
 def wait_for(path: Path, pattern: str, timeout_s: float) -> str:
@@ -443,6 +663,13 @@ def main() -> int:
             synthetic_row["imu_rx_stamp_us"] = above_two_53 + 2
             synthetic_row["producer_id"] = PRODUCER_ID
             synthetic_row["joint_valid"] = [index % 2 == 0 for index in range(joints)]
+            # The reader writes a non-finite sample double as an explicit
+            # string. The export must restore it without folding either
+            # infinity into NaN.
+            synthetic_row["measured_tau_est"] = (
+                ["NaN", "+Inf"] + [0.0] * (joints - 2)
+            )
+            synthetic_row["imu_orientation_rpy"] = ["-Inf", 0.0, 1.0]
             synthetic_path = work / "synthetic.npz"
             np.savez_compressed(
                 synthetic_path, **record_to_npz.to_archive([synthetic_row], run_summary)
@@ -467,6 +694,12 @@ def main() -> int:
                 fail("the per-joint validity flags did not survive the export as booleans")
             if str(synthetic["producer_id"][0]) != PRODUCER_ID:
                 fail(f"the producer identity came back as {str(synthetic['producer_id'][0])!r}")
+            if not np.isnan(synthetic["measured_tau_est"][0][0]):
+                fail("a NaN sample value did not survive the export as NaN")
+            if not np.isposinf(synthetic["measured_tau_est"][0][1]):
+                fail("a +Inf sample value did not survive the export as +Inf")
+            if not np.isneginf(synthetic["imu_orientation_rpy"][0][0]):
+                fail("a -Inf IMU value did not survive the export as -Inf")
 
             # An empty run keeps every column's shape: (0, 3) for the IMU
             # vectors, (0, joints) for the joint matrices and validity block,
@@ -485,6 +718,21 @@ def main() -> int:
                 fail(f"an empty run exported imu_rx_stamp_us with shape "
                      f"{empty['imu_rx_stamp_us'].shape} and dtype "
                      f"{empty['imu_rx_stamp_us'].dtype}")
+            # The fault table is independent of the sample rows and keeps its
+            # own shape when there is no occurrence at all.
+            for column, dtype in (
+                ("fault_record_seq", np.uint64),
+                ("fault_joint_index", np.int64),
+                ("fault_observed_value", np.float64),
+                ("fault_condition", np.uint32),
+            ):
+                if empty[column].shape != (0,) or empty[column].dtype != dtype:
+                    fail(
+                        f"an empty run exported {column} with shape "
+                        f"{empty[column].shape} and dtype {empty[column].dtype}"
+                    )
+            if empty["fault_condition_name"].dtype.kind != "U":
+                fail("an empty run exported fault_condition_name as a non-text column")
 
         # A 100 Hz recording over a four second run: the row rate is the
         # configured one and not the control rate, and the spacing is even.
@@ -624,6 +872,422 @@ def main() -> int:
                         killed.wait(timeout=10)
                     except subprocess.TimeoutExpired:
                         pass
+
+        # ------------------------------------------------------------------
+        # The fault stream and the application's independent velocity stream,
+        # exported together. The runtime run is a real committed run with a
+        # synthetic session identity and fault sidecar; the application run is
+        # written in the exact schema its recorder publishes.
+        # ------------------------------------------------------------------
+        sample_stamps = [int(value) for value in data["stamp_us"]]
+        fault_stamps = [
+            sample_stamps[len(sample_stamps) // 4],
+            sample_stamps[len(sample_stamps) // 2],
+            sample_stamps[3 * len(sample_stamps) // 4],
+        ]
+        fault_run = work / "fault-run"
+        make_fault_run(run, fault_run, fault_stamps, joints)
+        fault_meta = json.loads((fault_run / "meta.json").read_text())
+        t0 = sample_stamps[0] + 5_000
+        app_run = work / "app-run"
+        app_fixture = make_application_run(app_run, fault_meta, t0)
+
+        fault_read = subprocess.run(
+            [str(reader), "--run", str(fault_run)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if fault_read.returncode != 0:
+            fail(f"the fault run was not readable: {fault_read.stderr.strip()}")
+        else:
+            fault_lines = [
+                line for line in fault_read.stdout.splitlines() if line.strip()
+            ]
+            fault_records = [json.loads(line) for line in fault_lines[:-1]]
+            fault_summary = json.loads(fault_lines[-1])
+            fault_rows = [
+                row for row in fault_records if row.get("record_type") == "fault"
+            ]
+            fault_stats = fault_summary.get("faults") or {}
+            if fault_summary.get("record_kind") != "runtime":
+                fail("read_record did not dispatch the fault run")
+            if fault_stats.get("complete") is not True:
+                fail(f"the summary does not mark the fault stream complete: {fault_stats}")
+            if int(fault_stats.get("rows_in_range", -1)) != 3:
+                fail(f"the summary reports {fault_stats.get('rows_in_range')} fault rows")
+            if int(fault_stats.get("missing_occurrences", -1)) != 0:
+                fail(f"the summary reports missing fault occurrences: {fault_stats}")
+            if len(fault_rows) != 3:
+                fail(f"the reader printed {len(fault_rows)} fault rows, expected 3")
+            else:
+                if [row["condition_name"] for row in fault_rows] != [
+                    "JointDisconnected",
+                    "JointFeedbackInvalid",
+                    "JointFeedbackNonFinite",
+                ]:
+                    fail("the fault condition names did not survive the reader")
+                if [row["joint_index"] for row in fault_rows] != [0, None, 1]:
+                    fail(f"the fault joint indices are {[row['joint_index'] for row in fault_rows]}")
+                if [row["observed_value"] for row in fault_rows] != [
+                    "NaN",
+                    "+Inf",
+                    "-Inf",
+                ]:
+                    fail("the reader did not preserve the explicit non-finite fault values")
+                if [row["output_action"] for row in fault_rows] != [0, 0, 0]:
+                    fail("the fault output actions did not survive the reader")
+
+        app_read = subprocess.run(
+            [str(reader), "--run", str(app_run)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if app_read.returncode != 0:
+            fail(f"the application run was not readable: {app_read.stderr.strip()}")
+        else:
+            app_lines = [
+                line for line in app_read.stdout.splitlines() if line.strip()
+            ]
+            app_records = [json.loads(line) for line in app_lines[:-1]]
+            app_summary = json.loads(app_lines[-1])
+            velocity_rows = [
+                row for row in app_records if row.get("record_type") == "velocity"
+            ]
+            policy_rows = [
+                row
+                for row in app_records
+                if row.get("record_type") == "policy_session"
+            ]
+            if app_summary.get("record_kind") != "application":
+                fail("read_record did not dispatch the application run")
+            if app_summary.get("complete") is not True or app_summary.get(
+                "truncated"
+            ):
+                fail(f"the application run is not a complete stream: {app_summary}")
+            if int(app_summary.get("rows_in_range", -1)) != len(app_fixture["rows"]):
+                fail(
+                    f"the application reader returned {app_summary.get('rows_in_range')} "
+                    f"rows, expected {len(app_fixture['rows'])}"
+                )
+            if len(velocity_rows) != len(app_fixture["rows"]):
+                fail("the velocity rows did not survive the reader")
+            if int(app_summary.get("policy_sessions", -1)) != len(policy_rows):
+                fail("the policy-session count does not match the printed rows")
+            if str(app_summary.get("model", {}).get("name")) != app_fixture["model_name"]:
+                fail(
+                    "the application metadata lost its UTF-8 model file name: "
+                    f"{app_summary.get('model')}"
+                )
+
+        associated_path = work / "associated.npz"
+        associated = subprocess.run(
+            [
+                sys.executable,
+                str(source_root / "tools" / "record_to_npz.py"),
+                str(fault_run),
+                str(associated_path),
+                "--reader",
+                str(reader),
+                "--application-record",
+                str(app_run),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if associated.returncode != 0:
+            fail(f"the associated conversion failed: {associated.stderr.strip()}")
+        else:
+            linked = np.load(associated_path, allow_pickle=False)
+            if not bool(linked["association_ok"]):
+                fail(
+                    "the application run did not associate: "
+                    f"{str(linked['association_reason'])}"
+                )
+            if int(linked["application_rows_total"]) != len(app_fixture["rows"]):
+                fail("the archive does not report the application's total row count")
+            if int(linked["application_rows_excluded"]) != app_fixture["excluded"]:
+                fail(
+                    "the archive reports "
+                    f"{int(linked['application_rows_excluded'])} excluded rows, "
+                    f"expected {app_fixture['excluded']}"
+                )
+            if int(linked["velocity_stamp_us"].shape[0]) != app_fixture["selected"]:
+                fail(
+                    "the archive carries "
+                    f"{int(linked['velocity_stamp_us'].shape[0])} velocity rows, "
+                    f"expected {app_fixture['selected']}"
+                )
+            for column, dtype in (
+                ("velocity_stamp_us", np.uint64),
+                ("velocity_sample_seq", np.uint64),
+                ("velocity_identity_known", np.bool_),
+                ("velocity_latest_state_seq", np.uint64),
+                ("velocity_forward", np.float64),
+                ("velocity_lateral", np.float64),
+                ("velocity_yaw", np.float64),
+            ):
+                if linked[column].dtype != dtype:
+                    fail(
+                        f"the archive's {column} is {linked[column].dtype}, "
+                        f"expected {dtype}"
+                    )
+                if linked[column].shape != (app_fixture["selected"],):
+                    fail(f"the archive's {column} has shape {linked[column].shape}")
+            if set(str(value) for value in linked["velocity_runtime_id"]) != {
+                RUNTIME_ID
+            }:
+                fail("the archive did not keep only the matching runtime identity")
+            if not bool(linked["application_complete"]) or bool(
+                linked["application_truncated"]
+            ):
+                fail("the archive does not carry the application completion facts")
+            if int(linked["application_sample_hz"]) != 100:
+                fail("the archive does not carry the application sample rate")
+            if str(linked["application_model_name"]) != app_fixture["model_name"]:
+                fail(
+                    "the archive lost the UTF-8 model file name: "
+                    f"{str(linked['application_model_name'])!r}"
+                )
+            if str(linked["application_schema"]) != "irmv.application_velocity":
+                fail("the archive does not carry the application schema")
+            if int(linked["policy_session_count"]) != 1:
+                fail("the archive does not carry the policy-session sidecar")
+            if "policy_session_json" not in linked:
+                fail("the archive has no policy_session_json column")
+            elif app_fixture["model_name"] not in str(linked["policy_session_json"][0]):
+                fail("the policy-session text lost its UTF-8 model name")
+
+            # Hold-forward is aligned to the runtime rows and bounded to the
+            # contiguous segments: the gap between the loss and the next
+            # recorded sample is NaN, never the last value carried across it.
+            hold = linked["velocity_hold_forward"]
+            if hold.shape != (rows_written,) or hold.dtype != np.float64:
+                fail(
+                    f"velocity_hold_forward is {hold.shape}/{hold.dtype}, "
+                    f"expected ({rows_written},)/float64"
+                )
+            if linked["velocity_hold_lateral"].shape != (rows_written,):
+                fail("velocity_hold_lateral is not aligned with the runtime rows")
+            if linked["velocity_hold_yaw"].shape != (rows_written,):
+                fail("velocity_hold_yaw is not aligned with the runtime rows")
+            gap_target = app_fixture["gap_start"] + 50_000
+            gap_index = int(
+                np.searchsorted(
+                    data["stamp_us"], np.uint64(gap_target), side="right"
+                )
+                - 1
+            )
+            if 0 <= gap_index < rows_written:
+                if not np.isnan(hold[gap_index]):
+                    fail(
+                        "the held velocity crossed the recorded gap at "
+                        f"{int(data['stamp_us'][gap_index])}"
+                    )
+            finite_target = app_fixture["t0"] + 50_000
+            finite_index = int(
+                np.searchsorted(
+                    data["stamp_us"], np.uint64(finite_target), side="right"
+                )
+                - 1
+            )
+            if 0 <= finite_index < rows_written:
+                if np.isnan(hold[finite_index]):
+                    fail("a runtime row inside a contiguous segment holds no velocity")
+                else:
+                    applied_seq = (
+                        int(data["stamp_us"][finite_index]) - app_fixture["t0"]
+                    ) // 10_000
+                    expected_forward = 0.01 * (applied_seq + 1)
+                    if abs(float(hold[finite_index]) - expected_forward) > 1e-9:
+                        fail(
+                            "the held forward value is "
+                            f"{float(hold[finite_index])}, expected "
+                            f"{expected_forward} from the sample in force"
+                        )
+
+            # The fault arrays have their own length, their own dtypes, and the
+            # explicit non-finite values the file declared.
+            for column, dtype in (
+                ("fault_record_seq", np.uint64),
+                ("fault_state_seq", np.uint64),
+                ("fault_fault_id", np.uint64),
+                ("fault_reason", np.uint32),
+                ("fault_condition", np.uint32),
+                ("fault_joint_index", np.int64),
+                ("fault_error_code", np.uint64),
+                ("fault_observed_value", np.float64),
+                ("fault_limit", np.float64),
+                ("fault_sample_stamp_us", np.uint64),
+                ("fault_detected_stamp_us", np.uint64),
+                ("fault_output_action", np.uint32),
+            ):
+                if linked[column].dtype != dtype or linked[column].shape != (3,):
+                    fail(
+                        f"the archive's {column} is {linked[column].dtype}/"
+                        f"{linked[column].shape}, expected {dtype}/(3,)"
+                    )
+            if [int(value) for value in linked["fault_joint_index"]] != [0, -1, 1]:
+                fail("joint-less faults did not become the int64 sentinel -1")
+            if [str(value) for value in linked["fault_condition_name"]] != [
+                "JointDisconnected",
+                "JointFeedbackInvalid",
+                "JointFeedbackNonFinite",
+            ]:
+                fail("the archive lost a fault condition name")
+            if not np.isnan(linked["fault_observed_value"][0]):
+                fail("the archive folded a NaN fault value into another number")
+            if not np.isposinf(linked["fault_observed_value"][1]):
+                fail("the archive folded +Inf into NaN")
+            if not np.isneginf(linked["fault_observed_value"][2]):
+                fail("the archive folded -Inf into NaN")
+            if [str(value) for value in linked["fault_runtime_id"]] != [
+                RUNTIME_ID,
+                RUNTIME_ID,
+                RUNTIME_ID,
+            ]:
+                fail("the fault runtime identity did not survive the export")
+            # No column is an object array: loading with allow_pickle=False is
+            # part of the contract, and a fault detail is never pickled.
+            for column in linked.files:
+                if linked[column].dtype == np.dtype("O"):
+                    fail(f"the archive exported {column} as an object array")
+
+        # An empty application run still exports explicit (0,) columns, and the
+        # missing association is reported rather than silently treated as a
+        # perfect join.
+        empty_app = work / "app-empty"
+        empty_app.mkdir()
+        write_json(empty_app / "meta.json", json.loads((app_run / "meta.json").read_text()))
+        write_json(
+            empty_app / "index.json",
+            {
+                "schema": "irmv.application_velocity",
+                "version": 1,
+                "complete": True,
+                "write_failures": 0,
+                "losses": [],
+            },
+        )
+        (empty_app / "velocity.jsonl").write_text("", encoding="utf-8")
+        empty_path = work / "empty-associated.npz"
+        empty_convert = subprocess.run(
+            [
+                sys.executable,
+                str(source_root / "tools" / "record_to_npz.py"),
+                str(fault_run),
+                str(empty_path),
+                "--reader",
+                str(reader),
+                "--application-record",
+                str(empty_app),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if empty_convert.returncode != 0:
+            fail(f"the empty application conversion failed: {empty_convert.stderr.strip()}")
+        else:
+            empty_linked = np.load(empty_path, allow_pickle=False)
+            if bool(empty_linked["association_ok"]):
+                fail("an application run with no rows was accepted as associated")
+            if "no application" not in str(empty_linked["association_reason"]):
+                fail(
+                    "the empty association does not name its cause: "
+                    f"{str(empty_linked['association_reason'])!r}"
+                )
+            if int(empty_linked["application_rows_total"]) != 0:
+                fail("the empty application run reports rows")
+            for column in (
+                "velocity_stamp_us",
+                "velocity_sample_seq",
+                "velocity_identity_known",
+                "velocity_runtime_id",
+                "velocity_forward",
+            ):
+                if empty_linked[column].shape != (0,):
+                    fail(
+                        f"an empty application exported {column} with shape "
+                        f"{empty_linked[column].shape}"
+                    )
+            if not np.all(np.isnan(empty_linked["velocity_hold_forward"])):
+                fail("an empty application exported a held value")
+            if int(empty_linked["fault_record_seq"].shape[0]) != 3:
+                fail("the fault array changed length when the application was empty")
+
+        # Unknown and malformed inputs are refused with a nonzero exit, never
+        # reinterpreted. A missing prerequisite is not a pass.
+        unknown_runtime = work / "unknown-runtime"
+        unknown_runtime.mkdir()
+        write_json(unknown_runtime / "meta.json", {"schema_version": 99})
+        result = subprocess.run(
+            [str(reader), "--run", str(unknown_runtime)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            fail("an unknown runtime schema version was accepted")
+        unknown_app = work / "unknown-app"
+        unknown_app.mkdir()
+        write_json(
+            unknown_app / "meta.json",
+            {"schema": "irmv.application_velocity", "version": 2},
+        )
+        result = subprocess.run(
+            [str(reader), "--run", str(unknown_app)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            fail("an unknown application schema version was accepted")
+
+        corrupt_app = work / "corrupt-app"
+        shutil.copytree(app_run, corrupt_app)
+        with (corrupt_app / "velocity.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write('{"schema": "irmv.application_velocity", "version": 1\n')
+        result = subprocess.run(
+            [str(reader), "--run", str(corrupt_app)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            fail("a malformed complete velocity line was accepted")
+        elif "record_to_npz" in result.stderr:
+            fail("the read tool blamed the converter for a malformed line")
+
+        corrupt_policy = work / "corrupt-policy"
+        shutil.copytree(app_run, corrupt_policy)
+        with (corrupt_policy / "policy_sessions.jsonl").open(
+            "a", encoding="utf-8"
+        ) as stream:
+            stream.write('{"schema": "irmv.policy_session"\n')
+        result = subprocess.run(
+            [str(reader), "--run", str(corrupt_policy)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            fail("a malformed complete policy-session line was accepted")
+
+        corrupt_fault = work / "corrupt-fault"
+        shutil.copytree(fault_run, corrupt_fault)
+        with (corrupt_fault / "faults.jsonl").open("a", encoding="utf-8") as stream:
+            stream.write('{"schema_version": 4\n')
+        result = subprocess.run(
+            [str(reader), "--run", str(corrupt_fault)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            fail("a malformed complete fault line was accepted")
 
     if failures:
         return 1

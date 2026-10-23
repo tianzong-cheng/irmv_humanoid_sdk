@@ -60,7 +60,8 @@ jobs:
                       integration_stderr_backpressure integration_local_stop \
                       integration_write_refused real_backend_contract_test hardware_config_test \
                       device_lease_test real_backend_test maintenance_test \
-                      launcher_test hardware_package_test; do
+                      launcher_test hardware_package_test \
+                      record_alignment_test fault_recording_test; do
             grep -Eq "Test +#[0-9]+: ${test}$" registered-tests.txt
           done
 
