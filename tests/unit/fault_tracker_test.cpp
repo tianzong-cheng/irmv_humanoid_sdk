@@ -325,6 +325,40 @@ int TestFullTableDoesNotRereportSustainedKeys() {
   return 0;
 }
 
+int TestFullTableEvictsKeyAbsentForAFullTick() {
+  FaultTracker tracker;
+  const std::size_t keys = 2 * kFaultObservationCapacity;
+  const auto key = [](std::size_t index) {
+    return MakeDetail(FaultCondition::JointDriverError,
+                      static_cast<std::uint32_t>(index % 64),
+                      1'000 + static_cast<std::uint32_t>(index));
+  };
+  tracker.BeginTick();
+  for (std::size_t index = 0; index < keys; ++index) {
+    static_cast<void>(tracker.Observe(key(index)));
+  }
+  tracker.EndTick();
+
+  // Tick 2 carries a single key, so the other 2047 slots become two ticks old.
+  const FaultDetail carried = key(0);
+  CHECK(ObserveTick(tracker, {carried}) == 0);
+
+  // Tick 3 needs a slot for a new key. The keys absent from tick 2 are
+  // evictable, so the new key is tracked and reported once, while the key
+  // carried through tick 2 persists and is not reported again.
+  const FaultDetail fresh =
+      MakeDetail(FaultCondition::JointDriverError, 63, 777'777);
+  CHECK(ObserveTick(tracker, {fresh, carried}) == 1);
+  CHECK(tracker.NewObservations().count == 1);
+  CHECK(tracker.NewObservations().dropped == 0);
+  const FaultDetail *evicted_replacement =
+      FindNew(tracker, FaultCondition::JointDriverError, 63);
+  CHECK(evicted_replacement != nullptr);
+  CHECK(evicted_replacement->error_code == 777'777);
+  CHECK(FindNew(tracker, FaultCondition::JointDriverError, 0) == nullptr);
+  return 0;
+}
+
 int TestNoDynamicAllocation() {
   // Positive control: the monitor must observe a real allocation, otherwise a
   // broken override would let the zero-allocation assertion pass vacuously.
@@ -382,6 +416,10 @@ int main() {
     return result;
   }
   result = TestFullTableDoesNotRereportSustainedKeys();
+  if (result != 0) {
+    return result;
+  }
+  result = TestFullTableEvictsKeyAbsentForAFullTick();
   if (result != 0) {
     return result;
   }

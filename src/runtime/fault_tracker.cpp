@@ -65,7 +65,9 @@ FaultTracker::Slot *FaultTracker::AcquireSlot(
   // evicted: a slot last seen in the previous tick may still be observed later
   // in this tick, and evicting it would report the sustained condition as new.
   // (BeginTick clears the whole table when the generation counter wraps, so
-  // `last_seen_tick + 1` cannot wrap across generations here.)
+  // generations never cross.) The first comparison guards the UINT32_MAX wrap:
+  // without it, last_seen_tick + 1 of a slot seen in this tick would overflow
+  // to 0, pass the comparison and evict a slot that is still active.
   for (Slot &slot : slots_) {
     if (slot.last_seen_tick != tick_ && slot.last_seen_tick + 1 < tick_) {
       slot.condition = detail.condition;
