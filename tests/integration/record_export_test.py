@@ -1499,10 +1499,32 @@ def main() -> int:
 
         wrong_version_policy = work / "wrong-version-policy"
         shutil.copytree(app_run, wrong_version_policy)
+        # Complete apart from the version: every other field is valid, so the
+        # rejection below can only come from the version gate.
+        wrong_version_entry = {
+            "schema": "irmv.policy_session",
+            "version": 1,
+            "host_us": 1,
+            "monotonic_us": 1,
+            "runtime_id": RUNTIME_ID,
+            "session_id": SESSION_ID,
+            "producer_process_id": "00" * 16,
+            "epoch": 0,
+            "source": "local",
+            "model": {
+                "name": "policy.onnx",
+                "sha256": "a" * 64,
+                "path": "/opt/models/policy.onnx",
+                "input": "observation",
+                "output": "action",
+                "contract_sha256": "b" * 64,
+            },
+            "gains": [],
+        }
         with (wrong_version_policy / "policy_sessions.jsonl").open(
             "a", encoding="utf-8"
         ) as stream:
-            stream.write('{"schema": "irmv.policy_session", "version": 1}\n')
+            stream.write(json.dumps(wrong_version_entry) + "\n")
         result = subprocess.run(
             [str(reader), "--run", str(wrong_version_policy)],
             capture_output=True,
@@ -1511,6 +1533,11 @@ def main() -> int:
         )
         if result.returncode == 0:
             fail("a policy-session line of version 1 was accepted")
+        elif "unknown schema/version" not in result.stderr:
+            fail(
+                "the policy-session version refusal does not name the schema "
+                f"or version: {result.stderr.strip()}"
+            )
 
         corrupt_fault = work / "corrupt-fault"
         shutil.copytree(fault_run, corrupt_fault)

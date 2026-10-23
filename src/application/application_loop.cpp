@@ -1420,10 +1420,12 @@ int RunApplication(const ApplicationOptions &options,
       static_cast<void>(std::fflush(stdout));
       // Nothing of this process keeps running behind the exit line: the
       // transport thread is joined here, and the runtime is not touched - its
-      // own watchdog owns the link this process leaves behind. The session
-      // sidecar is closed first, then the velocity recorder finalizes its
-      // directory and index: the two records of a run are complete in that
-      // order, and the run directory is final before the process leaves.
+      // own watchdog owns the link this process leaves behind. Shutdown asks
+      // the session sidecar to finish before the velocity recorder finalizes
+      // its directory and index, so the two records of a run normally complete
+      // in that order. A sidecar that misses its deadline is left to its
+      // detached worker and may finish after the velocity index, so this is a
+      // best-effort order, not a guarantee.
       if (session_recorder && !session_recorder->Stop()) {
         std::fprintf(stderr,
                      "application: policy session record did not finalize "

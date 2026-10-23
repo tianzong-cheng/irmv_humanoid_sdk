@@ -42,6 +42,7 @@ using irmv::protocol::Sequence;
 using irmv::protocol::TimeUs;
 using irmv::telemetry::FaultLossReason;
 using irmv::telemetry::FaultRecordRange;
+using irmv::telemetry::kFaultRecordSchemaVersion;
 using irmv::telemetry::ReadFaultRange;
 using irmv::telemetry::RecordedFault;
 using irmv::telemetry::Recorder;
@@ -696,6 +697,45 @@ int IndexWithoutFaultBlockReadsIncomplete() {
 
 }  // namespace
 
+// A complete fault line of another schema version is refused by name, never
+// skipped or reinterpreted. The writer first produces a valid line, which is
+// then relabelled, so every other field is exactly what this build writes.
+int WrongLineSchemaVersionIsRefused() {
+  const std::filesystem::path directory = MakeDirectory();
+  Recorder recorder;
+  CHECK(StartRecorder(&recorder, directory));
+  CHECK(recorder.TryRecordFault(MakeFault(1, 10, 20, 1000)));
+  CHECK(recorder.Stop());
+
+  const std::filesystem::path faults_path =
+      recorder.run_directory() / "faults.jsonl";
+  std::string text = ReadFile(faults_path);
+  const std::uint32_t wrong_version = kFaultRecordSchemaVersion + 1;
+  const std::string from =
+      "\"schema_version\":" + std::to_string(kFaultRecordSchemaVersion);
+  const std::size_t position = text.find(from);
+  CHECK(position != std::string::npos);
+  if (position != std::string::npos) {
+    text.replace(position, from.size(),
+                 "\"schema_version\":" + std::to_string(wrong_version));
+  }
+  {
+    std::ofstream file(faults_path, std::ios::binary | std::ios::trunc);
+    file << text;
+  }
+
+  FaultRecordRange range;
+  CHECK(!ReadFaultRange(recorder.run_directory(), 0, kNever, &range));
+  CHECK(!range.ok);
+  CHECK(!range.error.empty());
+  CHECK(range.error.find("schema") != std::string::npos);
+  CHECK(range.error.find(std::to_string(wrong_version)) != std::string::npos);
+  CHECK(range.rows.empty());
+
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
 int main() {
   int failures = 0;
   failures += ThreeFaultsInOrder();
@@ -707,6 +747,7 @@ int main() {
   failures += MessageBytesRoundTrip();
   failures += LossSpanTableFoldRetainsTotals();
   failures += IndexWithoutFaultBlockReadsIncomplete();
+  failures += WrongLineSchemaVersionIsRefused();
   if (failures == 0) {
     return 0;
   }
