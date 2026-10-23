@@ -13,6 +13,7 @@
 #include "execution.hpp"
 #include "irmv/configuration/config.hpp"
 #include "irmv/protocol/types.hpp"
+#include "irmv/protocol/validation.hpp"
 #include "irmv/runtime/execution_context.hpp"
 #include "irmv/transport/codec.hpp"
 #include "irmv/transport/dds_transport.hpp"
@@ -28,6 +29,7 @@ using irmv::configuration::RuntimeConfig;
 using irmv::protocol::ExecutionRequest;
 using irmv::protocol::ExecutionResult;
 using irmv::protocol::ExecutionState;
+using irmv::protocol::FaultCondition;
 using irmv::protocol::FaultDetail;
 using irmv::protocol::FaultReason;
 using irmv::protocol::FaultReport;
@@ -52,6 +54,7 @@ using irmv::protocol::StopReason;
 using irmv::protocol::SupervisorHeartbeat;
 using irmv::protocol::TimeUs;
 using irmv::protocol::TopicDescriptor;
+using irmv::protocol::ValidateCommandShape;
 using irmv::runtime::kHeartbeatBatchCapacity;
 using irmv::runtime::TickInput;
 using irmv::runtime::TickResult;
@@ -248,6 +251,7 @@ RobotState MakeState(Sequence state_seq) {
   state.faults.count = 1;
   FaultDetail &detail = state.faults.details[0];
   detail.reason = FaultReason::JointVelocityExceeded;
+  detail.condition = FaultCondition::JointVelocityExceeded;
   detail.joint_index = 3;
   detail.error_code = kHighBitErrorCode;
   detail.observed_value = 9.5;
@@ -351,7 +355,9 @@ bool Same(const FeedbackSnapshot &left, const FeedbackSnapshot &right) {
 }
 
 bool Same(const FaultDetail &left, const FaultDetail &right) {
-  return left.reason == right.reason && left.joint_index == right.joint_index &&
+  return left.reason == right.reason &&
+         left.condition == right.condition &&
+         left.joint_index == right.joint_index &&
          left.error_code == right.error_code &&
          left.observed_value == right.observed_value &&
          left.limit == right.limit &&
@@ -598,6 +604,40 @@ bool RoundTripSamples() {
     if (!codec::FromWire(wire, restored) || !Same(expected, restored)) {
       std::cerr << "codec: fault reason " << static_cast<std::uint32_t>(value)
                 << " did not round trip\n";
+      return false;
+    }
+  }
+
+  const FaultCondition conditions[] = {
+      FaultCondition::None,
+      FaultCondition::Unspecified,
+      FaultCondition::JointDisconnected,
+      FaultCondition::JointFeedbackInvalid,
+      FaultCondition::JointFeedbackNonFinite,
+      FaultCondition::JointFeedbackStale,
+      FaultCondition::JointFrequencyLow,
+      FaultCondition::JointDriverError,
+      FaultCondition::JointPositionExceeded,
+      FaultCondition::JointVelocityExceeded,
+      FaultCondition::ImuFeedbackInvalid,
+      FaultCondition::ImuFeedbackNonFinite,
+      FaultCondition::ImuFeedbackStale,
+      FaultCondition::FeedbackShapeInvalid,
+      FaultCondition::BootFailed,
+      FaultCondition::CommandInvalid,
+      FaultCondition::ProtocolExhausted,
+      FaultCondition::PrimaryWriteFailed,
+      FaultCondition::FallbackWriteFailed};
+  static_assert(sizeof(conditions) / sizeof(conditions[0]) == 19);
+  for (const FaultCondition value : conditions) {
+    RobotState expected = MakeState(kStateSeq);
+    expected.faults.details[0].condition = value;
+    wire::RobotState wire;
+    codec::ToWire(expected, wire);
+    RobotState restored;
+    if (!codec::FromWire(wire, restored) || !Same(expected, restored)) {
+      std::cerr << "codec: fault condition "
+                << static_cast<std::uint32_t>(value) << " did not round trip\n";
       return false;
     }
   }
@@ -862,6 +902,34 @@ bool RejectInvalidSamples() {
     if (codec::FromWire(wire_state, destination) ||
         !Same(before, destination)) {
       std::cerr << "codec: an unknown fault reason was accepted\n";
+      return false;
+    }
+  }
+  {
+    wire::RobotState wire_state;
+    codec::ToWire(MakeState(kStateSeq), wire_state);
+    wire_state.faults().details()[0].condition(
+        static_cast<wire::FaultCondition>(99));
+    RobotState destination = MakeState(kFreshStateSeq);
+    const RobotState before = destination;
+    if (codec::FromWire(wire_state, destination) ||
+        !Same(before, destination)) {
+      std::cerr << "codec: an unknown fault condition was accepted\n";
+      return false;
+    }
+  }
+
+  // An execution packet of the previous protocol version is not migrated: the
+  // command decodes, then validation rejects it as a version mismatch.
+  {
+    wire::JointCommand wire_command;
+    codec::ToWire(MakeCommand(), wire_command);
+    wire_command.protocol_version(1);
+    JointCommand destination;
+    if (!codec::FromWire(wire_command, destination) ||
+        ValidateCommandShape(destination, kMaxJoints).reason !=
+            RejectReason::VersionMismatch) {
+      std::cerr << "codec: a protocol version 1 command was not rejected\n";
       return false;
     }
   }

@@ -1,4 +1,4 @@
-# Runtime protocol (version 1)
+# Runtime protocol (version 2)
 
 The wire contract between `robot_runtime` and a supervision client. Everything
 in this document is frozen for the phase: the topics, the QoS, the field layout,
@@ -14,7 +14,7 @@ messages or topics on this page.
 
 ## Encoding and bounds
 
-* `protocol_version` is `1`. A packet with any other value is rejected
+* `protocol_version` is `2`. A packet with any other value is rejected
   (`VersionMismatch`) and never changes runtime state.
 * Up to **64 joints** per packet. Collections are fixed-size IDL arrays
   (`JointValues[64]`, `JointFeedback[64]`, `FaultDetail[64]`, `Text64Bytes[64]`,
@@ -70,7 +70,7 @@ by exactly one `ExecutionResult`.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `protocol_version` | `unsigned long` | 1 |
+| `protocol_version` | `unsigned long` | 2 |
 | `supervisor_id` | `Id` | the requesting supervisor; the issued session is bound to it |
 | `request_id` | `unsigned long long` | request identity, unique per supervisor; the retry key |
 | `session_id` | `Id` | the session the request acts on; **empty for `AcquireSession`** |
@@ -86,7 +86,7 @@ by exactly one `ExecutionResult`.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `protocol_version` | `unsigned long` | 1 |
+| `protocol_version` | `unsigned long` | 2 |
 | `supervisor_id`, `request_id` | `Id`, `unsigned long long` | echo of the answered request |
 | `session_id` | `Id` | the session the answer belongs to |
 | `runtime_id` | `Id` | the runtime instance that answered |
@@ -108,7 +108,7 @@ The continuous target lane, one producer per session.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `protocol_version` | `unsigned long` | 1 |
+| `protocol_version` | `unsigned long` | 2 |
 | `runtime_id`, `session_id`, `producer_id` | `Id` | routing identity; all three must match the authorized session and producer |
 | `epoch` | `unsigned long long` | must equal the current watermark (`EpochMismatch` otherwise) |
 | `command_seq` | `unsigned long long` | strictly increasing per producer; older or repeated values are `StaleRequest` |
@@ -121,7 +121,7 @@ The continuous target lane, one producer per session.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `protocol_version` | `unsigned long` | 1 |
+| `protocol_version` | `unsigned long` | 2 |
 | `supervisor_id`, `session_id`, `runtime_id` | `Id` | the owner of the session and the instance it talks to |
 | `heartbeat_seq` | `unsigned long long` | **strictly increasing**; an equal or older value does not refresh the lease |
 | `stamp_us` | `unsigned long long` | sender stamp |
@@ -132,7 +132,7 @@ Published by the runtime as the machine state of record.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `protocol_version` | `unsigned long` | 1 |
+| `protocol_version` | `unsigned long` | 2 |
 | `runtime_id`, `session_id`, `producer_id` | `Id` | live instance, session and authorizing producer |
 | `epoch` | `unsigned long long` | authorization watermark |
 | `state_seq` | `unsigned long long` | strictly increasing state sequence |
@@ -150,10 +150,13 @@ Published by the runtime as the machine state of record.
 `JointFeedback` carries `valid`, `connected`, `q`, `dq`, `tau_est`,
 `rx_stamp_us`, `freq_hz`, `error_code`. `ImuFeedback` carries `valid`,
 `orientation_rpy[3]`, `angular_velocity[3]`, `linear_acceleration[3]`,
-`rx_stamp_us`. `FaultDetail` carries `reason`, `joint_index`, `error_code`,
-`observed_value`, `limit`, `sample_stamp_us`, `detected_stamp_us`,
-`output_action` and a 256-byte `message`; a joint index that names no joint is
-the all-ones value.
+`rx_stamp_us`. `FaultDetail` carries `reason`, `condition`, `joint_index`,
+`error_code`, `observed_value`, `limit`, `sample_stamp_us`,
+`detected_stamp_us`, `output_action` and a 256-byte `message`; a joint index
+that names no joint is the all-ones value. `reason` remains the aggregate
+category that drives the fault priority and latch semantics; `condition` refines
+it without changing either. A decoder rejects a condition outside the frozen
+set.
 
 ## Enums
 
@@ -170,7 +173,7 @@ Reject reasons (frozen set, `REJECT_NONE` for an applied request):
 | Reason | Raised when |
 |---|---|
 | `MALFORMED` | a field violates its bounds: version-independent layout, counts, joint indices, text bounds, missing identity |
-| `VERSION_MISMATCH` | `protocol_version` is not 1 |
+| `VERSION_MISMATCH` | `protocol_version` is not 2 |
 | `WRONG_INSTANCE` | `runtime_id` is neither empty nor the live instance |
 | `WRONG_SESSION` | the addressed session is not the live one (or the operation needs one and none is given), or the request does not come from the supervisor the session is bound to |
 | `SESSION_BUSY` | `ACQUIRE_SESSION` while another supervisor owns the session |
@@ -189,6 +192,20 @@ Reject reasons (frozen set, `REJECT_NONE` for an applied request):
 Fault reasons: `FAULT_NONE`, `BOOT_FAILED`, `FEEDBACK_INVALID`, `DRIVER_ERROR`,
 `IMU_INVALID`, `JOINT_POSITION_EXCEEDED`, `JOINT_VELOCITY_EXCEEDED`,
 `COMMAND_INVALID`, `FAULT_WRITE_FAILED`, `PROTOCOL_EXHAUSTED`.
+
+Fault conditions (fixed values, `FAULT_CONDITION_NONE=0`):
+`FAULT_CONDITION_NONE`, `FAULT_CONDITION_UNSPECIFIED`,
+`FAULT_CONDITION_JOINT_DISCONNECTED`, `FAULT_CONDITION_JOINT_FEEDBACK_INVALID`,
+`FAULT_CONDITION_JOINT_FEEDBACK_NON_FINITE`,
+`FAULT_CONDITION_JOINT_FEEDBACK_STALE`, `FAULT_CONDITION_JOINT_FREQUENCY_LOW`,
+`FAULT_CONDITION_JOINT_DRIVER_ERROR`, `FAULT_CONDITION_JOINT_POSITION_EXCEEDED`,
+`FAULT_CONDITION_JOINT_VELOCITY_EXCEEDED`,
+`FAULT_CONDITION_IMU_FEEDBACK_INVALID`,
+`FAULT_CONDITION_IMU_FEEDBACK_NON_FINITE`, `FAULT_CONDITION_IMU_FEEDBACK_STALE`,
+`FAULT_CONDITION_FEEDBACK_SHAPE_INVALID`, `FAULT_CONDITION_BOOT_FAILED`,
+`FAULT_CONDITION_COMMAND_INVALID`, `FAULT_CONDITION_PROTOCOL_EXHAUSTED`,
+`FAULT_CONDITION_PRIMARY_WRITE_FAILED`,
+`FAULT_CONDITION_FALLBACK_WRITE_FAILED`.
 
 Stop reasons: `STOP_NONE`, `STOP_REQUESTED`, `COMMAND_TIMEOUT`,
 `SOURCE_STATE_TIMEOUT`, `SUPERVISOR_TIMEOUT`.

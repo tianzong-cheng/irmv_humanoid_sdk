@@ -1,3 +1,5 @@
+#include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <string>
 
@@ -5,6 +7,8 @@
 #include "support/check.hpp"
 
 using irmv::protocol::ExecutionState;
+using irmv::protocol::FaultCondition;
+using irmv::protocol::FaultConditionName;
 using irmv::protocol::FaultReason;
 using irmv::protocol::IsValid;
 using irmv::protocol::JointCommand;
@@ -29,6 +33,10 @@ int main() {
   CHECK(!ValidateCommandShape(command, 2).ok);
 
   command.protocol_version = kProtocolVersion + 1;
+  CHECK(!ValidateCommandShape(command, 1).ok);
+  CHECK(ValidateCommandShape(command, 1).reason ==
+        RejectReason::VersionMismatch);
+  command.protocol_version = 1;
   CHECK(!ValidateCommandShape(command, 1).ok);
   CHECK(ValidateCommandShape(command, 1).reason ==
         RejectReason::VersionMismatch);
@@ -92,6 +100,56 @@ int main() {
   CHECK(IsValid(FaultReason::None));
   CHECK(IsValid(FaultReason::ProtocolExhausted));
   CHECK(!IsValid(static_cast<FaultReason>(99)));
+  const FaultCondition conditions[] = {
+      FaultCondition::None,
+      FaultCondition::Unspecified,
+      FaultCondition::JointDisconnected,
+      FaultCondition::JointFeedbackInvalid,
+      FaultCondition::JointFeedbackNonFinite,
+      FaultCondition::JointFeedbackStale,
+      FaultCondition::JointFrequencyLow,
+      FaultCondition::JointDriverError,
+      FaultCondition::JointPositionExceeded,
+      FaultCondition::JointVelocityExceeded,
+      FaultCondition::ImuFeedbackInvalid,
+      FaultCondition::ImuFeedbackNonFinite,
+      FaultCondition::ImuFeedbackStale,
+      FaultCondition::FeedbackShapeInvalid,
+      FaultCondition::BootFailed,
+      FaultCondition::CommandInvalid,
+      FaultCondition::ProtocolExhausted,
+      FaultCondition::PrimaryWriteFailed,
+      FaultCondition::FallbackWriteFailed};
+  static_assert(sizeof(conditions) / sizeof(conditions[0]) == 19);
+  const char *const condition_names[] = {
+      "None",
+      "Unspecified",
+      "JointDisconnected",
+      "JointFeedbackInvalid",
+      "JointFeedbackNonFinite",
+      "JointFeedbackStale",
+      "JointFrequencyLow",
+      "JointDriverError",
+      "JointPositionExceeded",
+      "JointVelocityExceeded",
+      "ImuFeedbackInvalid",
+      "ImuFeedbackNonFinite",
+      "ImuFeedbackStale",
+      "FeedbackShapeInvalid",
+      "BootFailed",
+      "CommandInvalid",
+      "ProtocolExhausted",
+      "PrimaryWriteFailed",
+      "FallbackWriteFailed"};
+  for (std::size_t index = 0; index < 19; ++index) {
+    CHECK(static_cast<std::uint32_t>(conditions[index]) == index);
+    CHECK(IsValid(conditions[index]));
+    CHECK(std::string(FaultConditionName(conditions[index])) ==
+          condition_names[index]);
+  }
+  CHECK(!IsValid(static_cast<FaultCondition>(99)));
+  CHECK(std::string(FaultConditionName(static_cast<FaultCondition>(99))) ==
+        "Unknown");
   CHECK(IsValid(StopReason::None));
   CHECK(IsValid(StopReason::SupervisorTimeout));
   CHECK(!IsValid(static_cast<StopReason>(99)));

@@ -81,6 +81,8 @@ void ToWireFaultDetail(const protocol::FaultDetail &source,
                        protocol::wire::FaultDetail &target) {
   target.reason(static_cast<protocol::wire::FaultReason>(
       static_cast<std::uint32_t>(source.reason)));
+  target.condition(static_cast<protocol::wire::FaultCondition>(
+      static_cast<std::uint32_t>(source.condition)));
   target.joint_index(source.joint_index);
   target.error_code(source.error_code);
   target.observed_value(source.observed_value);
@@ -190,6 +192,9 @@ bool ReadSnapshot(const protocol::wire::FeedbackSnapshot &source,
 bool ReadFaultDetail(const protocol::wire::FaultDetail &source,
                      protocol::FaultDetail &target) {
   if (!ReadEnum(source.reason(), target.reason)) {
+    return false;
+  }
+  if (!ReadEnum(source.condition(), target.condition)) {
     return false;
   }
   if (!ReadEnum(source.output_action(), target.output_action)) {

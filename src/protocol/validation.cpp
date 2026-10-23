@@ -88,6 +88,76 @@ bool IsValid(FaultReason value) {
   return false;
 }
 
+bool IsValid(FaultCondition value) {
+  switch (value) {
+    case FaultCondition::None:
+    case FaultCondition::Unspecified:
+    case FaultCondition::JointDisconnected:
+    case FaultCondition::JointFeedbackInvalid:
+    case FaultCondition::JointFeedbackNonFinite:
+    case FaultCondition::JointFeedbackStale:
+    case FaultCondition::JointFrequencyLow:
+    case FaultCondition::JointDriverError:
+    case FaultCondition::JointPositionExceeded:
+    case FaultCondition::JointVelocityExceeded:
+    case FaultCondition::ImuFeedbackInvalid:
+    case FaultCondition::ImuFeedbackNonFinite:
+    case FaultCondition::ImuFeedbackStale:
+    case FaultCondition::FeedbackShapeInvalid:
+    case FaultCondition::BootFailed:
+    case FaultCondition::CommandInvalid:
+    case FaultCondition::ProtocolExhausted:
+    case FaultCondition::PrimaryWriteFailed:
+    case FaultCondition::FallbackWriteFailed:
+      return true;
+  }
+  return false;
+}
+
+const char *FaultConditionName(FaultCondition value) {
+  switch (value) {
+    case FaultCondition::None:
+      return "None";
+    case FaultCondition::Unspecified:
+      return "Unspecified";
+    case FaultCondition::JointDisconnected:
+      return "JointDisconnected";
+    case FaultCondition::JointFeedbackInvalid:
+      return "JointFeedbackInvalid";
+    case FaultCondition::JointFeedbackNonFinite:
+      return "JointFeedbackNonFinite";
+    case FaultCondition::JointFeedbackStale:
+      return "JointFeedbackStale";
+    case FaultCondition::JointFrequencyLow:
+      return "JointFrequencyLow";
+    case FaultCondition::JointDriverError:
+      return "JointDriverError";
+    case FaultCondition::JointPositionExceeded:
+      return "JointPositionExceeded";
+    case FaultCondition::JointVelocityExceeded:
+      return "JointVelocityExceeded";
+    case FaultCondition::ImuFeedbackInvalid:
+      return "ImuFeedbackInvalid";
+    case FaultCondition::ImuFeedbackNonFinite:
+      return "ImuFeedbackNonFinite";
+    case FaultCondition::ImuFeedbackStale:
+      return "ImuFeedbackStale";
+    case FaultCondition::FeedbackShapeInvalid:
+      return "FeedbackShapeInvalid";
+    case FaultCondition::BootFailed:
+      return "BootFailed";
+    case FaultCondition::CommandInvalid:
+      return "CommandInvalid";
+    case FaultCondition::ProtocolExhausted:
+      return "ProtocolExhausted";
+    case FaultCondition::PrimaryWriteFailed:
+      return "PrimaryWriteFailed";
+    case FaultCondition::FallbackWriteFailed:
+      return "FallbackWriteFailed";
+  }
+  return "Unknown";
+}
+
 bool IsValid(ProducerStatus value) {
   switch (value) {
     case ProducerStatus::Ready:

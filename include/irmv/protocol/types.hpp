@@ -9,7 +9,7 @@
 
 namespace irmv::protocol {
 
-inline constexpr std::uint32_t kProtocolVersion = 1;
+inline constexpr std::uint32_t kProtocolVersion = 2;
 inline constexpr std::size_t kMaxJoints = 64;
 inline constexpr std::size_t kIdSize = 16;
 inline constexpr std::size_t kMaxNameBytes = 64;
@@ -141,6 +141,28 @@ enum class FaultReason : std::uint32_t {
   ProtocolExhausted = 9,
 };
 
+enum class FaultCondition : std::uint32_t {
+  None = 0,
+  Unspecified = 1,
+  JointDisconnected = 2,
+  JointFeedbackInvalid = 3,
+  JointFeedbackNonFinite = 4,
+  JointFeedbackStale = 5,
+  JointFrequencyLow = 6,
+  JointDriverError = 7,
+  JointPositionExceeded = 8,
+  JointVelocityExceeded = 9,
+  ImuFeedbackInvalid = 10,
+  ImuFeedbackNonFinite = 11,
+  ImuFeedbackStale = 12,
+  FeedbackShapeInvalid = 13,
+  BootFailed = 14,
+  CommandInvalid = 15,
+  ProtocolExhausted = 16,
+  PrimaryWriteFailed = 17,
+  FallbackWriteFailed = 18,
+};
+
 enum class StopReason : std::uint32_t {
   None = 0,
   Requested = 1,
@@ -200,6 +222,7 @@ struct FeedbackSnapshot {
 
 struct FaultDetail {
   FaultReason reason{FaultReason::None};
+  FaultCondition condition{FaultCondition::None};
   std::uint32_t joint_index{kNoJointIndex};
   std::uint32_t error_code{0};
   double observed_value{0.0};

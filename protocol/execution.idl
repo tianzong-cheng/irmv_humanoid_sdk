@@ -1,7 +1,7 @@
 module irmv {
   module protocol {
     module wire {
-      const unsigned long PROTOCOL_VERSION = 1;
+      const unsigned long PROTOCOL_VERSION = 2;
       const unsigned long MAX_JOINTS = 64;
 
       typedef octet Id[16];
@@ -82,6 +82,28 @@ module irmv {
         PROTOCOL_EXHAUSTED
       };
 
+      enum FaultCondition {
+        FAULT_CONDITION_NONE,
+        FAULT_CONDITION_UNSPECIFIED,
+        FAULT_CONDITION_JOINT_DISCONNECTED,
+        FAULT_CONDITION_JOINT_FEEDBACK_INVALID,
+        FAULT_CONDITION_JOINT_FEEDBACK_NON_FINITE,
+        FAULT_CONDITION_JOINT_FEEDBACK_STALE,
+        FAULT_CONDITION_JOINT_FREQUENCY_LOW,
+        FAULT_CONDITION_JOINT_DRIVER_ERROR,
+        FAULT_CONDITION_JOINT_POSITION_EXCEEDED,
+        FAULT_CONDITION_JOINT_VELOCITY_EXCEEDED,
+        FAULT_CONDITION_IMU_FEEDBACK_INVALID,
+        FAULT_CONDITION_IMU_FEEDBACK_NON_FINITE,
+        FAULT_CONDITION_IMU_FEEDBACK_STALE,
+        FAULT_CONDITION_FEEDBACK_SHAPE_INVALID,
+        FAULT_CONDITION_BOOT_FAILED,
+        FAULT_CONDITION_COMMAND_INVALID,
+        FAULT_CONDITION_PROTOCOL_EXHAUSTED,
+        FAULT_CONDITION_PRIMARY_WRITE_FAILED,
+        FAULT_CONDITION_FALLBACK_WRITE_FAILED
+      };
+
       enum StopReason {
         STOP_NONE,
         STOP_REQUESTED,
@@ -150,6 +172,7 @@ module irmv {
       @final
       struct FaultDetail {
         FaultReason reason;
+        FaultCondition condition;
         unsigned long joint_index;
         unsigned long error_code;
         double observed_value;

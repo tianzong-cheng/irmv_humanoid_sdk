@@ -18,6 +18,8 @@ bool IsValid(Operation value);
 bool IsValid(ResultStatus value);
 bool IsValid(RejectReason value);
 bool IsValid(FaultReason value);
+bool IsValid(FaultCondition value);
+const char *FaultConditionName(FaultCondition value);
 bool IsValid(StopReason value);
 bool IsValid(ProducerStatus value);
 bool IsValid(ProducerFailureReason value);
