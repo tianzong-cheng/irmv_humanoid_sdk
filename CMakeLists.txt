@@ -816,6 +816,7 @@ find_package(Threads REQUIRED)
 add_library(
   irmv_telemetry
   src/telemetry/diagnostic_write.cpp
+  src/telemetry/fault_record.cpp
   src/telemetry/logger.cpp
   src/telemetry/record_context.cpp
   src/telemetry/record_reader.cpp
@@ -876,6 +877,31 @@ target_link_libraries(
 add_test(NAME record_reader_test COMMAND record_reader_test)
 set_tests_properties(record_reader_test PROPERTIES LABELS core TIMEOUT 120)
 set_tests_properties(recorder_test PROPERTIES LABELS core TIMEOUT 120)
+
+# Fault occurrences are a second bounded handoff on the same recorder worker:
+# this proves the line schema, the reader's range and truncation rules, and
+# that a blocked fault write cannot hold Stop() past its deadline.
+add_executable(fault_record_test tests/unit/fault_record_test.cpp)
+target_compile_features(fault_record_test PRIVATE cxx_std_17)
+target_include_directories(
+  fault_record_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(
+  fault_record_test PRIVATE irmv_telemetry Threads::Threads
+                            nlohmann_json::nlohmann_json
+)
+
+add_test(NAME fault_record_test COMMAND fault_record_test)
+set_tests_properties(
+  fault_record_test
+  PROPERTIES
+    LABELS core
+    TIMEOUT 120
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
 
 # The independent record sample plan and the startup clock identity are pure or
 # startup-only; the test injects the boot-id file so it never depends on /proc.

@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "irmv/configuration/config.hpp"
+#include "irmv/telemetry/fault_record.hpp"
 #include "irmv/telemetry/record.hpp"
 #include "irmv/transport/bounded_channel.hpp"
 
@@ -73,6 +74,13 @@ inline constexpr std::size_t kRecordQueueCapacity = 256;
 // the event and is counted, exactly like a full sample queue: the control
 // thread never waits for it.
 inline constexpr std::size_t kRecordSessionQueueCapacity = 64;
+
+// The fault channel's fixed capacity, independent of the sample queue. Faults
+// are one-shot events, not a per-tick stream: a condition is reported once when
+// it appears, so a thousand pending occurrences is already a pathological run.
+// A full fault channel costs the event and is counted; it never takes room from
+// the sample handoff and never delays the control tick.
+inline constexpr std::size_t kRecordFaultQueueCapacity = 1024;
 
 // The refusal stretches the control thread reports in one run. The control
 // thread tracks the losses the full handoff costs it, and it may not allocate,
@@ -140,6 +148,23 @@ class Recorder {
   // writes what it accepted to `sessions.json` in the run directory.
   bool TryRecordSession(const RecordSessionEvent &event) noexcept;
 
+  // Offers one fault occurrence on the recorder's third bounded handoff. Like
+  // TryRecord it never blocks, allocates or throws: the recorder is disabled or
+  // stopped, or the fault channel is full, costs the occurrence - counted in
+  // faults_dropped() and reported as a queue-side loss span. It does not
+  // deduplicate: the state machine decides which conditions are new, and a
+  // repeated occurrence is a second event.
+  bool TryRecordFault(const RecordedFault &fault) noexcept;
+
+  // Reports occurrences the runtime's observation batch could not even
+  // enumerate (`FaultObservationBatch::dropped`). This is not a queue refusal:
+  // the control thread never offered them. The count is kept separately in
+  // faults_generation_dropped() and in a loss span whose reason is Generation.
+  // Never blocks or allocates.
+  void ReportFaultGenerationLoss(protocol::TimeUs stamp_us,
+                                 protocol::Sequence state_seq,
+                                 std::uint64_t count) noexcept;
+
   // Closes the handoff, asks the worker to drain and finalize, and waits for it
   // against one deadline. Returns true when the worker finished and was joined;
   // false when the deadline expired, in which case the worker still owns every
@@ -174,6 +199,20 @@ class Recorder {
   // returns, and the same list the index's `gaps` array holds.
   std::vector<RecordGap> gaps() const;
 
+  // Fault occurrences the fault handoff accepted.
+  std::uint64_t faults_recorded() const;
+  // Fault lines the worker wrote and flushed.
+  std::uint64_t faults_written() const;
+  // Fault occurrences the handoff refused because it was full or the recorder
+  // was not running. Distinct from faults_generation_dropped().
+  std::uint64_t faults_dropped() const;
+  // Occurrences the runtime could not enumerate at all. They never reached the
+  // handoff, so this is not a queue loss.
+  std::uint64_t faults_generation_dropped() const;
+  // Accepted occurrences whose line could not be written. Never counted as
+  // written, and the run's fault stream does not read complete.
+  std::uint64_t fault_write_failures() const;
+
  private:
   struct Impl;
 
@@ -182,6 +221,8 @@ class Recorder {
   // run state exists to hold them.
   std::atomic<std::uint64_t> unattached_dropped_{0};
   std::atomic<std::uint64_t> unattached_session_dropped_{0};
+  std::atomic<std::uint64_t> unattached_faults_dropped_{0};
+  std::atomic<std::uint64_t> unattached_faults_generation_dropped_{0};
 };
 
 }  // namespace irmv::telemetry

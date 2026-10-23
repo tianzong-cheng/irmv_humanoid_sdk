@@ -22,10 +22,12 @@
 #include <thread>
 #include <utility>
 
+#include "irmv/build_identity.hpp"
 #include "irmv/hardware/backend_factory.hpp"
 #include "irmv/runtime/execution_fsm.hpp"
 #include "irmv/telemetry/diagnostic_write.hpp"
 #include "irmv/telemetry/logger.hpp"
+#include "irmv/telemetry/record_context.hpp"
 #include "irmv/telemetry/recorder.hpp"
 #include "irmv/transport/bounded_channel.hpp"
 #include "irmv/transport/dds_transport.hpp"
@@ -578,6 +580,16 @@ telemetry::RecordSample MakeRecordSample(const ExecutionFsm &fsm,
   sample.feedback_stamp_us = result.state.feedback.stamp_us;
   sample.feedback_valid = feedback_valid;
   sample.imu_valid = result.state.feedback.imu.valid;
+  // The IMU snapshot of this tick, meaningful only while the snapshot's own
+  // flag holds. A failed read leaves default values behind; the flag, never a
+  // zero, tells a reader whether those numbers are a measurement.
+  if (sample.imu_valid) {
+    sample.imu_orientation_rpy = result.state.feedback.imu.orientation_rpy;
+    sample.imu_angular_velocity = result.state.feedback.imu.angular_velocity;
+    sample.imu_linear_acceleration =
+        result.state.feedback.imu.linear_acceleration;
+    sample.imu_rx_stamp_us = result.state.feedback.imu.rx_stamp_us;
+  }
   sample.send_accepted = result.write_result.accepted;
   sample.output_valid = result.output_valid;
   sample.joint_count = std::min<std::uint32_t>(result.state.feedback.count,
@@ -586,12 +598,14 @@ telemetry::RecordSample MakeRecordSample(const ExecutionFsm &fsm,
   // is meaningful only for the joints the feedback snapshot really carried and
   // only while `feedback_valid` holds; the flag, not the numbers, is the
   // contract, so a reader never reads a zero a failed read left behind as a
-  // measurement.
-  for (std::uint32_t index = 0;
-       index < result.state.feedback.count && index < protocol::kMaxJoints;
-       ++index) {
-    sample.measured_q[index] = result.state.feedback.joints[index].q;
-    sample.measured_dq[index] = result.state.feedback.joints[index].dq;
+  // measurement. Each joint's own validity flag is copied with its values, so
+  // one failed joint does not make the others look measured.
+  for (std::uint32_t index = 0; index < sample.joint_count; ++index) {
+    const protocol::JointFeedback &joint = result.state.feedback.joints[index];
+    sample.measured_q[index] = joint.q;
+    sample.measured_dq[index] = joint.dq;
+    sample.measured_tau_est[index] = joint.tau_est;
+    sample.joint_valid[index] = joint.valid;
   }
   // The final output of this tick: the torques the output stage produced for
   // the backend, from `TickResult::output`. `send_accepted` above is the host
@@ -1753,9 +1767,23 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
     }
   }
 
+  // The identity of the clock every recorded stamp is taken from. It is read
+  // once: the boot id proves two processes share a boot, so a run whose id
+  // could not be read may still be saved but cannot be merged automatically.
+  // The failure is not fatal and is written into the metadata rather than
+  // guessed around.
+  telemetry::RecordClockIdentity record_clock;
+  std::string record_clock_error;
+  if (config.telemetry.recorder.enabled &&
+      !telemetry::LoadRecordClockIdentity(&record_clock, &record_clock_error)) {
+    StderrFormat("robot_runtime: record clock identity unavailable: %s\n",
+                 record_clock_error.c_str());
+  }
+
   // The metadata of one recorded run: what a reader needs to interpret its rows
   // without any other file. The digests identify the configuration and the
-  // joint layout in effect, and the units are the protocol's own.
+  // joint layout in effect, the build revision identifies the code that wrote
+  // them, and the units are the protocol's own.
   //
   // The IMU convention the runtime can state is the one the feedback contract
   // fixes: `orientation_rpy` is roll, pitch, yaw in that order in radians,
@@ -1763,7 +1791,8 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
   // contract does not fix the axis frame or order of those vectors, nor whether
   // the acceleration includes gravity, so those are written as "unknown" - the
   // recorder never guesses at or transforms a measurement.
-  const auto record_metadata = [](const configuration::RuntimeConfig &config) {
+  const auto record_metadata = [&record_clock, &record_clock_error](
+                                   const configuration::RuntimeConfig &config) {
     Json metadata;
     metadata["schema_version"] = telemetry::kRecordSchemaVersion;
     metadata["config_id"] = config.config_id;
@@ -1773,6 +1802,13 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
     metadata["sample_hz"] = config.telemetry.recorder.sample_hz;
     metadata["joint_count"] = config.joint_count();
     metadata["joints"] = config.joint_names;
+    metadata["sdk_git_sha"] = std::string(irmv::SdkGitSha());
+    metadata["clock"] = {{"clock", record_clock.clock},
+                         {"boot_id", record_clock.boot_id},
+                         {"available", record_clock.available}};
+    if (!record_clock.available) {
+      metadata["clock"]["diagnostic"] = record_clock_error;
+    }
     metadata["units"] = {{"position", "rad"},
                          {"velocity", "rad_s"},
                          {"torque", "Nm"},
@@ -1868,6 +1904,10 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
     return static_cast<std::uint32_t>(ratio == 0 ? 1 : ratio);
   }();
   std::uint32_t record_tick = 0;
+  // The runtime's own ordinal for fault occurrences. It advances before every
+  // offer - including one the recorder refuses - so a loss span can name the
+  // events that never became rows.
+  std::uint64_t fault_record_seq = 0;
   // The authorization context the recorder's session channel last reported. The
   // runtime emits one session event when it changes - a new producer, a new
   // epoch, or the context ending - rather than one per tick, and the zero
@@ -1967,6 +2007,30 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
     counters.fsm_dropped =
         result.dropped_result_count + result.dropped_event_count;
     LogTickEvents(logger, fsm, result);
+
+    // Fault occurrences are not sampled at the recorder's rate: a condition the
+    // state machine reports as new is submitted on every tick, whether or not
+    // this tick is a recorded sample. The batch is one-shot (valid until the
+    // next Tick) and the recorder copies what it accepts, so the whole
+    // observation batch is submitted here. Generation-side loss - occurrences
+    // the state machine could not even enumerate - is reported apart from the
+    // handoff's own refusals; the recorder never deduplicates.
+    if (recorder && result.new_faults != nullptr) {
+      const runtime::FaultObservationBatch &batch = *result.new_faults;
+      for (std::uint32_t index = 0; index < batch.count; ++index) {
+        telemetry::RecordedFault fault;
+        fault.record_seq = ++fault_record_seq;
+        fault.runtime_id = result.state.runtime_id;
+        fault.state_seq = result.state.state_seq;
+        fault.fault_id = result.state.fault_id;
+        fault.detail = batch.details[index];
+        static_cast<void>(recorder->TryRecordFault(fault));
+      }
+      if (batch.dropped > 0) {
+        recorder->ReportFaultGenerationLoss(
+            result.state.stamp_us, result.state.state_seq, batch.dropped);
+      }
+    }
 
     if (recorder && record_ratio != 0) {
       if (record_tick % record_ratio == 0) {

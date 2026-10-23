@@ -14,6 +14,8 @@
 #include <utility>
 #include <vector>
 
+#include "fault_writer.hpp"
+
 namespace irmv::telemetry {
 namespace {
 
@@ -188,14 +190,31 @@ struct Recorder::Impl {
   void DrainSessionsInto();
   // Atomically replaces `sessions.json`.
   bool WriteSessions();
+  // Writes every fault the handoff holds, in arrival order. Runs on the worker
+  // only; a failed line is counted as a loss and the loop keeps going.
+  void DrainFaults();
+  bool WriteFault(const RecordedFault &fault);
+  void NoteFaultWriteFailure(const RecordedFault &fault);
+  void CloseFaultWriteLoss();
   // Producer side, run by the control thread with `offering` announced.
   bool OfferSample(const RecordSample &sample) noexcept;
   bool OfferSession(const RecordSessionEvent &event) noexcept;
+  bool OfferFault(const RecordedFault &fault) noexcept;
   void NoteRefusal(const RecordSample &sample) noexcept;
   void CloseRefusal() noexcept;
   static void PutRefusal(RefusalSpan *table, std::uint32_t *count,
                          const RefusalSpan &span) noexcept;
   void AppendRefusalGaps(std::vector<RecordGap> *gaps) const;
+  void NoteFaultQueueLoss(const RecordedFault &fault) noexcept;
+  void CloseFaultQueueLoss() noexcept;
+  void NoteFaultGenerationLoss(protocol::TimeUs stamp_us,
+                               protocol::Sequence state_seq,
+                               std::uint64_t count) noexcept;
+  static void PutFaultLoss(FaultLossSpan *table, std::uint32_t *count,
+                           const FaultLossSpan &span) noexcept;
+  // Runs after Stop() has waited for every control-thread producer to leave, so
+  // the producer-side loss tables are still.
+  void AppendFaultLosses(std::vector<FaultLossSpan> *losses) const;
   // The sampling stride of the run, normalized.
   protocol::Sequence Stride() const noexcept {
     return config.stride == 0 ? 1 : config.stride;
@@ -222,13 +241,27 @@ struct Recorder::Impl {
   transport::BoundedChannel<RecordSample, kRecordQueueCapacity> queue;
   transport::BoundedChannel<RecordSessionEvent, kRecordSessionQueueCapacity>
       session_queue;
+  transport::BoundedChannel<RecordedFault, kRecordFaultQueueCapacity>
+      fault_queue;
   std::atomic<std::uint32_t> offering{0};
   std::atomic<std::uint32_t> session_offering{0};
+  std::atomic<std::uint32_t> fault_offering{0};
   RefusalSpan refused[kRecordGapSegments]{};
   std::uint32_t refused_count{0};
   RefusalSpan refusal_open{};
   bool refusal_open_valid{false};
   std::uint64_t refusal_open_recorded{0};
+  // Producer-side fault loss tables. They are fixed capacity because the
+  // control thread may not allocate; two tables keep the generation-side and
+  // handoff-side facts apart, and each folds past its bound into its own last
+  // span rather than dropping the loss silently.
+  FaultLossSpan fault_queue_losses[kRecordGapSegments]{};
+  std::uint32_t fault_queue_loss_count{0};
+  FaultLossSpan fault_queue_loss_open{};
+  bool fault_queue_loss_open_valid{false};
+  std::uint64_t fault_queue_loss_open_recorded{0};
+  FaultLossSpan fault_generation_losses[kRecordGapSegments]{};
+  std::uint32_t fault_generation_loss_count{0};
   protocol::Sequence stride{1};
 
   // Counters are shared with the caller's accessors and may still advance
@@ -239,15 +272,26 @@ struct Recorder::Impl {
   std::atomic<std::uint64_t> recorded{0};
   std::atomic<std::uint64_t> chunks{0};
   std::atomic<std::uint64_t> write_failures{0};
+  std::atomic<std::uint64_t> faults_dropped{0};
+  std::atomic<std::uint64_t> faults_generation_dropped{0};
+  std::atomic<std::uint64_t> faults_recorded{0};
+  std::atomic<std::uint64_t> faults_written{0};
+  std::atomic<std::uint64_t> fault_write_failures{0};
 
   // Worker-owned after construction.
   std::vector<RecordSample> buffer;
   std::vector<RecordSessionEvent> sessions;
   std::vector<ChunkEntry> chunk_entries;
   std::vector<RecordGap> gaps;
+  std::vector<FaultLossSpan> fault_losses;
+  std::unique_ptr<FaultWriter> fault_writer;
   std::uint32_t joint_count{0};
   bool have_joint_count{false};
   std::uint64_t write_failure_count{0};
+  std::uint64_t fault_write_failure_count{0};
+  FaultLossSpan fault_write_loss_open{};
+  bool fault_write_loss_open_valid{false};
+  bool faults_complete{false};
   bool sessions_dirty{false};
 
   // The published loss table, guarded because gaps() may be asked from another
@@ -296,6 +340,14 @@ bool Recorder::Impl::Prepare(const RecorderConfig &recorder_config,
   metadata_file << metadata;
   if (!metadata_file.good()) {
     *error = "the recorder could not write " + run_directory.string();
+    return false;
+  }
+  // The fault sidecar exists from the start, even when no fault is ever
+  // reported: a reader then distinguishes "this run recorded no faults" from a
+  // sidecar that was never created.
+  fault_writer = std::make_unique<FaultWriter>(run_directory /
+                                               std::string(kRecordFaultsFile));
+  if (!fault_writer->Prepare(error)) {
     return false;
   }
   // The metadata is authoritative for the run's joint count, so an index
@@ -561,6 +613,60 @@ void Recorder::Impl::DrainSessionsInto() {
   }
 }
 
+void Recorder::Impl::DrainFaults() {
+  RecordedFault fault;
+  // One line per accepted occurrence, in the order the state machine reported
+  // them. A failed write does not stop the drain: the run keeps recording and
+  // the loss is named with the occurrence's own ordinals.
+  while (fault_queue.TryPop(fault)) {
+    static_cast<void>(WriteFault(fault));
+  }
+}
+
+bool Recorder::Impl::WriteFault(const RecordedFault &fault) {
+  if (!fault_writer->Write(fault)) {
+    ++fault_write_failure_count;
+    fault_write_failures.store(fault_write_failure_count,
+                               std::memory_order_relaxed);
+    NoteFaultWriteFailure(fault);
+    return false;
+  }
+  faults_written.fetch_add(1, std::memory_order_relaxed);
+  if (fault_write_loss_open_valid) {
+    fault_losses.push_back(fault_write_loss_open);
+    fault_write_loss_open_valid = false;
+  }
+  return true;
+}
+
+void Recorder::Impl::NoteFaultWriteFailure(const RecordedFault &fault) {
+  // Consecutive failed writes are one stretch. A successful write in between
+  // closes it (the caller pushes it), so a span never covers a row that is on
+  // disk.
+  if (!fault_write_loss_open_valid ||
+      fault.record_seq != fault_write_loss_open.last_record_seq + 1) {
+    CloseFaultWriteLoss();
+    fault_write_loss_open = FaultLossSpan{};
+    fault_write_loss_open.reason = FaultLossReason::WriteFailed;
+    fault_write_loss_open.first_record_seq = fault.record_seq;
+    fault_write_loss_open.first_state_seq = fault.state_seq;
+    fault_write_loss_open.first_stamp_us = fault.detail.detected_stamp_us;
+    fault_write_loss_open_valid = true;
+  }
+  fault_write_loss_open.last_record_seq = fault.record_seq;
+  fault_write_loss_open.last_state_seq = fault.state_seq;
+  fault_write_loss_open.last_stamp_us = fault.detail.detected_stamp_us;
+  ++fault_write_loss_open.dropped;
+}
+
+void Recorder::Impl::CloseFaultWriteLoss() {
+  if (!fault_write_loss_open_valid) {
+    return;
+  }
+  fault_write_loss_open_valid = false;
+  fault_losses.push_back(fault_write_loss_open);
+}
+
 bool Recorder::Impl::WriteSessions() {
   Json array = Json::array();
   for (const RecordSessionEvent &event : sessions) {
@@ -608,6 +714,7 @@ void Recorder::Impl::Run() {
     }
     static_cast<void>(DrainInto());
     DrainSessionsInto();
+    DrainFaults();
     if (sessions_dirty) {
       static_cast<void>(WriteSessions());
     }
@@ -621,7 +728,8 @@ void Recorder::Impl::Run() {
   // data.
   for (;;) {
     const bool quiet = offering.load(std::memory_order_seq_cst) == 0 &&
-                       session_offering.load(std::memory_order_seq_cst) == 0;
+                       session_offering.load(std::memory_order_seq_cst) == 0 &&
+                       fault_offering.load(std::memory_order_seq_cst) == 0;
     if (quiet) {
       break;
     }
@@ -637,6 +745,12 @@ void Recorder::Impl::Run() {
     }
   }
   DrainSessionsInto();
+  // The fault tail is drained under the same finalization, before the index is
+  // published: a run's fault stream is complete only when the worker has
+  // written what the handoff accepted. A blocked device can still make this
+  // exceed Stop()'s deadline; Stop() then returns and this worker finishes on
+  // its own.
+  DrainFaults();
   if (!buffer.empty()) {
     WriteChunk();
   }
@@ -681,6 +795,22 @@ void Recorder::Impl::Run() {
   if (sessions_dirty || !sessions.empty()) {
     static_cast<void>(WriteSessions());
   }
+  // The fault stream's loss table: the worker's failed lines, the handoff's
+  // refusals and the runtime's generation-side reports. Both producer tables
+  // are still because Stop() waited for every producer before finalization.
+  CloseFaultWriteLoss();
+  AppendFaultLosses(&fault_losses);
+  std::stable_sort(
+      fault_losses.begin(), fault_losses.end(),
+      [](const FaultLossSpan &left_loss, const FaultLossSpan &right_loss) {
+        if (left_loss.first_stamp_us != right_loss.first_stamp_us) {
+          return left_loss.first_stamp_us < right_loss.first_stamp_us;
+        }
+        return left_loss.first_record_seq < right_loss.first_record_seq;
+      });
+  // A failed line is not persistence. The final marker says so, and a reader
+  // that finds it absent treats the fault stream as unfinished.
+  faults_complete = fault_write_failure_count == 0;
   static_cast<void>(WriteIndex(published_gaps, true));
   {
     const std::lock_guard<std::mutex> lock(done_mutex);
@@ -724,6 +854,35 @@ bool Recorder::Impl::WriteIndex(const std::vector<RecordGap> &gaps,
   }
   index["gaps"] = std::move(gap_list);
   index["write_failures"] = write_failure_count;
+  // The fault stream's own state. While the run is open the marker is false and
+  // the loss table is empty: the producer-side tables are still being written
+  // by the control thread, and only the worker's finalization may read them.
+  Json faults;
+  faults["complete"] = complete && faults_complete;
+  faults["recorded"] = faults_recorded.load(std::memory_order_relaxed);
+  faults["written"] = faults_written.load(std::memory_order_relaxed);
+  faults["queue_dropped"] = faults_dropped.load(std::memory_order_relaxed);
+  faults["generation_dropped"] =
+      faults_generation_dropped.load(std::memory_order_relaxed);
+  faults["write_failures"] =
+      fault_write_failures.load(std::memory_order_relaxed);
+  Json fault_loss_list = Json::array();
+  if (complete) {
+    for (const FaultLossSpan &loss : fault_losses) {
+      Json entry;
+      entry["first_record_seq"] = loss.first_record_seq;
+      entry["last_record_seq"] = loss.last_record_seq;
+      entry["first_state_seq"] = loss.first_state_seq;
+      entry["last_state_seq"] = loss.last_state_seq;
+      entry["first_stamp_us"] = loss.first_stamp_us;
+      entry["last_stamp_us"] = loss.last_stamp_us;
+      entry["dropped"] = loss.dropped;
+      entry["reason"] = FaultLossReasonName(loss.reason);
+      fault_loss_list.push_back(std::move(entry));
+    }
+  }
+  faults["losses"] = std::move(fault_loss_list);
+  index["faults"] = std::move(faults);
   const std::filesystem::path path =
       run_directory / std::string(kRecordIndexFile);
   return WriteJsonAtomic(path, index);
@@ -861,6 +1020,76 @@ bool Recorder::Impl::OfferSession(const RecordSessionEvent &event) noexcept {
   return accepted;
 }
 
+bool Recorder::TryRecordFault(const RecordedFault &fault) noexcept {
+  // The fault side of the control-thread contract: one copy into the bounded
+  // fault lane and nothing else. Never blocks, allocates, formats or throws; a
+  // stopped recorder or a full lane costs the occurrence and is counted.
+  if (!impl_) {
+    unattached_faults_dropped_.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  Impl &impl = *impl_;
+  if (!impl.accepting.load(std::memory_order_seq_cst)) {
+    impl.faults_dropped.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  impl.fault_offering.fetch_add(1, std::memory_order_seq_cst);
+  if (!impl.accepting.load(std::memory_order_seq_cst)) {
+    impl.faults_dropped.fetch_add(1, std::memory_order_relaxed);
+    // Same final-access ordering as the other lanes: notify (when this is the
+    // last counted producer), then decrement and do not touch the shared state.
+    if (impl.fault_offering.load(std::memory_order_seq_cst) == 1) {
+      impl.done_cv.notify_all();
+    }
+    impl.fault_offering.fetch_sub(1, std::memory_order_seq_cst);
+    RunAfterDecrementHook();
+    return false;
+  }
+  const bool accepted = impl.OfferFault(fault);
+  if (impl.fault_offering.load(std::memory_order_seq_cst) == 1) {
+    impl.done_cv.notify_all();
+  }
+  impl.fault_offering.fetch_sub(1, std::memory_order_seq_cst);
+  RunAfterDecrementHook();
+  return accepted;
+}
+
+void Recorder::ReportFaultGenerationLoss(protocol::TimeUs stamp_us,
+                                         protocol::Sequence state_seq,
+                                         std::uint64_t count) noexcept {
+  if (count == 0) {
+    return;
+  }
+  // Generation-side loss is a fact even when the recorder is no longer
+  // accepting: it is counted, but only a run that is still open publishes a
+  // span for it.
+  if (!impl_) {
+    unattached_faults_generation_dropped_.fetch_add(count,
+                                                    std::memory_order_relaxed);
+    return;
+  }
+  Impl &impl = *impl_;
+  impl.faults_generation_dropped.fetch_add(count, std::memory_order_relaxed);
+  if (!impl.accepting.load(std::memory_order_seq_cst)) {
+    return;
+  }
+  impl.fault_offering.fetch_add(1, std::memory_order_seq_cst);
+  if (!impl.accepting.load(std::memory_order_seq_cst)) {
+    if (impl.fault_offering.load(std::memory_order_seq_cst) == 1) {
+      impl.done_cv.notify_all();
+    }
+    impl.fault_offering.fetch_sub(1, std::memory_order_seq_cst);
+    RunAfterDecrementHook();
+    return;
+  }
+  impl.NoteFaultGenerationLoss(stamp_us, state_seq, count);
+  if (impl.fault_offering.load(std::memory_order_seq_cst) == 1) {
+    impl.done_cv.notify_all();
+  }
+  impl.fault_offering.fetch_sub(1, std::memory_order_seq_cst);
+  RunAfterDecrementHook();
+}
+
 void Recorder::Impl::NoteRefusal(const RecordSample &sample) noexcept {
   // A refusal extends the current stretch when it is the same sample offered
   // again - a caller that retries a tick costs itself the same loss twice, not
@@ -931,6 +1160,106 @@ void Recorder::Impl::AppendRefusalGaps(
     gap.dropped = MissingSamples(gap.first_seq, gap.last_seq, stride);
     gap.reason = RecordGapReason::QueueFull;
     target_gaps->push_back(gap);
+  }
+}
+
+bool Recorder::Impl::OfferFault(const RecordedFault &fault) noexcept {
+  // One copy into the fixed-capacity fault lane and nothing else. A full lane
+  // is a queue-side loss named with the occurrence's ordinal and stamp; it
+  // never touches the sample lane's room.
+  if (!fault_queue.TryPush(fault)) {
+    NoteFaultQueueLoss(fault);
+    faults_dropped.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  faults_recorded.fetch_add(1, std::memory_order_relaxed);
+  return true;
+}
+
+void Recorder::Impl::NoteFaultQueueLoss(const RecordedFault &fault) noexcept {
+  // Consecutive refused occurrences are one stretch until an occurrence is
+  // accepted: the accepted one advances faults_recorded, which closes the
+  // stretch. That is the same rule the sample refusal table uses, and it keeps
+  // a span from claiming an occurrence that became a row.
+  const std::uint64_t recorded_now =
+      faults_recorded.load(std::memory_order_relaxed);
+  if (!fault_queue_loss_open_valid ||
+      recorded_now != fault_queue_loss_open_recorded ||
+      fault.record_seq != fault_queue_loss_open.last_record_seq + 1) {
+    CloseFaultQueueLoss();
+    fault_queue_loss_open = FaultLossSpan{};
+    fault_queue_loss_open.reason = FaultLossReason::QueueFull;
+    fault_queue_loss_open.first_record_seq = fault.record_seq;
+    fault_queue_loss_open.first_state_seq = fault.state_seq;
+    fault_queue_loss_open.first_stamp_us = fault.detail.detected_stamp_us;
+    fault_queue_loss_open_recorded = recorded_now;
+    fault_queue_loss_open_valid = true;
+  }
+  fault_queue_loss_open.last_record_seq = fault.record_seq;
+  fault_queue_loss_open.last_state_seq = fault.state_seq;
+  fault_queue_loss_open.last_stamp_us = fault.detail.detected_stamp_us;
+  ++fault_queue_loss_open.dropped;
+}
+
+void Recorder::Impl::CloseFaultQueueLoss() noexcept {
+  if (!fault_queue_loss_open_valid) {
+    return;
+  }
+  fault_queue_loss_open_valid = false;
+  PutFaultLoss(fault_queue_losses, &fault_queue_loss_count,
+               fault_queue_loss_open);
+}
+
+void Recorder::Impl::NoteFaultGenerationLoss(protocol::TimeUs stamp_us,
+                                             protocol::Sequence state_seq,
+                                             std::uint64_t count) noexcept {
+  FaultLossSpan span;
+  span.reason = FaultLossReason::Generation;
+  // The state machine could not enumerate these occurrences, so there is no
+  // record ordinal to name; the tick's own sequence and stamp are the range.
+  span.first_state_seq = state_seq;
+  span.last_state_seq = state_seq;
+  span.first_stamp_us = stamp_us;
+  span.last_stamp_us = stamp_us;
+  span.dropped = count;
+  PutFaultLoss(fault_generation_losses, &fault_generation_loss_count, span);
+}
+
+void Recorder::Impl::PutFaultLoss(FaultLossSpan *table, std::uint32_t *count,
+                                  const FaultLossSpan &span) noexcept {
+  if (*count < kRecordGapSegments) {
+    table[*count] = span;
+    ++*count;
+    return;
+  }
+  // The table is full: the last span absorbs this one and keeps the total, so
+  // a pathological run reports one coarse loss rather than silence. The loss
+  // resolution degrades past this bound; the loss itself is never dropped.
+  FaultLossSpan &last = table[kRecordGapSegments - 1];
+  if (span.last_record_seq > last.last_record_seq) {
+    last.last_record_seq = span.last_record_seq;
+  }
+  if (span.last_state_seq > last.last_state_seq) {
+    last.last_state_seq = span.last_state_seq;
+  }
+  if (span.last_stamp_us > last.last_stamp_us) {
+    last.last_stamp_us = span.last_stamp_us;
+  }
+  last.dropped += span.dropped;
+}
+
+void Recorder::Impl::AppendFaultLosses(
+    std::vector<FaultLossSpan> *losses) const {
+  // Called by the worker only after Stop() has waited for every control-thread
+  // producer to leave, so the tables and the open stretch are still.
+  for (std::uint32_t index = 0; index < fault_queue_loss_count; ++index) {
+    losses->push_back(fault_queue_losses[index]);
+  }
+  if (fault_queue_loss_open_valid) {
+    losses->push_back(fault_queue_loss_open);
+  }
+  for (std::uint32_t index = 0; index < fault_generation_loss_count; ++index) {
+    losses->push_back(fault_generation_losses[index]);
   }
 }
 
@@ -1019,6 +1348,31 @@ std::vector<RecordGap> Recorder::gaps() const {
   }
   const std::lock_guard<std::mutex> lock(impl_->gaps_mutex);
   return impl_->published_gaps;
+}
+
+std::uint64_t Recorder::faults_recorded() const {
+  return impl_ ? impl_->faults_recorded.load(std::memory_order_relaxed) : 0;
+}
+
+std::uint64_t Recorder::faults_written() const {
+  return impl_ ? impl_->faults_written.load(std::memory_order_relaxed) : 0;
+}
+
+std::uint64_t Recorder::faults_dropped() const {
+  return unattached_faults_dropped_.load(std::memory_order_relaxed) +
+         (impl_ ? impl_->faults_dropped.load(std::memory_order_relaxed) : 0);
+}
+
+std::uint64_t Recorder::faults_generation_dropped() const {
+  return unattached_faults_generation_dropped_.load(std::memory_order_relaxed) +
+         (impl_
+              ? impl_->faults_generation_dropped.load(std::memory_order_relaxed)
+              : 0);
+}
+
+std::uint64_t Recorder::fault_write_failures() const {
+  return impl_ ? impl_->fault_write_failures.load(std::memory_order_relaxed)
+               : 0;
 }
 
 }  // namespace irmv::telemetry
