@@ -329,6 +329,46 @@ check(np.isnan(held["forward"][1]), "a value crossed a cadence gap")
 check(np.isnan(held["forward"][2]), "a value was invented inside a cadence gap")
 check(close(float(held["forward"][3]), 2.2), "the sample after a gap was not used")
 
+# A cadence gap between two successful samples must not bypass an indexed loss.
+# The pair 1.015 s -> 1.040 s is already a gap, but the loss says the 1.020 s
+# sample was due: 1.019 s may still hold 1.015 s, 1.022 s must not.
+interior_losses = [
+    {
+        "first_sample_seq": 2,
+        "last_sample_seq": 3,
+        "first_stamp_us": 1_020_000,
+        "last_stamp_us": 1_030_000,
+        "dropped": 2,
+        "reason": "queue_full",
+    }
+]
+interior_samples = [
+    velocity_row(1_000_000, 0, forward=1.9),
+    velocity_row(1_015_000, 1, forward=2.0),
+    velocity_row(1_040_000, 2, forward=2.2),
+]
+interior = hold_values(
+    [
+        runtime_row(1_019_000),
+        runtime_row(1_022_000),
+        runtime_row(1_040_000),
+    ],
+    interior_samples,
+    losses=interior_losses,
+)
+check(
+    close(float(interior["forward"][0]), 2.0),
+    "the sample before an interior loss was not held",
+)
+check(
+    np.isnan(interior["forward"][1]),
+    "a cadence gap bypassed an interior loss and held the old value",
+)
+check(
+    close(float(interior["forward"][2]), 2.2),
+    "the sample after an interior loss was not used",
+)
+
 # The final segment has no following row, so the index's losses are the only
 # thing that can bound it. A loss starting inside the last planned period ends
 # the hold at that instant: 1.019 s is still served, 1.020 s and 1.022 s are

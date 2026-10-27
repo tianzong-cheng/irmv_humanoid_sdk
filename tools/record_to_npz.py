@@ -493,16 +493,17 @@ def _velocity_segments(rows, period_us, losses):
             or a.get("session_id") != b.get("session_id")
         ):
             broken = True
-        else:
-            for loss in losses:
-                first = int(loss.get("first_stamp_us", 0))
-                last = int(loss.get("last_stamp_us", 0))
-                if first < b_stamp and last >= a_stamp:
-                    # The value may be held only up to the instant the missing
-                    # sample would have been due; it never crosses the loss.
-                    end_us = min(end_us, max(first, a_stamp))
-                    broken = True
-                    break
+        # A loss bounds the hold for every segment, not only the tail. A
+        # cadence gap or identity change must not hide a loss whose first
+        # missing sample is earlier than the next recorded row: the value may
+        # be held only up to the instant that sample would have been due.
+        for loss in losses:
+            first = int(loss.get("first_stamp_us", 0))
+            last = int(loss.get("last_stamp_us", 0))
+            if first < b_stamp and last >= a_stamp:
+                end_us = min(end_us, max(first, a_stamp))
+                broken = True
+                break
         if broken:
             segments.append((start, index, end_us))
             start = index + 1
