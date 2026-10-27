@@ -77,7 +77,9 @@ TickResult ExecutionFsm::Tick(protocol::TimeUs now_us,
   // first faulty tick records every established condition. The safety check
   // stamps neither the detection time nor the output action, so both are
   // filled here with the same damping rule the published details use; the
-  // sample time stays the feedback stamp.
+  // sample time stays the feedback stamp. The action is only provisional: the
+  // output decision below runs after this check, and the batch is restamped
+  // with the final action once that decision is made.
   const protocol::OutputAction observed_action =
       DampingEligible(report) ? protocol::OutputAction::Damping
                               : protocol::OutputAction::ZeroTorque;
@@ -152,6 +154,13 @@ TickResult ExecutionFsm::Tick(protocol::TimeUs now_us,
     }
   }
   CommitPendingResults(scope, write.accepted);
+
+  // 10b. The tick's output is final now: a failed write and its fallback have
+  //      already degraded the action to zero torque. Every observation of this
+  //      tick - including a write failure recorded after the safety check -
+  //      must name the action the machine actually commands, not the
+  //      provisional damping rule applied before the output was decided.
+  fault_tracker_.SetOutputActionForTick(output_action_);
 
   // 11. Publish the state of this tick.
   PublishState(scope);

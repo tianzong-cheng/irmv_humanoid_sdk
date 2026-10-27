@@ -583,8 +583,9 @@ int RunRuntime(const std::string &run_directory, TimeUs begin_us, TimeUs end_us,
   summary["session_count"] = reader.sessions().size();
 
   // The fault stream's own accounting: completion, truncation, the loss spans
-  // and the final counts the recorder published. A run with no fault file has
-  // an empty, complete stream rather than a missing one.
+  // and the final counts the recorder published. The sidecar is created when
+  // the recorder starts, so ReadFaultRange refuses a run whose file is missing
+  // rather than presenting the loss as an empty stream.
   Json fault_summary;
   fault_summary["complete"] = faults.complete;
   fault_summary["truncated"] = faults.truncated;

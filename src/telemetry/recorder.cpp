@@ -283,6 +283,12 @@ struct Recorder::Impl {
   std::vector<RecordSessionEvent> sessions;
   std::vector<ChunkEntry> chunk_entries;
   std::vector<RecordGap> gaps;
+  // Worker-side write-failure spans. They are fixed capacity like the producer
+  // tables: a run that loses more than kRecordGapSegments separate stretches
+  // folds them into the last span instead of growing the index without bound.
+  FaultLossSpan fault_write_losses[kRecordGapSegments]{};
+  std::uint32_t fault_write_loss_count{0};
+  // The finalized, sorted loss table of the run.
   std::vector<FaultLossSpan> fault_losses;
   std::unique_ptr<FaultWriter> fault_writer;
   std::uint32_t joint_count{0};
@@ -632,10 +638,8 @@ bool Recorder::Impl::WriteFault(const RecordedFault &fault) {
     return false;
   }
   faults_written.fetch_add(1, std::memory_order_relaxed);
-  if (fault_write_loss_open_valid) {
-    fault_losses.push_back(fault_write_loss_open);
-    fault_write_loss_open_valid = false;
-  }
+  // A successful line closes the stretch of failed writes that preceded it.
+  CloseFaultWriteLoss();
   return true;
 }
 
@@ -664,7 +668,8 @@ void Recorder::Impl::CloseFaultWriteLoss() {
     return;
   }
   fault_write_loss_open_valid = false;
-  fault_losses.push_back(fault_write_loss_open);
+  PutFaultLoss(fault_write_losses, &fault_write_loss_count,
+               fault_write_loss_open);
 }
 
 bool Recorder::Impl::WriteSessions() {
@@ -1261,6 +1266,17 @@ void Recorder::Impl::AppendFaultLosses(
   }
   for (std::uint32_t index = 0; index < fault_generation_loss_count; ++index) {
     losses->push_back(fault_generation_losses[index]);
+  }
+  FaultLossSpan write_table[kRecordGapSegments];
+  std::uint32_t write_count = fault_write_loss_count;
+  for (std::uint32_t index = 0; index < write_count; ++index) {
+    write_table[index] = fault_write_losses[index];
+  }
+  if (fault_write_loss_open_valid) {
+    PutFaultLoss(write_table, &write_count, fault_write_loss_open);
+  }
+  for (std::uint32_t index = 0; index < write_count; ++index) {
+    losses->push_back(write_table[index]);
   }
 }
 

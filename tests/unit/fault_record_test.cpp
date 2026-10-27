@@ -43,6 +43,7 @@ using irmv::protocol::TimeUs;
 using irmv::telemetry::FaultLossReason;
 using irmv::telemetry::FaultRecordRange;
 using irmv::telemetry::kFaultRecordSchemaVersion;
+using irmv::telemetry::kRecordGapSegments;
 using irmv::telemetry::ReadFaultRange;
 using irmv::telemetry::RecordedFault;
 using irmv::telemetry::Recorder;
@@ -278,6 +279,51 @@ int NoFaultsIsComplete() {
   CHECK(index["faults"]["complete"] == true);
   CHECK(index["faults"]["written"] == 0);
   std::filesystem::remove_all(directory);
+  return 0;
+}
+
+// The recorder creates `faults.jsonl` before it accepts the first occurrence,
+// so its absence is lost evidence, never a run that simply saw no faults. This
+// holds for a run that recorded occurrences and for a finalized zero-fault run.
+int MissingSidecarIsAHardError() {
+  {
+    const std::filesystem::path directory = MakeDirectory();
+    Recorder recorder;
+    CHECK(StartRecorder(&recorder, directory));
+    CHECK(recorder.TryRecordFault(MakeFault(1, 10, 20, 1000)));
+    CHECK(recorder.Stop());
+    const std::filesystem::path faults_path =
+        recorder.run_directory() / "faults.jsonl";
+    CHECK(std::filesystem::exists(faults_path));
+    std::filesystem::remove(faults_path);
+
+    FaultRecordRange range;
+    CHECK(!ReadFaultRange(recorder.run_directory(), 0, kNever, &range));
+    CHECK(!range.ok);
+    CHECK(range.rows.empty());
+    CHECK(range.error.find("faults.jsonl") != std::string::npos);
+    std::filesystem::remove_all(directory);
+  }
+  {
+    const std::filesystem::path directory = MakeDirectory();
+    Recorder recorder;
+    CHECK(StartRecorder(&recorder, directory));
+    CHECK(recorder.Stop());
+    const std::filesystem::path faults_path =
+        recorder.run_directory() / "faults.jsonl";
+    CHECK(std::filesystem::exists(faults_path));
+    const nlohmann::json index = ReadIndex(recorder.run_directory());
+    CHECK(index["faults"]["complete"] == true);
+    CHECK(index["faults"]["written"] == 0);
+    std::filesystem::remove(faults_path);
+
+    FaultRecordRange range;
+    CHECK(!ReadFaultRange(recorder.run_directory(), 0, kNever, &range));
+    CHECK(!range.ok);
+    CHECK(range.rows.empty());
+    CHECK(range.error.find("faults.jsonl") != std::string::npos);
+    std::filesystem::remove_all(directory);
+  }
   return 0;
 }
 
@@ -670,6 +716,72 @@ int LossSpanTableFoldRetainsTotals() {
   return 0;
 }
 
+// The worker-side write-failure span table is bounded like the producer
+// tables. Alternating failures and successes create one span per failure; past
+// 64 they fold into the last one, which must keep the total without growing the
+// index.
+int WriteFailureLossSpansAreBounded() {
+  struct AlternatingHook {
+    std::atomic<std::uint64_t> calls{0};
+  } state;
+  irmv::telemetry::SetFaultLineWriteHookForTest(
+      [](void *context, std::string_view) -> int {
+        auto *hook = static_cast<AlternatingHook *>(context);
+        return (hook->calls.fetch_add(1) % 2 == 0) ? 1 : 0;
+      },
+      &state);
+
+  constexpr std::uint64_t kEvents = 600;
+  const std::filesystem::path directory = MakeDirectory();
+  Recorder recorder;
+  CHECK(StartRecorder(&recorder, directory));
+  for (std::uint64_t index = 0; index < kEvents; ++index) {
+    CHECK(recorder.TryRecordFault(MakeFault(
+        index + 1, 1000 + index, 5000 + index, 100'000 + index * 10)));
+  }
+  CHECK(recorder.Stop());
+  const std::uint64_t failures = recorder.fault_write_failures();
+  CHECK(failures == kEvents / 2);
+  CHECK(recorder.faults_written() == kEvents / 2);
+  CHECK(recorder.faults_recorded() == kEvents);
+
+  FaultRecordRange range;
+  CHECK(ReadFaultRange(recorder.run_directory(), 0, kNever, &range));
+  CHECK(range.ok);
+  CHECK(!range.complete);
+  CHECK(range.losses.size() <= kRecordGapSegments);
+  std::uint64_t dropped = 0;
+  for (const auto &loss : range.losses) {
+    CHECK(loss.reason == FaultLossReason::WriteFailed);
+    dropped += loss.dropped;
+    // The folded table retains the first span's start and extends the last.
+    CHECK(loss.first_record_seq != 0);
+    CHECK(loss.last_record_seq >= loss.first_record_seq);
+  }
+  CHECK(dropped == failures);
+
+  const nlohmann::json index = ReadIndex(recorder.run_directory());
+  CHECK(index.is_object());
+  CHECK(index["faults"]["complete"] == false);
+  CHECK(index["faults"]["write_failures"] == failures);
+  CHECK(index["faults"]["losses"].size() <= kRecordGapSegments);
+  std::uint64_t index_dropped = 0;
+  for (const auto &loss : index["faults"]["losses"]) {
+    index_dropped += loss["dropped"].get<std::uint64_t>();
+  }
+  CHECK(index_dropped == failures);
+  if (index["faults"]["losses"].size() == kRecordGapSegments) {
+    // The first failure starts the retained first span; the last reported
+    // failure ends the folded last span.
+    CHECK(index["faults"]["losses"][0]["first_record_seq"] == 1);
+    CHECK(index["faults"]["losses"].back()["last_record_seq"] == kEvents - 1);
+  }
+
+  irmv::telemetry::SetFaultLineWriteHookForTest(nullptr, nullptr);
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
 // An index without the fault block (a run from a build before fault
 // persistence, or one whose section was not published) is readable and
 // incomplete, not an error.
@@ -740,12 +852,14 @@ int main() {
   int failures = 0;
   failures += ThreeFaultsInOrder();
   failures += NoFaultsIsComplete();
+  failures += MissingSidecarIsAHardError();
   failures += TrailingPartialAndMissingCompletion();
   failures += WriteFailureDoesNotClaimPersistence();
   failures += BlockedWriterAndLossAccounting();
   failures += TornLineRollsBack();
   failures += MessageBytesRoundTrip();
   failures += LossSpanTableFoldRetainsTotals();
+  failures += WriteFailureLossSpansAreBounded();
   failures += IndexWithoutFaultBlockReadsIncomplete();
   failures += WrongLineSchemaVersionIsRefused();
   if (failures == 0) {

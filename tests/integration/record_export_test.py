@@ -734,6 +734,194 @@ def main() -> int:
             if empty["fault_condition_name"].dtype.kind != "U":
                 fail("an empty run exported fault_condition_name as a non-text column")
 
+            # The fault stream's completion and loss accounting is exported
+            # independently of its rows. A complete empty stream and a
+            # truncated/lossy one must stay distinguishable, and both keep the
+            # empty loss shape with the right dtype.
+            empty_summary = dict(run_summary)
+            empty_summary["faults"] = {
+                "complete": True,
+                "truncated": False,
+                "rows_in_range": 0,
+                "recorded": 0,
+                "written": 0,
+                "queue_dropped": 0,
+                "generation_dropped": 0,
+                "write_failures": 0,
+                "missing_occurrences": 0,
+                "losses": [],
+            }
+            empty_app = {
+                "summary": {
+                    "losses": [],
+                    "missing_samples": 0,
+                    "policy_session_truncated": False,
+                },
+                "association": {
+                    "ok": False,
+                    "reason": "test",
+                    "rows": [],
+                    "total": 0,
+                    "excluded": 0,
+                },
+                "hold": {
+                    "forward": np.zeros(0),
+                    "lateral": np.zeros(0),
+                    "yaw": np.zeros(0),
+                },
+                "policy_sessions": [],
+            }
+            empty_faults = record_to_npz.to_archive([], empty_summary, [], empty_app)
+            for column, dtype in (
+                ("fault_complete", np.bool_),
+                ("fault_truncated", np.bool_),
+                ("fault_rows_in_range", np.uint64),
+                ("fault_recorded", np.uint64),
+                ("fault_written", np.uint64),
+                ("fault_queue_dropped", np.uint64),
+                ("fault_generation_dropped", np.uint64),
+                ("fault_write_failures", np.uint64),
+                ("fault_missing_occurrences", np.uint64),
+            ):
+                if empty_faults[column].shape != () or empty_faults[column].dtype != dtype:
+                    fail(
+                        f"an empty fault stream exported {column} with shape "
+                        f"{empty_faults[column].shape} and dtype "
+                        f"{empty_faults[column].dtype}"
+                    )
+            if bool(empty_faults["fault_complete"]) is not True:
+                fail("a complete empty fault stream was not reported complete")
+            if bool(empty_faults["fault_truncated"]):
+                fail("a complete empty fault stream was reported truncated")
+            for column, dtype in (
+                ("fault_loss_first_record_seq", np.uint64),
+                ("fault_loss_last_record_seq", np.uint64),
+                ("fault_loss_first_state_seq", np.uint64),
+                ("fault_loss_last_state_seq", np.uint64),
+                ("fault_loss_first_stamp_us", np.uint64),
+                ("fault_loss_last_stamp_us", np.uint64),
+                ("fault_loss_dropped", np.uint64),
+            ):
+                if empty_faults[column].shape != (0,) or empty_faults[column].dtype != dtype:
+                    fail(
+                        f"an empty fault stream exported {column} with shape "
+                        f"{empty_faults[column].shape} and dtype "
+                        f"{empty_faults[column].dtype}"
+                    )
+            if empty_faults["fault_loss_reason"].shape != (0,) or empty_faults[
+                "fault_loss_reason"
+            ].dtype.kind != "U":
+                fail("an empty fault stream exported fault_loss_reason without text shape")
+            for column, dtype in (
+                ("application_loss_first_sample_seq", np.uint64),
+                ("application_loss_last_sample_seq", np.uint64),
+                ("application_loss_first_stamp_us", np.uint64),
+                ("application_loss_last_stamp_us", np.uint64),
+                ("application_loss_dropped", np.uint64),
+            ):
+                if empty_faults[column].shape != (0,) or empty_faults[column].dtype != dtype:
+                    fail(
+                        f"an empty application stream exported {column} with "
+                        f"shape {empty_faults[column].shape} and dtype "
+                        f"{empty_faults[column].dtype}"
+                    )
+            if empty_faults["application_loss_reason"].dtype.kind != "U":
+                fail("an empty application stream exported a non-text loss reason")
+            if int(empty_faults["application_missing_samples"]) != 0:
+                fail("an empty application stream reported missing samples")
+            if bool(empty_faults["policy_session_truncated"]):
+                fail("an empty application stream reported a truncated policy sidecar")
+
+            lossy_summary = dict(empty_summary)
+            lossy_summary["faults"] = {
+                "complete": False,
+                "truncated": True,
+                "rows_in_range": 0,
+                "recorded": 5,
+                "written": 2,
+                "queue_dropped": 1,
+                "generation_dropped": 0,
+                "write_failures": 3,
+                "missing_occurrences": 4,
+                "losses": [
+                    {
+                        "first_record_seq": 1,
+                        "last_record_seq": 5,
+                        "first_state_seq": 10,
+                        "last_state_seq": 14,
+                        "first_stamp_us": 1000,
+                        "last_stamp_us": 1040,
+                        "dropped": 4,
+                        "reason": "write_failed",
+                    }
+                ],
+            }
+            lossy_app = {
+                "summary": {
+                    "losses": [
+                        {
+                            "first_sample_seq": 20,
+                            "last_sample_seq": 29,
+                            "first_stamp_us": 200,
+                            "last_stamp_us": 290,
+                            "dropped": 10,
+                            "reason": "queue_full",
+                        }
+                    ],
+                    "missing_samples": 10,
+                    "policy_session_truncated": True,
+                },
+                "association": {
+                    "ok": False,
+                    "reason": "test",
+                    "rows": [],
+                    "total": 0,
+                    "excluded": 0,
+                },
+                "hold": {
+                    "forward": np.zeros(0),
+                    "lateral": np.zeros(0),
+                    "yaw": np.zeros(0),
+                },
+                "policy_sessions": [],
+            }
+            lossy = record_to_npz.to_archive([], lossy_summary, [], lossy_app)
+            if bool(lossy["fault_complete"]) or not bool(lossy["fault_truncated"]):
+                fail("a truncated fault stream was not exported as incomplete/truncated")
+            if int(lossy["fault_missing_occurrences"]) != 4:
+                fail("the fault stream's missing-occurrence count was not exported")
+            if int(lossy["fault_recorded"]) != 5 or int(lossy["fault_written"]) != 2:
+                fail("the fault stream's recorded/written counts were not exported")
+            if (
+                int(lossy["fault_queue_dropped"]) != 1
+                or int(lossy["fault_write_failures"]) != 3
+            ):
+                fail("the fault stream's queue/write loss counts were not exported")
+            if lossy["fault_loss_dropped"].shape != (1,) or int(
+                lossy["fault_loss_dropped"][0]
+            ) != 4:
+                fail("the fault loss span was not exported")
+            if str(lossy["fault_loss_reason"][0]) != "write_failed":
+                fail("the fault loss reason did not survive as text")
+            if int(lossy["fault_loss_last_record_seq"][0]) != 5:
+                fail("the fault loss span's record range was not exported")
+            if lossy["application_loss_dropped"].shape != (1,) or int(
+                lossy["application_loss_dropped"][0]
+            ) != 10:
+                fail("the application loss span was not exported")
+            if str(lossy["application_loss_reason"][0]) != "queue_full":
+                fail("the application loss reason did not survive as text")
+            if int(lossy["application_missing_samples"]) != 10:
+                fail("the application missing-sample count was not exported")
+            if not bool(lossy["policy_session_truncated"]):
+                fail("the policy-session truncation flag was not exported")
+            if bool(lossy["fault_complete"]) == bool(empty_faults["fault_complete"]):
+                fail("a lossy fault stream is indistinguishable from a complete one")
+            if int(lossy["fault_loss_dropped"].size) == int(
+                empty_faults["fault_loss_dropped"].size
+            ):
+                fail("a lossy fault stream exported the empty loss table")
+
         # A 100 Hz recording over a four second run: the row rate is the
         # configured one and not the control rate, and the spacing is even.
         span_us = int(data["stamp_us"][-1]) - int(data["stamp_us"][0])
@@ -1325,6 +1513,36 @@ def main() -> int:
                 RUNTIME_ID,
             ]:
                 fail("the fault runtime identity did not survive the export")
+            if not bool(linked["fault_complete"]) or bool(linked["fault_truncated"]):
+                fail("a complete fault stream was exported as incomplete/truncated")
+            if int(linked["fault_missing_occurrences"]) != 0:
+                fail("a complete fault stream reported missing occurrences")
+            if int(linked["fault_recorded"]) != 3 or int(linked["fault_written"]) != 3:
+                fail("the fault stream's recorded/written counts were not exported")
+            if linked["fault_loss_dropped"].shape != (0,):
+                fail("a complete fault stream exported a loss span")
+            # The fixture's application stream carries one ten-sample loss.
+            app_loss_columns = (
+                "application_loss_first_sample_seq",
+                "application_loss_last_sample_seq",
+                "application_loss_first_stamp_us",
+                "application_loss_last_stamp_us",
+                "application_loss_dropped",
+            )
+            for column in app_loss_columns:
+                if linked[column].shape != (1,) or linked[column].dtype != np.uint64:
+                    fail(
+                        f"the archive's {column} is {linked[column].dtype}/"
+                        f"{linked[column].shape}, expected uint64/(1,)"
+                    )
+            if int(linked["application_loss_dropped"][0]) != 10:
+                fail("the application loss span was not exported")
+            if str(linked["application_loss_reason"][0]) != "queue_full":
+                fail("the application loss reason did not survive the export")
+            if int(linked["application_missing_samples"]) != 10:
+                fail("the application missing-sample count was not exported")
+            if bool(linked["policy_session_truncated"]):
+                fail("a complete policy sidecar was exported as truncated")
             # No column is an object array: loading with allow_pickle=False is
             # part of the contract, and a fault detail is never pickled.
             for column in linked.files:
@@ -1393,6 +1611,23 @@ def main() -> int:
                 fail("an empty application exported a held value")
             if int(empty_linked["fault_record_seq"].shape[0]) != 3:
                 fail("the fault array changed length when the application was empty")
+            for column in (
+                "application_loss_first_sample_seq",
+                "application_loss_last_sample_seq",
+                "application_loss_first_stamp_us",
+                "application_loss_last_stamp_us",
+                "application_loss_dropped",
+            ):
+                if empty_linked[column].shape != (0,) or empty_linked[column].dtype != np.uint64:
+                    fail(
+                        f"an empty application exported {column} with shape "
+                        f"{empty_linked[column].shape} and dtype "
+                        f"{empty_linked[column].dtype}"
+                    )
+            if int(empty_linked["application_missing_samples"]) != 0:
+                fail("an empty application reported missing samples")
+            if bool(empty_linked["policy_session_truncated"]):
+                fail("an empty application reported a truncated policy sidecar")
 
         # Unknown and malformed inputs are refused with a nonzero exit, never
         # reinterpreted. A missing prerequisite is not a pass.

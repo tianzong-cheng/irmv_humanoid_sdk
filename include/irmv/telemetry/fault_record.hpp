@@ -147,9 +147,11 @@ struct FaultRecordRange {
 // Reads the complete occurrences of `run_directory` whose detection stamp lies
 // in `[begin_us, end_us)`, plus the overlapping loss spans and the run's fault
 // completion marker. An empty or inverted range reads no rows and is not an
-// error. A missing `faults.jsonl` (a run with no faults, or a truncated run) is
-// not an error either; a newline-terminated malformed line is. This is a
-// startup and tool path, so allocation and file reads are expected.
+// error. A missing `faults.jsonl` is an error: the recorder creates the sidecar
+// before it starts, so its absence means the file was lost or the run was
+// copied incompletely, not that the run saw no faults. A newline-terminated
+// malformed line is an error too. This is a startup and tool path, so
+// allocation and file reads are expected.
 bool ReadFaultRange(const std::filesystem::path &run_directory,
                     protocol::TimeUs begin_us, protocol::TimeUs end_us,
                     FaultRecordRange *range);

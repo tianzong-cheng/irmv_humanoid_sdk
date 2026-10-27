@@ -329,6 +329,45 @@ check(np.isnan(held["forward"][1]), "a value crossed a cadence gap")
 check(np.isnan(held["forward"][2]), "a value was invented inside a cadence gap")
 check(close(float(held["forward"][3]), 2.2), "the sample after a gap was not used")
 
+# The final segment has no following row, so the index's losses are the only
+# thing that can bound it. A loss starting inside the last planned period ends
+# the hold at that instant: 1.019 s is still served, 1.020 s and 1.022 s are
+# not. Without the loss the same 1.022 s row would hold the value.
+tail_losses = [
+    {
+        "first_sample_seq": 1,
+        "last_sample_seq": 2,
+        "first_stamp_us": 1_020_000,
+        "last_stamp_us": 1_030_000,
+        "dropped": 2,
+        "reason": "queue_full",
+    }
+]
+tail_samples = [velocity_row(1_015_000, 0, forward=7.0)]
+tail = hold_values(
+    [
+        runtime_row(1_019_000),
+        runtime_row(1_020_000),
+        runtime_row(1_022_000),
+    ],
+    tail_samples,
+    losses=tail_losses,
+)
+check(close(float(tail["forward"][0]), 7.0), "the last sample was not held before a future loss")
+check(
+    np.isnan(tail["forward"][1]),
+    "a value was held at the first lost sample's deadline",
+)
+check(
+    np.isnan(tail["forward"][2]),
+    "a value was held past a loss that started after the last sample",
+)
+unclamped = hold_values([runtime_row(1_022_000)], tail_samples)
+check(
+    close(float(unclamped["forward"][0]), 7.0),
+    "without a loss the last sample was not held for one planned period",
+)
+
 if failures:
     print(
         f"record_alignment_test: {len(failures)} failure(s)",

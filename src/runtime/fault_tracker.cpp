@@ -127,4 +127,11 @@ void FaultTracker::NoteDropped(std::uint64_t count) noexcept {
   observations_.dropped += count;
 }
 
+void FaultTracker::SetOutputActionForTick(
+    protocol::OutputAction action) noexcept {
+  for (std::uint32_t index = 0; index < observations_.count; ++index) {
+    observations_.details[index].output_action = action;
+  }
+}
+
 }  // namespace irmv::runtime

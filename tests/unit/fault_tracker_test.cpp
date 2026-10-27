@@ -379,6 +379,53 @@ int TestExternalDropIsCountedInTheTick() {
   return 0;
 }
 
+int TestSetOutputActionRestampsTheTick() {
+  FaultTracker tracker;
+  FaultDetail velocity =
+      MakeDetail(FaultCondition::JointVelocityExceeded, 1, 0, 11.0, "velocity");
+  velocity.output_action = irmv::protocol::OutputAction::Damping;
+  FaultDetail driver =
+      MakeDetail(FaultCondition::JointDriverError, 2, 7, 0.0, "driver");
+  driver.output_action = irmv::protocol::OutputAction::Damping;
+
+  tracker.BeginTick();
+  CHECK(tracker.Observe(velocity));
+  CHECK(tracker.Observe(driver));
+  tracker.SetOutputActionForTick(irmv::protocol::OutputAction::ZeroTorque);
+  CHECK(tracker.NewObservations().count == 2);
+  for (std::uint32_t index = 0; index < tracker.NewObservations().count;
+       ++index) {
+    CHECK(tracker.NewObservations().details[index].output_action ==
+          irmv::protocol::OutputAction::ZeroTorque);
+  }
+  tracker.EndTick();
+
+  // A sustained condition is not new, so the tick's batch stays empty while a
+  // duplicate inside the tick is still never stored twice.
+  tracker.BeginTick();
+  CHECK(!tracker.Observe(velocity));
+  CHECK(!tracker.Observe(velocity));
+  tracker.SetOutputActionForTick(irmv::protocol::OutputAction::Damping);
+  CHECK(tracker.NewObservations().count == 0);
+  CHECK(tracker.NewObservations().dropped == 0);
+  tracker.EndTick();
+
+  // A silent tick ends the occurrence; when it reappears it is restamped with
+  // that tick's final action.
+  tracker.BeginTick();
+  tracker.EndTick();
+  tracker.BeginTick();
+  CHECK(tracker.Observe(velocity));
+  CHECK(!tracker.Observe(velocity));
+  tracker.SetOutputActionForTick(irmv::protocol::OutputAction::Damping);
+  CHECK(tracker.NewObservations().count == 1);
+  CHECK(tracker.NewObservations().details[0].output_action ==
+        irmv::protocol::OutputAction::Damping);
+  CHECK(tracker.NewObservations().dropped == 0);
+  tracker.EndTick();
+  return 0;
+}
+
 int TestNoDynamicAllocation() {
   // Positive control: the monitor must observe a real allocation, otherwise a
   // broken override would let the zero-allocation assertion pass vacuously.
@@ -444,6 +491,10 @@ int main() {
     return result;
   }
   result = TestExternalDropIsCountedInTheTick();
+  if (result != 0) {
+    return result;
+  }
+  result = TestSetOutputActionRestampsTheTick();
   if (result != 0) {
     return result;
   }

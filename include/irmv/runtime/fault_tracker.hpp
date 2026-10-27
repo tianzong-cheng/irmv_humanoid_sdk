@@ -93,6 +93,14 @@ class FaultTracker {
   // or throws.
   void NoteDropped(std::uint64_t count) noexcept;
 
+  // Rewrites the `output_action` of every observation in the tick just
+  // observed. The safety check runs before the tick's output is decided, so a
+  // detail it copied carries a provisional action. The caller stamps the final
+  // action here after the write and fallback decision, so a degradation latch
+  // from an earlier tick is reflected by every observation of this one. Never
+  // allocates, blocks or throws.
+  void SetOutputActionForTick(protocol::OutputAction action) noexcept;
+
   // Observations that newly appeared in the tick just observed. Later
   // recorder stages copy only `count` entries, never the full capacity.
   const FaultObservationBatch &NewObservations() const noexcept {

@@ -609,8 +609,11 @@ bool ReadFaultRange(const std::filesystem::path &run_directory,
     return false;
   }
   if (!faults_exists) {
-    range->ok = true;
-    return true;
+    // The recorder creates the sidecar before it starts, even for a run that
+    // never reports a fault. Its absence is therefore missing evidence, not an
+    // empty stream: the run was copied incompletely or its file was lost.
+    range->error = "cannot find " + faults_path.string();
+    return false;
   }
   std::ifstream file(faults_path, std::ios::binary);
   if (!file) {

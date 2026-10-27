@@ -194,6 +194,50 @@ VELOCITY_TEXT_COLUMNS = {
     "velocity_session_id": 32,
 }
 
+# The loss reason is a name the reader carries, like a gap reason. One width
+# covers every stream's vocabulary; an unknown reason is still text, never a
+# number or an object array.
+LOSS_REASON_NAMES = ("none", "queue_full", "write_failed", "generation", "unknown")
+LOSS_REASON_WIDTH = max(len(name) for name in LOSS_REASON_NAMES)
+
+# The fault stream's completion and loss accounting. These are facts about the
+# whole stream, not about the rows a window selected: the reader copies the
+# recorder's final counts, so a truncated or lossy stream stays distinguishable
+# from a complete one whose row table is legitimately empty.
+FAULT_STREAM_SCALAR_DTYPES = {
+    "fault_complete": np.bool_,
+    "fault_truncated": np.bool_,
+    "fault_rows_in_range": np.uint64,
+    "fault_recorded": np.uint64,
+    "fault_written": np.uint64,
+    "fault_queue_dropped": np.uint64,
+    "fault_generation_dropped": np.uint64,
+    "fault_write_failures": np.uint64,
+    "fault_missing_occurrences": np.uint64,
+}
+
+# One fault loss span is one stretch of occurrences that never became rows. Its
+# arrays have their own length, independent of the fault rows and the sample
+# table.
+FAULT_LOSS_SCALAR_DTYPES = {
+    "fault_loss_first_record_seq": np.uint64,
+    "fault_loss_last_record_seq": np.uint64,
+    "fault_loss_first_state_seq": np.uint64,
+    "fault_loss_last_state_seq": np.uint64,
+    "fault_loss_first_stamp_us": np.uint64,
+    "fault_loss_last_stamp_us": np.uint64,
+    "fault_loss_dropped": np.uint64,
+}
+
+# The application stream's loss spans, in its own sample ordinals and stamps.
+APPLICATION_LOSS_SCALAR_DTYPES = {
+    "application_loss_first_sample_seq": np.uint64,
+    "application_loss_last_sample_seq": np.uint64,
+    "application_loss_first_stamp_us": np.uint64,
+    "application_loss_last_stamp_us": np.uint64,
+    "application_loss_dropped": np.uint64,
+}
+
 
 def _read_output(reader: Path, run_directory: Path, begin_us: int, end_us: int):
     """Return (records, summary) for the range, straight from the reader tool."""
@@ -462,9 +506,21 @@ def _velocity_segments(rows, period_us, losses):
         if broken:
             segments.append((start, index, end_us))
             start = index + 1
-    segments.append(
-        (start, len(rows) - 1, int(round(stamps[-1] + period_us)))
+    # The final segment has no next row to end it. Its value may be held for
+    # one planned period, but only up to the first sample the index says was
+    # lost: after that instant the application has no value to serve, even
+    # though the recording continued.
+    last_stamp = stamps[-1]
+    end_us = int(round(last_stamp + period_us))
+    end_us = min(
+        (
+            int(loss.get("first_stamp_us", 0))
+            for loss in losses
+            if last_stamp < int(loss.get("first_stamp_us", 0)) < end_us
+        ),
+        default=end_us,
     )
+    segments.append((start, len(rows) - 1, end_us))
     return segments
 
 
@@ -715,6 +771,23 @@ def to_archive(rows, summary, faults=None, application=None) -> dict:
             [fault.get(source) for fault in faults], width
         )
 
+    # The stream's own completion and loss accounting. It is exported even when
+    # there is no row and no loss: a complete, empty stream and one whose rows
+    # were lost must not look the same.
+    fault_summary = summary.get("faults", {})
+    for column, dtype in FAULT_STREAM_SCALAR_DTYPES.items():
+        source = column[len("fault_") :]
+        arrays[column] = np.array(fault_summary.get(source, 0), dtype=dtype)
+    fault_losses = fault_summary.get("losses", [])
+    for column, dtype in FAULT_LOSS_SCALAR_DTYPES.items():
+        source = column[len("fault_loss_") :]
+        arrays[column] = np.array(
+            [loss.get(source, 0) for loss in fault_losses], dtype=dtype
+        )
+    arrays["fault_loss_reason"] = _text_array(
+        [loss.get("reason") for loss in fault_losses], LOSS_REASON_WIDTH
+    )
+
     if application is not None:
         app_summary = application["summary"]
         # main() resolved the association and the window over the full
@@ -793,6 +866,26 @@ def to_archive(rows, summary, faults=None, application=None) -> dict:
         arrays["application_rows_total"] = np.uint64(association["total"])
         arrays["application_rows_excluded"] = np.uint64(
             association.get("excluded", 0)
+        )
+
+        # The application stream's loss spans and its policy sidecar's
+        # truncation are independent of the runtime rows. A window that selects
+        # no velocity row still carries the losses that explain why.
+        app_losses = app_summary.get("losses", [])
+        for column, dtype in APPLICATION_LOSS_SCALAR_DTYPES.items():
+            source = column[len("application_loss_") :]
+            arrays[column] = np.array(
+                [loss.get(source, 0) for loss in app_losses], dtype=dtype
+            )
+        arrays["application_loss_reason"] = _text_array(
+            [loss.get("reason") for loss in app_losses], LOSS_REASON_WIDTH
+        )
+        if "missing_samples" in app_summary:
+            arrays["application_missing_samples"] = np.uint64(
+                int(app_summary["missing_samples"])
+            )
+        arrays["policy_session_truncated"] = np.bool_(
+            bool(app_summary.get("policy_session_truncated"))
         )
 
         policy_sessions = application.get("policy_sessions", [])

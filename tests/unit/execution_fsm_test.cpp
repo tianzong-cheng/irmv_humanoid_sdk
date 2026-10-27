@@ -1036,6 +1036,61 @@ int CheckFaultOutputDegradation() {
   return 0;
 }
 
+// The safety check runs before the output is decided, so a later tick's
+// observation must be restamped with the action the fault actually commands.
+// After an earlier driver error permanently degraded the latched fault, a
+// position violation whose own report is damping-eligible is still output as
+// zero torque and must be recorded that way; the non-degraded case keeps
+// damping (proved by CheckFaultOutputDegradation).
+int CheckDegradedOutputActionOnLaterObservation() {
+  RuntimeFixture f;
+  f.BootToZeroTorque();
+  f.Acquire();
+  CHECK(f.Request(Operation::Damping).applied());
+
+  // The driver error latches a fault that may not damp, degrading its output
+  // for the rest of the fault.
+  f.SetDriverError();
+  f.Advance(f.ControlPeriodUs());
+  CHECK(f.state().execution_state == kFault);
+  CHECK(f.state().output_action == kActionZeroTorque);
+  CHECK(!f.state().damping_eligible);
+  CHECK(IsZeroTorque(f.last_tick().output));
+  const FaultDetail *driver =
+      FindNewFault(f.last_tick(), FaultCondition::JointDriverError, 0);
+  CHECK(driver != nullptr);
+  if (driver != nullptr) {
+    CHECK(driver->output_action == kActionZeroTorque);
+  }
+
+  // The driver recovers, but the degraded output latch does not. A fresh
+  // position violation is damping-eligible by its own report, yet the tick's
+  // actual output remains zero torque.
+  f.ClearDriverError();
+  f.mutable_feedback().joints[0].q = 2.5;
+  f.Advance(f.ControlPeriodUs());
+  CHECK(f.state().execution_state == kFault);
+  CHECK(f.state().output_action == kActionZeroTorque);
+  CHECK(!f.state().damping_eligible);
+  CHECK(IsZeroTorque(f.last_tick().output));
+  const FaultDetail *position =
+      FindNewFault(f.last_tick(), FaultCondition::JointPositionExceeded, 0);
+  CHECK(position != nullptr);
+  if (position != nullptr) {
+    CHECK(position->output_action == kActionZeroTorque);
+  }
+  // Every observation of the tick carries the same actual action: no detail
+  // recorded the provisional damping rule.
+  if (f.last_tick().new_faults != nullptr) {
+    for (std::uint32_t index = 0; index < f.last_tick().new_faults->count;
+         ++index) {
+      CHECK(f.last_tick().new_faults->details[index].output_action ==
+            kActionZeroTorque);
+    }
+  }
+  return 0;
+}
+
 int CheckWriteFailureDegradesLatchedFault() {
   RuntimeFixture f;
   f.BootToZeroTorque();
@@ -2857,6 +2912,7 @@ int main() {
   CHECK(CheckContinuityGuards() == 0);
   CHECK(CheckForeignPacketsChangeNothing() == 0);
   CHECK(CheckFaultOutputDegradation() == 0);
+  CHECK(CheckDegradedOutputActionOnLaterObservation() == 0);
   CHECK(CheckWriteFailureDegradesLatchedFault() == 0);
   CHECK(CheckRecoveryWindowAndReset() == 0);
   CHECK(CheckEpochWatermarkExhaustion() == 0);
