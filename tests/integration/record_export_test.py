@@ -1126,6 +1126,50 @@ def main() -> int:
                 if [row["output_action"] for row in fault_rows] != [0, 0, 0]:
                     fail("the fault output actions did not survive the reader")
 
+        # A missing sidecar is a hard error end to end. The recorder creates
+        # `faults.jsonl` before it starts, so a copied run without it has lost
+        # evidence: the reader names the file and the exporter refuses to
+        # produce an archive from that run.
+        missing_fault_run = work / "fault-run-missing-sidecar"
+        shutil.copytree(fault_run, missing_fault_run)
+        (missing_fault_run / "faults.jsonl").unlink()
+        missing_read = subprocess.run(
+            [str(reader), "--run", str(missing_fault_run)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if missing_read.returncode == 0:
+            fail("read_record accepted a run whose faults.jsonl is missing")
+        elif "faults.jsonl" not in missing_read.stderr:
+            fail(
+                "the missing-sidecar error does not name the file: "
+                f"{missing_read.stderr.strip()}"
+            )
+        missing_archive = work / "missing-sidecar.npz"
+        missing_convert = subprocess.run(
+            [
+                sys.executable,
+                str(source_root / "tools" / "record_to_npz.py"),
+                str(missing_fault_run),
+                str(missing_archive),
+                "--reader",
+                str(reader),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if missing_convert.returncode == 0:
+            fail("record_to_npz exported a run whose faults.jsonl is missing")
+        elif "faults.jsonl" not in missing_convert.stderr:
+            fail(
+                "the exporter's missing-sidecar error does not name the file: "
+                f"{missing_convert.stderr.strip()}"
+            )
+        if missing_archive.exists():
+            fail("record_to_npz created an archive for a missing fault sidecar")
+
         app_read = subprocess.run(
             [str(reader), "--run", str(app_run)],
             capture_output=True,

@@ -368,6 +368,74 @@ check(
     "without a loss the last sample was not held for one planned period",
 )
 
+# Several future losses bound the hold at the earliest one, regardless of the
+# order the index lists them in.
+multiple_losses = [
+    {
+        "first_sample_seq": 3,
+        "last_sample_seq": 4,
+        "first_stamp_us": 1_022_000,
+        "last_stamp_us": 1_023_000,
+        "dropped": 1,
+        "reason": "queue_full",
+    },
+    {
+        "first_sample_seq": 1,
+        "last_sample_seq": 2,
+        "first_stamp_us": 1_019_000,
+        "last_stamp_us": 1_021_000,
+        "dropped": 2,
+        "reason": "queue_full",
+    },
+]
+multiple = hold_values(
+    [
+        runtime_row(1_018_999),
+        runtime_row(1_019_000),
+        runtime_row(1_021_000),
+    ],
+    tail_samples,
+    losses=multiple_losses,
+)
+check(
+    close(float(multiple["forward"][0]), 7.0),
+    "the held value was cut before the earliest future loss",
+)
+check(
+    np.isnan(multiple["forward"][1]),
+    "a later loss won over the earliest future loss",
+)
+check(
+    np.isnan(multiple["forward"][2]),
+    "a value was held past the earliest future loss",
+)
+
+# A loss exactly at the planned deadline does not change that deadline: one
+# microsecond before it is still inside the hold, the deadline itself is not.
+deadline_losses = [
+    {
+        "first_sample_seq": 1,
+        "last_sample_seq": 1,
+        "first_stamp_us": 1_025_000,
+        "last_stamp_us": 1_025_000,
+        "dropped": 1,
+        "reason": "queue_full",
+    }
+]
+deadline = hold_values(
+    [runtime_row(1_024_999), runtime_row(1_025_000)],
+    tail_samples,
+    losses=deadline_losses,
+)
+check(
+    close(float(deadline["forward"][0]), 7.0),
+    "a loss at the planned deadline cut the hold early",
+)
+check(
+    np.isnan(deadline["forward"][1]),
+    "a value was held at the planned deadline",
+)
+
 if failures:
     print(
         f"record_alignment_test: {len(failures)} failure(s)",

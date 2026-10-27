@@ -291,15 +291,27 @@ int MissingSidecarIsAHardError() {
     Recorder recorder;
     CHECK(StartRecorder(&recorder, directory));
     CHECK(recorder.TryRecordFault(MakeFault(1, 10, 20, 1000)));
+    // A generation-side loss does not make the fault stream incomplete: the
+    // index is finalized and carries a loss span, exactly the evidence a
+    // failed read must not expose.
+    recorder.ReportFaultGenerationLoss(2000, 999, 2);
     CHECK(recorder.Stop());
     const std::filesystem::path faults_path =
         recorder.run_directory() / "faults.jsonl";
     CHECK(std::filesystem::exists(faults_path));
-    std::filesystem::remove(faults_path);
 
+    FaultRecordRange before;
+    CHECK(ReadFaultRange(recorder.run_directory(), 0, kNever, &before));
+    CHECK(before.ok);
+    CHECK(before.complete);
+    CHECK(!before.losses.empty());
+
+    std::filesystem::remove(faults_path);
     FaultRecordRange range;
     CHECK(!ReadFaultRange(recorder.run_directory(), 0, kNever, &range));
     CHECK(!range.ok);
+    CHECK(!range.complete);
+    CHECK(range.losses.empty());
     CHECK(range.rows.empty());
     CHECK(range.error.find("faults.jsonl") != std::string::npos);
     std::filesystem::remove_all(directory);

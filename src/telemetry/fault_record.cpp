@@ -611,7 +611,11 @@ bool ReadFaultRange(const std::filesystem::path &run_directory,
   if (!faults_exists) {
     // The recorder creates the sidecar before it starts, even for a run that
     // never reports a fault. Its absence is therefore missing evidence, not an
-    // empty stream: the run was copied incompletely or its file was lost.
+    // empty stream: the run was copied incompletely or its file was lost. The
+    // index may still carry a finalized marker and loss spans, so neither is
+    // exposed through a failed read.
+    range->complete = false;
+    range->losses.clear();
     range->error = "cannot find " + faults_path.string();
     return false;
   }
