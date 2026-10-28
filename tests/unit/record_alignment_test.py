@@ -369,6 +369,47 @@ check(
     "the sample after an interior loss was not used",
 )
 
+# Losses are grouped by reason in the index, not sorted by time. Every
+# overlapping loss must bound an interior segment, even if an earlier loss
+# appears after a later one in the table.
+mixed_losses = [
+    {
+        "first_stamp_us": 1_050_000,
+        "last_stamp_us": 1_060_000,
+        "reason": "queue_full",
+    },
+    {
+        "first_stamp_us": 1_020_000,
+        "last_stamp_us": 1_040_000,
+        "reason": "write_failed",
+    },
+]
+mixed_samples = [
+    velocity_row(1_000_000, 0, forward=1.9),
+    velocity_row(1_015_000, 1, forward=2.0),
+    velocity_row(1_080_000, 8, forward=2.2),
+]
+for losses in (mixed_losses, list(reversed(mixed_losses))):
+    mixed = hold_values(
+        [
+            runtime_row(1_019_999),
+            runtime_row(1_020_000),
+            runtime_row(1_022_000),
+            runtime_row(1_080_000),
+        ],
+        mixed_samples,
+        losses=losses,
+    )
+    check(close(float(mixed["forward"][0]), 2.0), "mixed losses cut the hold early")
+    check(
+        np.isnan(mixed["forward"][1]) and np.isnan(mixed["forward"][2]),
+        "loss table order hid the earliest missing sample",
+    )
+    check(
+        close(float(mixed["forward"][3]), 2.2),
+        "mixed losses hid the sample after recovery",
+    )
+
 # The final segment has no following row, so the index's losses are the only
 # thing that can bound it. A loss starting inside the last planned period ends
 # the hold at that instant: 1.019 s is still served, 1.020 s and 1.022 s are

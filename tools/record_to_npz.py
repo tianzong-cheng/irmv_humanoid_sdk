@@ -497,13 +497,14 @@ def _velocity_segments(rows, period_us, losses):
         # cadence gap or identity change must not hide a loss whose first
         # missing sample is earlier than the next recorded row: the value may
         # be held only up to the instant that sample would have been due.
+        # Losses are grouped by reason, so inspect every overlap to find the
+        # earliest boundary rather than relying on their order in the index.
         for loss in losses:
             first = int(loss.get("first_stamp_us", 0))
             last = int(loss.get("last_stamp_us", 0))
             if first < b_stamp and last >= a_stamp:
                 end_us = min(end_us, max(first, a_stamp))
                 broken = True
-                break
         if broken:
             segments.append((start, index, end_us))
             start = index + 1
