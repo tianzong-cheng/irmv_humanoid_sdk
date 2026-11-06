@@ -1285,6 +1285,39 @@ set_tests_properties(
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
+# Layout documents and the path rules of the local service are pure Python and
+# need no socket, so they are a core test. The HTTP/bridge acceptance is an
+# integration test because it binds a loopback port and starts helper
+# processes.
+add_test(
+  NAME experiment_web_layout_test
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/unit/experiment_web_layout_test.py"
+)
+set_tests_properties(
+  experiment_web_layout_test
+  PROPERTIES
+    LABELS core
+    TIMEOUT 120
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
+add_test(
+  NAME experiment_web_server_test
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/unit/experiment_web_server_test.py"
+    --reader "$<TARGET_FILE:web_record_query>"
+)
+set_tests_properties(
+  experiment_web_server_test
+  PROPERTIES
+    LABELS integration
+    TIMEOUT 180
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
 
 # The application: the supervising upper process of a separate robot_runtime.
 # It owns the supervision loop no other target needs, so its loop source is
