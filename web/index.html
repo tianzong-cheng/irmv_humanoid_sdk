@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>IRMV experiment workbench</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <strong class="brand">IRMV experiment workbench</strong>
+      <nav class="tabs" aria-label="Pages">
+        <button type="button" id="tab-workbench" class="tab active">Experiment</button>
+        <button type="button" id="tab-records" class="tab">Records</button>
+        <button type="button" id="tab-maintenance" class="tab">Bench maintenance</button>
+      </nav>
+    </header>
+
+    <main>
+      <section id="page-workbench" class="page">
+        <div class="workbench-grid">
+          <aside class="sidebar">
+            <div class="panel">
+              <h2>Signals</h2>
+              <input id="signal-search" type="search" placeholder="Search signals" autocomplete="off">
+              <div id="signal-tree" class="signal-tree" aria-label="Signal tree"></div>
+            </div>
+            <div class="panel">
+              <h2>Layouts</h2>
+              <input id="layout-name" type="text" placeholder="Layout name" autocomplete="off">
+              <div class="button-row">
+                <button type="button" id="save-layout">Save</button>
+                <button type="button" id="save-as-layout">Save as</button>
+              </div>
+              <select id="layout-select" aria-label="Saved layouts"></select>
+              <div class="button-row">
+                <button type="button" id="load-layout">Load</button>
+                <button type="button" id="delete-layout">Delete</button>
+              </div>
+            </div>
+          </aside>
+
+          <section class="workspace">
+            <header class="run-header">
+              <div>
+                <h1 id="run-title">No experiment loaded</h1>
+                <p id="run-detail" class="muted"></p>
+              </div>
+              <div class="time-controls">
+                <button type="button" id="zoom-in" title="Zoom in">+</button>
+                <button type="button" id="zoom-out" title="Zoom out">−</button>
+                <button type="button" id="zoom-fit" title="Fit recorded range">Fit</button>
+              </div>
+            </header>
+            <div class="status-lines">
+              <span id="window-readout" class="muted"></span>
+              <span id="cursor-readout" class="muted"></span>
+              <span id="integrity-line" class="muted"></span>
+              <span id="missing-signals" class="warning"></span>
+            </div>
+            <div id="dock-root" class="dock-root" aria-label="Chart workspace"></div>
+            <footer class="footer-bar">
+              <select id="replace-select" hidden aria-label="Replace missing signal"></select>
+              <span class="muted">Drag a signal to create or overlay; drop on an edge to split; drag a chart header to move it.</span>
+            </footer>
+          </section>
+        </div>
+      </section>
+
+      <section id="page-records" class="page" hidden>
+        <div class="records-panel">
+          <header class="panel-header">
+            <h1>Experiment records</h1>
+            <button type="button" id="refresh-runs">Refresh</button>
+          </header>
+          <p class="muted">Runs are the readable directories under the configured records root. The application stream is optional and is never merged unless its boot and runtime/session identity match.</p>
+          <label class="field">
+            Application stream
+            <select id="app-run-select"></select>
+          </label>
+          <div id="run-list" class="run-list"></div>
+        </div>
+      </section>
+
+      <section id="page-maintenance" class="page" hidden>
+        <div class="records-panel">
+          <h1>Bench maintenance</h1>
+          <p>No maintenance task is configured or implemented in this release. The workbench has no endpoint that writes a device, starts or stops an SDK process, or bypasses the maintenance tool's device lock.</p>
+        </div>
+      </section>
+    </main>
+
+    <div id="status-line" class="status-line" role="status" aria-live="polite"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

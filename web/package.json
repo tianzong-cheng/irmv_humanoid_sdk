@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Local experiment workbench for the IRMV humanoid SDK",
   "scripts": {
-    "test": "node --test tests/dock.test.js tests/layout.test.js tests/chart.test.js",
+    "test": "node --test tests/api.test.js tests/dock.test.js tests/layout.test.js tests/chart.test.js",
     "test:e2e": "playwright test"
   }
 }
