@@ -1219,6 +1219,51 @@ target_link_libraries(
   read_record PRIVATE irmv_telemetry nlohmann_json::nlohmann_json
 )
 
+# The read-only experiment web bridge: a JSONL stdin/stdout process that
+# answers catalog and metadata questions about one records root. It is a pure
+# reader and never links the runtime, transport or policy layers.
+add_library(irmv_web src/web/record_query.cpp)
+target_compile_features(irmv_web PUBLIC cxx_std_17)
+target_include_directories(
+  irmv_web
+  PUBLIC
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+    "$<INSTALL_INTERFACE:include>"
+)
+target_link_libraries(
+  irmv_web PUBLIC irmv_telemetry nlohmann_json::nlohmann_json
+)
+
+add_executable(web_record_query src/web/main.cpp)
+target_compile_features(web_record_query PRIVATE cxx_std_17)
+target_include_directories(
+  web_record_query PRIVATE "${PROJECT_SOURCE_DIR}/include"
+)
+target_link_libraries(web_record_query PRIVATE irmv_web)
+
+add_executable(web_record_query_test tests/unit/web_record_query_test.cpp)
+target_compile_features(web_record_query_test PRIVATE cxx_std_17)
+target_include_directories(
+  web_record_query_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(
+  web_record_query_test PRIVATE irmv_web Threads::Threads
+                               nlohmann_json::nlohmann_json
+)
+
+add_test(NAME web_record_query_test COMMAND web_record_query_test)
+set_tests_properties(
+  web_record_query_test
+  PROPERTIES
+    LABELS core
+    TIMEOUT 120
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
+
 # The application: the supervising upper process of a separate robot_runtime.
 # It owns the supervision loop no other target needs, so its loop source is
 # compiled into the executable instead of a library of its own. It links the
