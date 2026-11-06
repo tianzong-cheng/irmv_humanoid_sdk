@@ -1321,6 +1321,20 @@ set_tests_properties(
 )
 
 add_test(
+  NAME experiment_web_live_test
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/unit/experiment_web_live_test.py"
+)
+set_tests_properties(
+  experiment_web_live_test
+  PROPERTIES
+    LABELS core
+    TIMEOUT 120
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
+add_test(
   NAME experiment_web_server_test
   COMMAND
     "${Python3_EXECUTABLE}"

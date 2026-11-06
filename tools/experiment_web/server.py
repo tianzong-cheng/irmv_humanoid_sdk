@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from .bridge import BridgePool
 from .catalog import CatalogError, paginate, valid_run_id
 from .layout_store import LayoutError, LayoutStore
+from .live_store import LiveError, LiveReceiver, LiveStore
 
 _MAX_BODY_BYTES = 1024 * 1024
 _MAX_ACTIVE_REQUESTS = 8
@@ -37,6 +38,7 @@ class ExperimentWebServer:
         reader: Path,
         assets: Path,
         port: int = 0,
+        telemetry_socket: Path | None = None,
     ) -> None:
         self.records_root = Path(records_root)
         self.data_dir = Path(data_dir)
@@ -45,6 +47,13 @@ class ExperimentWebServer:
         self.assets = Path(assets)
         self.pool = BridgePool(self.reader, self.records_root)
         self.layouts = LayoutStore(self.data_dir)
+        self.live = LiveStore(self.records_root)
+        self.live_socket_path = (
+            Path(telemetry_socket) if telemetry_socket is not None
+            else self.data_dir / "live.sock"
+        )
+        self.live_receiver = LiveReceiver(self.live, self.live_socket_path)
+        self.live_receiver.start()
         self._slots = threading.BoundedSemaphore(_MAX_ACTIVE_REQUESTS)
         self._tokens: deque[str] = deque()
         self._token_set: set[str] = set()
@@ -87,6 +96,7 @@ class ExperimentWebServer:
         try:
             self._http.serve_forever(poll_interval=0.2)
         finally:
+            self.live_receiver.close()
             self.pool.close()
             self._http.server_close()
 
@@ -382,6 +392,29 @@ class _Handler(BaseHTTPRequestHandler):
                 reply["continuation"] = continuation
             _json_response(self, HTTPStatus.OK, reply)
             return
+        if parts == ["api", "live", "snapshot"]:
+            run_id = _one(params, "run_id")
+            if run_id is None or not valid_run_id(run_id):
+                raise CatalogError("the run id is not 32 lower-case hex digits")
+            signal_ids = _signal_ids(params)
+            begin_us = _int_param(params, "begin_us", 0, 0, 2**64 - 1)
+            end_us = _int_param(params, "end_us", 2**64 - 1, 1, 2**64 - 1)
+            pixel_width = _int_param(params, "pixel_width", 800, 1, 4096)
+            after_revision = _one(params, "after_revision")
+            revision = None
+            if after_revision is not None:
+                if not after_revision.isdigit():
+                    raise CatalogError("after_revision is not a decimal integer")
+                revision = int(after_revision)
+            try:
+                snapshot = self.app.live.Snapshot(
+                    run_id, signal_ids, begin_us, end_us, pixel_width, revision
+                )
+            except LiveError as error:
+                _error(self, HTTPStatus.NOT_FOUND, str(error))
+                return
+            _json_response(self, HTTPStatus.OK, snapshot)
+            return
         if parts == ["api", "layouts"]:
             page, continuation = self.app.layouts.list_page(
                 _one(params, "continuation"), _limit(params)
@@ -448,6 +481,19 @@ class _Handler(BaseHTTPRequestHandler):
         reply = self._bridge(request)
         if reply is None:
             return
+        if reply.get("ok"):
+            run_id = request["run_id"]
+            if operation == "range":
+                self.app.live.merge_range(
+                    reply,
+                    run_id,
+                    request.get("signal_ids", []),
+                    int(request.get("begin_us", "0")),
+                    int(request.get("end_us", str(2**64 - 1))),
+                    int(request.get("pixel_width", 800)),
+                )
+            elif operation == "events":
+                self.app.live.merge_events(reply, run_id)
         _json_response(self, HTTPStatus.OK, reply)
 
 

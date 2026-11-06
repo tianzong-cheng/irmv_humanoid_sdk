@@ -17,6 +17,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--reader", required=True)
     parser.add_argument("--assets", default=str(Path(__file__).resolve().parents[2] / "web"))
     parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--telemetry-socket", default=None)
     args = parser.parse_args(argv)
 
     try:
@@ -35,6 +36,9 @@ def main(argv: list[str] | None = None) -> int:
         reader=reader,
         assets=Path(args.assets),
         port=args.port,
+        telemetry_socket=Path(args.telemetry_socket)
+        if args.telemetry_socket
+        else None,
     )
     print(server.url, flush=True)
     try:

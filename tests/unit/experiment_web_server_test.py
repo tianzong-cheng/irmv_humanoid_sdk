@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import select
+import socket
 import subprocess
 import sys
 import tempfile
@@ -514,6 +515,139 @@ class BridgeFailureTest(unittest.TestCase):
         self.assertTrue(reply.get("transport_error"))
         self.assertTrue(reply["request_id"])
         self.assertLess(elapsed, 3.0)
+
+
+class LiveServerTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.base = Path(self.temp.name)
+        self.records = self.base / "records"
+        self.records.mkdir()
+        self.data = self.base / "data"
+        self.assets = self.base / "assets"
+        self.assets.mkdir()
+        (self.assets / "index.html").write_text("ok", encoding="utf-8")
+        self.runtime = runtime_run(self.records, "run_live")
+        self.process, self.url = start_server(
+            READER, self.records, self.data, self.assets
+        )
+        self.http = opener()
+        call(self.http, "GET", self.url)
+        status, catalog = call(self.http, "GET", f"{self.url}api/runs")
+        self.run_id = next(
+            run["run_id"] for run in catalog["runs"]
+            if run["name"] == "run_live"
+        )
+
+    def tearDown(self) -> None:
+        stop_server(self.process)
+        self.temp.cleanup()
+
+    def send(self, kind: str, transport_seq: int, payload: dict) -> None:
+        envelope = {
+            "version": 1,
+            "emitter_id": "e" * 32,
+            "run_path": str(self.runtime),
+            "source": "runtime",
+            "transport_seq": str(transport_seq),
+            "kind": kind,
+            "payload": payload,
+        }
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        try:
+            client.sendto(json.dumps(envelope).encode("utf-8"),
+                          str(self.data / "live.sock"))
+        finally:
+            client.close()
+
+    def sample(self, stamp: int, seq: int, q0: float) -> dict:
+        return {
+            "kind": "sample",
+            "stamp_us": str(stamp),
+            "state_seq": str(seq),
+            "command_present": True,
+            "feedback_valid": True,
+            "joint_count": 2,
+            "q": [q0, 0.0],
+            "joint_valid": [True, True],
+        }
+
+    def test_snapshot_range_events_and_revision(self) -> None:
+        self.send("hello", 1, {})
+        self.send("sample", 2, self.sample(1000, 1, 0.25))
+        self.send("sample", 3, self.sample(3000, 3, 0.75))
+        time.sleep(0.1)
+        status, snapshot = call(
+            self.http,
+            "GET",
+            f"{self.url}api/live/snapshot?run_id={self.run_id}"
+            "&signal_ids=runtime%2Fleft_hip%2Fq&begin_us=0&end_us=5000",
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(snapshot["ok"])
+        self.assertEqual(len(snapshot["series"][0]["points"]), 2)
+        revision = snapshot["revision"]
+        status, unchanged = call(
+            self.http,
+            "GET",
+            f"{self.url}api/live/snapshot?run_id={self.run_id}"
+            "&signal_ids=runtime%2Fleft_hip%2Fq&begin_us=0&end_us=5000"
+            f"&after_revision={revision}",
+        )
+        self.assertEqual(status, 200)
+        self.assertFalse(unchanged["changed"])
+
+        status, live_range = call(
+            self.http,
+            "GET",
+            f"{self.url}api/runs/{self.run_id}/range"
+            "?signal_ids=runtime%2Fleft_hip%2Fq&begin_us=0&end_us=5000"
+            "&pixel_width=10",
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(live_range["live"]["active"])
+        self.assertEqual(len(live_range["series"][0]["points"]), 2)
+
+        self.send("fault", 4, {
+            "record_seq": "9",
+            "detected_stamp_us": "1200",
+            "state_seq": "10",
+            "fault_id": "3",
+            "joint_index": 0,
+            "reason": 5,
+            "condition": 8,
+        })
+        time.sleep(0.1)
+        status, events = call(
+            self.http,
+            "GET",
+            f"{self.url}api/runs/{self.run_id}/events?begin_us=0",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(len(events["events"]), 1)
+        self.assertEqual(events["events"][0]["record_seq"], "9")
+        self.assertTrue(events["live"]["active"])
+
+    def test_service_restart_does_not_join_old_tail(self) -> None:
+        self.send("hello", 1, {})
+        self.send("sample", 2, self.sample(1000, 1, 0.5))
+        time.sleep(0.1)
+        stop_server(self.process)
+        self.process, self.url = start_server(
+            READER, self.records, self.data, self.assets
+        )
+        self.http = opener()
+        call(self.http, "GET", self.url)
+        status, snapshot = call(
+            self.http,
+            "GET",
+            f"{self.url}api/live/snapshot?run_id={self.run_id}"
+            "&signal_ids=runtime%2Fleft_hip%2Fq&begin_us=0&end_us=5000",
+        )
+        self.assertEqual(status, 404)
+        self.assertFalse(snapshot["ok"])
+
+
 
 
 def main() -> int:

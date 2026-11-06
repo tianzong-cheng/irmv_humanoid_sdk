@@ -1874,6 +1874,14 @@ std::string RecordQuery::Execute(std::string_view request_json) {
                        {"end_us", begin_us >= end_us
                                      ? Json(nullptr)
                                      : Json(Decimal(end_us))}};
+  if (run->kind == RunKind::Runtime && !run->reader->chunks().empty()) {
+    reply["committed"] = {
+        {"begin_us", Decimal(run->reader->chunks().front().first_stamp_us)},
+        {"end_us", Decimal(run->reader->chunks().back().last_stamp_us + 1)},
+        {"complete", run->reader->complete()}};
+  } else {
+    reply["committed"] = nullptr;
+  }
   reply["context"] = {{"run_id", run->id},
                       {"app_run_id", app != nullptr && run != app
                                          ? Json(app->id)
