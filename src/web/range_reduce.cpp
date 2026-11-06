@@ -37,8 +37,7 @@ double FieldValue(const telemetry::VelocitySample &row, VelocityField field) {
 
 }  // namespace
 
-RangeReducer::RangeReducer(protocol::TimeUs begin_us,
-                           protocol::TimeUs end_us,
+RangeReducer::RangeReducer(protocol::TimeUs begin_us, protocol::TimeUs end_us,
                            std::uint32_t pixel_width)
     : begin_us_(begin_us), end_us_(end_us) {
   // One display bucket per pixel, and at most four raw samples per bucket
@@ -59,8 +58,8 @@ std::uint64_t RangeReducer::BucketIndex(protocol::TimeUs stamp_us) const {
 void RangeReducer::Push(const SeriesPoint &point) {
   ++input_points_;
   const std::uint64_t index = BucketIndex(point.stamp_us);
-  if (bucket_used_ && (index != bucket_.index ||
-                       point.segment != bucket_.segment)) {
+  if (bucket_used_ &&
+      (index != bucket_.index || point.segment != bucket_.segment)) {
     Flush();
   }
   if (!bucket_used_) {
@@ -185,8 +184,8 @@ HoldValue HoldVelocityAt(const std::vector<telemetry::VelocitySample> &rows,
         const protocol::TimeUs first = loss.first_stamp_us;
         const protocol::TimeUs last = loss.last_stamp_us;
         if (first < b.stamp_us && last >= a.stamp_us) {
-          next_end = std::min(
-              next_end, std::max<std::uint64_t>(first, a.stamp_us));
+          next_end =
+              std::min(next_end, std::max<std::uint64_t>(first, a.stamp_us));
           broken = true;
         }
       }

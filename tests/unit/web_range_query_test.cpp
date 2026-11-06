@@ -5,8 +5,6 @@
 // chunk checksums are the ones this build actually produces. Pure model checks
 // cover the reduction budget and the held-forward boundary, which must not
 // depend on a file at all.
-#include "irmv/web/record_query.hpp"
-
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -27,6 +25,7 @@
 #include "irmv/telemetry/recorder.hpp"
 #include "irmv/telemetry/velocity_record.hpp"
 #include "irmv/web/range_reduce.hpp"
+#include "irmv/web/record_query.hpp"
 #include "support/check.hpp"
 
 namespace {
@@ -39,11 +38,11 @@ using irmv::protocol::Id;
 using irmv::protocol::OutputAction;
 using irmv::protocol::StopReason;
 using irmv::telemetry::RecordedFault;
+using irmv::telemetry::Recorder;
+using irmv::telemetry::RecorderConfig;
 using irmv::telemetry::RecordRange;
 using irmv::telemetry::RecordReader;
 using irmv::telemetry::RecordSample;
-using irmv::telemetry::Recorder;
-using irmv::telemetry::RecorderConfig;
 using irmv::telemetry::VelocitySample;
 using irmv::web::HoldVelocityAt;
 using irmv::web::RangeReducer;
@@ -185,10 +184,8 @@ bool WriteApplication(const std::filesystem::path &root,
   metadata["clock"] = {{"clock", "linux_clock_monotonic"},
                        {"boot_id", "boot-range"},
                        {"available", true}};
-  metadata["units"] = {{"forward", "m_s"},
-                       {"lateral", "m_s"},
-                       {"yaw", "rad_s"},
-                       {"time", "us"}};
+  metadata["units"] = {
+      {"forward", "m_s"}, {"lateral", "m_s"}, {"yaw", "rad_s"}, {"time", "us"}};
   metadata["model"] = {{"status", "loaded"}, {"name", "policy.onnx"}};
 
   irmv::telemetry::VelocityRecorder recorder;
@@ -233,8 +230,8 @@ std::string RunIdByName(const Json &catalog, const std::string &name) {
   return std::string();
 }
 
-RecordedFault MakeFault(std::uint64_t seq, std::uint64_t stamp,
-                        double observed, const std::string &message) {
+RecordedFault MakeFault(std::uint64_t seq, std::uint64_t stamp, double observed,
+                        const std::string &message) {
   RecordedFault fault;
   fault.record_seq = seq;
   fault.runtime_id = MakeId(0x11);
@@ -310,21 +307,23 @@ int CheckHoldBoundary() {
       HoldVelocityAt(rows, losses, 1019000, 10, VelocityField::Forward);
   CHECK(at_1019000.found);
   CHECK(at_1019000.value == 2.0);
-  CHECK(!HoldVelocityAt(rows, losses, 1020000, 10, VelocityField::Forward)
-             .found);
-  CHECK(!HoldVelocityAt(rows, losses, 1022000, 10, VelocityField::Forward)
-             .found);
+  CHECK(
+      !HoldVelocityAt(rows, losses, 1020000, 10, VelocityField::Forward).found);
+  CHECK(
+      !HoldVelocityAt(rows, losses, 1022000, 10, VelocityField::Forward).found);
   const auto at_1040000 =
       HoldVelocityAt(rows, losses, 1040000, 10, VelocityField::Forward);
   CHECK(at_1040000.found);
   CHECK(at_1040000.value == 2.2);
   std::reverse(losses.begin(), losses.end());
-  CHECK(HoldVelocityAt(rows, losses, 1019000, 10, VelocityField::Forward)
-            .value == 2.0);
-  CHECK(!HoldVelocityAt(rows, losses, 1020000, 10, VelocityField::Forward)
-             .found);
-  CHECK(HoldVelocityAt(rows, losses, 1040000, 10, VelocityField::Forward)
-            .value == 2.2);
+  CHECK(
+      HoldVelocityAt(rows, losses, 1019000, 10, VelocityField::Forward).value ==
+      2.0);
+  CHECK(
+      !HoldVelocityAt(rows, losses, 1020000, 10, VelocityField::Forward).found);
+  CHECK(
+      HoldVelocityAt(rows, losses, 1040000, 10, VelocityField::Forward).value ==
+      2.2);
   return 0;
 }
 
@@ -339,7 +338,8 @@ int main(int /*argc*/, char ** /*argv*/) {
   const std::vector<std::string> joints{"left_hip", "right_hip"};
 
   // A cursor run: the middle bucket holds a much larger value than the sample
-  // nearest the cursor. A cursor must return the raw sample, not the bucket max.
+  // nearest the cursor. A cursor must return the raw sample, not the bucket
+  // max.
   std::vector<RecordSample> cursor_samples;
   cursor_samples.push_back(MakeSample(1000, 1, joints));
   cursor_samples.back().q[0] = 1.0;
@@ -361,9 +361,9 @@ int main(int /*argc*/, char ** /*argv*/) {
   // one of them.
   std::vector<RecordedFault> same_tick;
   for (std::uint64_t seq = 0; seq < 5; ++seq) {
-    same_tick.push_back(MakeFault(
-        seq, 1234, seq == 0 ? std::nan("") : static_cast<double>(seq),
-        "same tick " + std::to_string(seq)));
+    same_tick.push_back(
+        MakeFault(seq, 1234, seq == 0 ? std::nan("") : static_cast<double>(seq),
+                  "same tick " + std::to_string(seq)));
   }
   std::filesystem::path fault_run;
   CHECK(WriteRuntime(root, joints, {MakeSample(1234, 1, joints)}, same_tick,
@@ -427,7 +427,8 @@ int main(int /*argc*/, char ** /*argv*/) {
       RunIdByName(catalog, cursor_run.filename().string());
   const std::string empty_faults_id =
       RunIdByName(catalog, empty_faults_run.filename().string());
-  const std::string fault_id = RunIdByName(catalog, fault_run.filename().string());
+  const std::string fault_id =
+      RunIdByName(catalog, fault_run.filename().string());
   const std::string corrupt_id =
       RunIdByName(catalog, corrupt_run.filename().string());
   const std::string app_id = RunIdByName(catalog, app_run.filename().string());

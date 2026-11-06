@@ -12,3 +12,5 @@ __pycache__/
 /web/node_modules/
 /web/test-results/
 /web/playwright-report/
+/build-bench/
+/build-web-runtime-only/

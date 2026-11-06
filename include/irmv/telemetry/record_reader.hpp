@@ -47,6 +47,15 @@ struct RunMetadata {
   std::string imu_json;
 };
 
+// Which joint columns a range read needs. A read of six joints of a 64-joint
+// run skips the other columns instead of decoding them into every row. An empty
+// joint list with a non-zero field mask means every joint; a zero mask means no
+// joint column is needed at all.
+struct ChunkProjection {
+  std::vector<std::uint32_t> joints;
+  std::uint32_t fields_mask{0};
+};
+
 // One chunk as the index describes it.
 struct ChunkInfo {
   std::string file;
@@ -113,8 +122,15 @@ class RecordReader {
   // on a long run from materialising every row of every overlapping chunk.
   using SampleVisitor = std::function<bool(const RecordSample &)>;
   bool VisitRange(protocol::TimeUs begin_us, protocol::TimeUs end_us,
-                  const SampleVisitor &visitor,
-                  RecordRange *summary) const;
+                  const SampleVisitor &visitor, RecordRange *summary) const;
+
+  // VisitRange with a projection: the joint columns outside `projection` are
+  // skipped, not decoded. The fixed per-row fields and the chunk checksums are
+  // always read.
+  bool VisitRangeProjected(protocol::TimeUs begin_us, protocol::TimeUs end_us,
+                           const ChunkProjection &projection,
+                           const SampleVisitor &visitor,
+                           RecordRange *summary) const;
 
  private:
   std::filesystem::path directory_;

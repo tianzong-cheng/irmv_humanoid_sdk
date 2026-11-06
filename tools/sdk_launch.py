@@ -15,6 +15,7 @@ Usage:
   sdk_launch.py --config PATH [--domain N]
                 [--locomotion-source none|local|external]
                 [--runtime PATH] [--application PATH]
+                [--web-telemetry-socket PATH]
 """
 
 import argparse
@@ -175,6 +176,10 @@ def main(argv: list[str]) -> int:
                         choices=["none", "local", "external"])
     parser.add_argument("--runtime", default=None)
     parser.add_argument("--application", default=None)
+    parser.add_argument(
+        "--web-telemetry-socket", default=None,
+        help="explicitly enable the workbench live outlet for the two SDK "
+             "processes; the launcher never starts the web service")
     parser.add_argument("--stop-all", action="store_true",
                         help="after the application exits, also send the "
                              "runtime SIGTERM (explicit whole-system stop)")
@@ -186,6 +191,11 @@ def main(argv: list[str]) -> int:
     common = ["--config", options.config]
     if options.domain is not None:
         common += ["--domain", str(options.domain)]
+    child_environment = os.environ.copy()
+    if options.web_telemetry_socket is not None:
+        # Only a user-requested socket is exported, and only to the two SDK
+        # processes. The launcher does not start or supervise the web service.
+        child_environment["IRMV_WEB_TELEMETRY_SOCKET"] = options.web_telemetry_socket
 
     # The runtime lives in its own session and process group: a terminal Ctrl+C
     # reaches the launcher and the application, never the lower layer. Its
@@ -196,7 +206,7 @@ def main(argv: list[str]) -> int:
         runtime_process = subprocess.Popen(
             [runtime, *common], stdin=subprocess.DEVNULL,
             stdout=runtime_log, stderr=subprocess.STDOUT, text=True,
-            bufsize=1, start_new_session=True)
+            bufsize=1, start_new_session=True, env=child_environment)
     print("sdk_launch: runtime diagnostics: %s" % log_path)
 
     if not wait_ready(log_path, runtime_process, START_TIMEOUT_S):
@@ -217,7 +227,8 @@ def main(argv: list[str]) -> int:
     for line in render_key_legend(options.config):
         print(line, flush=True)
     try:
-        application_process = subprocess.Popen(app_arguments)
+        application_process = subprocess.Popen(app_arguments,
+                                               env=child_environment)
     except OSError as error:
         print("sdk_launch: the application did not start: %s" % error,
               file=sys.stderr)

@@ -42,8 +42,8 @@ using irmv::telemetry::EncodeLiveVelocity;
 using irmv::telemetry::LiveTelemetryOptions;
 using irmv::telemetry::LiveTelemetrySender;
 using irmv::telemetry::RecordedFault;
-using irmv::telemetry::RecordSample;
 using irmv::telemetry::Recorder;
+using irmv::telemetry::RecordSample;
 using irmv::telemetry::SetLiveTelemetrySendHookForTest;
 using irmv::telemetry::VelocityRecorder;
 using irmv::telemetry::VelocitySample;
@@ -224,9 +224,8 @@ int main() {
     const std::filesystem::path root =
         std::filesystem::temp_directory_path() /
         ("irmv-live-record-test-" +
-         std::to_string(std::chrono::steady_clock::now()
-                            .time_since_epoch()
-                            .count()));
+         std::to_string(
+             std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(root);
     irmv::telemetry::RecorderConfig config;
     config.enabled = true;
@@ -283,9 +282,8 @@ int main() {
     const std::filesystem::path root =
         std::filesystem::temp_directory_path() /
         ("irmv-live-app-test-" +
-         std::to_string(std::chrono::steady_clock::now()
-                            .time_since_epoch()
-                            .count()));
+         std::to_string(
+             std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(root);
     irmv::configuration::RecorderConfig config;
     config.enabled = true;

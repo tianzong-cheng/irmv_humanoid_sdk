@@ -6,8 +6,6 @@
 // physical meaning of every exposed field; the test checks the bridge reports
 // that meaning rather than inferring one from a unit string or an array
 // position.
-#include "irmv/web/record_query.hpp"
-
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -24,6 +22,7 @@
 #include "irmv/telemetry/record_reader.hpp"
 #include "irmv/telemetry/recorder.hpp"
 #include "irmv/telemetry/velocity_record.hpp"
+#include "irmv/web/record_query.hpp"
 #include "support/check.hpp"
 
 namespace {
@@ -34,12 +33,12 @@ using irmv::protocol::Id;
 using irmv::protocol::OutputAction;
 using irmv::protocol::StopReason;
 using irmv::telemetry::RecordedFault;
+using irmv::telemetry::Recorder;
+using irmv::telemetry::RecorderConfig;
 using irmv::telemetry::RecordRange;
 using irmv::telemetry::RecordReader;
 using irmv::telemetry::RecordSample;
 using irmv::telemetry::RecordSessionEvent;
-using irmv::telemetry::Recorder;
-using irmv::telemetry::RecorderConfig;
 using irmv::telemetry::VelocityRecorder;
 using irmv::telemetry::VelocitySample;
 using irmv::web::RecordQuery;
@@ -107,7 +106,8 @@ RecorderConfig MakeRecorderConfig(const std::filesystem::path &directory) {
   return config;
 }
 
-std::string RuntimeMeta(const Json &contract, const std::vector<std::string> &joints,
+std::string RuntimeMeta(const Json &contract,
+                        const std::vector<std::string> &joints,
                         const std::string &boot_id) {
   Json metadata;
   metadata["schema_version"] = irmv::telemetry::kRecordSchemaVersion;
@@ -119,9 +119,8 @@ std::string RuntimeMeta(const Json &contract, const std::vector<std::string> &jo
   metadata["joint_count"] = joints.size();
   metadata["joints"] = joints;
   metadata["sdk_git_sha"] = contract["sdk_git_sha"];
-  metadata["clock"] = {{"clock", contract["clock"]},
-                       {"boot_id", boot_id},
-                       {"available", true}};
+  metadata["clock"] = {
+      {"clock", contract["clock"]}, {"boot_id", boot_id}, {"available", true}};
   metadata["units"] = contract["units"];
   metadata["imu"] = {{"orientation_rpy",
                       {{"order", "roll,pitch,yaw"},
@@ -231,13 +230,10 @@ std::string ApplicationMeta(const Json &contract, bool matching_boot,
   metadata["source"] = "local";
   metadata["clock"] = {
       {"clock", contract["clock"]},
-      {"boot_id", matching_boot ? contract["boot_id"]
-                                : "boot-runtime-other"},
+      {"boot_id", matching_boot ? contract["boot_id"] : "boot-runtime-other"},
       {"available", true}};
-  metadata["units"] = {{"forward", "m_s"},
-                       {"lateral", "m_s"},
-                       {"yaw", "rad_s"},
-                       {"time", "us"}};
+  metadata["units"] = {
+      {"forward", "m_s"}, {"lateral", "m_s"}, {"yaw", "rad_s"}, {"time", "us"}};
   metadata["model"] = {{"status", "loaded"},
                        {"name", "policy.onnx"},
                        {"path", nullptr},
@@ -260,10 +256,10 @@ bool WriteApplication(const std::filesystem::path &root, const Json &contract,
   config.sample_hz = 100;
   config.queue_capacity = 64;
   config.directory = root;
-  if (!recorder.Start(config,
-                      ApplicationMeta(contract, matching_boot, last_state_seq,
-                                      last_stamp),
-                      &error)) {
+  if (!recorder.Start(
+          config,
+          ApplicationMeta(contract, matching_boot, last_state_seq, last_stamp),
+          &error)) {
     std::cerr << "velocity recorder: " << error << '\n';
     return false;
   }
@@ -335,8 +331,7 @@ int CheckRuntimeSignals(const Json &context, const Json &contract,
     const std::string field = expected["field"].get<std::string>();
     if (expected.value("joint", false)) {
       for (const std::string &joint : joints) {
-        const std::string id =
-            "runtime/" + EscapeJoint(joint) + "/" + field;
+        const std::string id = "runtime/" + EscapeJoint(joint) + "/" + field;
         const Json *signal = FindSignal(context, id);
         CHECK(signal != nullptr);
         CHECK((*signal)["unit"] == expected["unit"]);
@@ -452,8 +447,7 @@ int main(int argc, char **argv) {
   const std::string application_b_id =
       RunIdByName(catalog, application_b.filename().string());
 
-  Json described = Call(
-      &query, {{"op", "describe"}, {"run_id", runtime_a_id}});
+  Json described = Call(&query, {{"op", "describe"}, {"run_id", runtime_a_id}});
   CHECK(described["ok"] == true);
   const Json &context = described["context"];
   CHECK(context["kind"] == "runtime");
@@ -477,8 +471,8 @@ int main(int argc, char **argv) {
                      "runtime/" + EscapeJoint(joint) + "/q") != nullptr);
   }
 
-  Json described_app = Call(
-      &query, {{"op", "describe"}, {"run_id", application_a_id}});
+  Json described_app =
+      Call(&query, {{"op", "describe"}, {"run_id", application_a_id}});
   CHECK(described_app["ok"] == true);
   CHECK(described_app["context"]["kind"] == "application");
   CHECK(described_app["context"]["state_seq"] ==
@@ -488,34 +482,32 @@ int main(int argc, char **argv) {
   CHECK(CheckApplicationSignals(described_app["context"],
                                 application_contract) == 0);
 
-  Json associated =
-      Call(&query, {{"op", "context"},
-                    {"run_id", runtime_a_id},
-                    {"app_run_id", application_a_id}});
+  Json associated = Call(&query, {{"op", "context"},
+                                  {"run_id", runtime_a_id},
+                                  {"app_run_id", application_a_id}});
   CHECK(associated["ok"] == true);
   CHECK(associated["context"]["association"]["boot_id_match"] == true);
   CHECK(associated["context"]["association"]["identity_match"] == true);
   CHECK(associated["context"]["association"]["ok"] == true);
   CHECK(associated["context"]["application"]["run_id"] == application_a_id);
 
-  Json mismatched =
-      Call(&query, {{"op", "context"},
-                    {"run_id", runtime_a_id},
-                    {"app_run_id", application_b_id}});
+  Json mismatched = Call(&query, {{"op", "context"},
+                                  {"run_id", runtime_a_id},
+                                  {"app_run_id", application_b_id}});
   CHECK(mismatched["ok"] == true);
   CHECK(mismatched["context"]["association"]["boot_id_match"] == false);
   CHECK(mismatched["context"]["association"]["ok"] == false);
   CHECK(mismatched["context"]["association"]["reason"] == "boot_id mismatch");
 
-  Json refused =
-      Call(&query, {{"op", "describe"},
-                    {"run_id", RunIdByName(catalog, "run_schema3")}});
+  Json refused = Call(
+      &query,
+      {{"op", "describe"}, {"run_id", RunIdByName(catalog, "run_schema3")}});
   CHECK(refused["ok"] == false);
   CHECK(refused["error"].get<std::string>().find("schema version 3") !=
         std::string::npos);
 
-  Json unimplemented = Call(
-      &query, {{"op", "subscribe"}, {"run_id", runtime_a_id}});
+  Json unimplemented =
+      Call(&query, {{"op", "subscribe"}, {"run_id", runtime_a_id}});
   CHECK(unimplemented["ok"] == false);
   CHECK(unimplemented["error"].get<std::string>().find("not implemented") !=
         std::string::npos);

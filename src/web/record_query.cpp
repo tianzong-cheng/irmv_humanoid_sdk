@@ -129,17 +129,17 @@ std::string CatalogRevision(const std::vector<RunEntry> &runs) {
   std::string material;
   for (const RunEntry &run : runs) {
     std::error_code code;
-    const auto stamp =
-        std::filesystem::last_write_time(run.directory, code).time_since_epoch()
-            .count();
+    const auto stamp = std::filesystem::last_write_time(run.directory, code)
+                           .time_since_epoch()
+                           .count();
     material += run.name;
     material += '|';
     material += std::to_string(stamp);
     material += '|';
-    material += run.kind == RunKind::Runtime
-                     ? "runtime"
-                     : (run.kind == RunKind::Application ? "application"
-                                                         : "unknown");
+    material +=
+        run.kind == RunKind::Runtime
+            ? "runtime"
+            : (run.kind == RunKind::Application ? "application" : "unknown");
     material += '|';
     material += run.readable ? "readable" : "unreadable";
     material += ';';
@@ -169,8 +169,7 @@ struct JointField {
 constexpr JointField kJointFields[] = {
     {"q", "position target", "rad", "joint_position", "command_present"},
     {"dq", "velocity target", "rad_s", "joint_velocity", "command_present"},
-    {"tau_ff", "feedforward torque", "Nm", "joint_torque",
-     "command_present"},
+    {"tau_ff", "feedforward torque", "Nm", "joint_torque", "command_present"},
     {"kp", "stiffness", "Nm_per_rad", "joint_stiffness", "command_present"},
     {"kd", "damping", "Nm_s_per_rad", "joint_damping", "command_present"},
     {"measured_q", "measured position", "rad", "joint_position",
@@ -179,8 +178,7 @@ constexpr JointField kJointFields[] = {
      "feedback_valid+joint_valid"},
     {"measured_tau_est", "estimated torque", "Nm", "joint_torque",
      "feedback_valid+joint_valid"},
-    {"output_torque", "output torque", "Nm", "joint_torque",
-     "output_valid"},
+    {"output_torque", "output torque", "Nm", "joint_torque", "output_valid"},
 };
 
 struct ScalarField {
@@ -292,13 +290,12 @@ Json RuntimeSignals(const telemetry::RunMetadata &metadata) {
   const std::string angular_unit = unit_of("imu_angular_velocity");
   const std::string linear_unit = unit_of("imu_linear_acceleration");
   for (const ImuField &field : kImuFields) {
-    const std::string &unit = std::string(field.field).rfind(
-                                  "imu_orientation", 0) == 0
-                                  ? orientation_unit
-                                  : (std::string(field.field).rfind(
-                                         "imu_angular_velocity", 0) == 0
-                                         ? angular_unit
-                                         : linear_unit);
+    const std::string &unit =
+        std::string(field.field).rfind("imu_orientation", 0) == 0
+            ? orientation_unit
+            : (std::string(field.field).rfind("imu_angular_velocity", 0) == 0
+                   ? angular_unit
+                   : linear_unit);
     signals.push_back(Signal("runtime", "", field.field, field.label, unit,
                              field.quantity, "scalar", "imu_valid"));
   }
@@ -430,9 +427,8 @@ Json RuntimeContext(const RunEntry &run) {
     entry["state_seq"] = Decimal(event.state_seq);
     entry["model_sha256"] = std::string(event.model_sha256.data());
     sessions.push_back(entry);
-    identities.push_back(
-        {{"runtime_id", HexId(event.runtime_id)},
-         {"session_id", HexId(event.session_id)}});
+    identities.push_back({{"runtime_id", HexId(event.runtime_id)},
+                          {"session_id", HexId(event.session_id)}});
   }
   context["sessions"] = std::move(sessions);
   context["runtime_identities"] = std::move(identities);
@@ -503,8 +499,8 @@ Json ApplicationContext(const RunEntry &run, const AppRead &read) {
   } else {
     context["stamp_us"] = nullptr;
     context["state_seq"] = nullptr;
-    context["identity"] = {{"known", false}, {"runtime_id", ""},
-                           {"session_id", ""}};
+    context["identity"] = {
+        {"known", false}, {"runtime_id", ""}, {"session_id", ""}};
   }
 
   Json losses = Json::array();
@@ -551,17 +547,16 @@ Json Association(const Json &runtime_context, const RunEntry &application,
       !runtime_boot.empty() && !app_boot.empty() && runtime_boot == app_boot;
   std::set<std::pair<std::string, std::string>> runtime_identities;
   for (const Json &entry : runtime_context["runtime_identities"]) {
-    runtime_identities.insert(
-        {entry.value("runtime_id", std::string()),
-         entry.value("session_id", std::string())});
+    runtime_identities.insert({entry.value("runtime_id", std::string()),
+                               entry.value("session_id", std::string())});
   }
   bool identity_match = false;
   for (const telemetry::VelocitySample &row : app_read.range.rows) {
     if (!row.identity_known) {
       continue;
     }
-    if (runtime_identities.count({HexId(row.runtime_id), HexId(row.session_id)}) >
-        0) {
+    if (runtime_identities.count(
+            {HexId(row.runtime_id), HexId(row.session_id)}) > 0) {
       identity_match = true;
       break;
     }
@@ -594,8 +589,7 @@ bool ParseDecimal(const Json &object, const char *key, std::uint64_t *out) {
     std::uint64_t parsed = 0;
     const auto result =
         std::from_chars(text.data(), text.data() + text.size(), parsed);
-    if (result.ec != std::errc() ||
-        result.ptr != text.data() + text.size()) {
+    if (result.ec != std::errc() || result.ptr != text.data() + text.size()) {
       return false;
     }
     *out = parsed;
@@ -668,6 +662,19 @@ const char *OutputActionText(protocol::OutputAction action) {
   }
 }
 
+std::uint32_t RuntimeFieldBit(const std::string &field) {
+  if (field == "q") return 1U << 0;
+  if (field == "dq") return 1U << 1;
+  if (field == "tau_ff") return 1U << 2;
+  if (field == "kp") return 1U << 3;
+  if (field == "kd") return 1U << 4;
+  if (field == "measured_q") return 1U << 5;
+  if (field == "measured_dq") return 1U << 6;
+  if (field == "output_torque") return 1U << 7;
+  if (field == "measured_tau_est") return 1U << 8;
+  return 0;
+}
+
 struct ResolvedSignal {
   Json signal;
   std::string source;
@@ -688,7 +695,8 @@ const Json *FindCatalogSignal(const Json &signals, const std::string &id) {
 }
 
 bool ResolveRuntimeSignals(const telemetry::RunMetadata &metadata,
-                           const Json &requested, std::vector<ResolvedSignal> *out,
+                           const Json &requested,
+                           std::vector<ResolvedSignal> *out,
                            std::string *error) {
   const Json signals = RuntimeSignals(metadata);
   for (const Json &id_value : requested) {
@@ -711,14 +719,12 @@ bool ResolveRuntimeSignals(const telemetry::RunMetadata &metadata,
     resolved.validity = signal->value("validity", std::string());
     if (!resolved.joint_name.empty()) {
       const auto found = std::find(metadata.joints.begin(),
-                                   metadata.joints.end(),
-                                   resolved.joint_name);
+                                   metadata.joints.end(), resolved.joint_name);
       if (found == metadata.joints.end()) {
         *error = "signal " + id + " names a joint this run does not have";
         return false;
       }
-      resolved.joint_index =
-          static_cast<int>(found - metadata.joints.begin());
+      resolved.joint_index = static_cast<int>(found - metadata.joints.begin());
     }
     out->push_back(std::move(resolved));
   }
@@ -822,13 +828,14 @@ bool RuntimeSignalValue(const telemetry::RecordSample &sample,
   } else if (field == "joint_count") {
     *value = static_cast<double>(sample.joint_count);
   } else if (field == "execution_state") {
-    *value = static_cast<double>(static_cast<std::uint32_t>(
-        sample.execution_state));
+    *value =
+        static_cast<double>(static_cast<std::uint32_t>(sample.execution_state));
   } else if (field == "output_action") {
     *value =
         static_cast<double>(static_cast<std::uint32_t>(sample.output_action));
   } else if (field == "stop_reason") {
-    *value = static_cast<double>(static_cast<std::uint32_t>(sample.stop_reason));
+    *value =
+        static_cast<double>(static_cast<std::uint32_t>(sample.stop_reason));
   } else if (field == "healthy") {
     *value = sample.healthy ? 1.0 : 0.0;
   } else if (field == "damping_eligible") {
@@ -1000,14 +1007,14 @@ Json LossesJson(const std::vector<telemetry::RecordGap> &gaps) {
     entry["first_stamp_us"] = Decimal(gap.first_stamp_us);
     entry["last_stamp_us"] = Decimal(gap.last_stamp_us);
     entry["dropped"] = Decimal(gap.dropped);
-    entry["reason"] = gap.reason == telemetry::RecordGapReason::QueueFull
-                          ? "queue_full"
-                          : (gap.reason == telemetry::RecordGapReason::WriteFailed
-                                 ? "write_failed"
-                                 : (gap.reason ==
-                                            telemetry::RecordGapReason::Stopped
-                                        ? "stopped"
-                                        : "none"));
+    entry["reason"] =
+        gap.reason == telemetry::RecordGapReason::QueueFull
+            ? "queue_full"
+            : (gap.reason == telemetry::RecordGapReason::WriteFailed
+                   ? "write_failed"
+                   : (gap.reason == telemetry::RecordGapReason::Stopped
+                          ? "stopped"
+                          : "none"));
     losses.push_back(std::move(entry));
   }
   return losses;
@@ -1023,12 +1030,12 @@ Json ApplicationLossesJson(
     entry["first_stamp_us"] = Decimal(loss.first_stamp_us);
     entry["last_stamp_us"] = Decimal(loss.last_stamp_us);
     entry["dropped"] = Decimal(loss.dropped);
-    entry["reason"] = loss.reason == telemetry::VelocityLossReason::QueueFull
-                          ? "queue_full"
-                          : (loss.reason ==
-                                     telemetry::VelocityLossReason::WriteFailed
-                                 ? "write_failed"
-                                 : "none");
+    entry["reason"] =
+        loss.reason == telemetry::VelocityLossReason::QueueFull
+            ? "queue_full"
+            : (loss.reason == telemetry::VelocityLossReason::WriteFailed
+                   ? "write_failed"
+                   : "none");
     output.push_back(std::move(entry));
   }
   return output;
@@ -1058,9 +1065,21 @@ bool BuildRuntimeRange(const RunEntry &run,
     trackers[index].period_us = period_us;
     trackers[index].gaps = &run.reader->gaps();
   }
+  telemetry::ChunkProjection projection;
+  for (const ResolvedSignal &signal : signals) {
+    if (signal.source != "runtime" || signal.joint_index < 0) {
+      continue;
+    }
+    projection.joints.push_back(static_cast<std::uint32_t>(signal.joint_index));
+    projection.fields_mask |= RuntimeFieldBit(signal.field);
+  }
+  std::sort(projection.joints.begin(), projection.joints.end());
+  projection.joints.erase(
+      std::unique(projection.joints.begin(), projection.joints.end()),
+      projection.joints.end());
   telemetry::RecordRange summary;
-  const bool visited = run.reader->VisitRange(
-      begin_us, end_us,
+  const bool visited = run.reader->VisitRangeProjected(
+      begin_us, end_us, projection,
       [&](const telemetry::RecordSample &sample) {
         for (std::size_t index = 0; index < count; ++index) {
           if (signals[index].source != "runtime") {
@@ -1076,10 +1095,9 @@ bool BuildRuntimeRange(const RunEntry &run,
             continue;
           }
           invalid_pushed[index] = !valid;
-          reducers[index].Push(
-              SeriesPoint{sample.stamp_us, sample.state_seq,
-                          valid ? value : 0.0, valid,
-                          trackers[index].segment});
+          reducers[index].Push(SeriesPoint{sample.stamp_us, sample.state_seq,
+                                           valid ? value : 0.0, valid,
+                                           trackers[index].segment});
         }
         return true;
       },
@@ -1120,8 +1138,7 @@ bool BuildApplicationRange(const RunEntry &application,
   for (std::size_t index = 0; index < count; ++index) {
     reducers.emplace_back(begin_us, end_us, pixel_width);
   }
-  const std::uint32_t sample_hz =
-      application.metadata.value("sample_hz", 100U);
+  const std::uint32_t sample_hz = application.metadata.value("sample_hz", 100U);
   const protocol::TimeUs period_us =
       sample_hz == 0 ? 1 : (1000000ULL + sample_hz / 2U) / sample_hz;
   // Read the loss table before the rows: the segment rules need every indexed
@@ -1258,8 +1275,7 @@ CursorResult CursorApplication(const RunEntry &application,
                                const ResolvedSignal &signal,
                                protocol::TimeUs cursor_us) {
   CursorResult result;
-  const std::uint32_t sample_hz =
-      application.metadata.value("sample_hz", 100U);
+  const std::uint32_t sample_hz = application.metadata.value("sample_hz", 100U);
   const protocol::TimeUs period_us =
       sample_hz == 0 ? 1 : (1000000ULL + sample_hz / 2U) / sample_hz;
   const protocol::TimeUs window_begin =
@@ -1271,8 +1287,7 @@ CursorResult CursorApplication(const RunEntry &application,
     return result;
   }
   if (signal.field == "stamp_us" || signal.field == "sample_seq" ||
-      signal.field == "latest_state_seq" ||
-      signal.field == "identity_known") {
+      signal.field == "latest_state_seq" || signal.field == "identity_known") {
     if (range.rows.empty()) {
       result.reason = "no application row at or before the cursor";
       return result;
@@ -1292,8 +1307,8 @@ CursorResult CursorApplication(const RunEntry &application,
     result.reason = "the field is not a held application value";
     return result;
   }
-  const HoldValue hold = HoldVelocityAt(range.rows, range.losses, cursor_us,
-                                        sample_hz, field);
+  const HoldValue hold =
+      HoldVelocityAt(range.rows, range.losses, cursor_us, sample_hz, field);
   result.found = hold.found;
   result.value = hold.value;
   result.stamp_us = hold.stamp_us;
@@ -1346,8 +1361,7 @@ Json EncodeFault(const telemetry::RecordedFault &fault,
   event["limit"] = EncodeDouble(detail.limit);
   event["sample_stamp_us"] = Decimal(detail.sample_stamp_us);
   event["detected_stamp_us"] = Decimal(detail.detected_stamp_us);
-  event["output_action"] =
-      static_cast<std::uint32_t>(detail.output_action);
+  event["output_action"] = static_cast<std::uint32_t>(detail.output_action);
   event["output_action_name"] = OutputActionText(detail.output_action);
   event["message"] = std::string(detail.message.View());
   event["message_hex"] = HexBytes(detail.message.View());
@@ -1379,7 +1393,8 @@ bool ResolveRequestedSignals(const RunEntry *run, const RunEntry *app,
     std::vector<ResolvedSignal> one;
     if (id.rfind("runtime/", 0) == 0) {
       if (run == nullptr || run->kind != RunKind::Runtime) {
-        *error = "signal " + id + " is a runtime signal but no runtime run was "
+        *error = "signal " + id +
+                 " is a runtime signal but no runtime run was "
                  "given";
         return false;
       }
@@ -1406,8 +1421,7 @@ bool ResolveRequestedSignals(const RunEntry *run, const RunEntry *app,
   return true;
 }
 
-bool AnySource(const std::vector<ResolvedSignal> &signals,
-               const char *source) {
+bool AnySource(const std::vector<ResolvedSignal> &signals, const char *source) {
   for (const ResolvedSignal &signal : signals) {
     if (signal.source == source) {
       return true;
@@ -1416,7 +1430,8 @@ bool AnySource(const std::vector<ResolvedSignal> &signals,
   return false;
 }
 
-std::string ErrorReply(const std::string &request_id, const std::string &error) {
+std::string ErrorReply(const std::string &request_id,
+                       const std::string &error) {
   Json reply;
   reply["request_id"] = request_id;
   reply["ok"] = false;
@@ -1434,8 +1449,8 @@ struct RecordQuery::Impl {
   explicit Impl(std::filesystem::path records_root)
       : root(std::move(records_root)) {
     std::error_code code;
-    const std::filesystem::path canonical = std::filesystem::canonical(root,
-                                                                       code);
+    const std::filesystem::path canonical =
+        std::filesystem::canonical(root, code);
     if (code || !std::filesystem::is_directory(canonical, code) || code) {
       root_error = "the records root is not a readable directory";
       return;
@@ -1475,9 +1490,9 @@ struct RecordQuery::Impl {
       run.directory = directory;
       run.name = directory.filename().string();
       run.metadata = std::move(metadata);
-      run.id =
-          configuration::Sha256(directory.lexically_relative(root).generic_string())
-              .substr(0, 32);
+      run.id = configuration::Sha256(
+                   directory.lexically_relative(root).generic_string())
+                   .substr(0, 32);
 
       const std::string schema = StringMember(run.metadata, "schema");
       if (!schema.empty()) {
@@ -1600,8 +1615,8 @@ std::string RecordQuery::Execute(std::string_view request_json) {
     return reply.dump(-1, ' ', false, Json::error_handler_t::replace);
   }
 
-  if (op != "describe" && op != "context" && op != "range" &&
-      op != "cursor" && op != "events") {
+  if (op != "describe" && op != "context" && op != "range" && op != "cursor" &&
+      op != "events") {
     return ErrorReply(request_id,
                       "op '" + op + "' is not implemented by this build");
   }
@@ -1613,9 +1628,8 @@ std::string RecordQuery::Execute(std::string_view request_json) {
     return ErrorReply(request_id, "unknown run_id");
   }
   if (!run->readable) {
-    return ErrorReply(request_id, run->error.empty()
-                                      ? "the run is not readable"
-                                      : run->error);
+    return ErrorReply(request_id, run->error.empty() ? "the run is not readable"
+                                                     : run->error);
   }
 
   const RunEntry *app = nullptr;
@@ -1708,10 +1722,11 @@ std::string RecordQuery::Execute(std::string_view request_json) {
     }
     Json events = Json::array();
     const std::uint64_t total = faults.rows.size();
-    const std::uint64_t stop = std::min<std::uint64_t>(
-        total, offset + max_rows);
+    const std::uint64_t stop =
+        std::min<std::uint64_t>(total, offset + max_rows);
     for (std::uint64_t index = offset; index < stop; ++index) {
-      events.push_back(EncodeFault(faults.rows[index], run->reader->metadata()));
+      events.push_back(
+          EncodeFault(faults.rows[index], run->reader->metadata()));
     }
     Json losses = Json::array();
     for (const telemetry::FaultLossSpan &loss : faults.losses) {
@@ -1723,16 +1738,14 @@ std::string RecordQuery::Execute(std::string_view request_json) {
       entry["first_stamp_us"] = Decimal(loss.first_stamp_us);
       entry["last_stamp_us"] = Decimal(loss.last_stamp_us);
       entry["dropped"] = Decimal(loss.dropped);
-      entry["reason"] = loss.reason == telemetry::FaultLossReason::QueueFull
-                            ? "queue_full"
-                            : (loss.reason ==
-                                       telemetry::FaultLossReason::WriteFailed
-                                   ? "write_failed"
-                                   : (loss.reason ==
-                                              telemetry::FaultLossReason::
-                                                  Generation
-                                          ? "generation"
-                                          : "none"));
+      entry["reason"] =
+          loss.reason == telemetry::FaultLossReason::QueueFull
+              ? "queue_full"
+              : (loss.reason == telemetry::FaultLossReason::WriteFailed
+                     ? "write_failed"
+                     : (loss.reason == telemetry::FaultLossReason::Generation
+                            ? "generation"
+                            : "none"));
       losses.push_back(std::move(entry));
     }
     Json reply;
@@ -1749,10 +1762,10 @@ std::string RecordQuery::Execute(std::string_view request_json) {
           {"losses", std::move(losses)},
           {"errors", faults.error.empty() ? Json::array()
                                           : Json::array({faults.error})}}}};
-    reply["coverage"] = {{"begin_us", begin_us >= end_us ? Json(nullptr)
-                                                         : Json(Decimal(begin_us))},
-                         {"end_us", begin_us >= end_us ? Json(nullptr)
-                                                       : Json(Decimal(end_us))}};
+    reply["coverage"] = {
+        {"begin_us",
+         begin_us >= end_us ? Json(nullptr) : Json(Decimal(begin_us))},
+        {"end_us", begin_us >= end_us ? Json(nullptr) : Json(Decimal(end_us))}};
     reply["context"] = {{"run_id", run->id},
                         {"kind", "events"},
                         {"offset", Decimal(offset)},
@@ -1778,7 +1791,8 @@ std::string RecordQuery::Execute(std::string_view request_json) {
     return ErrorReply(request_id, "runtime signals need a runtime run");
   }
   if (AnySource(signals, "application") && app == nullptr) {
-    return ErrorReply(request_id, "application signals need an application run");
+    return ErrorReply(request_id,
+                      "application signals need an application run");
   }
 
   if (op == "cursor") {
@@ -1854,12 +1868,11 @@ std::string RecordQuery::Execute(std::string_view request_json) {
   for (std::size_t index = 0; index < signals.size(); ++index) {
     if (!has_series[index]) {
       return ErrorReply(request_id,
-                        "signal " + signals[index].signal.value("id",
-                                                                std::string()) +
+                        "signal " +
+                            signals[index].signal.value("id", std::string()) +
                             " produced no series");
     }
-    series.push_back(ReducedSeriesJson(signals[index].signal,
-                                       reduced[index]));
+    series.push_back(ReducedSeriesJson(signals[index].signal, reduced[index]));
   }
   Json reply;
   reply["request_id"] = request_id;
@@ -1868,12 +1881,10 @@ std::string RecordQuery::Execute(std::string_view request_json) {
   reply["series"] = std::move(series);
   reply["events"] = Json::array();
   reply["integrity"] = std::move(integrity);
-  reply["coverage"] = {{"begin_us", begin_us >= end_us
-                                       ? Json(nullptr)
-                                       : Json(Decimal(begin_us))},
-                       {"end_us", begin_us >= end_us
-                                     ? Json(nullptr)
-                                     : Json(Decimal(end_us))}};
+  reply["coverage"] = {
+      {"begin_us",
+       begin_us >= end_us ? Json(nullptr) : Json(Decimal(begin_us))},
+      {"end_us", begin_us >= end_us ? Json(nullptr) : Json(Decimal(end_us))}};
   if (run->kind == RunKind::Runtime && !run->reader->chunks().empty()) {
     reply["committed"] = {
         {"begin_us", Decimal(run->reader->chunks().front().first_stamp_us)},
@@ -1882,15 +1893,15 @@ std::string RecordQuery::Execute(std::string_view request_json) {
   } else {
     reply["committed"] = nullptr;
   }
-  reply["context"] = {{"run_id", run->id},
-                      {"app_run_id", app != nullptr && run != app
-                                         ? Json(app->id)
-                                         : Json(nullptr)},
-                      {"kind", "range"},
-                      {"begin_us", Decimal(begin_us)},
-                      {"end_us", Decimal(end_us)},
-                      {"pixel_width", Decimal(pixel_width)},
-                      {"signal_count", signals.size()}};
+  reply["context"] = {
+      {"run_id", run->id},
+      {"app_run_id",
+       app != nullptr && run != app ? Json(app->id) : Json(nullptr)},
+      {"kind", "range"},
+      {"begin_us", Decimal(begin_us)},
+      {"end_us", Decimal(end_us)},
+      {"pixel_width", Decimal(pixel_width)},
+      {"signal_count", signals.size()}};
   return reply.dump(-1, ' ', false, Json::error_handler_t::replace);
 }
 

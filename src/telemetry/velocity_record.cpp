@@ -570,8 +570,8 @@ bool VelocityRecorder::Impl::Prepare(
     if (live_metadata.is_object()) {
       live_metadata["source"] = "application";
       live_metadata["run_path"] = run_directory.string();
-      live = std::make_unique<LiveTelemetrySender>(
-          live_options, live_metadata.dump());
+      live = std::make_unique<LiveTelemetrySender>(live_options,
+                                                   live_metadata.dump());
     }
   }
   // The stream exists from the start, even when no sample is ever recorded: a
@@ -813,10 +813,9 @@ void VelocityRecorder::Impl::SendLiveStatus(bool hello, bool complete) {
   payload["dropped"] = std::to_string(dropped.load());
   payload["write_failures"] = std::to_string(write_failures.load());
   payload["complete"] = complete;
-  static_cast<void>(
-      live->TrySend(hello ? "hello" : "status",
-                    payload.dump(-1, ' ', false,
-                                 Json::error_handler_t::replace)));
+  static_cast<void>(live->TrySend(
+      hello ? "hello" : "status",
+      payload.dump(-1, ' ', false, Json::error_handler_t::replace)));
   last_live_status = std::chrono::steady_clock::now();
 }
 
@@ -833,9 +832,8 @@ void VelocityRecorder::Impl::Run() {
       break;
     }
     Drain();
-    if (live &&
-        std::chrono::steady_clock::now() - last_live_status >=
-            std::chrono::milliseconds(100)) {
+    if (live && std::chrono::steady_clock::now() - last_live_status >=
+                    std::chrono::milliseconds(100)) {
       SendLiveStatus(false);
     }
   }
@@ -876,8 +874,7 @@ bool VelocityRecorder::Start(const configuration::RecorderConfig &config,
   }
   std::shared_ptr<Impl> impl = std::make_shared<Impl>();
   std::string message;
-  if (!impl->Prepare(config, std::move(meta_json), &message,
-                    std::move(live))) {
+  if (!impl->Prepare(config, std::move(meta_json), &message, std::move(live))) {
     if (error != nullptr) {
       *error = message;
     }
@@ -1146,8 +1143,8 @@ bool VisitVelocityRange(const std::filesystem::path &run_directory,
     }
     const Json document = Json::parse(line, nullptr, false);
     if (document.is_discarded()) {
-      summary->error = stream_path.string() + ":" + std::to_string(line_number) +
-                     ": not valid JSON";
+      summary->error = stream_path.string() + ":" +
+                       std::to_string(line_number) + ": not valid JSON";
       return false;
     }
     VelocitySample sample;

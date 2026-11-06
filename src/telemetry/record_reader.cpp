@@ -64,6 +64,14 @@ class Cursor {
     return true;
   }
 
+  bool Skip(std::size_t count) {
+    if (offset_ + count > bytes_.size()) {
+      return false;
+    }
+    offset_ += count;
+    return true;
+  }
+
   bool Bytes(std::uint8_t *out, std::size_t count) {
     if (offset_ + count > bytes_.size()) {
       return false;
@@ -214,8 +222,9 @@ void IdFromHex(const std::string &text, protocol::Id *id) {
 // a value the run never recorded, which is exactly what the checksums exist to
 // prevent - and it is the caller that learns, by name, which file was refused.
 bool DecodeChunk(const std::vector<std::uint8_t> &bytes,
-                 const RunMetadata &metadata, std::vector<RecordSample> *rows,
-                 bool *complete, bool *corrupt, std::string *error) {
+                 const RunMetadata &metadata, const ChunkProjection *projection,
+                 std::vector<RecordSample> *rows, bool *complete, bool *corrupt,
+                 std::string *error) {
   *complete = false;
   *corrupt = false;
   error->clear();
@@ -388,9 +397,32 @@ bool DecodeChunk(const std::vector<std::uint8_t> &bytes,
   // stored zero, which is exactly what a reader cannot afford. The chunk is
   // still reported through `complete` false, so the caller learns the run is
   // short.
+  const auto joint_selected = [projection](std::uint32_t joint) {
+    if (projection == nullptr || projection->joints.empty()) {
+      return true;
+    }
+    return std::binary_search(projection->joints.begin(),
+                              projection->joints.end(), joint);
+  };
   for (int column = 0; column < 9; ++column) {
+    if (projection != nullptr &&
+        (projection->fields_mask & (1U << column)) == 0) {
+      if (!cursor.Skip(static_cast<std::size_t>(row_count) * joint_count *
+                       sizeof(double))) {
+        rows->clear();
+        return true;
+      }
+      continue;
+    }
     for (std::uint32_t row = 0; row < row_count; ++row) {
       for (std::uint32_t joint = 0; joint < joint_count; ++joint) {
+        if (!joint_selected(joint)) {
+          if (!cursor.Skip(sizeof(double))) {
+            rows->clear();
+            return true;
+          }
+          continue;
+        }
         double value = 0.0;
         if (!cursor.Double(&value)) {
           rows->clear();
@@ -440,7 +472,9 @@ bool DecodeChunk(const std::vector<std::uint8_t> &bytes,
         rows->clear();
         return true;
       }
-      decoded[row].joint_valid[joint] = valid != 0;
+      if (joint_selected(joint)) {
+        decoded[row].joint_valid[joint] = valid != 0;
+      }
     }
   }
   // `whole` is the length's verdict, not the CRC's: a short file whose rows
@@ -707,6 +741,15 @@ bool RecordReader::VisitRange(protocol::TimeUs begin_us,
                               protocol::TimeUs end_us,
                               const SampleVisitor &visitor,
                               RecordRange *summary) const {
+  return VisitRangeProjected(begin_us, end_us, ChunkProjection{{}, 0x1FFU},
+                             visitor, summary);
+}
+
+bool RecordReader::VisitRangeProjected(protocol::TimeUs begin_us,
+                                       protocol::TimeUs end_us,
+                                       const ChunkProjection &projection,
+                                       const SampleVisitor &visitor,
+                                       RecordRange *summary) const {
   RecordRange result;
   if (end_us <= begin_us) {
     // An empty range reads nothing and is not an error: a caller asking for a
@@ -746,7 +789,7 @@ bool RecordReader::VisitRange(protocol::TimeUs begin_us,
     bool complete = false;
     bool corrupt = false;
     std::string decode_error;
-    if (!DecodeChunk(bytes, metadata_, &rows, &complete, &corrupt,
+    if (!DecodeChunk(bytes, metadata_, &projection, &rows, &complete, &corrupt,
                      &decode_error)) {
       if (corrupt) {
         // A chunk whose checksum did not match is corrupt, not a truncation:

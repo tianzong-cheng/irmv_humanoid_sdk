@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <string_view>
 
 #include "irmv/protocol/types.hpp"
@@ -287,19 +288,59 @@ inline constexpr std::uint64_t ChunkPayloadBytes(std::uint32_t rows,
 
 // The CRC-32 of the buffer (the IEEE 802.3 polynomial, reflected). A chunk
 // carries one over its payload and one over its header, so a reader can tell
-// corruption in place from a file that was cut short. It is table-free on
-// purpose: a chunk is checksummed once as it is written and once as it is read,
-// so a static table would buy microseconds at the cost of a shared mutable
-// state that a control-side caller must not have.
+// corruption in place from a file that was cut short.
+//
+// Eight slicing tables make the whole-chunk checksum a few loads per eight
+// bytes. A thirty-minute 64-joint run is almost a gigabyte that every first
+// window verifies, so a byte-at-a-time bit loop dominated the query. The tables
+// are immutable after their first construction; there is no lock or mutable
+// cache on the path.
+inline const std::array<std::array<std::uint32_t, 256>, 8> &ChunkCrcTables() {
+  static const std::array<std::array<std::uint32_t, 256>, 8> tables = [] {
+    std::array<std::array<std::uint32_t, 256>, 8> values{};
+    for (std::uint32_t index = 0; index < 256; ++index) {
+      std::uint32_t value = index;
+      for (int bit = 0; bit < 8; ++bit) {
+        const std::uint32_t mask = 0U - (value & 1U);
+        value = (value >> 1) ^ (0xEDB88320U & mask);
+      }
+      values[0][index] = value;
+    }
+    for (std::size_t table = 1; table < values.size(); ++table) {
+      for (std::size_t index = 0; index < 256; ++index) {
+        const std::uint32_t previous = values[table - 1][index];
+        values[table][index] = values[0][previous & 0xFFU] ^ (previous >> 8);
+      }
+    }
+    return values;
+  }();
+  return tables;
+}
+
+inline std::uint32_t LoadCrc32(const std::uint8_t *bytes) {
+  // The target platform is little-endian x86-64; the four bytes are combined in
+  // that order by the slicing-by-eight recurrence.
+  std::uint32_t value = 0;
+  std::memcpy(&value, bytes, sizeof(value));
+  return value;
+}
+
 inline std::uint32_t ChunkCrc32(const std::uint8_t *bytes,
                                 std::size_t size) noexcept {
+  const auto &tables = ChunkCrcTables();
   std::uint32_t crc = 0xFFFFFFFFU;
-  for (std::size_t index = 0; index < size; ++index) {
-    crc ^= bytes[index];
-    for (int bit = 0; bit < 8; ++bit) {
-      const std::uint32_t mask = 0U - (crc & 1U);
-      crc = (crc >> 1) ^ (0xEDB88320U & mask);
-    }
+  std::size_t index = 0;
+  while (index + 8 <= size) {
+    const std::uint32_t one = crc ^ LoadCrc32(bytes + index);
+    const std::uint32_t two = LoadCrc32(bytes + index + 8 - 4);
+    crc = tables[7][one & 0xFFU] ^ tables[6][(one >> 8) & 0xFFU] ^
+          tables[5][(one >> 16) & 0xFFU] ^ tables[4][(one >> 24) & 0xFFU] ^
+          tables[3][two & 0xFFU] ^ tables[2][(two >> 8) & 0xFFU] ^
+          tables[1][(two >> 16) & 0xFFU] ^ tables[0][(two >> 24) & 0xFFU];
+    index += 8;
+  }
+  for (; index < size; ++index) {
+    crc = tables[0][(crc ^ bytes[index]) & 0xFFU] ^ (crc >> 8);
   }
   return ~crc;
 }

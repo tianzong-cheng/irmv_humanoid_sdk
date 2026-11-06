@@ -1,9 +1,5 @@
 #include "irmv/telemetry/recorder.hpp"
 
-#include <chrono>
-
-#include "irmv/telemetry/live_telemetry.hpp"
-
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -19,6 +15,7 @@
 #include <vector>
 
 #include "fault_writer.hpp"
+#include "irmv/telemetry/live_telemetry.hpp"
 
 namespace irmv::telemetry {
 namespace {
@@ -363,8 +360,8 @@ bool Recorder::Impl::Prepare(const RecorderConfig &recorder_config,
     if (live_metadata.is_object()) {
       live_metadata["source"] = "runtime";
       live_metadata["run_path"] = run_directory.string();
-      live = std::make_unique<LiveTelemetrySender>(
-          live_options, live_metadata.dump());
+      live = std::make_unique<LiveTelemetrySender>(live_options,
+                                                   live_metadata.dump());
     }
   }
   // The fault sidecar exists from the start, even when no fault is ever
@@ -751,16 +748,14 @@ void Recorder::Impl::SendLiveStatus(bool hello, bool complete) {
   payload["complete"] = complete;
   Json sessions_json = Json::array();
   for (const RecordSessionEvent &event : sessions) {
-    sessions_json.push_back(
-        {{"runtime_id", IdHex(event.runtime_id)},
-         {"session_id", IdHex(event.session_id)},
-         {"epoch", std::to_string(event.epoch)}});
+    sessions_json.push_back({{"runtime_id", IdHex(event.runtime_id)},
+                             {"session_id", IdHex(event.session_id)},
+                             {"epoch", std::to_string(event.epoch)}});
   }
   payload["sessions"] = std::move(sessions_json);
-  static_cast<void>(
-      live->TrySend(hello ? "hello" : "status",
-                    payload.dump(-1, ' ', false,
-                                 Json::error_handler_t::replace)));
+  static_cast<void>(live->TrySend(
+      hello ? "hello" : "status",
+      payload.dump(-1, ' ', false, Json::error_handler_t::replace)));
   last_live_status = std::chrono::steady_clock::now();
 }
 
@@ -781,9 +776,8 @@ void Recorder::Impl::Run() {
     if (sessions_dirty) {
       static_cast<void>(WriteSessions());
     }
-    if (live &&
-        std::chrono::steady_clock::now() - last_live_status >=
-            std::chrono::milliseconds(100)) {
+    if (live && std::chrono::steady_clock::now() - last_live_status >=
+                    std::chrono::milliseconds(100)) {
       SendLiveStatus(false);
     }
   }
@@ -969,8 +963,7 @@ bool Recorder::Start(const RecorderConfig &config, std::string meta_json,
   }
   std::shared_ptr<Impl> impl = std::make_shared<Impl>();
   std::string message;
-  if (!impl->Prepare(config, std::move(meta_json), &message,
-                    std::move(live))) {
+  if (!impl->Prepare(config, std::move(meta_json), &message, std::move(live))) {
     if (error != nullptr) {
       *error = message;
     }

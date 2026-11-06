@@ -486,7 +486,7 @@ class BridgeFailureTest(unittest.TestCase):
             "#!/usr/bin/env python3\n"
             "import sys\n"
             "for line in sys.stdin:\n"
-            "    print('this is not json')\n"
+            "    print('this is not json', flush=True)\n"
         )
         process, url = start_server(reader, self.records, self.data, self.assets)
         try:

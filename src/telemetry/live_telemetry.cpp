@@ -14,10 +14,10 @@
 
 #include "irmv/configuration/sha256.hpp"
 #include "irmv/protocol/types.hpp"
+#include "irmv/protocol/validation.hpp"
 #include "irmv/telemetry/fault_record.hpp"
 #include "irmv/telemetry/record.hpp"
 #include "irmv/telemetry/velocity_record.hpp"
-#include "irmv/protocol/validation.hpp"
 
 namespace irmv::telemetry {
 namespace {
@@ -140,8 +140,8 @@ LiveTelemetrySender::LiveTelemetrySender(LiveTelemetryOptions options,
           .substr(0, 32);
   impl_->address.sun_family = AF_UNIX;
   std::memcpy(impl_->address.sun_path, path.c_str(), path.size());
-  impl_->address_length = static_cast<socklen_t>(
-      offsetof(sockaddr_un, sun_path) + path.size() + 1);
+  impl_->address_length =
+      static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) + path.size() + 1);
   impl_->socket_fd =
       ::socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
   if (impl_->socket_fd < 0) {
@@ -208,7 +208,8 @@ bool LiveTelemetrySender::TrySend(std::string_view kind,
         ::sendto(impl_->socket_fd, bytes.data(), bytes.size(), MSG_DONTWAIT,
                  reinterpret_cast<const sockaddr *>(&impl_->address),
                  impl_->address_length);
-    accepted = written >= 0 && static_cast<std::size_t>(written) == bytes.size();
+    accepted =
+        written >= 0 && static_cast<std::size_t>(written) == bytes.size();
   }
   if (accepted) {
     impl_->sent += 1;
@@ -283,23 +284,32 @@ std::string EncodeLiveSample(const RecordSample &sample) {
   payload["imu_angular_velocity"] = std::move(angular);
   payload["imu_linear_acceleration"] = std::move(linear);
   for (const auto &column :
-       {std::pair<const char *, const std::array<double, protocol::kMaxJoints> *>(
-            "q", &sample.q),
-        std::pair<const char *, const std::array<double, protocol::kMaxJoints> *>(
-            "dq", &sample.dq),
-        std::pair<const char *, const std::array<double, protocol::kMaxJoints> *>(
+       {std::pair<const char *,
+                  const std::array<double, protocol::kMaxJoints> *>("q",
+                                                                    &sample.q),
+        std::pair<const char *,
+                  const std::array<double, protocol::kMaxJoints> *>("dq",
+                                                                    &sample.dq),
+        std::pair<const char *,
+                  const std::array<double, protocol::kMaxJoints> *>(
             "tau_ff", &sample.tau_ff),
-        std::pair<const char *, const std::array<double, protocol::kMaxJoints> *>(
-            "kp", &sample.kp),
-        std::pair<const char *, const std::array<double, protocol::kMaxJoints> *>(
-            "kd", &sample.kd),
-        std::pair<const char *, const std::array<double, protocol::kMaxJoints> *>(
+        std::pair<const char *,
+                  const std::array<double, protocol::kMaxJoints> *>("kp",
+                                                                    &sample.kp),
+        std::pair<const char *,
+                  const std::array<double, protocol::kMaxJoints> *>("kd",
+                                                                    &sample.kd),
+        std::pair<const char *,
+                  const std::array<double, protocol::kMaxJoints> *>(
             "measured_q", &sample.measured_q),
-        std::pair<const char *, const std::array<double, protocol::kMaxJoints> *>(
+        std::pair<const char *,
+                  const std::array<double, protocol::kMaxJoints> *>(
             "measured_dq", &sample.measured_dq),
-        std::pair<const char *, const std::array<double, protocol::kMaxJoints> *>(
+        std::pair<const char *,
+                  const std::array<double, protocol::kMaxJoints> *>(
             "measured_tau_est", &sample.measured_tau_est),
-        std::pair<const char *, const std::array<double, protocol::kMaxJoints> *>(
+        std::pair<const char *,
+                  const std::array<double, protocol::kMaxJoints> *>(
             "output_torque", &sample.output_torque)}) {
     Json values = Json::array();
     for (std::uint32_t index = 0; index < count; ++index) {

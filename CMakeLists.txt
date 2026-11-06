@@ -1253,6 +1253,11 @@ target_link_libraries(
 
 add_executable(web_record_query src/web/main.cpp)
 target_compile_features(web_record_query PRIVATE cxx_std_17)
+if(APPLE)
+  set_target_properties(web_record_query PROPERTIES INSTALL_RPATH "@loader_path/../lib")
+else()
+  set_target_properties(web_record_query PROPERTIES INSTALL_RPATH "$ORIGIN/../lib")
+endif()
 target_include_directories(
   web_record_query PRIVATE "${PROJECT_SOURCE_DIR}/include"
 )
@@ -1958,3 +1963,50 @@ set_tests_properties(
   real_backend_contract_test
   PROPERTIES LABELS integration TIMEOUT 180
   WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+
+# The experiment workbench is an installation option, not a change to the SDK
+# build. Leaving it off keeps the original tree and install set unchanged; the
+# targets remain available to the tests either way.
+option(
+  IRMV_BUILD_EXPERIMENT_WEB
+  "Install the local experiment web workbench (reader, service, assets)"
+  OFF
+)
+if(IRMV_BUILD_EXPERIMENT_WEB)
+  install(TARGETS web_record_query RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+  install(
+    FILES web/index.html web/styles.css
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/irmv/experiment-web/web"
+  )
+  install(
+    DIRECTORY web/src
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/irmv/experiment-web/web"
+  )
+  install(
+    DIRECTORY tools/experiment_web
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/irmv/experiment-web"
+    PATTERN "__pycache__" EXCLUDE
+  )
+  install(
+    PROGRAMS tools/experiment_web/launcher.py
+    DESTINATION "${CMAKE_INSTALL_BINDIR}"
+    RENAME irmv_experiment_web
+  )
+
+  add_test(
+    NAME experiment_web_package_test
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${PROJECT_SOURCE_DIR}/tests/integration/experiment_web_package_test.py"
+      "${PROJECT_SOURCE_DIR}"
+      "${CMAKE_BINARY_DIR}"
+      "${CMAKE_BINARY_DIR}/experiment-web-package-stage"
+  )
+  set_tests_properties(
+    experiment_web_package_test
+    PROPERTIES
+      LABELS integration
+      TIMEOUT 300
+      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+  )
+endif()
