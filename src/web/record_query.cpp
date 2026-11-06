@@ -169,17 +169,17 @@ struct JointField {
 constexpr JointField kJointFields[] = {
     {"q", "position target", "rad", "joint_position", "command_present"},
     {"dq", "velocity target", "rad_s", "joint_velocity", "command_present"},
-    {"tau_ff", "feedforward torque", "Nm", "feedforward_torque",
+    {"tau_ff", "feedforward torque", "Nm", "joint_torque",
      "command_present"},
     {"kp", "stiffness", "Nm_per_rad", "joint_stiffness", "command_present"},
     {"kd", "damping", "Nm_s_per_rad", "joint_damping", "command_present"},
-    {"measured_q", "measured position", "rad", "measured_joint_position",
+    {"measured_q", "measured position", "rad", "joint_position",
      "feedback_valid+joint_valid"},
-    {"measured_dq", "measured velocity", "rad_s", "measured_joint_velocity",
+    {"measured_dq", "measured velocity", "rad_s", "joint_velocity",
      "feedback_valid+joint_valid"},
-    {"measured_tau_est", "estimated torque", "Nm", "estimated_joint_torque",
+    {"measured_tau_est", "estimated torque", "Nm", "joint_torque",
      "feedback_valid+joint_valid"},
-    {"output_torque", "output torque", "Nm", "output_joint_torque",
+    {"output_torque", "output torque", "Nm", "joint_torque",
      "output_valid"},
 };
 
