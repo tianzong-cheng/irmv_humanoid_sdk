@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -104,6 +105,16 @@ class RecordReader {
   // the run reads everything.
   bool ReadRange(protocol::TimeUs begin_us, protocol::TimeUs end_us,
                  RecordRange *range) const;
+
+  // The streaming form of ReadRange: one decoded chunk at a time, with the
+  // visitor called for every sample inside the range. The visitor returns false
+  // to stop early. `summary` receives the range's gaps, truncation and
+  // corruption facts but no samples; it may be null. This keeps a range query
+  // on a long run from materialising every row of every overlapping chunk.
+  using SampleVisitor = std::function<bool(const RecordSample &)>;
+  bool VisitRange(protocol::TimeUs begin_us, protocol::TimeUs end_us,
+                  const SampleVisitor &visitor,
+                  RecordRange *summary) const;
 
  private:
   std::filesystem::path directory_;

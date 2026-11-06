@@ -987,13 +987,14 @@ const std::string &VelocityRecorder::error() const noexcept {
   return impl_ ? impl_->error : start_error_;
 }
 
-bool ReadVelocityRange(const std::filesystem::path &run_directory,
-                       protocol::TimeUs begin_us, protocol::TimeUs end_us,
-                       VelocityRecordRange *range) {
-  if (range == nullptr) {
+bool VisitVelocityRange(const std::filesystem::path &run_directory,
+                        protocol::TimeUs begin_us, protocol::TimeUs end_us,
+                        const VelocitySampleVisitor &visitor,
+                        VelocityRecordRange *summary) {
+  if (summary == nullptr) {
     return false;
   }
-  *range = VelocityRecordRange{};
+  *summary = VelocityRecordRange{};
   std::error_code code;
 
   // The metadata owns the run's schema identity. A run whose metadata is
@@ -1002,17 +1003,17 @@ bool ReadVelocityRange(const std::filesystem::path &run_directory,
       run_directory / std::string(kVelocityMetadataFile);
   std::ifstream metadata_file(metadata_path);
   if (!metadata_file) {
-    range->error = "cannot open " + metadata_path.string();
+    summary->error = "cannot open " + metadata_path.string();
     return false;
   }
   const Json metadata = Json::parse(metadata_file, nullptr, false);
   if (metadata.is_discarded() || !metadata.is_object()) {
-    range->error = metadata_path.string() + " is not valid JSON";
+    summary->error = metadata_path.string() + " is not valid JSON";
     return false;
   }
   std::string why;
   if (!SchemaMatches(metadata, &why)) {
-    range->error = metadata_path.string() + ": " + why;
+    summary->error = metadata_path.string() + ": " + why;
     return false;
   }
 
@@ -1023,55 +1024,55 @@ bool ReadVelocityRange(const std::filesystem::path &run_directory,
       run_directory / std::string(kVelocityIndexFile);
   const bool index_exists = std::filesystem::exists(index_path, code);
   if (code) {
-    range->error = "cannot inspect " + index_path.string();
+    summary->error = "cannot inspect " + index_path.string();
     return false;
   }
   if (index_exists) {
     std::ifstream file(index_path);
     if (!file) {
-      range->error = "cannot open " + index_path.string();
+      summary->error = "cannot open " + index_path.string();
       return false;
     }
     const Json document = Json::parse(file, nullptr, false);
     if (document.is_discarded() || !document.is_object()) {
-      range->error = index_path.string() + " is not valid JSON";
+      summary->error = index_path.string() + " is not valid JSON";
       return false;
     }
     if (!SchemaMatches(document, &why)) {
-      range->error = index_path.string() + ": " + why;
+      summary->error = index_path.string() + ": " + why;
       return false;
     }
     const auto complete = document.find("complete");
     if (complete != document.end()) {
       if (!complete->is_boolean()) {
-        range->error = index_path.string() + " has no completion marker";
+        summary->error = index_path.string() + " has no completion marker";
         return false;
       }
-      range->complete = complete->get<bool>();
+      summary->complete = complete->get<bool>();
     }
-    if (range->complete) {
+    if (summary->complete) {
       // A finalized run with a failed write is not intact: the worker's final
       // marker already says false, but an index hand-edited to true must not
       // hide a loss that is still in the table.
       const auto failures = document.find("write_failures");
       if (failures != document.end() && failures->is_number_unsigned() &&
           failures->get<std::uint64_t>() != 0) {
-        range->complete = false;
+        summary->complete = false;
       }
     }
     const auto losses = document.find("losses");
     if (losses != document.end()) {
       if (!losses->is_array()) {
-        range->error = index_path.string() + " has no loss table";
+        summary->error = index_path.string() + " has no loss table";
         return false;
       }
       for (const Json &entry : *losses) {
         VelocityLossSpan loss;
         if (!DecodeLoss(entry, &loss, &why)) {
-          range->error = index_path.string() + ": " + why;
+          summary->error = index_path.string() + ": " + why;
           return false;
         }
-        range->losses.push_back(loss);
+        summary->losses.push_back(loss);
       }
     }
   }
@@ -1080,48 +1081,65 @@ bool ReadVelocityRange(const std::filesystem::path &run_directory,
       run_directory / std::string(kVelocityFile);
   std::ifstream file(stream_path, std::ios::binary);
   if (!file) {
-    range->error = "cannot open " + stream_path.string();
+    summary->error = "cannot open " + stream_path.string();
     return false;
   }
-  const std::string content{std::istreambuf_iterator<char>(file),
-                            std::istreambuf_iterator<char>()};
-  if (file.bad()) {
-    range->error = "cannot read " + stream_path.string();
-    return false;
-  }
-  // Only newline-terminated lines are complete. The final segment without one
-  // is a write that did not finish: it is named truncated and never parsed,
-  // because a half-written object is not evidence of a malformed sample.
-  std::size_t start = 0;
-  std::size_t line_number = 0;
-  while (start < content.size()) {
-    const std::size_t newline = content.find('\n', start);
-    if (newline == std::string::npos) {
-      range->truncated = true;
+  // Read one complete line at a time. Only newline-terminated lines are
+  // complete: a final line that reaches EOF without one is a write that did
+  // not finish, and its bytes are never parsed as evidence of a sample.
+  std::string line;
+  std::uint64_t line_number = 0;
+  bool keep_going = true;
+  while (keep_going && std::getline(file, line)) {
+    ++line_number;
+    if (file.eof()) {
+      summary->truncated = true;
       break;
     }
-    ++line_number;
-    const std::string_view text(content.data() + start, newline - start);
-    const Json line = Json::parse(text.begin(), text.end(), nullptr, false);
-    if (line.is_discarded()) {
-      range->error = stream_path.string() + ":" + std::to_string(line_number) +
+    const Json document = Json::parse(line, nullptr, false);
+    if (document.is_discarded()) {
+      summary->error = stream_path.string() + ":" + std::to_string(line_number) +
                      ": not valid JSON";
       return false;
     }
     VelocitySample sample;
-    if (!DecodeSample(line, &sample, &why)) {
-      range->error =
+    std::string why;
+    if (!DecodeSample(document, &sample, &why)) {
+      summary->error =
           stream_path.string() + ":" + std::to_string(line_number) + ": " + why;
       return false;
     }
     if (begin_us < end_us && sample.stamp_us >= begin_us &&
         sample.stamp_us < end_us) {
-      range->rows.push_back(sample);
+      if (visitor && !visitor(sample)) {
+        keep_going = false;
+      }
     }
-    start = newline + 1;
   }
-  range->ok = true;
+  if (file.bad()) {
+    summary->error = "cannot read " + stream_path.string();
+    return false;
+  }
+  summary->ok = true;
   return true;
+}
+
+bool ReadVelocityRange(const std::filesystem::path &run_directory,
+                       protocol::TimeUs begin_us, protocol::TimeUs end_us,
+                       VelocityRecordRange *range) {
+  if (range == nullptr) {
+    return false;
+  }
+  VelocityRecordRange summary;
+  const bool ok = VisitVelocityRange(
+      run_directory, begin_us, end_us,
+      [&summary](const VelocitySample &sample) {
+        summary.rows.push_back(sample);
+        return true;
+      },
+      &summary);
+  *range = std::move(summary);
+  return ok;
 }
 
 }  // namespace irmv::telemetry

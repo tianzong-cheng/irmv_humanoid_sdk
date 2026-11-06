@@ -417,8 +417,8 @@ int main(int argc, char **argv) {
 
   // A symlink that leaves the configured root is not a run of this workbench.
   const std::filesystem::path outside =
-      root.parent_path() /
-      ("irmv-web-query-outside-" + std::to_string(root.filename().string().size()));
+      root.parent_path() / (root.filename().string() + "-outside");
+  std::filesystem::remove_all(outside);
   CHECK(std::filesystem::create_directory(outside));
   {
     std::ofstream metadata(outside / "meta.json");
@@ -515,7 +515,7 @@ int main(int argc, char **argv) {
         std::string::npos);
 
   Json unimplemented = Call(
-      &query, {{"op", "cursor"}, {"run_id", runtime_a_id}});
+      &query, {{"op", "subscribe"}, {"run_id", runtime_a_id}});
   CHECK(unimplemented["ok"] == false);
   CHECK(unimplemented["error"].get<std::string>().find("not implemented") !=
         std::string::npos);

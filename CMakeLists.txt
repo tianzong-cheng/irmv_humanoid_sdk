@@ -1222,7 +1222,7 @@ target_link_libraries(
 # The read-only experiment web bridge: a JSONL stdin/stdout process that
 # answers catalog and metadata questions about one records root. It is a pure
 # reader and never links the runtime, transport or policy layers.
-add_library(irmv_web src/web/record_query.cpp)
+add_library(irmv_web src/web/record_query.cpp src/web/range_reduce.cpp)
 target_compile_features(irmv_web PUBLIC cxx_std_17)
 target_include_directories(
   irmv_web
@@ -1257,6 +1257,28 @@ target_link_libraries(
 add_test(NAME web_record_query_test COMMAND web_record_query_test)
 set_tests_properties(
   web_record_query_test
+  PROPERTIES
+    LABELS core
+    TIMEOUT 120
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
+add_executable(web_range_query_test tests/unit/web_range_query_test.cpp)
+target_compile_features(web_range_query_test PRIVATE cxx_std_17)
+target_include_directories(
+  web_range_query_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(
+  web_range_query_test PRIVATE irmv_web Threads::Threads
+                              nlohmann_json::nlohmann_json
+)
+
+add_test(NAME web_range_query_test COMMAND web_range_query_test)
+set_tests_properties(
+  web_range_query_test
   PROPERTIES
     LABELS core
     TIMEOUT 120

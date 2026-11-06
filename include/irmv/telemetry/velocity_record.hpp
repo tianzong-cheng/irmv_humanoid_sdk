@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -210,6 +211,16 @@ class VelocityRecorder {
 bool ReadVelocityRange(const std::filesystem::path &run_directory,
                        protocol::TimeUs begin_us, protocol::TimeUs end_us,
                        VelocityRecordRange *range);
+
+// The streaming form of ReadVelocityRange: one decoded line at a time, with the
+// visitor called for every sample inside the range, and no row vector built.
+// The visitor returns false to stop early. `summary` receives the loss table,
+// completion and truncation facts but no rows; it may be null.
+using VelocitySampleVisitor = std::function<bool(const VelocitySample &)>;
+bool VisitVelocityRange(const std::filesystem::path &run_directory,
+                        protocol::TimeUs begin_us, protocol::TimeUs end_us,
+                        const VelocitySampleVisitor &visitor,
+                        VelocityRecordRange *summary);
 
 // Test-only seam: called on the worker before one line is written, with the
 // serialized line. It returns the action:

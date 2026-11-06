@@ -683,11 +683,38 @@ bool RecordReader::ReadRange(protocol::TimeUs begin_us, protocol::TimeUs end_us,
     return false;
   }
   RecordRange result;
+  RecordRange summary;
+  const bool ok = VisitRange(
+      begin_us, end_us,
+      [&result](const RecordSample &sample) {
+        result.samples.push_back(sample);
+        return true;
+      },
+      &summary);
+  if (!ok) {
+    return false;
+  }
+  result.ok = summary.ok;
+  result.error = std::move(summary.error);
+  result.gaps = std::move(summary.gaps);
+  result.truncated = summary.truncated;
+  result.corrupt = summary.corrupt;
+  *range = std::move(result);
+  return true;
+}
+
+bool RecordReader::VisitRange(protocol::TimeUs begin_us,
+                              protocol::TimeUs end_us,
+                              const SampleVisitor &visitor,
+                              RecordRange *summary) const {
+  RecordRange result;
   if (end_us <= begin_us) {
     // An empty range reads nothing and is not an error: a caller asking for a
     // window that holds no time is asking a question with an empty answer.
     result.ok = true;
-    *range = std::move(result);
+    if (summary != nullptr) {
+      *summary = std::move(result);
+    }
     return true;
   }
   for (const std::string &damaged : damaged_chunks_) {
@@ -702,7 +729,11 @@ bool RecordReader::ReadRange(protocol::TimeUs begin_us, protocol::TimeUs end_us,
       result.error += damaged;
     }
   }
+  bool keep_going = true;
   for (const ChunkInfo &chunk : chunks_) {
+    if (!keep_going) {
+      break;
+    }
     if (chunk.last_stamp_us < begin_us || chunk.first_stamp_us >= end_us) {
       continue;
     }
@@ -739,7 +770,10 @@ bool RecordReader::ReadRange(protocol::TimeUs begin_us, protocol::TimeUs end_us,
     }
     for (const RecordSample &sample : rows) {
       if (sample.stamp_us >= begin_us && sample.stamp_us < end_us) {
-        result.samples.push_back(sample);
+        if (visitor && !visitor(sample)) {
+          keep_going = false;
+          break;
+        }
       }
     }
   }
@@ -754,7 +788,9 @@ bool RecordReader::ReadRange(protocol::TimeUs begin_us, protocol::TimeUs end_us,
     result.gaps.push_back(gap);
   }
   result.ok = true;
-  *range = std::move(result);
+  if (summary != nullptr) {
+    *summary = std::move(result);
+  }
   return true;
 }
 
