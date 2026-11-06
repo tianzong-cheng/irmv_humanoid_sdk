@@ -8,3 +8,7 @@
 /.tools/
 __pycache__/
 /build-real/
+# Browser test artifacts and the local Playwright dependency tree.
+/web/node_modules/
+/web/test-results/
+/web/playwright-report/

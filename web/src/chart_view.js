@@ -109,11 +109,19 @@ export function Render(canvas, chart, series, timeWindow, cursor = null, markers
     ? chart.axes
     : [{ id: 'axis-1', quantity: '', unit: '' }];
   ctx.font = '11px system-ui, sans-serif';
-  const axisWidths = axes.map((axis) => {
+  let axisWidths = axes.map((axis) => {
     const label = `${axis.quantity || 'value'} (${axis.unit || '-'})`;
     return Math.max(72, Math.ceil(ctx.measureText(label).width) + 14);
   });
-  const gutter = axisWidths.reduce((sum, value) => sum + value, 0);
+  let gutter = axisWidths.reduce((sum, value) => sum + value, 0);
+  // The DOM axis columns already exist to the left of the canvas. When the
+  // canvas itself is too narrow for its own measured columns, it draws only the
+  // plot and leaves labels to those columns rather than returning an empty
+  // canvas. Every axis stays in the DOM and none is dropped.
+  if (gutter + 60 > width) {
+    axisWidths = [];
+    gutter = 0;
+  }
   const plotLeft = gutter + 6;
   const plotRight = width - 8;
   const plotTop = 28;
@@ -133,7 +141,7 @@ export function Render(canvas, chart, series, timeWindow, cursor = null, markers
 
   // Axis columns are drawn from the plot outwards; each has its own column.
   let columnLeft = 0;
-  for (let index = 0; index < axes.length; index += 1) {
+  for (let index = 0; index < axisWidths.length; index += 1) {
     const axis = axes[index];
     const columnWidth = axisWidths[index];
     const [low, high] = ranges.get(axis.id);

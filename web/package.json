@@ -7,5 +7,8 @@
   "scripts": {
     "test": "node --test tests/api.test.js tests/dock.test.js tests/layout.test.js tests/chart.test.js tests/time.test.js",
     "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.0"
   }
 }

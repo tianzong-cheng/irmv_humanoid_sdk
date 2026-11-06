@@ -1349,6 +1349,46 @@ set_tests_properties(
     WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 
+if(IRMV_BUILD_APPLICATION)
+add_test(
+  NAME experiment_web_test
+  COMMAND
+    "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/integration/experiment_web_test.py"
+    "${PROJECT_SOURCE_DIR}"
+    "$<TARGET_FILE:robot_runtime>"
+    "$<TARGET_FILE:application>"
+    "$<TARGET_FILE:web_record_query>"
+)
+set_tests_properties(
+  experiment_web_test
+  PROPERTIES
+    LABELS integration
+    TIMEOUT 300
+    WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+endif()
+
+# The real-browser acceptance is opt-in: it needs Node, the pinned Playwright
+# dependency, its downloaded browser and a loopback port. When enabled, a
+# missing npm or browser must fail the test, never silently skip it.
+option(IRMV_WEB_BROWSER_TESTS "Run the Playwright workbench acceptance" OFF)
+if(IRMV_WEB_BROWSER_TESTS)
+  find_program(IRMV_NPM_EXECUTABLE npm REQUIRED)
+  add_test(
+    NAME experiment_web_browser_test
+    COMMAND
+      "${IRMV_NPM_EXECUTABLE}" --prefix "${PROJECT_SOURCE_DIR}/web" run test:e2e
+  )
+  set_tests_properties(
+    experiment_web_browser_test
+    PROPERTIES
+      LABELS integration
+      TIMEOUT 600
+      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+  )
+endif()
+
 
 # The application: the supervising upper process of a separate robot_runtime.
 # It owns the supervision loop no other target needs, so its loop source is
