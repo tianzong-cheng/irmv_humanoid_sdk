@@ -58,7 +58,33 @@
               <span id="integrity-line" class="muted"></span>
               <span id="missing-signals" class="warning"></span>
             </div>
+            <div class="transport-bar">
+              <button type="button" id="play">Play</button>
+              <button type="button" id="pause">Pause</button>
+              <button type="button" id="step-prev">Step back</button>
+              <button type="button" id="step-next">Step</button>
+              <select id="speed-select" aria-label="Playback speed">
+                <option value="0.25">0.25×</option>
+                <option value="1" selected>1×</option>
+                <option value="2">2×</option>
+                <option value="4">4×</option>
+              </select>
+              <button type="button" id="go-live">Go live</button>
+              <span id="transport-mode" class="muted"></span>
+              <span id="live-status" class="muted"></span>
+              <button type="button" id="integrity-toggle">Integrity</button>
+            </div>
             <div id="dock-root" class="dock-root" aria-label="Chart workspace"></div>
+            <section class="events-panel">
+              <header class="events-header">
+                <strong>Events</strong>
+                <span id="events-summary" class="muted"></span>
+                <button type="button" id="load-events">Refresh events</button>
+              </header>
+              <div id="events-list" class="events-list"></div>
+              <pre id="event-detail" class="event-detail"></pre>
+              <pre id="integrity-detail" class="integrity-detail" hidden></pre>
+            </section>
             <footer class="footer-bar">
               <select id="replace-select" hidden aria-label="Replace missing signal"></select>
               <span class="muted">Drag a signal to create or overlay; drop on an edge to split; drag a chart header to move it.</span>

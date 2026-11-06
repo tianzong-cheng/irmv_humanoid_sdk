@@ -17,6 +17,7 @@ export class DockView {
     this.series = [];
     this.timeWindow = { beginUs: 0n, endUs: 1n };
     this.cursor = null;
+    this.markers = [];
     this.canvases = new Map();
     this.axisElements = new Map();
   }
@@ -32,6 +33,11 @@ export class DockView {
 
   SetCursor(cursor) {
     this.cursor = cursor;
+    this.Redraw();
+  }
+
+  SetMarkers(markers) {
+    this.markers = markers ?? [];
     this.Redraw();
   }
 
@@ -295,7 +301,8 @@ export class DockView {
       if (!chart || !canvas.isConnected) {
         continue;
       }
-      Render(canvas, chart, this.series, this.timeWindow, this.cursor);
+      Render(canvas, chart, this.series, this.timeWindow, this.cursor,
+        this.markers);
     }
   }
 

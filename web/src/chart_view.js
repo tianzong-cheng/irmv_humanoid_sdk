@@ -81,7 +81,7 @@ function CurveColor(canvas, curve, index) {
   return colors[index % colors.length];
 }
 
-export function Render(canvas, chart, series, timeWindow, cursor = null) {
+export function Render(canvas, chart, series, timeWindow, cursor = null, markers = []) {
   const width = Math.max(1, Math.round(canvas.clientWidth || 640));
   const height = Math.max(1, Math.round(canvas.clientHeight || 280));
   const ratio = globalThis.devicePixelRatio || 1;
@@ -218,6 +218,22 @@ export function Render(canvas, chart, series, timeWindow, cursor = null) {
     }
     ctx.stroke();
   });
+
+  for (const marker of markers) {
+    const stamp = Us(marker.timeUs);
+    if (stamp < begin || stamp > end) {
+      continue;
+    }
+    const x = plotLeft + Number(((stamp - begin) * 1000n) / span) / 1000 *
+      (plotRight - plotLeft);
+    ctx.fillStyle = style.getPropertyValue('--error').trim() || '#d95d8c';
+    ctx.beginPath();
+    ctx.moveTo(x - 3, plotTop);
+    ctx.lineTo(x + 3, plotTop);
+    ctx.lineTo(x, plotTop + 5);
+    ctx.closePath();
+    ctx.fill();
+  }
 
   if (cursor?.timeUs !== undefined && cursor.timeUs !== null) {
     const stamp = Us(cursor.timeUs);

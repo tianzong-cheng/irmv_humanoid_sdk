@@ -25,6 +25,8 @@ import {
   ResizeSplit,
 } from './dock_model.js';
 import { DockView } from './dock_view.js';
+import { EventsView } from './events_view.js';
+import { SampleTimes, TimeModel } from './time_model.js';
 import {
   EmptyLayout,
   LayoutError,
@@ -62,6 +64,20 @@ export class Workbench {
     this.layouts = [];
     this.replacing = null;
     this.dock = null;
+    this.time = TimeModel.Initial();
+    this.eventsView = new EventsView({
+      onSeek: (stamp) => this.SeekTo(stamp),
+      onSelect: (event) => this.ShowEventDetail(event),
+      onMore: (continuation) => this.LoadEvents(continuation),
+    });
+    this.liveTimer = null;
+    this.liveInFlight = false;
+    this.liveRevision = null;
+    this.liveServiceEpoch = null;
+    this.liveSeen = false;
+    this.playbackTimer = null;
+    this.lastRangeAt = 0;
+    this.lastCursorAt = undefined;
   }
 
   $(selector) {
@@ -143,6 +159,26 @@ export class Workbench {
       event.preventDefault();
       this.Zoom(event.deltaY > 0 ? 6n : 4n, event.deltaY > 0 ? 5n : 5n);
     }, { passive: false });
+    this.$('#go-live')?.addEventListener('click', () => this.GoLive());
+    this.$('#play')?.addEventListener('click', () => this.Play());
+    this.$('#pause')?.addEventListener('click', () => this.Pause());
+    this.$('#step-prev')?.addEventListener('click', () => this.Step('previous'));
+    this.$('#step-next')?.addEventListener('click', () => this.Step('next'));
+    this.$('#speed-select')?.addEventListener('change', (event) =>
+      this.SetSpeed(Number(event.target.value)));
+    this.$('#load-events')?.addEventListener('click', () =>
+      this.LoadEvents().catch((error) => this.Status(error.message)));
+    this.$('#integrity-toggle')?.addEventListener('click', () => {
+      const detail = this.$('#integrity-detail');
+      if (detail) {
+        detail.hidden = !detail.hidden;
+      }
+    });
+    this.document.addEventListener('visibilitychange', () => {
+      if (this.document.visibilityState === 'visible' && this.liveTimer) {
+        this.PollLive();
+      }
+    });
     this.$('#dock-root')?.addEventListener('pointermove', (event) => {
       const root = this.$('#dock-root');
       if (!root || !this.run) {
@@ -254,18 +290,30 @@ export class Workbench {
     this.appRun = appRunId ? { id: appRunId, context: appDescription?.context } : null;
     this.catalog = catalog;
     const coverage = described.context?.coverage;
-    if (coverage?.begin_us && coverage?.end_us) {
-      this.timeWindow = {
-        beginUs: Us(coverage.begin_us),
-        endUs: Us(coverage.end_us),
-      };
-    } else {
-      this.timeWindow = { beginUs: 0n, endUs: 1000000n };
-    }
+    const coverageBegin = coverage?.begin_us ? Us(coverage.begin_us) : 0n;
+    const coverageEnd = coverage?.end_us ? Us(coverage.end_us) : 1000000n;
+    this.time = TimeModel.Step(TimeModel.Initial(), {
+      type: 'reset',
+      runId,
+      coverage: { beginUs: coverageBegin, endUs: coverageEnd },
+      mode: 'history',
+    }, this.Now());
+    this.timeWindow = this.time.window;
+    this.liveRevision = null;
+    this.liveSeen = false;
+    this.eventsView.Reset();
     this.RenderSignals();
     this.RenderRunHeader();
-    this.RenderWindowControls();
     this.ApplyLayout(this.layout, { request: true });
+    this.RenderTransport();
+    if (described.context?.kind === 'runtime') {
+      this.LoadEvents().catch((error) => this.Status(error.message));
+    } else {
+      this.eventsView.Reset();
+      this.eventsView.Render(this.$('#events-list'));
+      this.dock?.SetMarkers([]);
+      this.ShowEventDetail(null);
+    }
     this.Status(`run ${runtime.name} loaded`);
   }
 
@@ -529,6 +577,11 @@ export class Workbench {
       this.ShowIntegrity(cached.integrity);
       return;
     }
+    if (this.rangeInFlight) {
+      this.rangePending = true;
+      return;
+    }
+    this.rangeInFlight = true;
     const pixelWidth = Math.min(4096, Math.max(200, Math.round(this.$('#dock-root')?.clientWidth ?? 800)));
     LatestQuery(this.gate, {
       key: 'range',
@@ -541,17 +594,35 @@ export class Workbench {
         pixelWidth,
       }, { signal }),
       onValue: (payload) => {
+        this.rangeInFlight = false;
         this.series = payload.series ?? [];
         this.cache.Set(key, { series: this.series, integrity: payload.integrity });
         this.dock.SetView(this.layout, this.resolved, this.series, this.timeWindow, this.cursor);
         this.ShowIntegrity(payload.integrity);
+        this.ResumePendingRange();
       },
-      onError: (error) => this.Status(error.message),
-      onAbort: () => {},
+      onError: (error) => {
+        this.rangeInFlight = false;
+        this.Status(error.message);
+        this.ResumePendingRange();
+      },
+      onAbort: () => {
+        this.rangeInFlight = false;
+        this.ResumePendingRange();
+      },
     });
   }
 
+  ResumePendingRange() {
+    if (this.rangePending) {
+      this.rangePending = false;
+      this.RequestWindow();
+    }
+  }
+
   ShowIntegrity(integrity) {
+    this.lastIntegrity = integrity;
+    this.ShowIntegrityDetail();
     const element = this.$('#integrity-line');
     if (!element) {
       return;
@@ -579,6 +650,11 @@ export class Workbench {
       return;
     }
     this.lastCursorAt = now;
+    if (this.cursorInFlight) {
+      this.pendingCursor = stamp;
+      return;
+    }
+    this.cursorInFlight = true;
     const signalIds = this.CurrentSignalIds();
     if (signalIds.length === 0) {
       return;
@@ -593,6 +669,7 @@ export class Workbench {
         cursorUs: stamp,
       }, { signal }),
       onValue: (payload) => {
+        this.cursorInFlight = false;
         const values = new Map();
         for (const entry of payload.series ?? []) {
           values.set(entry.signal.id, {
@@ -614,9 +691,263 @@ export class Workbench {
           readout.textContent = `t=${stamp.toString()} · ${details.slice(0, 4).join(' · ')}`;
         }
       },
-      onError: () => {},
-      onAbort: () => {},
+      onError: () => {
+        this.cursorInFlight = false;
+        this.ResumePendingCursor();
+      },
+      onAbort: () => {
+        this.cursorInFlight = false;
+        this.ResumePendingCursor();
+      },
     });
+  }
+
+  ResumePendingCursor() {
+    if (this.pendingCursor !== undefined) {
+      const stamp = this.pendingCursor;
+      this.pendingCursor = undefined;
+      this.RequestCursor(stamp);
+    }
+  }
+
+  Now() {
+    return globalThis.performance?.now?.() ?? Date.now();
+  }
+
+  RenderTransport() {
+    const mode = this.$('#transport-mode');
+    if (mode) {
+      const following = this.time.following ? ' · following' : '';
+      const playing = this.time.playing ? ' · playing' : '';
+      mode.textContent = `${this.time.mode}${following}${playing} · ${this.time.speed}×`;
+    }
+    const live = this.$('#live-status');
+    if (live) {
+      if (this.time.offline) {
+        live.textContent = `live offline · last received ${this.time.lastReceivedMs ? `${Math.round(performance.now() - this.time.lastReceivedMs)} ms ago` : 'never'}`;
+        live.classList.add('warning');
+      } else {
+        live.classList.remove('warning');
+        live.textContent = this.liveSeen
+          ? `live revision ${this.liveRevision ?? '—'}`
+          : 'no live tail';
+      }
+    }
+    if (this.$('#speed-select')) {
+      this.$('#speed-select').value = String(this.time.speed);
+    }
+    this.RenderWindowControls();
+  }
+
+  ApplyTimeState(state, options = {}) {
+    const previous = this.timeWindow;
+    this.time = state;
+    this.timeWindow = state.window;
+    if (this.dock) {
+      this.dock.timeWindow = state.window;
+      if (this.cursor) {
+        this.cursor.timeUs = state.cursor;
+      }
+    }
+    this.RenderTransport();
+    const changed = previous.beginUs !== state.window.beginUs ||
+      previous.endUs !== state.window.endUs;
+    if (options.request !== false && changed && this.run) {
+      this.RequestWindow();
+    } else if (this.dock) {
+      this.dock.SetView(this.layout, this.resolved, this.series,
+        state.window, this.cursor);
+    }
+  }
+
+  Play() {
+    if (!this.run) {
+      return;
+    }
+    let state = this.time;
+    if (state.mode !== 'history') {
+      state = TimeModel.Step(state, { type: 'setMode', mode: 'history' }, this.Now());
+    }
+    state = TimeModel.Step(state, { type: 'play' }, this.Now());
+    this.ApplyTimeState(state, { request: false });
+    if (this.playbackTimer) {
+      clearInterval(this.playbackTimer);
+    }
+    this.playbackTimer = setInterval(() => {
+      if (!this.time.playing) {
+        clearInterval(this.playbackTimer);
+        this.playbackTimer = null;
+        return;
+      }
+      const next = TimeModel.Step(this.time, { type: 'advance' }, this.Now());
+      this.ApplyTimeState(next);
+      if (!next.playing) {
+        clearInterval(this.playbackTimer);
+        this.playbackTimer = null;
+        this.RenderTransport();
+      }
+    }, 50);
+  }
+
+  Pause() {
+    if (this.playbackTimer) {
+      clearInterval(this.playbackTimer);
+      this.playbackTimer = null;
+    }
+    this.ApplyTimeState(TimeModel.Step(this.time, { type: 'pause' }, this.Now()));
+  }
+
+  Step(direction) {
+    if (this.playbackTimer) {
+      clearInterval(this.playbackTimer);
+      this.playbackTimer = null;
+    }
+    const runtimeSeries = this.series.filter((entry) => entry.signal?.source === 'runtime');
+    const times = SampleTimes(runtimeSeries.length > 0 ? runtimeSeries : this.series);
+    const next = TimeModel.Step(this.time, {
+      type: 'stepSample',
+      direction,
+      times,
+    }, this.Now());
+    this.ApplyTimeState(next);
+  }
+
+  SetSpeed(speed) {
+    this.ApplyTimeState(TimeModel.Step(this.time, { type: 'setSpeed', speed }, this.Now()),
+      { request: false });
+  }
+
+  GoLive() {
+    if (!this.run) {
+      return;
+    }
+    this.ApplyTimeState(TimeModel.Step(this.time, { type: 'followLatest' }, this.Now()));
+    if (!this.liveTimer) {
+      this.liveTimer = setInterval(() => this.PollLive(), 100);
+    }
+    this.liveSeen = false;
+    this.liveRevision = null;
+    this.PollLive();
+  }
+
+  PollLive() {
+    if (!this.run || this.liveInFlight) {
+      return;
+    }
+    let signalIds = this.CurrentSignalIds();
+    if (signalIds.length === 0) {
+      signalIds = this.catalog.slice(0, 2).map((signal) => signal.id);
+    }
+    if (signalIds.length === 0) {
+      return;
+    }
+    this.liveInFlight = true;
+    const query = {
+      runId: this.run.id,
+      signalIds,
+      beginUs: this.time.coverage.beginUs,
+      endUs: this.time.coverage.endUs,
+      pixelWidth: 800,
+    };
+    if (this.liveSeen && this.liveRevision !== null) {
+      query.afterRevision = this.liveRevision;
+    }
+    LatestQuery(this.gate, {
+      key: 'live',
+      loader: (signal) => this.api.LiveSnapshot(query, { signal }),
+      onValue: (snapshot) => {
+        this.liveInFlight = false;
+        if (snapshot.changed === false) {
+          this.time = { ...this.time, lastReceivedMs: this.Now(), offline: false };
+          this.RenderTransport();
+          return;
+        }
+        this.liveSeen = true;
+        this.liveRevision = snapshot.revision;
+        this.liveServiceEpoch = snapshot.service_epoch;
+        if (snapshot.coverage?.begin_us && snapshot.coverage?.end_us) {
+          const state = TimeModel.Step(this.time, {
+            type: 'liveAdvance',
+            coverage: {
+              beginUs: Us(snapshot.coverage.begin_us),
+              endUs: Us(snapshot.coverage.end_us),
+            },
+            receivedAtMs: this.Now(),
+          }, this.Now());
+          this.ApplyTimeState(state);
+        }
+        for (const fault of snapshot.faults ?? []) {
+          this.eventsView.Append({
+            events: [{ ...fault, event_id: String(fault.record_seq) }],
+          });
+        }
+        this.eventsView.Render(this.$('#events-list'));
+        this.dock?.SetMarkers(this.eventsView.markers);
+        this.RenderTransport();
+      },
+      onError: (error) => {
+        this.liveInFlight = false;
+        if (error instanceof ApiError && error.status === 404) {
+          this.time = TimeModel.Step(this.time, { type: 'markOffline' }, this.Now());
+          this.RenderTransport();
+          return;
+        }
+        this.Status(error.message);
+      },
+      onAbort: () => {
+        this.liveInFlight = false;
+      },
+    });
+  }
+
+  async LoadEvents(continuation = null) {
+    if (!this.run) {
+      return;
+    }
+    if (continuation === null) {
+      this.eventsView.Reset();
+    }
+    const payload = await this.api.Events({
+      runId: this.run.id,
+      beginUs: 0n,
+      endUs: (1n << 64n) - 1n,
+      maxRows: 100,
+      continuation,
+    });
+    this.eventsView.Append(payload);
+    this.eventsView.Render(this.$('#events-list'));
+    const summary = this.$('#events-summary');
+    if (summary) {
+      summary.textContent = this.eventsView.Summary();
+    }
+    this.ShowEventDetail(this.eventsView.selected);
+    this.ShowIntegrityDetail();
+  }
+
+  ShowEventDetail(event) {
+    const detail = this.$('#event-detail');
+    if (detail) {
+      detail.textContent = event ? this.eventsView.DetailText() : '';
+    }
+  }
+
+  SeekTo(stamp) {
+    this.ApplyTimeState(TimeModel.Step(this.time, { type: 'seek', timeUs: stamp }, this.Now()));
+    this.RequestCursor(stamp);
+  }
+
+  ShowIntegrityDetail() {
+    const detail = this.$('#integrity-detail');
+    if (!detail) {
+      return;
+    }
+    const context = this.run?.context ?? {};
+    detail.textContent = JSON.stringify({
+      sdk_git_sha: context.sdk_git_sha ?? null,
+      model: context.model ?? this.appRun?.context?.model ?? null,
+      clock: context.clock ?? null,
+      integrity: this.lastIntegrity ?? context.integrity ?? null,
+    }, null, 2);
   }
 
   Zoom(numerator, denominator) {
