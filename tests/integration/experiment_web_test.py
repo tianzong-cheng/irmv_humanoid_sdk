@@ -70,14 +70,18 @@ def stop_process(process: subprocess.Popen, timeout: float = 8.0) -> None:
         process.wait(timeout=5.0)
 
 
-def run_processes(config: Path, runtime: Path, application: Path) -> tuple[int, int]:
+def run_processes(config: Path, runtime: Path, application: Path,
+                  telemetry_socket: Path | None = None) -> tuple[int, int]:
+    environment = os.environ.copy()
+    if telemetry_socket is not None:
+        environment["IRMV_WEB_TELEMETRY_SOCKET"] = str(telemetry_socket)
     runtime_log = config.parent / "runtime.log"
     application_log = config.parent / "application.log"
     with runtime_log.open("wb") as runtime_out, application_log.open("wb") as app_out:
         runtime_process = subprocess.Popen(
             [str(runtime), "--config", str(config), "--domain", str(DOMAIN)],
             stdin=subprocess.DEVNULL, stdout=runtime_out, stderr=subprocess.STDOUT,
-            cwd=str(SOURCE),
+            cwd=str(SOURCE), env=environment,
         )
         try:
             time.sleep(1.0)
@@ -85,7 +89,7 @@ def run_processes(config: Path, runtime: Path, application: Path) -> tuple[int, 
             application_process = subprocess.Popen(
                 [str(application), "--config", str(config), "--domain", str(DOMAIN)],
                 stdin=slave, stdout=app_out, stderr=subprocess.STDOUT,
-                cwd=str(SOURCE),
+                cwd=str(SOURCE), env=environment,
             )
             os.close(slave)
             try:
@@ -293,6 +297,33 @@ class ExperimentWebTest(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertFalse(events["ok"])
             self.assertIn("cannot find", events["error"])
+        finally:
+            service.stop()
+
+    def test_real_recorder_live_tail_reaches_the_service(self) -> None:
+        service = Service(self.records, self.data, READER)
+        try:
+            run_processes(self.config, RUNTIME, APPLICATION,
+                          self.data / "live.sock")
+            newest = max(self.runtime_dirs(),
+                         key=lambda path: path.stat().st_mtime)
+            status, catalog = service.call("GET", "/api/runs")
+            self.assertEqual(status, 200)
+            runtime = next(run for run in catalog["runs"]
+                           if run["name"] == newest.name)
+            status, described = service.call(
+                "GET", f"/api/runs/{runtime['run_id']}/describe")
+            signal = next(item for item in described["context"]["signals"]
+                          if item["field"] == "q")
+            status, snapshot = service.call(
+                "GET",
+                f"/api/live/snapshot?run_id={runtime['run_id']}"
+                f"&signal_ids={urllib.parse.quote(signal['id'], safe='')}"
+                "&begin_us=0&end_us=9999999999999999&pixel_width=100",
+            )
+            self.assertEqual(status, 200)
+            self.assertTrue(snapshot["ok"])
+            self.assertGreater(snapshot["identity"]["sample_hz"], 0)
         finally:
             service.stop()
 

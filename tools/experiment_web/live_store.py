@@ -21,7 +21,7 @@ import socket
 import sys
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -137,6 +137,7 @@ class _RunTail:
         self.pending = True
         self.last_arrival_ms = 0.0
         self.bytes = 0
+        self.fault_bytes = 0
 
 
 class LiveStore:
@@ -146,6 +147,7 @@ class LiveStore:
     MAX_TAIL_SECONDS = 15
     MAX_RUN_BYTES = 32 * 1024 * 1024
     MAX_GLOBAL_BYTES = 128 * 1024 * 1024
+    MAX_FAULTS_PER_RUN = 1024
 
     def __init__(self, records_root: Path | str,
                  clock=None) -> None:
@@ -154,7 +156,7 @@ class LiveStore:
         self._lock = threading.Lock()
         self._runs: "OrderedDict[str, _RunTail]" = OrderedDict()
         self._bytes = 0
-        self._rejected: list[str] = []
+        self._rejected: deque[str] = deque(maxlen=32)
         self.epoch = hashlib.sha256(str(time.time_ns()).encode()).hexdigest()[:16]
 
     # -- identity -----------------------------------------------------------
@@ -248,10 +250,33 @@ class LiveStore:
                 record_seq = int(payload.get("record_seq", -1))
                 if record_seq < 0:
                     raise LiveError("a live fault has no record_seq")
+                encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+                size = len(encoded.encode("utf-8"))
+                previous = run.faults.pop(record_seq, None)
+                if previous is not None:
+                    previous_size = len(json.dumps(
+                        previous, separators=(",", ":"), ensure_ascii=False
+                    ).encode("utf-8"))
+                    run.fault_bytes -= previous_size
+                    self._bytes -= previous_size
+                    run.bytes -= previous_size
                 run.faults[record_seq] = payload
+                run.fault_bytes += size
+                run.bytes += size
+                self._bytes += size
+                while len(run.faults) > self.MAX_FAULTS_PER_RUN:
+                    oldest_seq = next(iter(run.faults))
+                    removed = run.faults.pop(oldest_seq)
+                    removed_size = len(json.dumps(
+                        removed, separators=(",", ":"), ensure_ascii=False
+                    ).encode("utf-8"))
+                    run.fault_bytes -= removed_size
+                    run.bytes -= removed_size
+                    self._bytes -= removed_size
                 run.last_transport_seq = max(run.last_transport_seq, transport_seq)
                 run.revision += 1
                 run.last_arrival_ms = now
+                self._trim_run(run)
                 return
             if kind != "sample":
                 raise LiveError("the live message kind is unknown")
@@ -328,6 +353,15 @@ class LiveStore:
             run.bytes -= oldest["bytes"]
             run.evicted_until_us = max(run.evicted_until_us,
                                        oldest["stamp_us"] + 1)
+        while run.faults and run.bytes > self.MAX_RUN_BYTES:
+            oldest_seq = next(iter(run.faults))
+            removed = run.faults.pop(oldest_seq)
+            removed_size = len(json.dumps(
+                removed, separators=(",", ":"), ensure_ascii=False
+            ).encode("utf-8"))
+            run.fault_bytes -= removed_size
+            run.bytes -= removed_size
+            self._bytes -= removed_size
 
     def _trim_global(self) -> None:
         while self._bytes > self.MAX_GLOBAL_BYTES and self._runs:
@@ -336,6 +370,16 @@ class LiveStore:
                 key=lambda item: item.last_arrival_ms,
             )
             if not oldest_run.samples:
+                if oldest_run.faults:
+                    oldest_seq = next(iter(oldest_run.faults))
+                    removed = oldest_run.faults.pop(oldest_seq)
+                    removed_size = len(json.dumps(
+                        removed, separators=(",", ":"), ensure_ascii=False
+                    ).encode("utf-8"))
+                    oldest_run.fault_bytes -= removed_size
+                    oldest_run.bytes -= removed_size
+                    self._bytes -= removed_size
+                    continue
                 break
             oldest_key = min(
                 oldest_run.samples,
@@ -357,14 +401,57 @@ class LiveStore:
             raise LiveError(f"the signal id is not canonical: {signal_id}")
         return parts[0], _decode_joint(parts[1]), parts[2]
 
+    @staticmethod
+    def _period_us(run: _RunTail) -> int:
+        try:
+            rate = float(run.sample_hz)
+        except (TypeError, ValueError):
+            return 1
+        if rate <= 0.0:
+            return 1
+        return max(1, int(round(1_000_000.0 / rate)))
+
+    def _ordered_samples(self, run: _RunTail) -> list[tuple[int, dict, int]]:
+        """Samples sorted by time with the segment that owns each one.
+
+        A cadence break, an application identity change and an evicted stretch
+        each start a new segment. The segment is what keeps the canvas from
+        joining a value before a gap to one after it.
+        """
+        ordered = []
+        for entry in run.samples.values():
+            if entry["stamp_us"] < run.evicted_until_us:
+                continue
+            ordered.append((entry["stamp_us"], entry["payload"]))
+        ordered.sort(key=lambda item: item[0])
+        period = self._period_us(run)
+        result = []
+        segment = 0
+        previous = None
+        for stamp, payload in ordered:
+            if previous is not None:
+                broken = stamp <= previous[0] or stamp - previous[0] > (period * 3) // 2
+                if run.source == "application":
+                    if payload.get("identity_known") != previous[1].get("identity_known") or \
+                            payload.get("runtime_id") != previous[1].get("runtime_id") or \
+                            payload.get("session_id") != previous[1].get("session_id"):
+                        broken = True
+                if run.evicted_until_us and previous[0] < run.evicted_until_us:
+                    broken = True
+                if broken:
+                    segment += 1
+            result.append((stamp, payload, segment))
+            previous = (stamp, payload)
+        return result
+
     def _points_for_signal(self, run: _RunTail, signal_id: str) -> list[dict]:
         source, joint, field = self._signal_parts(signal_id)
         if source != run.source:
             return []
         points = []
+        ordered = self._ordered_samples(run)
         if source == "application":
-            for entry in run.samples.values():
-                payload = entry["payload"]
+            for stamp, payload, segment in ordered:
                 if field not in payload and field not in {
                     "stamp_us", "sample_seq", "latest_state_seq", "identity_known"
                 }:
@@ -374,11 +461,11 @@ class LiveStore:
                     continue
                 points.append(
                     {
-                        "t": str(entry["stamp_us"]),
+                        "t": str(stamp),
                         "seq": str(payload.get("sample_seq", "0")),
                         "v": value,
                         "valid": True,
-                        "segment": 0,
+                        "segment": segment,
                         "agg": "live",
                     }
                 )
@@ -386,8 +473,7 @@ class LiveStore:
         if joint and joint not in run.joints:
             return []
         index = run.joints.index(joint) if joint else -1
-        for entry in run.samples.values():
-            payload = entry["payload"]
+        for stamp, payload, segment in ordered:
             valid = True
             if field in {"q", "dq", "tau_ff", "kp", "kd"}:
                 valid = bool(payload.get("command_present", False))
@@ -417,11 +503,11 @@ class LiveStore:
                     value = 1 if value else 0
             points.append(
                 {
-                    "t": str(entry["stamp_us"]),
+                    "t": str(stamp),
                     "seq": str(payload.get("state_seq", "0")),
                     "v": value,
                     "valid": valid,
-                    "segment": 0,
+                    "segment": segment,
                     "agg": "live",
                 }
             )
@@ -479,6 +565,7 @@ class LiveStore:
                 "coverage": coverage,
                 "pending": run.pending,
                 "transport_losses": run.transport_losses,
+                "rejected_subscriptions": len(self._rejected),
                 "active_runs": len(self._runs),
             }
             return payload
@@ -514,13 +601,27 @@ class LiveStore:
             existing = {
                 (point.get("t"), point.get("seq")) for point in series.get("points", [])
             }
+            committed_points = series.get("points", [])
+            max_segment = max(
+                (int(point.get("segment", 0)) for point in committed_points),
+                default=0,
+            )
+            first_live = min((int(point["t"]) for point in points), default=None)
+            base_segment = max_segment
+            if committed_end is not None and first_live is not None:
+                tail_run = self._runs.get(run_id)
+                period = self._period_us(tail_run) if tail_run else 1
+                if first_live > committed_end + (period * 3) // 2:
+                    base_segment = max_segment + 1
             for point in points:
                 if committed_end is not None and int(point["t"]) < committed_end:
                     continue
                 key = (point["t"], point["seq"])
                 if key in existing:
                     continue
-                series["points"].append(point)
+                appended = dict(point)
+                appended["segment"] = base_segment + int(point.get("segment", 0))
+                series["points"].append(appended)
                 existing.add(key)
             series["points"].sort(key=lambda item: (int(item["t"]), int(item["seq"])))
         reply["live"] = {

@@ -148,6 +148,10 @@ def _limit(params: dict[str, list[str]]) -> int:
     return min(value, 100)
 
 
+def _u64_param(params: dict[str, list[str]], key: str, default: int) -> int:
+    return _int_param(params, key, default, 0, 2**64 - 1)
+
+
 def _int_param(params: dict[str, list[str]], key: str, default: int,
                minimum: int, maximum: int) -> int:
     raw = _one(params, key)
@@ -222,7 +226,14 @@ class _Handler(BaseHTTPRequestHandler):
     def _authorized(self) -> bool:
         return self.app.valid_token(self._cookie_token())
 
+    def _host_ok(self) -> bool:
+        host = self.headers.get("Host", "")
+        port = self.server.app.port
+        return host in {f"127.0.0.1:{port}", f"localhost:{port}"}
+
     def _origin_ok(self) -> bool:
+        if not self._host_ok():
+            return False
         origin = self.headers.get("Origin")
         host = self.headers.get("Host")
         return bool(origin and host) and origin in {
@@ -301,6 +312,9 @@ class _Handler(BaseHTTPRequestHandler):
     # -- routes -------------------------------------------------------------
 
     def do_GET(self) -> None:
+        if not self._host_ok():
+            _error(self, HTTPStatus.FORBIDDEN, "the host is refused")
+            return
         parsed = urlsplit(self.path)
         if not parsed.path.startswith("/api/"):
             self._serve_static()
@@ -315,6 +329,9 @@ class _Handler(BaseHTTPRequestHandler):
             _error(self, HTTPStatus.BAD_REQUEST, str(error))
 
     def do_POST(self) -> None:
+        if not self._host_ok():
+            _error(self, HTTPStatus.FORBIDDEN, "the host is refused")
+            return
         if not self._require_auth():
             return
         if not self._origin_ok():
@@ -339,6 +356,9 @@ class _Handler(BaseHTTPRequestHandler):
             _error(self, HTTPStatus.INTERNAL_SERVER_ERROR, str(error))
 
     def do_PUT(self) -> None:
+        if not self._host_ok():
+            _error(self, HTTPStatus.FORBIDDEN, "the host is refused")
+            return
         if not self._authorized():
             _error(self, HTTPStatus.UNAUTHORIZED, "the bootstrap cookie is missing")
             return
@@ -364,6 +384,9 @@ class _Handler(BaseHTTPRequestHandler):
             _error(self, HTTPStatus.INTERNAL_SERVER_ERROR, str(error))
 
     def do_DELETE(self) -> None:
+        if not self._host_ok():
+            _error(self, HTTPStatus.FORBIDDEN, "the host is refused")
+            return
         if not self._authorized():
             _error(self, HTTPStatus.UNAUTHORIZED, "the bootstrap cookie is missing")
             return
@@ -465,20 +488,19 @@ class _Handler(BaseHTTPRequestHandler):
         elif operation == "range":
             request["op"] = "range"
             request["signal_ids"] = _signal_ids(params)
-            request["begin_us"] = _one(params, "begin_us") or "0"
-            request["end_us"] = _one(params, "end_us") or str(2**64 - 1)
+            request["begin_us"] = str(_u64_param(params, "begin_us", 0))
+            request["end_us"] = str(_u64_param(params, "end_us", 2**64 - 1))
             request["pixel_width"] = _int_param(params, "pixel_width", 800, 1, 4096)
         elif operation == "cursor":
             request["op"] = "cursor"
             request["signal_ids"] = _signal_ids(params)
-            cursor = _one(params, "cursor_us")
-            if cursor is None:
+            if _one(params, "cursor_us") is None:
                 raise CatalogError("cursor_us is required")
-            request["cursor_us"] = cursor
+            request["cursor_us"] = str(_u64_param(params, "cursor_us", 0))
         elif operation == "events":
             request["op"] = "events"
-            request["begin_us"] = _one(params, "begin_us") or "0"
-            request["end_us"] = _one(params, "end_us") or str(2**64 - 1)
+            request["begin_us"] = str(_u64_param(params, "begin_us", 0))
+            request["end_us"] = str(_u64_param(params, "end_us", 2**64 - 1))
             request["max_rows"] = _int_param(params, "max_rows", 50, 1, 100)
             continuation = _one(params, "continuation")
             if continuation is not None:

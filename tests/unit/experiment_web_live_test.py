@@ -323,6 +323,54 @@ class LiveStoreTest(unittest.TestCase):
                                        5000, 10)
         self.assertEqual(snapshot["series"][0]["points"][0]["v"], 0.4)
 
+    def test_live_gap_starts_a_new_segment_and_never_joins_commit(self) -> None:
+        run = runtime_run(self.root, "run_gap")
+        run_id = run_id_for_directory(self.root, run)
+        self.store.ingest(envelope(run, "runtime", 1, "hello", {}))
+        self.store.ingest(
+            envelope(run, "runtime", 2, "sample", runtime_sample(1000, 1))
+        )
+        self.store.ingest(
+            envelope(run, "runtime", 3, "sample", runtime_sample(30000, 2))
+        )
+        snapshot = self.store.Snapshot(run_id, ["runtime/j1/q"], 0, 40000, 100)
+        segments = [point["segment"] for point in snapshot["series"][0]["points"]]
+        self.assertGreater(segments[-1], segments[0])
+        reply = {
+            "ok": True,
+            "series": [{
+                "signal": {"id": "runtime/j1/q"},
+                "points": [{"t": "1000", "seq": "1", "v": 0.1,
+                            "valid": True, "segment": 0, "agg": "first"}],
+            }],
+            "committed": {"begin_us": "1000", "end_us": "1001",
+                          "complete": False},
+        }
+        merged = self.store.merge_range(reply, run_id, ["runtime/j1/q"],
+                                        0, 40000, 100)
+        points = merged["series"][0]["points"]
+        self.assertEqual(points[0]["segment"], 0)
+        self.assertGreater(points[1]["segment"], 0)
+
+    def test_faults_and_rejections_are_bounded(self) -> None:
+        run = runtime_run(self.root, "run_fault_bound")
+        run_id = run_id_for_directory(self.root, run)
+        self.store.ingest(envelope(run, "runtime", 1, "hello", {}))
+        for seq in range(2000):
+            self.store.ingest(envelope(
+                run, "runtime", seq + 2, "fault",
+                {"record_seq": str(seq), "detected_stamp_us": str(seq)},
+            ))
+        snapshot = self.store.Snapshot(run_id, ["runtime/j1/q"], 0, 5000, 10)
+        self.assertLessEqual(len(snapshot["faults"]), 1024)
+        for index in range(100):
+            extra = runtime_run(self.root, f"run_reject_{index}")
+            try:
+                self.store.ingest(envelope(extra, "runtime", 1, "hello", {}))
+            except LiveError:
+                pass
+        self.assertLessEqual(len(self.store._rejected), 32)
+
     def test_faults_are_merged_once(self) -> None:
         run = runtime_run(self.root, "run_fault")
         run_id = run_id_for_directory(self.root, run)

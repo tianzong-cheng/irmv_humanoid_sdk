@@ -357,6 +357,30 @@ class ServerTest(unittest.TestCase):
         self.assertFalse(described["ok"])
         self.assertIn("cannot open", described["error"])
 
+    def test_refuses_a_non_loopback_host_header(self) -> None:
+        host = urllib.parse.urlsplit(self.url).netloc
+        status, body = call(
+            self.http,
+            "GET",
+            f"{self.url}api/runs",
+            headers={"Host": f"evil.example:{host.split(':')[-1]}"},
+        )
+        self.assertEqual(status, 403)
+        self.assertFalse(body["ok"])
+
+    def test_malformed_range_time_is_a_400_not_a_widened_query(self) -> None:
+        catalog = self.catalog()
+        runtime = next(run for run in catalog["runs"] if run["name"] == "run_0001")
+        status, body = call(
+            self.http,
+            "GET",
+            f"{self.url}api/runs/{runtime['run_id']}/range"
+            "?signal_ids=runtime%2Fleft_hip%2Fq&begin_us=abc&end_us=5000",
+        )
+        self.assertEqual(status, 400)
+        self.assertFalse(body["ok"])
+        self.assertIn("begin_us", body["error"])
+
     def test_refuses_path_shaped_ids(self) -> None:
         status, body = call(
             self.http, "GET", f"{self.url}api/runs/2e2e/describe"

@@ -610,6 +610,10 @@ export class Workbench {
         this.rangeInFlight = false;
         this.ResumePendingRange();
       },
+      onStale: () => {
+        this.rangeInFlight = false;
+        this.ResumePendingRange();
+      },
     });
   }
 
@@ -696,6 +700,10 @@ export class Workbench {
         this.ResumePendingCursor();
       },
       onAbort: () => {
+        this.cursorInFlight = false;
+        this.ResumePendingCursor();
+      },
+      onStale: () => {
         this.cursorInFlight = false;
         this.ResumePendingCursor();
       },
@@ -895,6 +903,9 @@ export class Workbench {
         this.Status(error.message);
       },
       onAbort: () => {
+        this.liveInFlight = false;
+      },
+      onStale: () => {
         this.liveInFlight = false;
       },
     });

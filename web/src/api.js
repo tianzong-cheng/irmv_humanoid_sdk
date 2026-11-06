@@ -60,12 +60,13 @@ function AppendParams(params, values) {
 
 export class RequestGate {
   constructor() {
-    this.generation = 0;
+    this.generations = new Map();
     this.controllers = new Map();
   }
 
   Begin(key = 'default') {
-    const generation = ++this.generation;
+    const generation = (this.generations.get(key) ?? 0) + 1;
+    this.generations.set(key, generation);
     const previous = this.controllers.get(key);
     if (previous) {
       previous.abort();
@@ -76,13 +77,16 @@ export class RequestGate {
   }
 
   IsCurrent(token) {
-    return token.generation === this.generation;
+    return this.generations.get(token.key) === token.generation;
   }
 
   Invalidate() {
-    this.generation += 1;
-    for (const controller of this.controllers.values()) {
-      controller.abort();
+    for (const key of new Set([
+      ...this.generations.keys(),
+      ...this.controllers.keys(),
+    ])) {
+      this.generations.set(key, (this.generations.get(key) ?? 0) + 1);
+      this.controllers.get(key)?.abort();
     }
     this.controllers.clear();
   }
@@ -94,6 +98,7 @@ export async function LatestQuery(gate, options) {
   try {
     const value = await options.loader(token.signal);
     if (!gate.IsCurrent(token)) {
+      options.onStale?.();
       return { applied: false, stale: true };
     }
     options.onValue?.(value);
@@ -104,6 +109,7 @@ export async function LatestQuery(gate, options) {
       return { aborted: true, stale: !gate.IsCurrent(token) };
     }
     if (!gate.IsCurrent(token)) {
+      options.onStale?.();
       return { applied: false, stale: true };
     }
     options.onError?.(error);

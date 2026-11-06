@@ -42,6 +42,18 @@ test('an older generation cannot overwrite a newer one', async () => {
   assert.deepEqual(applied, ['B']);
 });
 
+test('another key does not invalidate a range query', async () => {
+  const gate = new RequestGate();
+  const range = gate.Begin('range');
+  const live = gate.Begin('live');
+  assert.equal(gate.IsCurrent(range), true);
+  assert.equal(gate.IsCurrent(live), true);
+  const newerRange = gate.Begin('range');
+  assert.equal(gate.IsCurrent(range), false);
+  assert.equal(gate.IsCurrent(newerRange), true);
+  assert.equal(gate.IsCurrent(live), true);
+});
+
 test('switching experiments invalidates an in-flight query', async () => {
   const gate = new RequestGate();
   const applied = [];

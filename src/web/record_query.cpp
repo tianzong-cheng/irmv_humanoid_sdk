@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <set>
@@ -1442,9 +1443,16 @@ std::string ErrorReply(const std::string &request_id,
 }  // namespace
 
 struct RecordQuery::Impl {
+  struct CachedReader {
+    std::shared_ptr<telemetry::RecordReader> reader;
+    std::filesystem::file_time_type index_time{};
+    std::uintmax_t index_size{0};
+  };
+
   std::filesystem::path root;
   bool root_ok{false};
   std::string root_error;
+  mutable std::map<std::string, CachedReader> readers;
 
   explicit Impl(std::filesystem::path records_root)
       : root(std::move(records_root)) {
@@ -1518,14 +1526,35 @@ struct RecordQuery::Impl {
                       std::to_string(telemetry::kRecordSchemaVersion);
         } else {
           run.kind = RunKind::Runtime;
-          auto reader = std::make_shared<telemetry::RecordReader>();
-          std::string open_error;
-          if (telemetry::RecordReader::Open(directory, reader.get(),
-                                            &open_error)) {
-            run.readable = true;
-            run.reader = std::move(reader);
+          const std::filesystem::path index_path =
+              directory / std::string(telemetry::kRecordIndexFile);
+          std::error_code index_code;
+          const auto index_time =
+              std::filesystem::last_write_time(index_path, index_code);
+          const std::uintmax_t index_size =
+              std::filesystem::file_size(index_path, index_code);
+          const std::string key = directory.string();
+          const auto cached = readers.find(key);
+          if (!index_code && cached != readers.end() &&
+              cached->second.index_time == index_time &&
+              cached->second.index_size == index_size) {
+            run.reader = cached->second.reader;
+            run.readable = run.reader != nullptr;
+            if (!run.readable) {
+              run.error = "the run index could not be opened";
+            }
           } else {
-            run.error = open_error;
+            auto reader = std::make_shared<telemetry::RecordReader>();
+            std::string open_error;
+            if (telemetry::RecordReader::Open(directory, reader.get(),
+                                              &open_error)) {
+              run.readable = true;
+              run.reader = reader;
+              readers[key] = CachedReader{reader, index_time, index_size};
+            } else {
+              run.error = open_error;
+              readers.erase(key);
+            }
           }
         }
       } else if (run.metadata.contains("schema_version")) {
