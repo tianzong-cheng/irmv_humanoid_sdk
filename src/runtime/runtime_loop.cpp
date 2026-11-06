@@ -1947,6 +1947,13 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
   protocol::Id session_producer{};
   protocol::Sequence session_epoch = 0;
   std::unique_ptr<telemetry::Recorder> recorder;
+  // The web outlet is a startup decision: the environment is read once here,
+  // never by a control path. An empty or unset socket keeps the outlet off.
+  telemetry::LiveTelemetryOptions live_telemetry;
+  if (const char *socket = std::getenv("IRMV_WEB_TELEMETRY_SOCKET");
+      socket != nullptr && *socket != '\0') {
+    live_telemetry.socket_path = socket;
+  }
   if (config.telemetry.recorder.enabled) {
     telemetry::RecorderConfig recorder_config;
     recorder_config.enabled = true;
@@ -1957,7 +1964,7 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
     recorder = std::make_unique<telemetry::Recorder>();
     std::string recorder_error;
     if (!recorder->Start(recorder_config, record_metadata(config),
-                         &recorder_error)) {
+                         &recorder_error, live_telemetry)) {
       StderrFormat("robot_runtime: %s\n", recorder_error.c_str());
       logger.Stop();
       trace.reset();

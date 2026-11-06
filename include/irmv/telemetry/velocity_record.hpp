@@ -11,6 +11,7 @@
 
 #include "irmv/configuration/config.hpp"
 #include "irmv/protocol/types.hpp"
+#include "irmv/telemetry/live_telemetry.hpp"
 
 // The application's own velocity stream: one row per sampling deadline of the
 // body-velocity intent the control loop was holding, in a run directory of its
@@ -160,7 +161,7 @@ class VelocityRecorder {
   // `schema` = kVelocitySchema and `version` = kVelocitySchemaVersion; its
   // remaining fields are written verbatim and interpreted by readers.
   bool Start(const configuration::RecorderConfig &config, std::string meta_json,
-             std::string *error);
+             std::string *error, LiveTelemetryOptions live = {});
 
   // Offers one sample. Never blocks, allocates, throws or touches a file.
   // Returns false when the handoff was full or the recorder is not running;

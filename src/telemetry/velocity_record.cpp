@@ -407,7 +407,8 @@ struct VelocityRecorder::Impl {
   };
 
   bool Prepare(const configuration::RecorderConfig &recorder_config,
-               std::string meta_json, std::string *error);
+               std::string meta_json, std::string *error,
+               LiveTelemetryOptions live_options);
   void Run();
   void Drain();
   bool WriteLine(const VelocitySample &sample);
@@ -428,6 +429,10 @@ struct VelocityRecorder::Impl {
   configuration::RecorderConfig config;
   std::filesystem::path run_directory;
   std::string error;
+  LiveTelemetryOptions live_options;
+  std::unique_ptr<LiveTelemetrySender> live;
+  std::chrono::steady_clock::time_point last_live_status{};
+  void SendLiveStatus(bool hello, bool complete = false);
   std::size_t capacity{kVelocityQueueCapacity};
 
   // Shared ownership: the worker captures this state, not the VelocityRecorder
@@ -464,8 +469,9 @@ struct VelocityRecorder::Impl {
 
 bool VelocityRecorder::Impl::Prepare(
     const configuration::RecorderConfig &recorder_config, std::string meta_json,
-    std::string *error_out) {
+    std::string *error_out, LiveTelemetryOptions live_options_in) {
   config = recorder_config;
+  live_options = std::move(live_options_in);
   if (!config.enabled) {
     *error_out = "the velocity recorder is disabled";
     return false;
@@ -557,6 +563,15 @@ bool VelocityRecorder::Impl::Prepare(
           "the velocity recorder could not write " + run_directory.string();
       discard_run();
       return false;
+    }
+  }
+  if (!live_options.socket_path.empty()) {
+    Json live_metadata = Json::parse(meta_json, nullptr, false);
+    if (live_metadata.is_object()) {
+      live_metadata["source"] = "application";
+      live_metadata["run_path"] = run_directory.string();
+      live = std::make_unique<LiveTelemetrySender>(
+          live_options, live_metadata.dump());
     }
   }
   // The stream exists from the start, even when no sample is ever recorded: a
@@ -770,6 +785,9 @@ bool VelocityRecorder::Impl::WriteIndex(bool complete) const {
 void VelocityRecorder::Impl::Drain() {
   VelocitySample sample;
   while (queue.TryPop(sample)) {
+    if (live) {
+      static_cast<void>(live->TrySend("sample", EncodeLiveVelocity(sample)));
+    }
     if (WriteLine(sample)) {
       written.fetch_add(1, std::memory_order_relaxed);
       CloseWriteLoss();
@@ -781,7 +799,29 @@ void VelocityRecorder::Impl::Drain() {
   }
 }
 
+void VelocityRecorder::Impl::SendLiveStatus(bool hello, bool complete) {
+  if (!live || !live->enabled()) {
+    return;
+  }
+  Json payload;
+  payload["kind"] = hello ? "hello" : "status";
+  payload["run_path"] = run_directory.string();
+  payload["record_kind"] = "application";
+  payload["sample_hz"] = config.sample_hz;
+  payload["recorded"] = std::to_string(recorded.load());
+  payload["written"] = std::to_string(written.load());
+  payload["dropped"] = std::to_string(dropped.load());
+  payload["write_failures"] = std::to_string(write_failures.load());
+  payload["complete"] = complete;
+  static_cast<void>(
+      live->TrySend(hello ? "hello" : "status",
+                    payload.dump(-1, ' ', false,
+                                 Json::error_handler_t::replace)));
+  last_live_status = std::chrono::steady_clock::now();
+}
+
 void VelocityRecorder::Impl::Run() {
+  SendLiveStatus(true);
   for (;;) {
     {
       std::unique_lock<std::mutex> lock(done_mutex);
@@ -793,6 +833,11 @@ void VelocityRecorder::Impl::Run() {
       break;
     }
     Drain();
+    if (live &&
+        std::chrono::steady_clock::now() - last_live_status >=
+            std::chrono::milliseconds(100)) {
+      SendLiveStatus(false);
+    }
   }
   // Wait for a producer already inside TryRecord to leave, so what is left in
   // the queue is exactly the accepted samples of the run. The
@@ -811,6 +856,7 @@ void VelocityRecorder::Impl::Run() {
   // sampling: a failed line is a loss the index names, and the run cannot claim
   // to be intact.
   static_cast<void>(WriteIndex(write_failure_count == 0));
+  SendLiveStatus(false, true);
   {
     const std::lock_guard<std::mutex> lock(done_mutex);
     finished = true;
@@ -823,13 +869,15 @@ VelocityRecorder::VelocityRecorder() = default;
 VelocityRecorder::~VelocityRecorder() { Stop(); }
 
 bool VelocityRecorder::Start(const configuration::RecorderConfig &config,
-                             std::string meta_json, std::string *error) {
+                             std::string meta_json, std::string *error,
+                             LiveTelemetryOptions live) {
   if (impl_) {
     return true;
   }
   std::shared_ptr<Impl> impl = std::make_shared<Impl>();
   std::string message;
-  if (!impl->Prepare(config, std::move(meta_json), &message)) {
+  if (!impl->Prepare(config, std::move(meta_json), &message,
+                    std::move(live))) {
     if (error != nullptr) {
       *error = message;
     }

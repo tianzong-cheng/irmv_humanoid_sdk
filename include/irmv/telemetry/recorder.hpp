@@ -12,6 +12,7 @@
 
 #include "irmv/configuration/config.hpp"
 #include "irmv/telemetry/fault_record.hpp"
+#include "irmv/telemetry/live_telemetry.hpp"
 #include "irmv/telemetry/record.hpp"
 #include "irmv/transport/bounded_channel.hpp"
 
@@ -133,7 +134,7 @@ class Recorder {
   // is what makes a directory self-describing (schema version, configuration
   // and layout digests, the joint table, the units and the sampling rate).
   bool Start(const RecorderConfig &config, std::string meta_json,
-             std::string *error);
+             std::string *error, LiveTelemetryOptions live = {});
 
   // Offers one sample. Never blocks, never allocates, never throws and never
   // touches a file. Returns false when the sample was not accepted: the

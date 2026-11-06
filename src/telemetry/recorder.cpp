@@ -1,5 +1,9 @@
 #include "irmv/telemetry/recorder.hpp"
 
+#include <chrono>
+
+#include "irmv/telemetry/live_telemetry.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -175,7 +179,7 @@ struct Recorder::Impl {
   };
 
   bool Prepare(const RecorderConfig &recorder_config, std::string meta_json,
-               std::string *error);
+               std::string *error, LiveTelemetryOptions live_options);
   void Run();
   // Takes what the queue holds into the chunk buffer, and closes the chunk when
   // it is full. Returns how many samples it took.
@@ -223,6 +227,10 @@ struct Recorder::Impl {
   RecorderConfig config;
   std::filesystem::path run_directory;
   std::string metadata;
+  LiveTelemetryOptions live_options;
+  std::unique_ptr<LiveTelemetrySender> live;
+  std::chrono::steady_clock::time_point last_live_status{};
+  void SendLiveStatus(bool hello, bool complete = false);
 
   // Shared ownership: the worker thread captures this state, not the Recorder
   // object. After a timed-out Stop() the worker may finish on its own without
@@ -307,8 +315,10 @@ struct Recorder::Impl {
 };
 
 bool Recorder::Impl::Prepare(const RecorderConfig &recorder_config,
-                             std::string meta_json, std::string *error) {
+                             std::string meta_json, std::string *error,
+                             LiveTelemetryOptions live_options_in) {
   config = recorder_config;
+  live_options = std::move(live_options_in);
   metadata = std::move(meta_json);
   if (config.queue_capacity == 0 ||
       config.queue_capacity > kRecordQueueCapacity) {
@@ -347,6 +357,15 @@ bool Recorder::Impl::Prepare(const RecorderConfig &recorder_config,
   if (!metadata_file.good()) {
     *error = "the recorder could not write " + run_directory.string();
     return false;
+  }
+  if (!live_options.socket_path.empty()) {
+    Json live_metadata = Json::parse(metadata, nullptr, false);
+    if (live_metadata.is_object()) {
+      live_metadata["source"] = "runtime";
+      live_metadata["run_path"] = run_directory.string();
+      live = std::make_unique<LiveTelemetrySender>(
+          live_options, live_metadata.dump());
+    }
   }
   // The fault sidecar exists from the start, even when no fault is ever
   // reported: a reader then distinguishes "this run recorded no faults" from a
@@ -600,6 +619,9 @@ std::size_t Recorder::Impl::DrainInto() {
       continue;
     }
     buffer.push_back(sample);
+    if (live) {
+      static_cast<void>(live->TrySend("sample", EncodeLiveSample(sample)));
+    }
   }
   if (buffer.size() >= kRecordChunkRows) {
     WriteChunk();
@@ -625,6 +647,9 @@ void Recorder::Impl::DrainFaults() {
   // them. A failed write does not stop the drain: the run keeps recording and
   // the loss is named with the occurrence's own ordinals.
   while (fault_queue.TryPop(fault)) {
+    if (live) {
+      static_cast<void>(live->TrySend("fault", EncodeLiveFault(fault)));
+    }
     static_cast<void>(WriteFault(fault));
   }
 }
@@ -707,7 +732,40 @@ bool Recorder::Impl::WriteSessions() {
   return true;
 }
 
+void Recorder::Impl::SendLiveStatus(bool hello, bool complete) {
+  if (!live || !live->enabled()) {
+    return;
+  }
+  Json payload;
+  payload["kind"] = hello ? "hello" : "status";
+  payload["run_path"] = run_directory.string();
+  payload["record_kind"] = "runtime";
+  payload["sample_hz"] = config.sample_hz;
+  payload["recorded"] = std::to_string(recorded.load());
+  payload["chunks"] = std::to_string(chunks.load());
+  payload["dropped"] = std::to_string(dropped.load());
+  payload["write_failures"] = std::to_string(write_failures.load());
+  payload["faults_recorded"] = std::to_string(faults_recorded.load());
+  payload["faults_written"] = std::to_string(faults_written.load());
+  payload["sessions_written"] = std::to_string(sessions_written.load());
+  payload["complete"] = complete;
+  Json sessions_json = Json::array();
+  for (const RecordSessionEvent &event : sessions) {
+    sessions_json.push_back(
+        {{"runtime_id", IdHex(event.runtime_id)},
+         {"session_id", IdHex(event.session_id)},
+         {"epoch", std::to_string(event.epoch)}});
+  }
+  payload["sessions"] = std::move(sessions_json);
+  static_cast<void>(
+      live->TrySend(hello ? "hello" : "status",
+                    payload.dump(-1, ' ', false,
+                                 Json::error_handler_t::replace)));
+  last_live_status = std::chrono::steady_clock::now();
+}
+
 void Recorder::Impl::Run() {
+  SendLiveStatus(true);
   for (;;) {
     {
       std::unique_lock<std::mutex> lock(done_mutex);
@@ -722,6 +780,11 @@ void Recorder::Impl::Run() {
     DrainFaults();
     if (sessions_dirty) {
       static_cast<void>(WriteSessions());
+    }
+    if (live &&
+        std::chrono::steady_clock::now() - last_live_status >=
+            std::chrono::milliseconds(100)) {
+      SendLiveStatus(false);
     }
   }
   // Stop() signals shutdown on every path, including one where its own
@@ -818,6 +881,7 @@ void Recorder::Impl::Run() {
   // that finds it absent treats the fault stream as unfinished.
   faults_complete = fault_write_failure_count == 0;
   static_cast<void>(WriteIndex(published_gaps, true));
+  SendLiveStatus(false, true);
   {
     const std::lock_guard<std::mutex> lock(done_mutex);
     finished = true;
@@ -899,13 +963,14 @@ Recorder::Recorder() = default;
 Recorder::~Recorder() { Stop(); }
 
 bool Recorder::Start(const RecorderConfig &config, std::string meta_json,
-                     std::string *error) {
+                     std::string *error, LiveTelemetryOptions live) {
   if (impl_) {
     return true;
   }
   std::shared_ptr<Impl> impl = std::make_shared<Impl>();
   std::string message;
-  if (!impl->Prepare(config, std::move(meta_json), &message)) {
+  if (!impl->Prepare(config, std::move(meta_json), &message,
+                    std::move(live))) {
     if (error != nullptr) {
       *error = message;
     }

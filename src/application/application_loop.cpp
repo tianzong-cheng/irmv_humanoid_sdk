@@ -745,13 +745,18 @@ int RunApplication(const ApplicationOptions &options,
         std::fflush(stdout);
       }
       velocity_recorder = std::make_unique<telemetry::VelocityRecorder>();
+      telemetry::LiveTelemetryOptions live_telemetry;
+      if (const char *socket = std::getenv("IRMV_WEB_TELEMETRY_SOCKET");
+          socket != nullptr && *socket != '\0') {
+        live_telemetry.socket_path = socket;
+      }
       std::string error;
       if (!velocity_recorder->Start(
               config.runtime.telemetry.recorder,
               BuildVelocityMetadata(config, source, model.get(), record_clock,
                                     record_clock_error, period_us,
                                     velocity_schedule.PeriodUs()),
-              &error)) {
+              &error, live_telemetry)) {
         std::fprintf(stderr, "application: velocity record unavailable: %s\n",
                      error.c_str());
         std::fflush(stderr);
