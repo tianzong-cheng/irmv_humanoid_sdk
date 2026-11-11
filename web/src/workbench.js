@@ -6,7 +6,6 @@
 
 import {
   Api,
-  ApiError,
   LatestQuery,
   RequestGate,
   SeriesCache,
@@ -26,7 +25,8 @@ import {
 } from './dock_model.js';
 import { DockView } from './dock_view.js';
 import { EventsView } from './events_view.js';
-import { SampleTimes, TimeModel } from './time_model.js';
+import { SampleTimes, TimeModel, ZoomWindow } from './time_model.js';
+import { DisplaySeries, DisplaySignalValue, RelativeTime, RelativeTimestampFields } from './time_display.js';
 import {
   EmptyLayout,
   LayoutError,
@@ -34,15 +34,20 @@ import {
   ValidateLayout,
 } from './layout_model.js';
 
-function FormatUs(value) {
-  if (value === null || value === undefined) {
-    return '—';
-  }
-  try {
-    return Us(value).toString();
-  } catch {
-    return '—';
-  }
+
+// Runtime recorder directories use system-clock microseconds, whereas samples
+// use a monotonic clock. Only directory names can provide a calendar start time.
+function RecordingStart(name) {
+  const epoch = /^run_(\d{13,17})$/.exec(name);
+  const utc = /^run_(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z(?:_|$)/.exec(name);
+  const date = epoch ? new Date(Number(BigInt(epoch[1]) / 1000n))
+    : utc ? new Date(`${utc[1]}-${utc[2]}-${utc[3]}T${utc[4]}:${utc[5]}:${utc[6]}Z`) : null;
+  return date && Number.isFinite(date.getTime()) ? date : null;
+}
+
+function RecordingStartLabel(run) {
+  const date = RecordingStart(run.name);
+  return date ? `${date.toISOString().slice(0, 19).replace('T', ' ')} UTC` : 'Start time unavailable';
 }
 
 export class Workbench {
@@ -59,8 +64,15 @@ export class Workbench {
     this.series = [];
     this.timeWindow = { beginUs: 0n, endUs: 1n };
     this.cursor = null;
+    this.timeOriginUs = null;
     this.currentLayoutId = null;
     this.runs = [];
+    this.matchedApplications = [];
+    this.sourceMode = 'history';
+    this.loadGeneration = 0;
+    this.runLoadController = null;
+    this.catalogInFlight = false;
+    this.catalogTimer = null;
     this.layouts = [];
     this.replacing = null;
     this.dock = null;
@@ -75,9 +87,11 @@ export class Workbench {
     this.liveRevision = null;
     this.liveServiceEpoch = null;
     this.liveSeen = false;
-    this.playbackTimer = null;
+    this.playbackFrame = null;
     this.lastRangeAt = 0;
     this.lastCursorAt = undefined;
+    this.cursorTimer = null;
+    this.pendingCursor = undefined;
   }
 
   $(selector) {
@@ -93,9 +107,16 @@ export class Workbench {
       onRemoveSignal: (chartId, signalId) => this.RemoveSignal(chartId, signalId),
       onAxisRange: (chartId, axisId, range) => this.SetAxisRange(chartId, axisId, range),
       onReplaceSignal: (chartId, signalId) => this.BeginReplace(chartId, signalId),
-      onReassignCurve: (chartId, signalId, axisId) =>
-        this.ReassignCurve(chartId, signalId, axisId),
       onStatus: (message) => this.Status(message),
+      onSelectRegion: (chartId, zoom) => this.SelectChartRegion(chartId, zoom),
+      onResetValueAxes: (chartId) => this.ResetValueAxes(chartId),
+      onCursor: (stamp) => { if (!this.time.playing) this.RequestCursor(stamp); },
+      onWheelZoom: (delta, stamp) => {
+        this.RequestCursor(stamp);
+        this.Zoom(delta > 0 ? 6n : 4n, 5n, stamp);
+      },
+      onSelectionEnd: () => this.ResumePendingCursor(),
+      onSelectionStart: () => { if (this.time.playing) this.Pause(); },
     });
     this.dock.SetView(this.layout, ResolveLayout(this.layout, []), [], this.timeWindow, null);
     this.BindControls();
@@ -109,6 +130,11 @@ export class Workbench {
         globalThis.localStorage?.removeItem('irmv.workbench.layout');
       }
     }
+    this.RenderTransport();
+    this.OpenExperiments();
+    this.catalogTimer = setInterval(() => {
+      if (this.document.visibilityState === 'visible') this.RefreshRuns({ quiet: true });
+    }, 2000);
   }
 
   BindControls() {
@@ -117,11 +143,37 @@ export class Workbench {
       if (!button) {
         return;
       }
-      const appRunId = this.$('#app-run-select')?.value || null;
-      this.LoadRun(button.dataset.runId, appRunId || null)
-        .catch((error) => this.Status(error.message));
+      this.LoadRun(button.dataset.runId)
+        .catch((error) => {
+          if (error.name !== 'AbortError') this.BrowserMessage(error.message, true);
+        });
     });
     this.$('#refresh-runs')?.addEventListener('click', () => this.RefreshRuns());
+    this.$('#experiment-picker-toggle')?.addEventListener('click', () => {
+      if (this.$('#experiment-browser').hidden) this.OpenExperiments();
+      else this.CloseExperiments();
+    });
+    this.$('#live-experiments')?.addEventListener('click', () => this.ViewLive());
+    this.$('#app-run-select')?.addEventListener('change', event => {
+      if (this.run) this.LoadRun(this.run.id, event.target.value || null, this.sourceMode)
+        .catch(error => {
+          if (error.name !== 'AbortError') this.Status(error.message);
+          this.RenderAppCandidates();
+        });
+    });
+    this.$('#close-experiments')?.addEventListener('click', () => this.CloseExperiments());
+    this.$('#run-search')?.addEventListener('input', () => this.RenderRuns());
+    this.document.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && !this.$('#experiment-browser').hidden) {
+        this.CloseExperiments();
+      }
+    });
+    this.document.addEventListener('pointerdown', event => {
+      if (!this.$('#experiment-browser').hidden &&
+          !event.target.closest('#experiment-browser, #experiment-picker-toggle, #live-experiments')) {
+        this.CloseExperiments(false);
+      }
+    });
     this.$('#signal-search')?.addEventListener('input', () => this.RenderSignals());
     this.$('#save-layout')?.addEventListener('click', () => this.SaveLayout(false));
     this.$('#save-as-layout')?.addEventListener('click', () => this.SaveLayout(true));
@@ -137,14 +189,10 @@ export class Workbench {
         this.DeleteLayout(id).catch((error) => this.Status(error.message));
       }
     });
-    this.$('#zoom-in')?.addEventListener('click', () => this.Zoom(4n, 5n));
-    this.$('#zoom-out')?.addEventListener('click', () => this.Zoom(5n, 4n));
-    this.$('#zoom-fit')?.addEventListener('click', () => this.FitWindow());
     this.$('#layout-name')?.addEventListener('change', () => {
       this.layout = { ...this.layout, name: this.$('#layout-name').value || this.layout.name };
     });
     this.$('#tab-workbench')?.addEventListener('click', () => this.ShowPage('workbench'));
-    this.$('#tab-records')?.addEventListener('click', () => this.ShowPage('records'));
     this.$('#tab-maintenance')?.addEventListener('click', () => this.ShowPage('maintenance'));
     this.$('#replace-select')?.addEventListener('change', (event) => {
       const signalId = this.$('#replace-select')?.value;
@@ -152,45 +200,22 @@ export class Workbench {
         this.ReplaceSignal(signalId).catch((error) => this.Status(error.message));
       }
     });
-    this.$('#dock-root')?.addEventListener('wheel', (event) => {
-      if (!this.run) {
-        return;
-      }
-      event.preventDefault();
-      this.Zoom(event.deltaY > 0 ? 6n : 4n, event.deltaY > 0 ? 5n : 5n);
-    }, { passive: false });
     this.$('#go-live')?.addEventListener('click', () => this.GoLive());
     this.$('#play')?.addEventListener('click', () => this.Play());
     this.$('#pause')?.addEventListener('click', () => this.Pause());
+    this.$('#reset-time')?.addEventListener('click', () => this.ResetTimeAxis());
     this.$('#step-prev')?.addEventListener('click', () => this.Step('previous'));
     this.$('#step-next')?.addEventListener('click', () => this.Step('next'));
     this.$('#speed-select')?.addEventListener('change', (event) =>
       this.SetSpeed(Number(event.target.value)));
     this.$('#load-events')?.addEventListener('click', () =>
       this.LoadEvents().catch((error) => this.Status(error.message)));
-    this.$('#integrity-toggle')?.addEventListener('click', () => {
-      const detail = this.$('#integrity-detail');
-      if (detail) {
-        detail.hidden = !detail.hidden;
-      }
-    });
     this.document.addEventListener('visibilitychange', () => {
       if (this.document.visibilityState === 'visible' && this.liveTimer) {
         this.PollLive();
       }
     });
-    this.$('#dock-root')?.addEventListener('pointermove', (event) => {
-      const root = this.$('#dock-root');
-      if (!root || !this.run) {
-        return;
-      }
-      const bounds = root.getBoundingClientRect();
-      const ratio = Math.min(1, Math.max(0, (event.clientX - bounds.left) / bounds.width));
-      const begin = this.timeWindow.beginUs;
-      const span = this.timeWindow.endUs - begin;
-      const stamp = begin + BigInt(Math.round(Number(span) * ratio));
-      this.RequestCursor(stamp);
-    });
+
   }
 
   Status(message) {
@@ -201,7 +226,8 @@ export class Workbench {
   }
 
   ShowPage(page) {
-    for (const name of ['workbench', 'records', 'maintenance']) {
+    this.CloseExperiments(false);
+    for (const name of ['workbench', 'maintenance']) {
       const element = this.$(`#page-${name}`);
       if (element) {
         element.hidden = name !== page;
@@ -209,40 +235,153 @@ export class Workbench {
     }
   }
 
-  async RefreshRuns() {
+  BrowserMessage(message = '', error = false) {
+    const element = this.$('#experiment-browser-message');
+    element.textContent = message;
+    element.classList.toggle('warning', error);
+  }
+
+  OpenExperiments() {
+    this.$('#experiment-browser').hidden = false;
+    this.$('#experiment-picker-toggle').setAttribute('aria-expanded', 'true');
+    this.$('#run-search').value = '';
+    this.BrowserMessage();
+    this.RenderRuns();
+    this.$('#run-search').focus();
+    this.RefreshRuns({ quiet: true });
+  }
+
+  CloseExperiments(focus = true) {
+    this.$('#experiment-browser').hidden = true;
+    this.$('#experiment-picker-toggle').setAttribute('aria-expanded', 'false');
+    if (focus) this.$('#experiment-picker-toggle').focus();
+  }
+
+  LiveRuntimes() {
+    return this.runs.filter(run => run.kind === 'runtime' && run.live?.active);
+  }
+
+  RenderLiveAvailability() {
+    const live = this.LiveRuntimes();
+    const ready = live.length === 1 && live[0].readable;
+    const status = this.$('#telemetry-availability');
+    status.textContent = live.length > 1 ? 'Conflicting runtime streams'
+      : ready ? 'Live telemetry available' : 'No live telemetry';
+    status.dataset.state = ready ? 'available' : live.length > 1 ? 'conflict' : 'unavailable';
+    const button = this.$('#live-experiments');
+    button.disabled = !ready;
+    button.title = live.length > 1 ? 'More than one runtime is emitting telemetry. Check the SDK processes.'
+      : ready ? 'View the current robot experiment' : 'No runtime telemetry received. Check the SDK telemetry connection.';
+  }
+
+  async ViewLive() {
+    const live = this.LiveRuntimes();
+    if (live.length !== 1 || !live[0].readable) {
+      this.RenderLiveAvailability();
+      return;
+    }
+    this.CloseExperiments(false);
     try {
-      const payload = await this.api.Runs();
-      this.runs = payload.runs ?? [];
-      this.RenderRuns();
-      this.RenderAppCandidates();
+      await this.LoadRun(live[0].run_id, undefined, 'live');
+      this.$('#live-experiments').focus();
     } catch (error) {
-      this.Status(error.message);
+      if (error.name !== 'AbortError') this.Status(error.message);
+    }
+  }
+
+  async RefreshRuns({ quiet = false } = {}) {
+    if (this.catalogInFlight) return;
+    this.catalogInFlight = true;
+    try {
+      const runs = [];
+      const seen = new Set();
+      let continuation;
+      do {
+        const payload = await this.api.Runs({ continuation });
+        runs.push(...(payload.runs ?? []));
+        continuation = payload.continuation;
+        if (continuation && seen.has(continuation)) throw new Error('The experiment list could not be loaded. Refresh to try again.');
+        seen.add(continuation);
+      } while (continuation);
+      this.runs = runs;
+      if (this.run) this.run.live = runs.find(run => run.run_id === this.run.id)?.live;
+      this.RenderLiveAvailability();
+      this.RenderRuns();
+      this.RenderExperimentState();
+      if (!quiet) this.BrowserMessage();
+    } catch (error) {
+      this.$('#telemetry-availability').textContent = 'Telemetry status unavailable';
+      this.$('#telemetry-availability').dataset.state = 'unavailable';
+      this.$('#live-experiments').disabled = true;
+      if (!quiet || !this.$('#experiment-browser').hidden) this.BrowserMessage(error.message, true);
+    } finally {
+      this.catalogInFlight = false;
     }
   }
 
   RenderRuns() {
     const list = this.$('#run-list');
-    if (!list) {
-      return;
-    }
+    if (!list) return;
+    const query = (this.$('#run-search')?.value ?? '').trim().toLowerCase();
+    const runs = this.runs.filter(run => run.kind !== 'application' &&
+      `${run.name} ${RecordingStartLabel(run)}`.toLowerCase().includes(query))
+      .sort((left, right) => (RecordingStart(right.name)?.getTime() ?? -Infinity) -
+        (RecordingStart(left.name)?.getTime() ?? -Infinity) || right.name.localeCompare(left.name));
+    this.$('#recording-count').textContent = `${runs.length} recording${runs.length === 1 ? '' : 's'}`;
+    const signature = JSON.stringify([query, this.run?.id, this.sourceMode,
+      runs.map(run => [run.run_id, run.name, run.kind, run.readable,
+        run.complete, run.live?.active, run.error, run.begin_us, run.end_us])]);
+    if (signature === this.runListSignature) return;
+    this.runListSignature = signature;
+    const focusedId = list.contains(this.document.activeElement)
+      ? this.document.activeElement.dataset.runId : null;
+    const scrollTop = list.scrollTop;
     list.replaceChildren();
-    for (const run of this.runs) {
+    if (runs.length === 0) {
+      const empty = this.document.createElement('p');
+      empty.className = 'experiment-empty';
+      empty.textContent = query ? 'No matching experiments. Try another name.'
+        : 'No recordings found. Enable recording in the SDK configuration, then refresh.';
+      list.append(empty);
+    }
+    for (const run of runs) {
       const item = this.document.createElement('div');
       item.className = 'run-item';
       item.dataset.kind = run.kind;
+      item.classList.toggle('selected', this.run?.id === run.run_id);
       const name = this.document.createElement('span');
       name.className = 'run-name';
       name.textContent = run.name;
+      name.title = run.name;
       const meta = this.document.createElement('span');
       meta.className = 'run-meta';
-      meta.textContent = `${run.kind}${run.complete === false ? ' • open' : ''}${run.error ? ` • ${run.error}` : ''}`;
+      const status = run.live?.active ? 'Recording' : run.complete === true ? 'Complete'
+        : run.complete === false ? 'Unfinished' : 'Unavailable';
+      const started = RecordingStartLabel(run);
+      const durationUs = run.begin_us != null && run.end_us != null
+        ? Us(run.end_us) - Us(run.begin_us) : null;
+      const duration = durationUs == null ? 'Duration unavailable'
+        : `${(Number(durationUs) / 1000000).toFixed(1)} s`;
+      meta.textContent = `${started} · ${duration}`;
+      const badge = this.document.createElement('span');
+      badge.className = 'recording-status';
+      badge.dataset.state = run.readable ? status.toLowerCase() : 'unavailable';
+      badge.textContent = run.error ? 'Unreadable' : status;
+      if (run.error) meta.textContent = run.error;
       const button = this.document.createElement('button');
       button.type = 'button';
-      button.textContent = 'Open';
+      button.textContent = this.run?.id === run.run_id && this.sourceMode === 'history' ? 'Viewing' : 'Replay';
       button.dataset.runId = run.run_id;
       button.disabled = !run.readable;
-      item.append(name, meta, button);
+      button.setAttribute('aria-label', `${button.textContent} ${run.name}`);
+      item.append(name, meta, badge, button);
       list.append(item);
+    }
+    list.scrollTop = scrollTop;
+    if (focusedId) {
+      const focused = [...list.querySelectorAll('button[data-run-id]')]
+        .find(button => button.dataset.runId === focusedId);
+      (focused ?? this.$('#run-search')).focus({ preventScroll: true });
     }
   }
 
@@ -251,47 +390,98 @@ export class Workbench {
     if (!select) {
       return;
     }
-    const previous = select.value;
     select.replaceChildren();
     const none = this.document.createElement('option');
     none.value = '';
-    none.textContent = 'No application stream';
+    none.textContent = 'Runtime only';
     select.append(none);
-    for (const run of this.runs.filter((entry) => entry.kind === 'application' && entry.readable)) {
+    for (const run of this.matchedApplications) {
       const option = this.document.createElement('option');
       option.value = run.run_id;
       option.textContent = run.name;
       select.append(option);
     }
-    if ([...select.options].some((option) => option.value === previous)) {
-      select.value = previous;
-    }
+    select.value = this.appRun?.id ?? '';
+    select.disabled = this.matchedApplications.length === 0;
+    this.$('#experiment-sources').hidden = !this.run;
+    this.$('#runtime-source-name').textContent = this.run ? `Runtime: ${this.run.name}` : '';
+    this.$('#source-summary').textContent = this.appRun ? 'Runtime + Application' : 'Runtime only';
   }
 
-  async LoadRun(runId, appRunId = null) {
+  async LoadRun(runId, appRunId = undefined, mode = 'history') {
+    const generation = ++this.loadGeneration;
+    this.runLoadController?.abort();
+    this.runLoadController = new AbortController();
+    const signal = this.runLoadController.signal;
+    const runtime = this.runs.find(run => run.run_id === runId);
+    if (!runtime) throw new Error('The experiment is no longer in the list. Refresh to try again.');
+    if (runtime.kind === 'application') appRunId = null;
+    this.BrowserMessage('Opening experiment…');
+    let described = appRunId
+      ? await this.api.Context(runId, appRunId, signal)
+      : await this.api.Describe(runId, signal);
+    if (generation !== this.loadGeneration) return;
+    if (appRunId && described.context?.association?.ok !== true) {
+      throw new Error('This application stream does not match the runtime session. Choose another stream or open without it.');
+    }
+    let matched = this.run?.id === runId ? this.matchedApplications : [];
+    let sourceMessage = '';
+    if (appRunId === undefined && runtime.kind === 'runtime') {
+      matched = [];
+      let unavailable = false;
+      for (const candidate of this.runs.filter(run => run.kind === 'application' && run.readable)) {
+        try {
+          const reply = await this.api.Context(runId, candidate.run_id, signal);
+          if (generation !== this.loadGeneration) return;
+          if (reply.context?.association?.ok === true) {
+            matched.push({ ...candidate, description: reply });
+          }
+        } catch (error) {
+          if (error.name === 'AbortError') throw error;
+          unavailable = true;
+        }
+      }
+      if (generation !== this.loadGeneration) return;
+      if (matched.length === 1) {
+        appRunId = matched[0].run_id;
+        described = matched[0].description;
+      }
+      sourceMessage = unavailable ? 'Some application streams could not be checked. Refresh the experiment to retry.'
+        : matched.length > 1 ? 'Multiple matching application streams. Select the stream to include.'
+          : matched.length === 0 ? 'No matching application stream. Runtime data is available.' : 'Application identity verified for this experiment.';
+    }
+    const appDescription = appRunId ? { context: described.context.application } : null;
+    const catalog = [...(described.context?.signals ?? []), ...(appDescription?.context?.signals ?? [])];
+    const changingExperiment = this.run?.id !== runId;
+    this.dock.selection?.cancel();
+    if (this.playbackFrame !== null) cancelAnimationFrame(this.playbackFrame);
+    this.playbackFrame = null;
+    clearInterval(this.liveTimer);
+    this.liveTimer = null;
+    clearTimeout(this.cursorTimer);
+    this.cursorTimer = null;
+    this.pendingCursor = undefined;
+    this.lastCursorAt = undefined;
     this.gate.Invalidate();
+    this.liveInFlight = false;
+    this.cursorInFlight = false;
     this.cache.Clear();
     this.series = [];
     this.cursor = null;
     this.replacing = null;
-    this.Status('loading run…');
-    const runtime = this.runs.find((run) => run.run_id === runId);
-    if (!runtime) {
-      throw new Error('the run is not in the catalog');
-    }
-    const described = await this.api.Describe(runId);
-    let catalog = [...(described.context?.signals ?? [])];
-    let appDescription = null;
-    if (appRunId) {
-      appDescription = await this.api.Describe(appRunId);
-      catalog = catalog.concat(appDescription.context?.signals ?? []);
-    }
+    this.sourceMode = mode;
     this.run = { ...runtime, id: runId, context: described.context };
     this.appRun = appRunId ? { id: appRunId, context: appDescription?.context } : null;
+    this.matchedApplications = matched;
+    this.RenderAppCandidates();
+    this.$('#source-message').textContent = sourceMessage;
+    this.RenderRuns();
     this.catalog = catalog;
     const coverage = described.context?.coverage;
     const coverageBegin = coverage?.begin_us ? Us(coverage.begin_us) : 0n;
     const coverageEnd = coverage?.end_us ? Us(coverage.end_us) : 1000000n;
+    this.timeOriginUs = coverage?.begin_us == null ? null : coverageBegin;
+    this.dock.timeOriginUs = this.timeOriginUs;
     this.time = TimeModel.Step(TimeModel.Initial(), {
       type: 'reset',
       runId,
@@ -301,27 +491,45 @@ export class Workbench {
     this.timeWindow = this.time.window;
     this.liveRevision = null;
     this.liveSeen = false;
-    this.eventsView.Reset();
+    this.eventsView.Reset(this.timeOriginUs);
+    this.eventsView.Render(this.$('#events-list'));
+    this.dock.SetMarkers([]);
+    this.$('#cursor-readout').textContent = '';
+    this.$('#events-summary').textContent = '';
+    this.$('#integrity-detail').hidden = true;
+    this.ShowIntegrity(null);
+    this.ShowEventDetail(null);
     this.RenderSignals();
     this.RenderRunHeader();
-    this.ApplyLayout(this.layout, { request: true });
+    if (changingExperiment) this.currentLayoutId = null;
+    this.ApplyLayout(changingExperiment ? EmptyLayout() : this.layout, { request: true });
     this.RenderTransport();
     if (described.context?.kind === 'runtime') {
       this.LoadEvents().catch((error) => this.Status(error.message));
     } else {
-      this.eventsView.Reset();
+      this.eventsView.Reset(this.timeOriginUs);
       this.eventsView.Render(this.$('#events-list'));
       this.dock?.SetMarkers([]);
       this.ShowEventDetail(null);
     }
-    this.Status(`run ${runtime.name} loaded`);
+    this.Status('');
+    this.BrowserMessage();
+    if (!this.$('#experiment-browser').hidden) this.CloseExperiments();
+    if (mode === 'live') {
+      const endUs = this.time.coverage.endUs;
+      const beginUs = endUs - this.time.coverage.beginUs > 10000000n
+        ? endUs - 10000000n : this.time.coverage.beginUs;
+      this.ApplyTimeState({ ...this.time, window: { beginUs, endUs } }, { request: false });
+      this.GoLive();
+    }
   }
 
   RenderRunHeader() {
     const title = this.$('#run-title');
     if (title) {
-      title.textContent = this.run ? this.run.name : 'No experiment loaded';
+      title.textContent = this.run ? this.run.name : 'Choose an experiment';
     }
+    this.RenderExperimentState();
     const detail = this.$('#run-detail');
     if (detail) {
       const context = this.run?.context ?? {};
@@ -330,7 +538,29 @@ export class Workbench {
         context.sdk_git_sha ? `SDK ${String(context.sdk_git_sha).slice(0, 12)}` : '',
         context.clock?.boot_id ? `boot ${context.clock.boot_id}` : '',
         context.clock?.clock ?? '',
+        this.appRun ? 'Application stream included' : '',
       ].filter(Boolean).join(' · ');
+    }
+  }
+
+  RenderExperimentState() {
+    const state = this.$('#experiment-state');
+    if (!state) return;
+    const live = this.sourceMode === 'live';
+    const offline = live && (this.time.offline || !this.run?.live?.active);
+    state.textContent = !this.run ? 'No experiment selected' : !live ? 'History'
+      : offline ? 'Live / Offline' : this.time.following ? 'Live / Following' : 'Live / Reviewing';
+    state.dataset.state = !live ? 'history' : offline ? 'offline' : 'live';
+    const follow = this.$('#go-live');
+    const resetTime = this.$('#reset-time');
+    if (resetTime) resetTime.disabled = !this.run;
+    if (follow) {
+      follow.disabled = !this.run || (live && this.time.following && !offline);
+      follow.hidden = this.run && !live && !this.run.live?.active;
+    }
+    for (const id of ['play', 'pause', 'step-prev', 'step-next', 'speed-select']) {
+      const control = this.$(`#${id}`);
+      if (control) control.disabled = !this.run || (id !== 'pause' && live && this.time.following);
     }
   }
 
@@ -477,26 +707,62 @@ export class Workbench {
     }
   }
 
-  ReassignCurve(chartId, signalId, axisId) {
-    const chart = this.layout.charts.find((entry) => entry.id === chartId);
-    const signal = this.SignalById(signalId);
-    const axis = chart?.axes.find((entry) => entry.id === axisId);
-    if (!chart || !signal || !axis) {
+  SelectChartRegion(chartId, zoom) {
+    if (!this.run) {
       return;
     }
-    if (axis.quantity !== signal.quantity || axis.unit !== signal.unit) {
-      this.Status('an axis can only group signals of the same quantity and unit');
+    let chart = this.layout.charts.find((entry) => entry.id === chartId);
+    if (!chart) {
       return;
     }
-    const updated = {
-      ...chart,
-      curves: chart.curves.map((curve) =>
-        curve.signalId === signalId ? { ...curve, axisId } : curve),
-    };
+    if (zoom.window) {
+      this.PreserveValueRanges();
+      this.SetTimeWindow(zoom.window);
+      return;
+    }
+    for (const axis of zoom.axes) {
+      chart = SetAxisRange(chart, axis.axisId, axis.range);
+    }
     this.ApplyLayout({
       ...this.layout,
-      charts: this.layout.charts.map((entry) => (entry.id === chartId ? updated : entry)),
-    });
+      charts: this.layout.charts.map((entry) => entry.id === chartId ? chart : entry),
+    }, { request: false });
+  }
+
+  PreserveValueRanges() {
+    // Time-only zoom must not rescale automatic axes when new data arrives.
+    // Retain their displayed extents until an explicit reset or value zoom.
+    this.ApplyLayout({
+      ...this.layout,
+      charts: this.layout.charts.map(chart => ({
+        ...chart,
+        axes: chart.axes.map(axis => {
+          const displayed = this.dock.plotViews.get(chart.id)?.ranges
+            .find(range => range.axisId === axis.id);
+          return !axis.range && displayed
+            ? { ...axis, range: [displayed.low, displayed.high] } : axis;
+        }),
+      })),
+    }, { request: false });
+  }
+
+  SetTimeWindow(window) {
+    this.ApplyTimeState(TimeModel.Step(this.time, { type: 'setWindow', window }, this.Now()));
+  }
+
+  ResetValueAxes(chartId) {
+    this.ApplyLayout({
+      ...this.layout,
+      charts: this.layout.charts.map((chart) => chart.id === chartId
+        ? { ...chart, axes: chart.axes.map((axis) => ({ ...axis, range: null })) }
+        : chart),
+    }, { request: false });
+  }
+
+  ResetTimeAxis() {
+    if (!this.run) return;
+    this.PreserveValueRanges();
+    this.SetTimeWindow({ ...this.time.coverage });
   }
 
   BeginReplace(chartId, signalId) {
@@ -583,19 +849,33 @@ export class Workbench {
     }
     this.rangeInFlight = true;
     const pixelWidth = Math.min(4096, Math.max(200, Math.round(this.$('#dock-root')?.clientWidth ?? 800)));
+    // Keep neighboring raw samples on both sides of the visible window. The
+    // renderer clips connecting segments at the plot edge, retaining real gaps.
+    const contexts = [this.run.context, this.appRun?.context].filter(Boolean);
+    const period = BigInt(Math.max(1, ...contexts.map(context => {
+      const hz = Number(context.sample_hz);
+      return Math.ceil(1000000 / (Number.isFinite(hz) && hz > 0 ? hz : 100));
+    })));
+    const margin = 2n * period + (end - begin + BigInt(pixelWidth) - 1n) / BigInt(pixelWidth);
+    const starts = contexts.map(context => context.coverage?.begin_us).filter(value => value != null).map(Us);
+    const first = starts.length ? starts.reduce((a, b) => a < b ? a : b) : 0n;
+    let queryBegin = begin > margin ? begin - margin : 0n;
+    if (begin >= first && queryBegin < first) queryBegin = first;
+    const maximum = (1n << 64n) - 1n;
+    const queryEnd = end + margin + 1n > maximum ? maximum : end + margin + 1n;
     LatestQuery(this.gate, {
       key: 'range',
       loader: (signal) => this.api.Range({
         runId: this.run.id,
         appRunId: this.appRun?.id ?? null,
         signalIds,
-        beginUs: begin,
-        endUs: end,
+        beginUs: queryBegin,
+        endUs: queryEnd,
         pixelWidth,
       }, { signal }),
       onValue: (payload) => {
         this.rangeInFlight = false;
-        this.series = payload.series ?? [];
+        this.series = DisplaySeries(payload.series ?? [], this.timeOriginUs);
         this.cache.Set(key, { series: this.series, integrity: payload.integrity });
         this.dock.SetView(this.layout, this.resolved, this.series, this.timeWindow, this.cursor);
         this.ShowIntegrity(payload.integrity);
@@ -646,24 +926,51 @@ export class Workbench {
   }
 
   RequestCursor(stamp) {
-    if (!this.run) {
+    if (!this.run || this.dock.selection) {
       return;
     }
-    const now = globalThis.performance?.now?.() ?? Date.now();
-    if (this.lastCursorAt !== undefined && now - this.lastCursorAt < 100) {
+    // Pointer feedback is local and frame-paced. A slow value lookup must not
+    // delay it, and an older lookup must never move the pointer backwards.
+    this.cursor = {
+      timeUs: stamp,
+      values: this.cursor?.values ?? new Map(),
+      valuesTimeUs: this.cursor?.valuesTimeUs,
+    };
+    this.dock.SetCursor(this.cursor);
+    this.pendingCursor = stamp;
+    this.ResumePendingCursor();
+  }
+
+  ResumePendingCursor() {
+    if (!this.run || this.cursorInFlight || this.pendingCursor === undefined ||
+        this.dock.selection) {
       return;
     }
-    this.lastCursorAt = now;
-    if (this.cursorInFlight) {
-      this.pendingCursor = stamp;
+    const delay = this.lastCursorAt === undefined
+      ? 0 : Math.max(0, 100 - (this.Now() - this.lastCursorAt));
+    if (delay > 0) {
+      if (this.cursorTimer === null) {
+        this.cursorTimer = setTimeout(() => {
+          this.cursorTimer = null;
+          this.ResumePendingCursor();
+        }, delay);
+      }
       return;
     }
-    this.cursorInFlight = true;
+    clearTimeout(this.cursorTimer);
+    this.cursorTimer = null;
+    const stamp = this.pendingCursor;
+    this.pendingCursor = undefined;
     const signalIds = this.CurrentSignalIds();
     if (signalIds.length === 0) {
       return;
     }
-    this.dock.cursor = { timeUs: stamp, values: this.cursor?.values ?? new Map() };
+    this.lastCursorAt = this.Now();
+    this.cursorInFlight = true;
+    const complete = () => {
+      this.cursorInFlight = false;
+      this.ResumePendingCursor();
+    };
     LatestQuery(this.gate, {
       key: 'cursor',
       loader: (signal) => this.api.Cursor({
@@ -673,49 +980,38 @@ export class Workbench {
         cursorUs: stamp,
       }, { signal }),
       onValue: (payload) => {
-        this.cursorInFlight = false;
+        if (this.dock.selection) {
+          complete();
+          return;
+        }
         const values = new Map();
         for (const entry of payload.series ?? []) {
           values.set(entry.signal.id, {
-            value: entry.value,
+            value: DisplaySignalValue(entry.signal, entry.value, entry.sample_stamp_us, this.timeOriginUs),
             valid: entry.valid,
             ageUs: entry.age_us,
             sampleStampUs: entry.sample_stamp_us,
           });
         }
-        this.cursor = { timeUs: stamp, values, raw: payload };
+        this.cursor = { timeUs: this.cursor?.timeUs ?? stamp, values, valuesTimeUs: stamp, raw: payload };
         this.dock.SetCursor(this.cursor);
         const readout = this.$('#cursor-readout');
         if (readout) {
           const details = [];
           for (const [signalId, value] of values) {
             const signal = this.SignalById(signalId);
-            details.push(`${signal?.label ?? signalId}=${value.valid ? value.value : 'unavailable'}${value.ageUs !== null && value.ageUs !== undefined ? ` (${value.ageUs} us ago)` : ''}`);
+            const shown = signal?.quantity === 'time' && typeof value.value === 'number' && Number.isFinite(value.value)
+              ? RelativeTime(BigInt(Math.round(value.value)), 0n) : value.value;
+            details.push(`${signal?.label ?? signalId}=${value.valid ? shown : 'unavailable'}${value.ageUs !== null && value.ageUs !== undefined ? ` (${value.ageUs} us ago)` : ''}`);
           }
-          readout.textContent = `t=${stamp.toString()} · ${details.slice(0, 4).join(' · ')}`;
+          readout.textContent = `t=${RelativeTime(stamp, this.timeOriginUs)} · ${details.slice(0, 4).join(' · ')}`;
         }
+        complete();
       },
-      onError: () => {
-        this.cursorInFlight = false;
-        this.ResumePendingCursor();
-      },
-      onAbort: () => {
-        this.cursorInFlight = false;
-        this.ResumePendingCursor();
-      },
-      onStale: () => {
-        this.cursorInFlight = false;
-        this.ResumePendingCursor();
-      },
+      onError: complete,
+      onAbort: complete,
+      onStale: complete,
     });
-  }
-
-  ResumePendingCursor() {
-    if (this.pendingCursor !== undefined) {
-      const stamp = this.pendingCursor;
-      this.pendingCursor = undefined;
-      this.RequestCursor(stamp);
-    }
   }
 
   Now() {
@@ -723,6 +1019,7 @@ export class Workbench {
   }
 
   RenderTransport() {
+    this.RenderExperimentState();
     const mode = this.$('#transport-mode');
     if (mode) {
       const following = this.time.following ? ' · following' : '';
@@ -731,14 +1028,15 @@ export class Workbench {
     }
     const live = this.$('#live-status');
     if (live) {
+      live.hidden = this.sourceMode !== 'live';
       if (this.time.offline) {
-        live.textContent = `live offline · last received ${this.time.lastReceivedMs ? `${Math.round(performance.now() - this.time.lastReceivedMs)} ms ago` : 'never'}`;
+        live.textContent = 'Stream offline';
         live.classList.add('warning');
       } else {
         live.classList.remove('warning');
         live.textContent = this.liveSeen
-          ? `live revision ${this.liveRevision ?? '—'}`
-          : 'no live tail';
+          ? 'Receiving data'
+          : 'Waiting for data';
       }
     }
     if (this.$('#speed-select')) {
@@ -749,75 +1047,62 @@ export class Workbench {
 
   ApplyTimeState(state, options = {}) {
     const previous = this.timeWindow;
+    const previousPlaybackCursor = this.time.cursor;
     this.time = state;
     this.timeWindow = state.window;
     if (this.dock) {
       this.dock.timeWindow = state.window;
-      if (this.cursor) {
-        this.cursor.timeUs = state.cursor;
+      if (state.cursor !== previousPlaybackCursor || (state.playing && !this.cursor)) {
+        this.cursor = { ...(this.cursor ?? { values: new Map() }), timeUs: state.cursor };
       }
+      this.dock.SetCursor(this.cursor);
     }
     this.RenderTransport();
-    const changed = previous.beginUs !== state.window.beginUs ||
-      previous.endUs !== state.window.endUs;
-    if (options.request !== false && changed && this.run) {
+    const changed = previous.beginUs !== state.window.beginUs || previous.endUs !== state.window.endUs;
+    if (changed && options.request !== false && this.run) {
       this.RequestWindow();
-    } else if (this.dock) {
-      this.dock.SetView(this.layout, this.resolved, this.series,
-        state.window, this.cursor);
+    } else if (changed && this.dock) {
+      this.dock.SetView(this.layout, this.resolved, this.series, state.window, this.cursor);
     }
   }
 
   Play() {
-    if (!this.run) {
-      return;
-    }
+    if (!this.run) return;
     let state = this.time;
     if (state.mode !== 'history') {
       state = TimeModel.Step(state, { type: 'setMode', mode: 'history' }, this.Now());
     }
-    state = TimeModel.Step(state, { type: 'play' }, this.Now());
-    this.ApplyTimeState(state, { request: false });
-    if (this.playbackTimer) {
-      clearInterval(this.playbackTimer);
+    const hover = this.cursor?.timeUs;
+    if (hover !== undefined && hover >= state.window.beginUs && hover <= state.window.endUs) {
+      state = { ...state, cursor: hover };
     }
-    this.playbackTimer = setInterval(() => {
-      if (!this.time.playing) {
-        clearInterval(this.playbackTimer);
-        this.playbackTimer = null;
-        return;
-      }
+    this.ApplyTimeState(TimeModel.Step(state, { type: 'play' }, this.Now()), { request: false });
+    if (this.playbackFrame !== null) cancelAnimationFrame(this.playbackFrame);
+    const advance = () => {
+      this.playbackFrame = null;
+      if (!this.time.playing) return;
       const next = TimeModel.Step(this.time, { type: 'advance' }, this.Now());
       this.ApplyTimeState(next);
-      if (!next.playing) {
-        clearInterval(this.playbackTimer);
-        this.playbackTimer = null;
-        this.RenderTransport();
-      }
-    }, 50);
+      this.RequestCursor(next.cursor);
+      if (next.playing) this.playbackFrame = requestAnimationFrame(advance);
+    };
+    this.playbackFrame = requestAnimationFrame(advance);
   }
 
   Pause() {
-    if (this.playbackTimer) {
-      clearInterval(this.playbackTimer);
-      this.playbackTimer = null;
-    }
-    this.ApplyTimeState(TimeModel.Step(this.time, { type: 'pause' }, this.Now()));
+    if (this.playbackFrame !== null) cancelAnimationFrame(this.playbackFrame);
+    this.playbackFrame = null;
+    const paused = TimeModel.Step(this.time, { type: 'pause' }, this.Now());
+    this.ApplyTimeState(TimeModel.Step(paused, { type: 'setMode', mode: 'history' }, this.Now()));
   }
 
   Step(direction) {
-    if (this.playbackTimer) {
-      clearInterval(this.playbackTimer);
-      this.playbackTimer = null;
-    }
+    if (this.playbackFrame !== null) cancelAnimationFrame(this.playbackFrame);
+    this.playbackFrame = null;
     const runtimeSeries = this.series.filter((entry) => entry.signal?.source === 'runtime');
     const times = SampleTimes(runtimeSeries.length > 0 ? runtimeSeries : this.series);
-    const next = TimeModel.Step(this.time, {
-      type: 'stepSample',
-      direction,
-      times,
-    }, this.Now());
-    this.ApplyTimeState(next);
+    this.ApplyTimeState(TimeModel.Step(this.time, { type: 'stepSample', direction, times }, this.Now()));
+    this.RequestCursor(this.time.cursor);
   }
 
   SetSpeed(speed) {
@@ -829,6 +1114,7 @@ export class Workbench {
     if (!this.run) {
       return;
     }
+    this.sourceMode = 'live';
     this.ApplyTimeState(TimeModel.Step(this.time, { type: 'followLatest' }, this.Now()));
     if (!this.liveTimer) {
       this.liveTimer = setInterval(() => this.PollLive(), 100);
@@ -865,8 +1151,10 @@ export class Workbench {
       loader: (signal) => this.api.LiveSnapshot(query, { signal }),
       onValue: (snapshot) => {
         this.liveInFlight = false;
+        this.run.live = { ...this.run.live, active: snapshot.active === true };
+        this.time = { ...this.time, offline: snapshot.active !== true };
         if (snapshot.changed === false) {
-          this.time = { ...this.time, lastReceivedMs: this.Now(), offline: false };
+          if (snapshot.active) this.time = { ...this.time, lastReceivedMs: this.Now() };
           this.RenderTransport();
           return;
         }
@@ -874,6 +1162,11 @@ export class Workbench {
         this.liveRevision = snapshot.revision;
         this.liveServiceEpoch = snapshot.service_epoch;
         if (snapshot.coverage?.begin_us && snapshot.coverage?.end_us) {
+          if (this.timeOriginUs === null) {
+            this.timeOriginUs = Us(snapshot.coverage.begin_us);
+            this.dock.timeOriginUs = this.timeOriginUs;
+            this.eventsView.timeOriginUs = this.timeOriginUs;
+          }
           const state = TimeModel.Step(this.time, {
             type: 'liveAdvance',
             coverage: {
@@ -882,7 +1175,7 @@ export class Workbench {
             },
             receivedAtMs: this.Now(),
           }, this.Now());
-          this.ApplyTimeState(state);
+          this.ApplyTimeState({ ...state, offline: snapshot.active !== true });
         }
         for (const fault of snapshot.faults ?? []) {
           this.eventsView.Append({
@@ -895,12 +1188,9 @@ export class Workbench {
       },
       onError: (error) => {
         this.liveInFlight = false;
-        if (error instanceof ApiError && error.status === 404) {
-          this.time = TimeModel.Step(this.time, { type: 'markOffline' }, this.Now());
-          this.RenderTransport();
-          return;
-        }
-        this.Status(error.message);
+        this.run.live = { ...this.run.live, active: false };
+        this.time = TimeModel.Step(this.time, { type: 'markOffline' }, this.Now());
+        this.RenderTransport();
       },
       onAbort: () => {
         this.liveInFlight = false;
@@ -916,8 +1206,9 @@ export class Workbench {
       return;
     }
     if (continuation === null) {
-      this.eventsView.Reset();
+      this.eventsView.Reset(this.timeOriginUs);
     }
+    const generation = this.loadGeneration;
     const payload = await this.api.Events({
       runId: this.run.id,
       beginUs: 0n,
@@ -925,6 +1216,7 @@ export class Workbench {
       maxRows: 100,
       continuation,
     });
+    if (generation !== this.loadGeneration) return;
     this.eventsView.Append(payload);
     this.eventsView.Render(this.$('#events-list'));
     const summary = this.$('#events-summary');
@@ -953,53 +1245,33 @@ export class Workbench {
       return;
     }
     const context = this.run?.context ?? {};
-    detail.textContent = JSON.stringify({
+    detail.textContent = JSON.stringify(RelativeTimestampFields({
+      time_reference: 'experiment start; timestamp fields in microseconds',
       sdk_git_sha: context.sdk_git_sha ?? null,
       model: context.model ?? this.appRun?.context?.model ?? null,
       clock: context.clock ?? null,
       integrity: this.lastIntegrity ?? context.integrity ?? null,
-    }, null, 2);
+    }, this.timeOriginUs), null, 2);
   }
 
-  Zoom(numerator, denominator) {
-    const begin = this.timeWindow.beginUs;
-    const end = this.timeWindow.endUs;
-    const span = end - begin;
-    if (span <= 1n) {
+  Zoom(numerator, denominator, anchorUs = null) {
+    if (!this.run) {
       return;
     }
-    const center = this.cursor?.timeUs ?? begin + span / 2n;
-    const next = (span * numerator) / denominator;
-    if (next <= 0n) {
+    const window = ZoomWindow(this.timeWindow, this.time.coverage,
+      numerator, denominator, anchorUs);
+    if (window.beginUs === this.timeWindow.beginUs &&
+        window.endUs === this.timeWindow.endUs) {
       return;
     }
-    const half = next / 2n;
-    let nextBegin = center - half;
-    let nextEnd = center + half;
-    if (nextBegin < 0n) {
-      nextBegin = 0n;
-      nextEnd = next;
-    }
-    this.timeWindow = { beginUs: nextBegin, endUs: nextEnd };
-    this.RequestWindow();
-    this.RenderWindowControls();
-  }
-
-  FitWindow() {
-    const coverage = this.run?.context?.coverage;
-    if (coverage?.begin_us && coverage?.end_us) {
-      this.timeWindow = { beginUs: Us(coverage.begin_us), endUs: Us(coverage.end_us) };
-    } else {
-      this.timeWindow = { beginUs: 0n, endUs: 1000000n };
-    }
-    this.RequestWindow();
-    this.RenderWindowControls();
+    this.PreserveValueRanges();
+    this.SetTimeWindow(window);
   }
 
   RenderWindowControls() {
     const element = this.$('#window-readout');
     if (element) {
-      element.textContent = `${FormatUs(this.timeWindow.beginUs)} – ${FormatUs(this.timeWindow.endUs)}`;
+      element.textContent = `${RelativeTime(this.timeWindow.beginUs, this.timeOriginUs)} – ${RelativeTime(this.timeWindow.endUs, this.timeOriginUs)}`;
     }
   }
 

@@ -269,6 +269,10 @@ def build(root: Path) -> None:
     write_runtime(root, "run_web_a", JOINTS, 1200)
     write_runtime(root, "run_web_b", ["waist"], 20, base=BASE_US + 50_000)
     write_application(root, "app_run_web", 1200)
+    foreign = write_application(root, "app_run_foreign", 20)
+    meta = json.loads((foreign / "meta.json").read_text(encoding="utf-8"))
+    meta["clock"]["boot_id"] = "another-boot"
+    (foreign / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
     write_corrupt(root, "run_web_corrupt")
     (root / "README.txt").write_text("generated fixtures\n", encoding="utf-8")
 

@@ -3,15 +3,17 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>IRMV experiment workbench</title>
+    <title>IRMV Studio</title>
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
     <header class="topbar">
-      <strong class="brand">IRMV experiment workbench</strong>
+      <a class="brand" href="/" aria-label="IRMV Studio home">
+        <svg class="brand-mark" viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="M6 8h7l3 8-3 8H6l3-8-3-8Zm13 0h7l-3 8 3 8h-7l-3-8 3-8Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+        <span>IRMV Studio</span>
+      </a>
       <nav class="tabs" aria-label="Pages">
-        <button type="button" id="tab-workbench" class="tab active">Experiment</button>
-        <button type="button" id="tab-records" class="tab">Records</button>
+        <button type="button" id="tab-workbench" class="tab">Experiment</button>
         <button type="button" id="tab-maintenance" class="tab">Bench maintenance</button>
       </nav>
     </header>
@@ -20,14 +22,15 @@
       <section id="page-workbench" class="page">
         <div class="workbench-grid">
           <aside class="sidebar">
-            <div class="panel">
+            <div class="panel signals-panel">
               <h2>Signals</h2>
-              <input id="signal-search" type="search" placeholder="Search signals" autocomplete="off">
-              <div id="signal-tree" class="signal-tree" aria-label="Signal tree"></div>
+              <p class="panel-hint">Explore joint and runtime signals.</p>
+              <input aria-label="Search signals" id="signal-search" type="search" placeholder="Search signals" autocomplete="off">
+              <div id="signal-tree" class="signal-tree" aria-label="Signal tree"><p class="sidebar-empty">Open a recording to browse its signals.</p></div>
             </div>
-            <div class="panel">
-              <h2>Layouts</h2>
-              <input id="layout-name" type="text" placeholder="Layout name" autocomplete="off">
+            <div class="panel layouts-panel">
+              <h2>Saved layouts</h2>
+              <input aria-label="Layout name" id="layout-name" type="text" placeholder="Layout name" autocomplete="off">
               <div class="button-row">
                 <button type="button" id="save-layout">Save</button>
                 <button type="button" id="save-as-layout">Save as</button>
@@ -42,16 +45,44 @@
 
           <section class="workspace">
             <header class="run-header">
-              <div>
-                <h1 id="run-title">No experiment loaded</h1>
-                <p id="run-detail" class="muted"></p>
+              <div class="experiment-heading">
+                <span id="experiment-state" class="experiment-state">No experiment selected</span>
+                <h1 id="run-title">Choose an experiment</h1>
+                <p id="run-detail" class="muted">View a live experiment or open a recording.</p>
               </div>
-              <div class="time-controls">
-                <button type="button" id="zoom-in" title="Zoom in">+</button>
-                <button type="button" id="zoom-out" title="Zoom out">−</button>
-                <button type="button" id="zoom-fit" title="Fit recorded range">Fit</button>
+              <div class="experiment-actions">
+                <span id="telemetry-availability" class="telemetry-availability" role="status">Checking telemetry…</span>
+                <button type="button" id="live-experiments" disabled><span class="live-dot" aria-hidden="true"></span> View live</button>
+                <button type="button" id="experiment-picker-toggle" aria-expanded="false" aria-controls="experiment-browser">History <span aria-hidden="true">⌄</span></button>
               </div>
+              <section id="experiment-browser" class="experiment-browser" aria-label="Experiment history" hidden>
+                <header class="experiment-browser-header">
+                  <div>
+                    <h2>Experiment history</h2>
+                    <p>Open a recording to review charts and events.</p>
+                  </div>
+                  <button type="button" id="close-experiments" aria-label="Close experiment history">×</button>
+                </header>
+                <div class="experiment-search">
+                  <input id="run-search" type="search" aria-label="Search recordings" placeholder="Search recordings by name or date" autocomplete="off">
+                  <button type="button" id="refresh-runs" aria-label="Refresh recordings">Refresh</button>
+                </div>
+                <p id="experiment-browser-message" class="browser-message" role="status"></p>
+                <div class="recording-list-heading"><span id="recording-count">Recordings</span><span>Newest first</span></div>
+                <div id="run-list" class="run-list" aria-label="Recorded experiments"></div>
+              </section>
             </header>
+            <details id="experiment-sources" class="experiment-sources" hidden>
+              <summary>Experiment data sources <span id="source-summary"></span></summary>
+              <div class="experiment-source-content">
+                <p id="runtime-source-name"></p>
+                <label class="application-choice" for="app-run-select">
+                  <span>Application stream <small>Only identity-verified streams for this experiment</small></span>
+                  <select id="app-run-select"></select>
+                </label>
+                <p id="source-message" class="muted" role="status"></p>
+              </div>
+            </details>
             <div class="status-lines">
               <span id="window-readout" class="muted"></span>
               <span id="cursor-readout" class="muted"></span>
@@ -59,8 +90,8 @@
               <span id="missing-signals" class="warning"></span>
             </div>
             <div class="transport-bar">
-              <button type="button" id="play">Play</button>
-              <button type="button" id="pause">Pause</button>
+              <button type="button" id="play"><span aria-hidden="true">▶</span> Play</button>
+              <button type="button" id="pause"><span aria-hidden="true">Ⅱ</span> Pause</button>
               <button type="button" id="step-prev">Step back</button>
               <button type="button" id="step-next">Step</button>
               <select id="speed-select" aria-label="Playback speed">
@@ -69,10 +100,10 @@
                 <option value="2">2×</option>
                 <option value="4">4×</option>
               </select>
-              <button type="button" id="go-live">Go live</button>
+              <button type="button" id="go-live"><span class="live-dot" aria-hidden="true"></span> Follow latest</button>
               <span id="transport-mode" class="muted"></span>
               <span id="live-status" class="muted"></span>
-              <button type="button" id="integrity-toggle">Integrity</button>
+              <button type="button" id="reset-time" title="Show the full time range across all charts">Reset time</button>
             </div>
             <div id="dock-root" class="dock-root" aria-label="Chart workspace"></div>
             <section class="events-panel">
@@ -85,33 +116,15 @@
               <pre id="event-detail" class="event-detail"></pre>
               <pre id="integrity-detail" class="integrity-detail" hidden></pre>
             </section>
-            <footer class="footer-bar">
-              <select id="replace-select" hidden aria-label="Replace missing signal"></select>
-              <span class="muted">Drag a signal to create or overlay; drop on an edge to split; drag a chart header to move it.</span>
-            </footer>
+            <select id="replace-select" hidden aria-label="Replace missing signal"></select>
           </section>
-        </div>
-      </section>
-
-      <section id="page-records" class="page" hidden>
-        <div class="records-panel">
-          <header class="panel-header">
-            <h1>Experiment records</h1>
-            <button type="button" id="refresh-runs">Refresh</button>
-          </header>
-          <p class="muted">Runs are the readable directories under the configured records root. The application stream is optional and is never merged unless its boot and runtime/session identity match.</p>
-          <label class="field">
-            Application stream
-            <select id="app-run-select"></select>
-          </label>
-          <div id="run-list" class="run-list"></div>
         </div>
       </section>
 
       <section id="page-maintenance" class="page" hidden>
         <div class="records-panel">
           <h1>Bench maintenance</h1>
-          <p>No maintenance task is configured or implemented in this release. The workbench has no endpoint that writes a device, starts or stops an SDK process, or bypasses the maintenance tool's device lock.</p>
+          <div class="maintenance-notice"><span class="notice-symbol" aria-hidden="true">◇</span><div><h2>Maintenance is not available here yet</h2><p>Use the SDK maintenance tool for bench tasks. This workbench only reads telemetry and recordings.</p></div></div>
         </div>
       </section>
     </main>

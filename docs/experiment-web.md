@@ -1,4 +1,4 @@
-# Experiment Web Workbench
+# IRMV Studio
 
 The workbench is a local web page and a local service for looking at the
 experiments the SDK already records. It never commands the robot, never starts
@@ -83,12 +83,92 @@ The prefix then holds:
 own prefix; it does not need the source tree, and it does not link or need ONNX
 Runtime. A missing reader or asset is named explicitly.
 
+## Choosing an experiment
+
+One host controls one robot. **View live** opens the current runtime experiment
+immediately, initially following up to the last ten seconds. It never opens a
+source picker. The adjacent status describes telemetry availability, not robot
+health. Without a readable live runtime the button is disabled. Application-only
+telemetry does not count as a live experiment. Conflicting runtime streams are
+reported instead of selecting one arbitrarily.
+
+**History** opens a recording browser without leaving the charts. It lists
+runtime experiments, not individual application streams. Search by name or
+start date, or use **Refresh** to rescan. The newest known start comes first;
+start times come from the recorder directory's host-clock timestamp, never from
+monotonic sample times. Renamed directories may show an unavailable start time.
+Rows include recorded duration and recording/completion status; unreadable rows
+show the reason and cannot be opened. **Replay** opens saved data; the current
+replay is marked **Viewing**. Escape or the close button dismisses the browser
+and restores focus to History. No recording is opened automatically.
+
+Opening a different experiment clears charts, cursor and diagnostic details.
+Reopening the same experiment retains charts. Saved layouts remain available
+to load explicitly; missing signals remain visible as placeholders.
+
+Runtime and application are data sources within an experiment. On opening a
+runtime, the workbench checks application streams using the service's
+boot/runtime/session association. A single verified match is included
+automatically. **Experiment data sources** shows the selected sources and lets
+you select from verified matches or use runtime data alone. Multiple matches
+require selection; unrelated application streams are never offered. An
+association check failure cannot replace the current view with a mismatched
+stream. If a candidate cannot be checked, runtime data remains available and the
+source details explain that the check was incomplete.
+
+Pausing, seeking or zooming a live experiment keeps it selected while you
+review. **Follow latest** returns to the tail. A disconnected stream shows
+**Offline** and retains chart data. Catalog updates never switch the selected
+experiment. These controls only change displayed data; they never start, stop
+or command the robot.
+
+## Chart interaction
+
+- Drag horizontally in a plot to select a shared time range for every chart.
+  Value ranges stay fixed. Hold **Ctrl** before dragging vertically to zoom
+  only that chart's value axes; the shared time range stays unchanged. The
+  selection band fills the unused direction, and Escape cancels either mode.
+- Drag a signal into a chart to overlay it, or onto an edge to split the view.
+  Drag the legend area to move the chart. Removing the last curve closes it.
+- Legends identify each curve by joint/source, signal and unit, using the same
+  color and line style as the trace. Hover a legend entry to
+  emphasize its trace; use its close button to remove that signal.
+- Value axes group signals automatically by physical quantity and unit. The
+  unit beside each legend entry identifies its axis. Ctrl-drag adjusts all
+  value axes in that chart using the same selected vertical band.
+- Use the mouse wheel over a plot to zoom about the time under the pointer.
+  Time zoom retains the displayed value ranges across all charts. Zooming out
+  stops at the full recording; neither edge can move beyond its time coverage.
+- A completed time selection pauses playback/live following. Ctrl-drag keeps
+  the shared time window and live-follow setting. Press Esc to cancel, or
+  simply click to leave the view unchanged.
+- All displayed timestamps use seconds since the experiment's first sample,
+  including chart ticks, cursor readouts and event times. Timestamp-valued
+  signals use relative microseconds on their existing axes; diagnostic JSON
+  timestamp fields also remain in microseconds. Queries and recordings retain
+  their absolute timestamps. Live buffer changes do not move the time origin.
+- Playback moves the cursor through the current window without moving the
+  chart. The window follows only after the cursor passes its right edge, and
+  playback stops at the end of the experiment.
+- Range queries include neighboring samples beyond the visible edges, so
+  clipping shows complete line segments even between samples. Gaps and invalid
+  samples still break the trace.
+- The time cursor follows the pointer on the browser's animation frames using
+  an independent overlay; moving it does not redraw the traces. Exact value
+  lookups run at most every 100 ms with one request in flight. The readout names
+  its queried time, and value dots appear only when they match the current
+  cursor. Stopping the pointer still queries its final position.
+- **Reset Y** at the right of a chart's legend, or a double-click in its plot,
+  restores only that chart's automatic value ranges. **Reset time** in the
+  playback toolbar restores the shared full time range while preserving every
+  chart's displayed value ranges. View changes never alter a recording.
+
 ## Semantics
 
 - **Two sources, never stitched by themselves.** A runtime run records the
   lower layer. The application's velocity stream is a separate directory with
-  its own sampling phase. It is offered as a candidate; the UI shows the
-  boot/runtime/session association and does not merge on a file name or an
+  its own sampling phase. The UI includes a stream only after the service
+  verifies boot/runtime/session association; it never merges by file name or
   array index.
 - **Committed history is authoritative.** Range queries read the chunk index and
   verify each chunk's header and payload CRC. A corrupt chunk contributes no

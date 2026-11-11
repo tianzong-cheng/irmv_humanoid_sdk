@@ -41,10 +41,44 @@ function AxisRange(chart, series, axisId) {
   return [low - padding, high + padding];
 }
 
-function Ticks(low, high, count = 5) {
+function NiceStep(target) {
+  const power = 10 ** Math.floor(Math.log10(target));
+  const fraction = target / power;
+  return (fraction < 1.5 ? 1 : fraction < 3.5 ? 2 : fraction < 7.5 ? 5 : 10) * power;
+}
+
+export function ValueTicks(low, high, count = 5) {
+  if (!Number.isFinite(low) || !Number.isFinite(high) || high <= low) {
+    return [];
+  }
+  const step = NiceStep((high - low) / Math.max(1, count));
+  if (!Number.isFinite(step) || step <= 0) {
+    return [];
+  }
+  const first = Math.ceil(low / step - 1e-10);
+  const last = Math.floor(high / step + 1e-10);
   const ticks = [];
-  for (let index = 0; index <= count; index += 1) {
-    ticks.push(low + ((high - low) * index) / count);
+  for (let index = 0; index <= last - first; index += 1) {
+    // Multiplication avoids accumulated drift; rounding removes binary tails.
+    const value = Number(((first + index) * step).toPrecision(12));
+    ticks.push(Object.is(value, -0) ? 0 : value);
+  }
+  return ticks;
+}
+
+export function TimeTicks(begin, end, origin, count = 5) {
+  if (origin === null || origin === undefined || end <= begin) {
+    return [];
+  }
+  const step = BigInt(Math.max(1, Math.round(NiceStep(
+    Number(end - begin) / Math.max(1, count),
+  ))));
+  const offset = begin - origin;
+  // BigInt division truncates toward zero, which is ceil only for negatives.
+  const first = (offset / step + (offset % step > 0n ? 1n : 0n)) * step;
+  const ticks = [];
+  for (let stamp = origin + first; stamp <= end; stamp += step) {
+    ticks.push(stamp);
   }
   return ticks;
 }
@@ -57,7 +91,7 @@ function FormatValue(value) {
   if (magnitude !== 0 && (magnitude < 0.001 || magnitude >= 100000)) {
     return value.toExponential(1);
   }
-  return Number(value.toFixed(3)).toString();
+  return Number(value.toPrecision(6)).toString();
 }
 
 function Palette(canvas) {
@@ -72,16 +106,78 @@ function Palette(canvas) {
   return colors.length > 0 ? colors : FALLBACK_COLORS;
 }
 
-function CurveColor(canvas, curve, index) {
-  const style = getComputedStyle(canvas);
+export function CurveAppearance(canvas, curve, index) {
   const colors = Palette(canvas);
-  if (curve.style && curve.style.startsWith('#')) {
-    return curve.style;
-  }
-  return colors[index % colors.length];
+  const styleIndex = /^style-(\d+)$/.exec(curve.style ?? '');
+  const slot = styleIndex ? Number(styleIndex[1]) - 1 : index;
+  const patterns = [[], [6, 3], [2, 3], [8, 3, 2, 3]];
+  return {
+    color: curve.style?.startsWith('#') ? curve.style : colors[slot % colors.length],
+    dash: patterns[slot % patterns.length],
+  };
 }
 
-export function Render(canvas, chart, series, timeWindow, cursor = null, markers = []) {
+/** Map a one-dimensional selection to shared time or local value ranges. */
+export function SelectionZoom(view, start, end, timeWindow, mode = 'time') {
+  const plot = view.plot;
+  const clampX = (x) => Math.max(plot.left, Math.min(plot.right, x));
+  const clampY = (y) => Math.max(plot.top, Math.min(plot.bottom, y));
+  const left = clampX(Math.min(start.x, end.x));
+  const right = clampX(Math.max(start.x, end.x));
+  const top = clampY(Math.min(start.y, end.y));
+  const bottom = clampY(Math.max(start.y, end.y));
+  if (mode === 'value') {
+    if (bottom - top < 6) return null;
+    return {
+      window: null,
+      axes: view.ranges.map(({ axisId, low, high }) => ({
+        axisId,
+        range: [
+          low + (plot.bottom - bottom) / (plot.bottom - plot.top) * (high - low),
+          low + (plot.bottom - top) / (plot.bottom - plot.top) * (high - low),
+        ],
+      })),
+    };
+  }
+  if (right - left < 6) {
+    return null;
+  }
+  const span = Us(timeWindow.endUs) - Us(timeWindow.beginUs);
+  if (span <= 0n) {
+    return null;
+  }
+  const stamp = (x) => Us(timeWindow.beginUs) + span *
+    BigInt(Math.round((x - plot.left) / (plot.right - plot.left) * 1e9)) / 1000000000n;
+  const beginUs = stamp(left);
+  const endUs = stamp(right);
+  if (endUs <= beginUs) {
+    return null;
+  }
+  return {
+    window: { beginUs, endUs },
+    axes: [],
+  };
+}
+
+export function Render(canvas, chart, series, timeWindow, cursor = null, markers = [], highlightedSignal = null, timeOriginUs = null) {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    return { drawn: false, axisWidths: [], plotted: 0 };
+  }
+  const axes = chart.axes.length > 0
+    ? chart.axes
+    : [{ id: 'axis-1', quantity: '', unit: '' }];
+  ctx.font = '11px system-ui, sans-serif';
+  const ranges = new Map(axes.map(axis => [axis.id, AxisRange(chart, series, axis.id)]));
+  const axisWidths = axes.map((axis) => {
+    const [low, high] = ranges.get(axis.id);
+    const labels = [low, high, ...ValueTicks(low, high)].map(FormatValue);
+    return Math.max(36, ...labels.map(label => Math.ceil(ctx.measureText(label).width) + 12));
+  });
+  const gutter = axisWidths.reduce((sum, value) => sum + value, 0);
+  // Keep every value axis in the canvas. Narrow chart bodies scroll rather
+  // than dropping labels or duplicating them in a separate DOM sidebar.
+  canvas.style.minWidth = `${gutter + 180}px`;
   const width = Math.max(1, Math.round(canvas.clientWidth || 640));
   const height = Math.max(1, Math.round(canvas.clientHeight || 280));
   const ratio = globalThis.devicePixelRatio || 1;
@@ -89,10 +185,6 @@ export function Render(canvas, chart, series, timeWindow, cursor = null, markers
       canvas.height !== Math.round(height * ratio)) {
     canvas.width = Math.round(width * ratio);
     canvas.height = Math.round(height * ratio);
-  }
-  const ctx = canvas.getContext('2d');
-  if (!ctx) {
-    return { drawn: false, axisWidths: [], plotted: 0 };
   }
   ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
   ctx.clearRect(0, 0, width, height);
@@ -104,28 +196,12 @@ export function Render(canvas, chart, series, timeWindow, cursor = null, markers
 
   const begin = Us(timeWindow.beginUs);
   const end = Us(timeWindow.endUs);
-  const span = end > begin ? end - begin : 1n;
-  const axes = chart.axes.length > 0
-    ? chart.axes
-    : [{ id: 'axis-1', quantity: '', unit: '' }];
+  // Resizing the backing canvas resets the context font.
   ctx.font = '11px system-ui, sans-serif';
-  let axisWidths = axes.map((axis) => {
-    const label = `${axis.quantity || 'value'} (${axis.unit || '-'})`;
-    return Math.max(72, Math.ceil(ctx.measureText(label).width) + 14);
-  });
-  let gutter = axisWidths.reduce((sum, value) => sum + value, 0);
-  // The DOM axis columns already exist to the left of the canvas. When the
-  // canvas itself is too narrow for its own measured columns, it draws only the
-  // plot and leaves labels to those columns rather than returning an empty
-  // canvas. Every axis stays in the DOM and none is dropped.
-  if (gutter + 60 > width) {
-    axisWidths = [];
-    gutter = 0;
-  }
   const plotLeft = gutter + 6;
   const plotRight = width - 8;
-  const plotTop = 28;
-  const plotBottom = height - 16;
+  const plotTop = 10;
+  const plotBottom = height - 26;
   if (plotRight <= plotLeft || plotBottom <= plotTop) {
     return { drawn: false, axisWidths, plotted: 0 };
   }
@@ -134,10 +210,30 @@ export function Render(canvas, chart, series, timeWindow, cursor = null, markers
     ctx.fillStyle = surface;
     ctx.fillRect(0, 0, width, height);
   }
-  const ranges = new Map();
-  for (const axis of axes) {
-    ranges.set(axis.id, AxisRange(chart, series, axis.id));
+  const intervals = Math.max(1, Math.floor((plotRight - plotLeft) / 100));
+  const origin = timeOriginUs === null || timeOriginUs === undefined ? null : Us(timeOriginUs);
+  const timeTicks = TimeTicks(begin, end, origin, intervals);
+  const valueIntervals = Math.max(1, Math.min(5, Math.floor((plotBottom - plotTop) / 40)));
+  // A single horizontal grid follows the first value axis; overlaying grids
+  // from unrelated units would make the background ambiguous and cluttered.
+  const [gridLow, gridHigh] = ranges.get(axes[0].id);
+  ctx.save();
+  ctx.strokeStyle = muted;
+  ctx.globalAlpha = 0.16;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (const stamp of timeTicks) {
+    const x = TimeToX(stamp, timeWindow, plotLeft, plotRight);
+    ctx.moveTo(x, plotTop);
+    ctx.lineTo(x, plotBottom);
   }
+  for (const tick of ValueTicks(gridLow, gridHigh, valueIntervals)) {
+    const y = plotBottom - (tick - gridLow) / (gridHigh - gridLow) * (plotBottom - plotTop);
+    ctx.moveTo(plotLeft, y);
+    ctx.lineTo(plotRight, y);
+  }
+  ctx.stroke();
+  ctx.restore();
 
   // Axis columns are drawn from the plot outwards; each has its own column.
   let columnLeft = 0;
@@ -145,33 +241,10 @@ export function Render(canvas, chart, series, timeWindow, cursor = null, markers
     const axis = axes[index];
     const columnWidth = axisWidths[index];
     const [low, high] = ranges.get(axis.id);
-    const ticks = Ticks(low, high);
-    ctx.strokeStyle = border;
+    const ticks = ValueTicks(low, high, valueIntervals);
     ctx.fillStyle = muted;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    const axisX = columnLeft + columnWidth - 4;
-    ctx.moveTo(axisX, plotTop);
-    ctx.lineTo(axisX, plotBottom);
-    ctx.stroke();
-    const label = `${axis.quantity || 'value'} (${axis.unit || '-'})`;
-    // The label lives in the axis's own column above the ticks. It is measured
-    // into the column width, so a long name widens the column instead of
-    // covering another axis or a tick value.
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(columnLeft, 0, columnWidth, plotTop);
-    ctx.clip();
-    ctx.fillStyle = fg;
-    ctx.fillText(label, columnLeft + 4, 13);
-    ctx.restore();
     for (const tick of ticks) {
       const y = plotBottom - ((tick - low) / (high - low)) * (plotBottom - plotTop);
-      ctx.strokeStyle = border;
-      ctx.beginPath();
-      ctx.moveTo(axisX - 4, y);
-      ctx.lineTo(axisX, y);
-      ctx.stroke();
       ctx.fillStyle = muted;
       ctx.fillText(FormatValue(tick), columnLeft + 4, y + 3);
     }
@@ -181,6 +254,27 @@ export function Render(canvas, chart, series, timeWindow, cursor = null, markers
   ctx.strokeStyle = border;
   ctx.strokeRect(plotLeft, plotTop, plotRight - plotLeft, plotBottom - plotTop);
 
+  ctx.font = '10px system-ui, sans-serif';
+  ctx.fillStyle = muted;
+  for (const stamp of timeTicks) {
+    const x = TimeToX(stamp, timeWindow, plotLeft, plotRight);
+    const delta = stamp - origin;
+    const magnitude = delta < 0n ? -delta : delta;
+    const fraction = String(magnitude % 1000000n).padStart(6, '0').replace(/0+$/, '');
+    const label = `${delta < 0n ? '-' : ''}${magnitude / 1000000n}${fraction ? `.${fraction}` : ''} s`;
+    const halfLabel = ctx.measureText(label).width / 2;
+    ctx.textAlign = x - halfLabel < plotLeft ? 'left'
+      : x + halfLabel > plotRight ? 'right' : 'center';
+    ctx.fillText(label, x, height - 7);
+  }
+  ctx.textAlign = 'left';
+
+  // Manual/box ranges can put samples outside the plot. Keep traces and cursor
+  // dots inside the plot instead of drawing over labels and neighboring axes.
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(plotLeft, plotTop, plotRight - plotLeft, plotBottom - plotTop);
+  ctx.clip();
   const colorByCurve = new Map();
   let plotted = 0;
   chart.curves.forEach((curve, index) => {
@@ -190,11 +284,13 @@ export function Render(canvas, chart, series, timeWindow, cursor = null, markers
     }
     const axis = axes.find((item) => item.id === curve.axisId) ?? axes[0];
     const [low, high] = ranges.get(axis.id);
-    const color = CurveColor(canvas, curve, index);
+    const { color, dash } = CurveAppearance(canvas, curve, index);
     colorByCurve.set(curve.signalId, color);
     ctx.strokeStyle = color;
     ctx.fillStyle = color;
-    ctx.lineWidth = 1.5;
+    ctx.setLineDash(dash);
+    ctx.globalAlpha = highlightedSignal && highlightedSignal !== curve.signalId ? 0.25 : 1;
+    ctx.lineWidth = highlightedSignal === curve.signalId ? 2.8 : 1.7;
     const step = entry.signal?.value_kind === 'bool' || entry.signal?.value_kind === 'enum';
     let previous = null;
     let lastSegment = null;
@@ -210,8 +306,7 @@ export function Render(canvas, chart, series, timeWindow, cursor = null, markers
       }
       lastSegment = point.segment;
       const stamp = Us(point.t);
-      const x = plotLeft + Number(((stamp - begin) * 1000n) / span) / 1000 *
-        (plotRight - plotLeft);
+      const x = TimeToX(stamp, timeWindow, plotLeft, plotRight);
       const y = plotBottom - ((point.v - low) / (high - low)) * (plotBottom - plotTop);
       if (previous === null) {
         ctx.moveTo(x, y);
@@ -227,13 +322,14 @@ export function Render(canvas, chart, series, timeWindow, cursor = null, markers
     ctx.stroke();
   });
 
+  ctx.setLineDash([]);
+  ctx.globalAlpha = 1;
   for (const marker of markers) {
     const stamp = Us(marker.timeUs);
     if (stamp < begin || stamp > end) {
       continue;
     }
-    const x = plotLeft + Number(((stamp - begin) * 1000n) / span) / 1000 *
-      (plotRight - plotLeft);
+    const x = TimeToX(stamp, timeWindow, plotLeft, plotRight);
     ctx.fillStyle = style.getPropertyValue('--error').trim() || '#d95d8c';
     ctx.beginPath();
     ctx.moveTo(x - 3, plotTop);
@@ -246,8 +342,7 @@ export function Render(canvas, chart, series, timeWindow, cursor = null, markers
   if (cursor?.timeUs !== undefined && cursor.timeUs !== null) {
     const stamp = Us(cursor.timeUs);
     if (stamp >= begin && stamp <= end) {
-      const x = plotLeft + Number(((stamp - begin) * 1000n) / span) / 1000 *
-        (plotRight - plotLeft);
+      const x = TimeToX(stamp, timeWindow, plotLeft, plotRight);
       ctx.strokeStyle = fg;
       ctx.globalAlpha = 0.6;
       ctx.beginPath();
@@ -274,13 +369,21 @@ export function Render(canvas, chart, series, timeWindow, cursor = null, markers
     }
   }
 
-  return { drawn: plotted > 0 || axes.length > 0, axisWidths, plotted };
+  ctx.restore();
+  return {
+    drawn: plotted > 0 || axes.length > 0, axisWidths, plotted,
+    plot: { left: plotLeft, right: plotRight, top: plotTop, bottom: plotBottom },
+    ranges: axes.map((axis) => ({ axisId: axis.id, low: ranges.get(axis.id)[0], high: ranges.get(axis.id)[1] })),
+  };
 }
 
 export function TimeToX(stampUs, timeWindow, plotLeft, plotRight) {
   const begin = Us(timeWindow.beginUs);
   const end = Us(timeWindow.endUs);
   const span = end > begin ? end - begin : 1n;
-  return plotLeft + Number(((Us(stampUs) - begin) * 1000n) / span) / 1000 *
+  // Subtract absolute timestamps as BigInt first. Only the relative duration
+  // becomes a float, preserving precision above 2^53 without quantizing the
+  // screen position into a fixed number of time buckets.
+  return plotLeft + Number(Us(stampUs) - begin) / Number(span) *
     (plotRight - plotLeft);
 }

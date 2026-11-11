@@ -1,12 +1,24 @@
 /**
  * DOM view of the dock tree. It owns drag/drop previews, split dividers, chart
- * headers, legends and the left axis columns; layout changes are delegated to
+ * legends and value-axis controls; layout changes are delegated to
  * the models, so the view never invents a chart or a split of its own.
  */
 
-import { Render } from './chart_view.js';
+import { CurveAppearance, Render, SelectionZoom, TimeToX } from './chart_view.js';
 import { ValidateLayout } from './layout_model.js';
 import { Us } from './api.js';
+
+// A split must preserve space for its plot and legend rather than clipping
+// controls when several charts share a short workspace. The dock can scroll.
+const MIN_CHART_HEIGHT = 160;
+function MinimumHeight(node) {
+  if (node.type !== 'split') {
+    return MIN_CHART_HEIGHT;
+  }
+  const first = MinimumHeight(node.first);
+  const second = MinimumHeight(node.second);
+  return node.direction === 'column' ? first + second + 6 : Math.max(first, second);
+}
 
 export class DockView {
   constructor(root, callbacks = {}) {
@@ -17,9 +29,27 @@ export class DockView {
     this.series = [];
     this.timeWindow = { beginUs: 0n, endUs: 1n };
     this.cursor = null;
+    this.timeOriginUs = null;
     this.markers = [];
     this.canvases = new Map();
-    this.axisElements = new Map();
+    this.plotViews = new Map();
+    this.cursorElements = new Map();
+    this.cursorFrame = null;
+    this.selection = null;
+    this.highlightedSignal = null;
+    this.highlightedChartId = null;
+    // Canvas backing dimensions must follow the responsive workspace, including
+    // when a hidden page becomes visible again.
+    this.resizeObserver = typeof ResizeObserver === 'function'
+      ? new ResizeObserver(() => {
+        if (this.root.clientWidth > 0) {
+          this.selection?.cancel();
+          this.Redraw();
+        }
+      })
+      : null;
+    this.resizeObserver?.observe(this.root);
+    this.root.ownerDocument.addEventListener('dragend', () => this.ClearDropPreviews());
   }
 
   SetView(layout, resolved, series, timeWindow, cursor) {
@@ -28,12 +58,14 @@ export class DockView {
     this.series = series;
     this.timeWindow = timeWindow;
     this.cursor = cursor;
-    this.Render();
+    if (!this.selection) {
+      this.Render();
+    }
   }
 
   SetCursor(cursor) {
     this.cursor = cursor;
-    this.Redraw();
+    this.ScheduleCursorDraw();
   }
 
   SetMarkers(markers) {
@@ -45,8 +77,11 @@ export class DockView {
     if (!this.layout) {
       return;
     }
+    this.highlightedSignal = null;
+    this.highlightedChartId = null;
+    this.cursorElements.clear();
+    this.plotViews.clear();
     this.canvases.clear();
-    this.axisElements.clear();
     this.root.replaceChildren(this.RenderNode(this.layout.dock, []));
     this.DrawAll();
   }
@@ -56,7 +91,11 @@ export class DockView {
       const empty = document.createElement('div');
       empty.className = 'workspace-empty';
       empty.dataset.dropZone = 'empty';
-      empty.textContent = 'Drag a signal here to create a chart.';
+      const title = document.createElement('strong');
+      title.textContent = 'Build your signal view';
+      const hint = document.createElement('p');
+      hint.textContent = 'Choose an experiment above, then drag signals here to compare them.';
+      empty.append(title, hint);
       this.BindDrop(empty, null);
       return empty;
     }
@@ -67,9 +106,11 @@ export class DockView {
     split.className = 'dock-split';
     split.dataset.direction = node.direction;
     split.style.flexDirection = node.direction;
+    split.style.minHeight = `${MinimumHeight(node)}px`;
     split.dataset.path = JSON.stringify(path);
     const first = document.createElement('div');
     first.className = 'dock-pane';
+    first.style.minHeight = `${MinimumHeight(node.first)}px`;
     first.style.flex = `${node.ratio} 1 0`;
     first.append(this.RenderNode(node.first, [...path, 0]));
     const divider = document.createElement('div');
@@ -99,6 +140,7 @@ export class DockView {
     });
     const second = document.createElement('div');
     second.className = 'dock-pane';
+    second.style.minHeight = `${MinimumHeight(node.second)}px`;
     second.style.flex = `${1 - node.ratio} 1 0`;
     second.append(this.RenderNode(node.second, [...path, 1]));
     split.append(first, divider, second);
@@ -110,54 +152,68 @@ export class DockView {
       this.layout.charts.find((entry) => entry.id === chartId);
     const shell = document.createElement('section');
     shell.className = 'chart';
+    shell.style.minHeight = `${MIN_CHART_HEIGHT}px`;
     shell.dataset.chartId = chartId;
-    const header = document.createElement('header');
-    header.className = 'chart-header';
-    header.draggable = true;
-    header.addEventListener('dragstart', (event) => {
-      event.dataTransfer?.setData('application/x-irmv-chart', chartId);
-      event.dataTransfer.effectAllowed = 'move';
-    });
-    const title = document.createElement('span');
-    title.className = 'chart-title';
-    title.textContent = chart?.title || chartId;
-    const close = document.createElement('button');
-    close.type = 'button';
-    close.className = 'chart-close';
-    close.title = 'Close chart';
-    close.textContent = '×';
-    close.addEventListener('click', () => this.callbacks.onCloseChart?.(chartId));
-    header.append(title, close);
     const body = document.createElement('div');
     body.className = 'chart-body';
     body.dataset.chartId = chartId;
-    this.BindDrop(body, chartId);
-    const axes = document.createElement('div');
-    axes.className = 'chart-axes';
+    const preview = document.createElement('div');
+    preview.className = 'chart-drop-preview';
+    preview.hidden = true;
+    preview.setAttribute('aria-hidden', 'true');
+    const previewLabel = document.createElement('span');
+    preview.append(previewLabel);
+    this.BindDrop(body, chartId, preview);
     const canvas = document.createElement('canvas');
     canvas.className = 'chart-canvas';
     canvas.dataset.chartId = chartId;
-    body.append(axes, canvas);
+    canvas.title = 'Drag to select time across all charts. Ctrl-drag to zoom this chart’s value axes. Double-click to reset value axes. Esc cancels selection.';
+    this.BindSelection(canvas, shell, chartId);
+    body.append(canvas);
+    body.addEventListener('scroll', () => this.ScheduleCursorDraw(), { passive: true });
+    const cursorLine = document.createElement('div');
+    cursorLine.className = 'chart-cursor';
+    cursorLine.hidden = true;
+    cursorLine.setAttribute('aria-hidden', 'true');
+    this.cursorElements.set(chartId, cursorLine);
     const legend = document.createElement('div');
     legend.className = 'chart-legend';
-    for (const curve of chart?.curves ?? []) {
+    legend.draggable = true;
+    legend.title = 'Drag the legend area to move this chart';
+    legend.addEventListener('dragstart', event => {
+      if (event.target.closest('button')) {
+        event.preventDefault();
+        return;
+      }
+      event.dataTransfer?.setData('application/x-irmv-chart', chartId);
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+    });
+    for (const [index, curve] of (chart?.curves ?? []).entries()) {
       const item = document.createElement('span');
       item.className = 'legend-item';
       item.dataset.signalId = curve.signalId;
       item.dataset.chartId = chartId;
       const label = document.createElement('span');
       label.className = 'legend-label';
+      item.title = curve.signalId;
+      const { color, dash } = CurveAppearance(this.root, curve, index);
+      const swatch = document.createElement('span');
+      swatch.className = 'legend-swatch';
+      swatch.setAttribute('aria-hidden', 'true');
+      swatch.style.borderTopColor = color;
+      swatch.style.borderTopStyle = dash.length ? (dash[0] === 2 ? 'dotted' : 'dashed') : 'solid';
+      item.append(swatch);
       item.addEventListener('mouseenter', () => {
         item.classList.add('highlight');
-        const column = this.axisElements.get(chartId)?.querySelector(
-          `[data-axis-id="${curve.axisId}"]`);
-        column?.classList.add('highlight');
+        this.highlightedSignal = curve.signalId;
+        this.highlightedChartId = chartId;
+        this.Redraw();
       });
       item.addEventListener('mouseleave', () => {
         item.classList.remove('highlight');
-        const column = this.axisElements.get(chartId)?.querySelector(
-          `[data-axis-id="${curve.axisId}"]`);
-        column?.classList.remove('highlight');
+        this.highlightedSignal = null;
+        this.highlightedChartId = null;
+        this.Redraw();
       });
       if (curve.missing) {
         item.classList.add('missing');
@@ -170,100 +226,93 @@ export class DockView {
           this.callbacks.onReplaceSignal?.(chartId, curve.signalId));
         item.append(label, replace);
       } else {
-        label.textContent = curve.signal?.label ?? curve.signalId;
+        const signal = curve.signal;
+        label.textContent = signal
+          ? `${signal.joint_name || signal.source} / ${signal.label}`
+          : curve.signalId;
+        const unit = document.createElement('span');
+        unit.className = 'legend-unit';
+        unit.textContent = signal?.unit || signal?.value_kind || 'value';
+        unit.title = `Automatic axis: ${signal?.quantity || 'value'} (${unit.textContent})`;
         const remove = document.createElement('button');
         remove.type = 'button';
         remove.className = 'legend-remove';
         remove.title = 'Remove curve';
+        remove.setAttribute('aria-label', `Remove ${label.textContent}`);
         remove.textContent = '×';
         remove.addEventListener('click', () =>
           this.callbacks.onRemoveSignal?.(chartId, curve.signalId));
-        const axisSelect = document.createElement('select');
-        axisSelect.className = 'curve-axis';
-        axisSelect.title = 'Axis for this curve (quantity and unit must match)';
-        for (const axis of chart?.axes ?? []) {
-          const option = document.createElement('option');
-          option.value = axis.id;
-          option.textContent = `${axis.quantity || 'value'} (${axis.unit || '-'})`;
-          axisSelect.append(option);
-        }
-        axisSelect.value = curve.axisId;
-        axisSelect.addEventListener('change', () =>
-          this.callbacks.onReassignCurve?.(chartId, curve.signalId,
-            axisSelect.value));
-        item.append(label, remove, axisSelect);
+        item.append(label, unit, remove);
       }
       legend.append(item);
     }
-    shell.append(header, body, legend);
+    const reset = document.createElement('button');
+    reset.type = 'button';
+    reset.className = 'chart-reset-y';
+    reset.textContent = 'Reset Y';
+    reset.title = 'Restore automatic value axes for this chart';
+    reset.setAttribute('aria-label', 'Reset value axes');
+    reset.addEventListener('click', () => this.callbacks.onResetValueAxes?.(chartId));
+    const footer = document.createElement('div');
+    footer.className = 'chart-footer';
+    footer.append(legend, reset);
+    shell.append(body, footer, preview, cursorLine);
     this.canvases.set(chartId, canvas);
-    this.axisElements.set(chartId, axes);
-    this.RenderAxes(chartId, chart, axes);
     return shell;
   }
 
-  RenderAxes(chartId, chart, container) {
-    container.replaceChildren();
-    if (!chart) {
-      return;
+  ClearDropPreviews() {
+    for (const element of this.root.querySelectorAll('.drop-empty, .drop-center, .drop-left, .drop-right, .drop-top, .drop-bottom')) {
+      element.classList.remove('drop-empty', 'drop-center', 'drop-left',
+        'drop-right', 'drop-top', 'drop-bottom');
     }
-    const usedAxes = new Set(chart.curves.map((curve) => curve.axisId));
-    for (const axis of chart.axes) {
-      if (!usedAxes.has(axis.id) && chart.axes.length > 1) {
-        continue;
-      }
-      const column = document.createElement('div');
-      column.className = 'axis-column';
-      column.dataset.axisId = axis.id;
-      const label = document.createElement('div');
-      label.className = 'axis-label';
-      label.textContent = `${axis.quantity || 'value'} (${axis.unit || '-'})`;
-      column.append(label);
-      const range = axis.range ?? [null, null];
-      for (const [index, edge] of ['min', 'max'].entries()) {
-        const input = document.createElement('input');
-        input.type = 'number';
-        input.className = `axis-range axis-range-${edge}`;
-        input.placeholder = edge;
-        input.step = 'any';
-        input.value = range[index] ?? '';
-        input.addEventListener('change', () => {
-          const low = Number(column.querySelector('.axis-range-min')?.value);
-          const high = Number(column.querySelector('.axis-range-max')?.value);
-          if (input.value === '' && !column.querySelector('.axis-range-min')?.value &&
-              !column.querySelector('.axis-range-max')?.value) {
-            this.callbacks.onAxisRange?.(chartId, axis.id, null);
-            return;
-          }
-          if (!Number.isFinite(low) || !Number.isFinite(high) || !(low < high)) {
-            input.value = '';
-            this.callbacks.onStatus?.('axis range must be finite and increasing');
-            return;
-          }
-          this.callbacks.onAxisRange?.(chartId, axis.id, [low, high]);
-        });
-        column.append(input);
-      }
-      container.append(column);
+    for (const preview of this.root.querySelectorAll('.chart-drop-preview')) {
+      preview.hidden = true;
     }
   }
 
-  BindDrop(element, chartId) {
+  BindDrop(element, chartId, preview = null) {
     const clear = () => {
-      element.classList.remove('drop-center', 'drop-left', 'drop-right',
-        'drop-top', 'drop-bottom');
+      element.classList.remove('drop-empty', 'drop-center', 'drop-left',
+        'drop-right', 'drop-top', 'drop-bottom');
+      if (preview) {
+        preview.hidden = true;
+      }
     };
     element.addEventListener('dragover', (event) => {
       event.preventDefault();
       event.dataTransfer.dropEffect = 'copy';
       const zone = chartId === null ? 'empty' : this.ZoneAt(event, element);
-      clear();
+      this.ClearDropPreviews();
       element.classList.add(`drop-${zone}`);
+      if (preview) {
+        // The preview is a sibling of the scrolling plot, so its coordinates
+        // follow the visible target rather than the scrolled canvas content.
+        const bounds = element.getBoundingClientRect();
+        const parent = preview.parentElement.getBoundingClientRect();
+        const width = element.clientWidth;
+        const height = element.clientHeight;
+        const horizontal = zone === 'left' || zone === 'right';
+        const vertical = zone === 'top' || zone === 'bottom';
+        preview.style.left = `${bounds.left - parent.left + (zone === 'right' ? width / 2 : 0)}px`;
+        preview.style.top = `${bounds.top - parent.top + (zone === 'bottom' ? height / 2 : 0)}px`;
+        preview.style.width = `${horizontal ? width / 2 : width}px`;
+        preview.style.height = `${vertical ? height / 2 : height}px`;
+        preview.firstElementChild.textContent = zone === 'center'
+          ? 'Overlay signal'
+          : `Split ${zone}`;
+        preview.hidden = false;
+      }
     });
-    element.addEventListener('dragleave', clear);
+    element.addEventListener('dragleave', (event) => {
+      if (event.relatedTarget && element.contains(event.relatedTarget)) {
+        return;
+      }
+      clear();
+    });
     element.addEventListener('drop', (event) => {
       event.preventDefault();
-      clear();
+      this.ClearDropPreviews();
       const zone = chartId === null ? 'empty' : this.ZoneAt(event, element);
       const signalId = event.dataTransfer?.getData('application/x-irmv-signal');
       const movedChart = event.dataTransfer?.getData('application/x-irmv-chart');
@@ -279,8 +328,8 @@ export class DockView {
 
   ZoneAt(event, element) {
     const bounds = element.getBoundingClientRect();
-    const x = (event.clientX - bounds.left) / Math.max(1, bounds.width);
-    const y = (event.clientY - bounds.top) / Math.max(1, bounds.height);
+    const x = (event.clientX - bounds.left) / Math.max(1, element.clientWidth);
+    const y = (event.clientY - bounds.top) / Math.max(1, element.clientHeight);
     if (x > 0.25 && x < 0.75 && y > 0.25 && y < 0.75) {
       return 'center';
     }
@@ -294,15 +343,208 @@ export class DockView {
     return distances[0][0];
   }
 
+  BindSelection(canvas, shell, chartId) {
+    const rectangle = document.createElement('div');
+    rectangle.className = 'chart-selection';
+    rectangle.hidden = true;
+    rectangle.setAttribute('aria-hidden', 'true');
+    shell.append(rectangle);
+    const pointAt = (event, plot) => {
+      const bounds = canvas.getBoundingClientRect();
+      return {
+        x: Math.max(plot.left, Math.min(plot.right, event.clientX - bounds.left)),
+        y: Math.max(plot.top, Math.min(plot.bottom, event.clientY - bounds.top)),
+      };
+    };
+    canvas.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0 || this.selection) {
+        return;
+      }
+      const view = this.plotViews.get(chartId);
+      if (!view?.plot) {
+        return;
+      }
+      const bounds = canvas.getBoundingClientRect();
+      const x = event.clientX - bounds.left;
+      const y = event.clientY - bounds.top;
+      const plot = view.plot;
+      if (x < plot.left || x > plot.right || y < plot.top || y > plot.bottom) {
+        return;
+      }
+      event.preventDefault();
+      this.callbacks.onSelectionStart?.();
+      this.ClearDropPreviews();
+      const start = { x, y };
+      const timeWindow = { ...this.timeWindow };
+      const mode = event.ctrlKey ? 'value' : 'time';
+      const selection = { chartId, start, end: start, mode };
+      this.selection = selection;
+      this.DrawCursors();
+      canvas.setPointerCapture(event.pointerId);
+      const cleanup = () => {
+        rectangle.hidden = true;
+        canvas.removeEventListener('pointermove', move);
+        canvas.removeEventListener('pointerup', up);
+        canvas.removeEventListener('pointercancel', cancel);
+        canvas.removeEventListener('lostpointercapture', cancel);
+        canvas.ownerDocument.removeEventListener('keydown', escape);
+        this.selection = null;
+        if (canvas.hasPointerCapture(event.pointerId)) {
+          canvas.releasePointerCapture(event.pointerId);
+        }
+      };
+      const move = (moveEvent) => {
+        if (moveEvent.pointerId !== event.pointerId) {
+          return;
+        }
+        selection.end = pointAt(moveEvent, plot);
+        const canvasBounds = canvas.getBoundingClientRect();
+        const parent = shell.getBoundingClientRect();
+        const left = mode === 'value' ? plot.left : Math.min(start.x, selection.end.x);
+        const top = mode === 'time' ? plot.top : Math.min(start.y, selection.end.y);
+        rectangle.style.left = `${canvasBounds.left - parent.left + left}px`;
+        rectangle.style.top = `${canvasBounds.top - parent.top + top}px`;
+        rectangle.style.width = `${mode === 'value' ? plot.right - plot.left : Math.abs(start.x - selection.end.x)}px`;
+        rectangle.style.height = `${mode === 'time' ? plot.bottom - plot.top : Math.abs(start.y - selection.end.y)}px`;
+        rectangle.hidden = false;
+      };
+      const cancel = () => {
+        cleanup();
+        this.Render();
+        this.callbacks.onSelectionEnd?.();
+      };
+      const escape = (keyEvent) => {
+        if (keyEvent.key === 'Escape') {
+          keyEvent.preventDefault();
+          cancel();
+        }
+      };
+      const up = (upEvent) => {
+        if (upEvent.pointerId !== event.pointerId) {
+          return;
+        }
+        const zoom = SelectionZoom(view, start, pointAt(upEvent, plot), timeWindow, mode);
+        cleanup();
+        if (zoom) {
+          this.callbacks.onSelectRegion?.(chartId, zoom);
+        } else {
+          this.Render();
+        }
+        this.callbacks.onSelectionEnd?.();
+      };
+      selection.cancel = cancel;
+      canvas.addEventListener('pointermove', move);
+      canvas.addEventListener('pointerup', up);
+      canvas.addEventListener('pointercancel', cancel);
+      canvas.addEventListener('lostpointercapture', cancel);
+      canvas.ownerDocument.addEventListener('keydown', escape);
+    });
+    const timeAt = (event, view) => {
+      const point = pointAt(event, view.plot);
+      const plot = view.plot;
+      const span = Us(this.timeWindow.endUs) - Us(this.timeWindow.beginUs);
+      return Us(this.timeWindow.beginUs) + span *
+        BigInt(Math.round((point.x - plot.left) / (plot.right - plot.left) * 1e9)) / 1000000000n;
+    };
+    canvas.addEventListener('pointermove', (event) => {
+      if (this.selection) {
+        return;
+      }
+      const view = this.plotViews.get(chartId);
+      if (view?.plot) {
+        this.callbacks.onCursor?.(timeAt(event, view));
+      }
+    });
+    canvas.addEventListener('wheel', (event) => {
+      const view = this.plotViews.get(chartId);
+      if (this.selection || !view?.plot || event.deltaY === 0) {
+        return;
+      }
+      event.preventDefault();
+      // Read coordinates from this wheel event, not a previous hover or an
+      // asynchronous value query. This also works with a stationary mouse.
+      this.callbacks.onWheelZoom?.(event.deltaY, timeAt(event, view));
+    }, { passive: false });
+    canvas.addEventListener('dblclick', () => this.callbacks.onResetValueAxes?.(chartId));
+  }
+
   DrawAll() {
+    if (this.selection) {
+      return;
+    }
     for (const [chartId, canvas] of this.canvases) {
       const chart = this.resolved?.charts.find((entry) => entry.id === chartId) ??
         this.layout?.charts.find((entry) => entry.id === chartId);
       if (!chart || !canvas.isConnected) {
         continue;
       }
-      Render(canvas, chart, this.series, this.timeWindow, this.cursor,
-        this.markers);
+      const view = Render(canvas, chart, this.series, this.timeWindow, null,
+        this.markers, this.highlightedChartId === chartId ? this.highlightedSignal : null, this.timeOriginUs);
+      this.plotViews.set(chartId, view);
+    }
+    this.DrawCursors();
+  }
+
+  ScheduleCursorDraw() {
+    if (this.cursorFrame !== null) {
+      return;
+    }
+    this.cursorFrame = requestAnimationFrame(() => {
+      this.cursorFrame = null;
+      this.DrawCursors();
+    });
+  }
+
+  DrawCursors() {
+    for (const [chartId, line] of this.cursorElements) {
+      const canvas = this.canvases.get(chartId);
+      const view = this.plotViews.get(chartId);
+      const stamp = this.cursor?.timeUs;
+      line.hidden = true;
+      if (this.selection || stamp === undefined || stamp === null || !view?.plot ||
+          !canvas?.isConnected || stamp < this.timeWindow.beginUs || stamp > this.timeWindow.endUs) {
+        continue;
+      }
+      const plot = view.plot;
+      const bounds = canvas.getBoundingClientRect();
+      const body = canvas.parentElement;
+      const visible = body.getBoundingClientRect();
+      const parent = line.parentElement.getBoundingClientRect();
+      const x = bounds.left + TimeToX(stamp, this.timeWindow, plot.left, plot.right);
+      const top = Math.max(bounds.top + plot.top, visible.top);
+      const bottom = Math.min(bounds.top + plot.bottom, visible.top + body.clientHeight);
+      if (x < visible.left || x > visible.left + body.clientWidth || bottom <= top) {
+        continue;
+      }
+      line.style.left = `${x - parent.left}px`;
+      line.style.top = `${top - parent.top}px`;
+      line.style.height = `${bottom - top}px`;
+      line.replaceChildren();
+      line.hidden = false;
+      // Exact sampled values arrive separately. Only show dots when they
+      // belong to the current pointer time, not a previous mouse position.
+      if (this.cursor.valuesTimeUs !== stamp) {
+        continue;
+      }
+      const chart = this.resolved?.charts.find((entry) => entry.id === chartId);
+      for (const [index, curve] of (chart?.curves ?? []).entries()) {
+        const value = this.cursor.values?.get(curve.signalId);
+        const range = view.ranges.find((entry) => entry.axisId === curve.axisId);
+        if (!value?.valid || !Number.isFinite(value.value) || !range ||
+            value.value < range.low || value.value > range.high) {
+          continue;
+        }
+        const y = bounds.top + plot.bottom -
+          (value.value - range.low) / (range.high - range.low) * (plot.bottom - plot.top);
+        if (y < top || y > bottom) {
+          continue;
+        }
+        const dot = document.createElement('span');
+        dot.className = 'chart-cursor-dot';
+        dot.style.top = `${y - top}px`;
+        dot.style.background = CurveAppearance(canvas, curve, index).color;
+        line.append(dot);
+      }
     }
   }
 

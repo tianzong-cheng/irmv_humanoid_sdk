@@ -87,6 +87,7 @@ export function ResolveLayout(layout, catalog) {
   const missingSignals = [];
   const charts = layout.charts.map((chart) => ({
     ...chart,
+    autoTitle: !chart.title || catalog.some((signal) => signal.label === chart.title),
     curves: chart.curves.map((curve) => {
       const signal = signals.get(curve.signalId) ?? null;
       if (signal === null) {
