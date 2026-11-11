@@ -417,6 +417,9 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             runs = reply.get("runs", [])
             page, continuation = paginate(runs, _one(params, "continuation"), _limit(params))
+            live = self.app.live.CatalogStatus()
+            for run in page:
+                run["live"] = live.get(run["run_id"], {"active": False, "age_ms": None})
             reply["runs"] = page
             reply.pop("continuation", None)
             if continuation is not None:

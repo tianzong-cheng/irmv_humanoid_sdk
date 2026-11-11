@@ -610,6 +610,11 @@ class LiveServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(snapshot["ok"])
         self.assertEqual(len(snapshot["series"][0]["points"]), 2)
+        status, catalog = call(self.http, "GET", f"{self.url}api/runs")
+        live_run = next(run for run in catalog["runs"] if run["run_id"] == self.run_id)
+        self.assertEqual(status, 200)
+        self.assertTrue(live_run["live"]["active"])
+        self.assertGreaterEqual(live_run["live"]["age_ms"], 0)
         revision = snapshot["revision"]
         status, unchanged = call(
             self.http,

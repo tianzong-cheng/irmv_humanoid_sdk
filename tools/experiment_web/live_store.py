@@ -515,6 +515,17 @@ class LiveStore:
 
     # -- queries ------------------------------------------------------------
 
+    def CatalogStatus(self, now_ms: float | None = None) -> dict:
+        now = self._clock() * 1000.0 if now_ms is None else now_ms
+        with self._lock:
+            return {
+                run_id: {
+                    "active": run.pending and now - run.last_arrival_ms <= 3000,
+                    "age_ms": max(0, int(now - run.last_arrival_ms)),
+                }
+                for run_id, run in self._runs.items()
+            }
+
     def Snapshot(self, run_id: str, signal_ids: list[str], begin_us: int,
                  end_us: int, pixel_width: int = 800,
                  after_revision: int | None = None) -> dict:
@@ -523,12 +534,14 @@ class LiveStore:
             if run is None:
                 raise LiveError("the run has no active live tail")
             revision = run.revision
+            active = run.pending and self._clock() * 1000.0 - run.last_arrival_ms <= 3000
             if after_revision is not None and after_revision == revision:
                 return {
                     "ok": True,
                     "run_id": run_id,
                     "revision": str(revision),
                     "changed": False,
+                    "active": active,
                     "service_epoch": self.epoch,
                 }
             points = []
@@ -558,6 +571,7 @@ class LiveStore:
                 "run_id": run_id,
                 "revision": str(revision),
                 "changed": True,
+                "active": active,
                 "service_epoch": self.epoch,
                 "series": points,
                 "faults": list(run.faults.values()),

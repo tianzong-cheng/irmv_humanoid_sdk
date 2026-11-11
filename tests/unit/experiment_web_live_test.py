@@ -134,6 +134,30 @@ class LiveStoreTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
+    def test_catalog_status_distinguishes_recent_stale_and_complete(self) -> None:
+        run = runtime_run(self.root, "run_status")
+        run_id = run_id_for_directory(self.root, run)
+        self.store.ingest(envelope(run, "runtime", 1, "hello", {}), now_ms=1000)
+        self.assertEqual(self.store.CatalogStatus(now_ms=1500)[run_id],
+                         {"active": True, "age_ms": 500})
+        self.assertFalse(self.store.CatalogStatus(now_ms=5001)[run_id]["active"])
+        self.store.ingest(envelope(run, "runtime", 2, "status", {"complete": True}),
+                          now_ms=6000)
+        self.assertFalse(self.store.CatalogStatus(now_ms=6001)[run_id]["active"])
+
+    def test_unchanged_snapshot_reports_stale_stream(self) -> None:
+        now = [1.0]
+        store = LiveStore(self.root, clock=lambda: now[0])
+        run = runtime_run(self.root, "run_stale")
+        run_id = run_id_for_directory(self.root, run)
+        store.ingest(envelope(run, "runtime", 1, "hello", {}))
+        snapshot = store.Snapshot(run_id, [], 0, 5000)
+        self.assertTrue(snapshot.get("active"))
+        now[0] = 5.0
+        stale = store.Snapshot(run_id, [], 0, 5000, after_revision=int(snapshot["revision"]))
+        self.assertFalse(stale["changed"])
+        self.assertFalse(stale["active"])
+
     def test_late_join_has_hello_and_the_start_of_the_tail(self) -> None:
         run = runtime_run(self.root, "run_1")
         run_id = run_id_for_directory(self.root, run)
