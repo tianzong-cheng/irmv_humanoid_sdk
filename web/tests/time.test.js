@@ -61,11 +61,13 @@ test('history playback honours every speed and pauses at the end', () => {
       runId: 'run-long',
       coverage: { beginUs: 0n, endUs: 100000000n },
     }, 0);
-    const base = state.window.endUs;
+    const beforeWindow = { ...state.window };
+    const base = state.cursor;
     state = TimeModel.Step(state, { type: 'setSpeed', speed }, 0);
     state = TimeModel.Step(state, { type: 'play' }, 0);
     state = TimeModel.Step(state, { type: 'advance' }, 1000);
-    const advanced = state.window.endUs - base;
+    const advanced = state.cursor - base;
+    assert.deepEqual(state.window, beforeWindow);
     assert.equal(advanced, BigInt(Math.round(1000 * speed)) * 1000n);
     state = TimeModel.Step(state, { type: 'advance' }, 1000000);
     assert.equal(state.playing, false);
@@ -166,4 +168,92 @@ test('clicking an event seeks to its detection time and keeps its detail', () =>
   assert.equal(selected.event_id, '9');
   assert.match(view.DetailText(), /observed NaN/);
   assert.match(view.DetailText(), /message_hex 6c696d6974/);
+});
+
+test('selecting a time window stops following and playback without losing timestamp precision', () => {
+  const state = { ...initial(), mode: 'live', following: true, playing: true };
+  const next = TimeModel.Step(state, {
+    type: 'setWindow',
+    window: { beginUs: 9007199254740993n, endUs: 9007199254741993n },
+  }, 42);
+  assert.deepEqual(next.window, { beginUs: 9007199254740993n, endUs: 9007199254741993n });
+  assert.equal(next.mode, 'history');
+  assert.equal(next.following, false);
+  assert.equal(next.playing, false);
+  assert.equal(next.lastAdvanceMs, 42);
+  assert.deepEqual(TimeModel.Step(next, { type: 'advance' }, 500).window, next.window);
+  assert.equal(TimeModel.Step(next, { type: 'setWindow', window: { beginUs: 20n, endUs: 10n } }, 45), next);
+});
+
+test('zoom out stops at full coverage and boundary windows stay filled with recorded data', async () => {
+  const { ZoomWindow } = await import('../src/time_model.js');
+  const coverage = { beginUs: 9007199254740993n, endUs: 9007199254750993n };
+  assert.deepEqual(ZoomWindow(coverage, coverage, 6n, 5n, coverage.beginUs + 8000n), coverage);
+  const nearStart = { beginUs: coverage.beginUs, endUs: coverage.beginUs + 1000n };
+  assert.deepEqual(ZoomWindow(nearStart, coverage, 2n, 1n, coverage.beginUs + 100n), {
+    beginUs: coverage.beginUs, endUs: coverage.beginUs + 2000n,
+  });
+  const nearEnd = { beginUs: coverage.endUs - 1000n, endUs: coverage.endUs };
+  assert.deepEqual(ZoomWindow(nearEnd, coverage, 2n, 1n, coverage.endUs - 100n), {
+    beginUs: coverage.endUs - 2000n, endUs: coverage.endUs,
+  });
+});
+
+test('zoom keeps the mouse time at its fractional position instead of recentering it', async () => {
+  const { ZoomWindow } = await import('../src/time_model.js');
+  const base = 9007199254740993n;
+  const coverage = { beginUs: base, endUs: base + 10000n };
+  assert.deepEqual(ZoomWindow(coverage, coverage, 4n, 5n, base + 7500n), {
+    beginUs: base + 1500n, endUs: base + 9500n,
+  });
+  const tiny = { beginUs: base + 50n, endUs: base + 51n };
+  for (const [numerator, denominator] of [[2n, 1n], [6n, 5n], [5n, 4n]]) {
+    assert.deepEqual(ZoomWindow(tiny, coverage, numerator, denominator, base + 50n), {
+      beginUs: base + 50n, endUs: base + 52n,
+    });
+  }
+});
+
+
+test('playback moves the cursor through a fixed window and pans only after its right edge', () => {
+  const base = 9007199254740993n;
+  let state = TimeModel.Step(TimeModel.Initial(), {
+    type: 'reset', runId: 'large', coverage: { beginUs: base, endUs: base + 10000000n },
+  });
+  state = { ...state, window: { beginUs: base + 1000000n, endUs: base + 2000000n }, cursor: base + 1500000n };
+  state = TimeModel.Step(state, { type: 'play' }, 0);
+  state = TimeModel.Step(state, { type: 'advance' }, 250);
+  assert.equal(state.cursor, base + 1750000n);
+  assert.deepEqual(state.window, { beginUs: base + 1000000n, endUs: base + 2000000n });
+  state = TimeModel.Step(state, { type: 'advance' }, 750);
+  assert.equal(state.cursor, base + 2250000n);
+  assert.deepEqual(state.window, { beginUs: base + 1250000n, endUs: base + 2250000n });
+  state = TimeModel.Step(state, { type: 'advance' }, 20000);
+  assert.equal(state.playing, false);
+  assert.equal(state.cursor, base + 10000000n);
+  assert.deepEqual(state.window, { beginUs: base + 9000000n, endUs: base + 10000000n });
+});
+
+test('relative times and timestamp-valued signals preserve microseconds beyond 2^53', async () => {
+  const { RelativeTime, RelativeTimestampFields, DisplaySeries } = await import('../src/time_display.js');
+  const base = 9007199254740993n;
+  assert.equal(RelativeTime(base + 2n, base), '0.000002 s');
+  assert.equal(RelativeTime(base - 10n, base), '-0.000010 s');
+  assert.equal(RelativeTime(base + 1234567n, base), '1.234567 s');
+  assert.equal(RelativeTime(base, null), '—');
+  assert.deepEqual(RelativeTimestampFields({ losses: [{ first_stamp_us: String(base + 7n), last_stamp_us: String(base + 9n), age_us: '12' }] }, base), {
+    losses: [{ first_stamp_us: '7', last_stamp_us: '9', age_us: '12' }],
+  });
+  const series = [{ signal: { field: 'stamp_us', quantity: 'time', unit: 'us' }, points: [
+    { t: String(base + 7n), v: Number(base + 7n), valid: true },
+  ] }];
+  const display = DisplaySeries(series, base);
+  assert.equal(display[0].points[0].v, 7);
+  assert.equal(series[0].points[0].v, Number(base + 7n));
+  const events = new EventsView();
+  events.Reset(base);
+  events.Append({ events: [{ event_id: 'r', detected_stamp_us: String(base + 7n), sample_stamp_us: String(base - 10n) }] });
+  events.Select('r');
+  assert.match(events.DetailText(), /detected 0.000007 s/);
+  assert.match(events.DetailText(), /sample -0.000010 s/);
 });

@@ -6,10 +6,12 @@
  */
 
 import { Us } from './api.js';
+import { RelativeTime } from './time_display.js';
 
 export class EventsView {
   constructor(callbacks = {}) {
     this.callbacks = callbacks;
+    this.timeOriginUs = 0n;
     this.events = [];
     this.markers = [];
     this.integrity = null;
@@ -17,7 +19,8 @@ export class EventsView {
     this.selected = null;
   }
 
-  Reset() {
+  Reset(originUs = this.timeOriginUs) {
+    this.timeOriginUs = originUs;
     this.events = [];
     this.markers = [];
     this.integrity = null;
@@ -96,7 +99,7 @@ export class EventsView {
       }
       const time = document.createElement('span');
       time.className = 'event-time';
-      time.textContent = `t=${event.detected_stamp_us}`;
+      time.textContent = `t=${RelativeTime(event.detected_stamp_us, this.timeOriginUs)}`;
       const reason = document.createElement('span');
       reason.className = 'event-reason';
       reason.textContent = event.reason_name ?? `reason ${event.reason}`;
@@ -127,7 +130,7 @@ export class EventsView {
     }
     return [
       `event ${event.event_id}`,
-      `detected ${event.detected_stamp_us} us · sample ${event.sample_stamp_us} us`,
+      `detected ${RelativeTime(event.detected_stamp_us, this.timeOriginUs)} · sample ${RelativeTime(event.sample_stamp_us, this.timeOriginUs)}`,
       `reason ${event.reason_name} (${event.reason})`,
       `condition ${event.condition_name} (${event.condition})`,
       `joint ${event.joint_name ?? event.joint_index ?? '—'}`,
