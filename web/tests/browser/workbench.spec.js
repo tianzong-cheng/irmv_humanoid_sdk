@@ -142,6 +142,35 @@ async function axisBoxes(page) {
   });
 }
 
+test('the first signal can be dropped anywhere in the empty workspace', async ({ page }) => {
+  for (const width of [1280, 390]) {
+    await page.setViewportSize({ width, height: 820 });
+    for (const [horizontal, vertical] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
+      await page.goto('/');
+      await openRun(page, 'run_web_a');
+      const result = await page.evaluate(({ horizontal, vertical }) => {
+        const root = document.querySelector('#dock-root');
+        root.scrollIntoView({ block: 'center' });
+        const box = root.getBoundingClientRect();
+        const x = horizontal ? box.right - 8 : box.left + 8;
+        const y = vertical ? box.bottom - 8 : box.top + 8;
+        const target = document.elementFromPoint(x, y);
+        const data = new DataTransfer();
+        const signal = document.querySelector('[data-signal-id="runtime/left_hip/q"]');
+        signal.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: data }));
+        const event = { bubbles: true, cancelable: true, dataTransfer: data, clientX: x, clientY: y };
+        const accepted = !target.dispatchEvent(new DragEvent('dragover', event));
+        const highlighted = Boolean(root.querySelector('.drop-empty'));
+        target.dispatchEvent(new DragEvent('drop', event));
+        return { accepted, highlighted };
+      }, { horizontal, vertical });
+      expect(result).toEqual({ accepted: true, highlighted: true });
+      await expect(page.locator('.chart')).toHaveCount(1);
+      await expect(page.locator('.legend-item')).toHaveAttribute('data-signal-id', 'runtime/left_hip/q');
+    }
+  }
+});
+
 test('builds a multi-axis chart, splits it and keeps every axis on the left', async ({ page }) => {
   const requests = [];
   page.on('request', (request) => {
