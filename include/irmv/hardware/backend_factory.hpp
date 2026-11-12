@@ -5,6 +5,9 @@
 #include "irmv/configuration/config.hpp"
 #include "irmv/hardware/backend.hpp"
 
+namespace irmv::simulation {
+class SimulationExchange;
+}
 namespace irmv::hardware {
 
 // Builds the backend the configuration selects. `fake` keeps the shipped
@@ -14,6 +17,11 @@ namespace irmv::hardware {
 // Throws std::runtime_error when the backend is unavailable. The caller is
 // responsible for the startup sequence: nothing here touches a device.
 std::unique_ptr<Backend> MakeBackend(
-    const configuration::RuntimeConfig &config);
+    const configuration::RuntimeConfig& config);
+
+// Explicit context must outlive the returned SimBackend. For Fake/Real this
+// overload delegates to the original factory without changing behavior.
+std::unique_ptr<Backend> MakeBackend(const configuration::RuntimeConfig& config,
+                                     simulation::SimulationExchange& exchange);
 
 }  // namespace irmv::hardware

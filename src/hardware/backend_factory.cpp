@@ -6,11 +6,16 @@
 #include "irmv/hardware/driver_port.hpp"
 #include "irmv/hardware/fake_backend.hpp"
 #include "irmv/hardware/real_backend.hpp"
+#include "irmv/hardware/sim_backend.hpp"
 
 namespace irmv::hardware {
 
 std::unique_ptr<Backend> MakeBackend(
-    const configuration::RuntimeConfig &config) {
+    const configuration::RuntimeConfig& config) {
+  if (config.backend == "sim") {
+    throw std::runtime_error(
+        "sim backend requires an explicit SimulationExchange");
+  }
   if (config.backend == "fake") {
     return std::make_unique<FakeBackend>(config);
   }
@@ -30,4 +35,9 @@ std::unique_ptr<Backend> MakeBackend(
   throw std::runtime_error("unknown backend \"" + config.backend + "\"");
 }
 
+std::unique_ptr<Backend> MakeBackend(const configuration::RuntimeConfig& c,
+                                     simulation::SimulationExchange& x) {
+  if (c.backend == "sim") return std::make_unique<SimBackend>(c, x);
+  return MakeBackend(c);
+}
 }  // namespace irmv::hardware
