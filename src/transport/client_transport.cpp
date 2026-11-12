@@ -113,6 +113,7 @@ void ClientTransport::Impl::Run() {
       // and started() turns false.
       break;
     }
+    if (owner.simulation_) owner.simulation_->WorkerUpdate();
     if (data_available && !ReadInbound()) {
       break;
     }
@@ -138,7 +139,7 @@ bool ClientTransport::Impl::ReadInbound() {
 
 void ClientTransport::Impl::ReadResults() {
   // All samples of one read share the host receive time of that read.
-  const protocol::TimeUs rx_us = NowUs();
+  protocol::TimeUs rx_us = NowUs();
   auto samples = result_reader.select()
                      .max_samples(kReadBatch)
                      .state(dds::sub::status::DataState::any())
@@ -152,11 +153,25 @@ void ClientTransport::Impl::ReadResults() {
       owner.inbound_rejected_.fetch_add(1, std::memory_order_relaxed);
       continue;
     }
+    simulation::MessageIdentity identity;
+    if (owner.simulation_) {
+      const int disposition =
+          simulation::Identify(value, &identity)
+              ? owner.simulation_->WorkerCheck(identity, &rx_us)
+              : -1;
+      if (disposition != 1) {
+        if (disposition < 0)
+          owner.inbound_rejected_.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+    }
+
     // The result lane is FIFO: an answer that does not fit is refused and
     // counted, and the answers already queued keep their order, which is the
     // order the runtime produced them in.
     const bool stored = owner.results_.TryPush(
         runtime::Received<protocol::ExecutionResult>{value, rx_us});
+    if (owner.simulation_) owner.simulation_->WorkerStored(identity, stored);
     if (!stored) {
       owner.dropped_results_.fetch_add(1, std::memory_order_relaxed);
     }
@@ -164,7 +179,7 @@ void ClientTransport::Impl::ReadResults() {
 }
 
 void ClientTransport::Impl::ReadStates() {
-  const protocol::TimeUs rx_us = NowUs();
+  protocol::TimeUs rx_us = NowUs();
   auto samples = state_reader.select()
                      .max_samples(kReadBatch)
                      .state(dds::sub::status::DataState::any())
@@ -178,12 +193,30 @@ void ClientTransport::Impl::ReadStates() {
       owner.inbound_rejected_.fetch_add(1, std::memory_order_relaxed);
       continue;
     }
+    simulation::MessageIdentity identity;
+    if (owner.simulation_) {
+      const int disposition =
+          simulation::Identify(value, &identity)
+              ? owner.simulation_->WorkerCheck(identity, &rx_us)
+              : -1;
+      if (disposition != 1) {
+        if (disposition < 0)
+          owner.inbound_rejected_.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+    }
+
     // The state lane keeps only the newest entry: a sample that supersedes an
     // unread one, and one that cannot be stored at all, are both losses the
     // supervision thread would never see otherwise.
     bool evicted = false;
-    const bool stored = owner.states_.Publish(
-        runtime::Received<protocol::RobotState>{value, rx_us}, &evicted);
+    const bool stored =
+        owner.simulation_
+            ? owner.sim_states_->TryPush({value, rx_us})
+            : owner.states_.Publish(
+                  runtime::Received<protocol::RobotState>{value, rx_us},
+                  &evicted);
+    if (owner.simulation_) owner.simulation_->WorkerStored(identity, stored);
     if (!stored || evicted) {
       owner.dropped_states_.fetch_add(1, std::memory_order_relaxed);
     }
@@ -210,10 +243,12 @@ void ClientTransport::Impl::WriteOutbound() {
   // nothing published; the wire representation is built only in the first case,
   // which keeps the loop cheap while no frame is pending.
   protocol::JointCommand command;
-  if (owner.commands_.TryTake(command)) {
+  while (owner.simulation_ ? owner.sim_commands_out_->TryPop(command)
+                           : owner.commands_.TryTake(command)) {
     wire::JointCommand wire_command;
     codec::ToWire(command, wire_command);
     TryWrite(command_writer, wire_command, owner.dropped_commands_);
+    if (!owner.simulation_) break;
   }
 
   // The heartbeat lane is FIFO and drained until empty, so every heartbeat the
@@ -252,6 +287,36 @@ ClientTransport::ClientTransport(const configuration::ApplicationConfig &config)
     : config_(config) {}
 
 ClientTransport::~ClientTransport() { Stop(); }
+
+bool ClientTransport::ConfigureSimulation(
+    const simulation::LogicalClock &clock) {
+  if (impl_ || simulation_) return false;
+  sim_states_ = std::make_unique<
+      BoundedChannel<runtime::Received<protocol::RobotState>, 64>>();
+  sim_commands_out_ =
+      std::make_unique<BoundedChannel<protocol::JointCommand, 64>>();
+  simulation_ = std::make_unique<simulation::Ingress>(
+      simulation::Role::Application, clock);
+  return true;
+}
+bool ClientTransport::BeginSimulationPhase(
+    const simulation::PhaseManifest &m) noexcept {
+  return simulation_ && simulation_->ControlBegin(m);
+}
+bool ClientTransport::TrySimulationReceipt(
+    simulation::PhaseReceipt *r) noexcept {
+  return simulation_ && simulation_->ControlTakeReceipt(r);
+}
+bool ClientTransport::ReportSimulationProcessed(
+    const simulation::MessageIdentity &m) noexcept {
+  return simulation_ && simulation_->ControlProcessed(m);
+}
+bool ClientTransport::TrySimulationAck(simulation::Frame *f) noexcept {
+  return simulation_ && simulation_->ControlAck(f);
+}
+bool ClientTransport::SimulationFailed() const noexcept {
+  return simulation_ && simulation_->Failed();
+}
 
 void ClientTransport::Start() {
   if (impl_) {
@@ -324,7 +389,8 @@ bool ClientTransport::PublishCommand(const protocol::JointCommand &command) {
   // way the newest frame is the one that reaches the peer, so the caller learns
   // about the loss from the counter, not from the return value.
   bool evicted = false;
-  const bool stored = commands_.Publish(command, &evicted);
+  const bool stored = simulation_ ? sim_commands_out_->TryPush(command)
+                                  : commands_.Publish(command, &evicted);
   if (!stored || evicted) {
     dropped_commands_.fetch_add(1, std::memory_order_relaxed);
   }
@@ -377,12 +443,21 @@ const ClientEvents &ClientTransport::TakeEvents() {
          results_.TryPop(events_.results[events_.result_count])) {
     ++events_.result_count;
   }
-  if (states_.TryTake(state_scratch_)) {
+  if (simulation_ ? sim_states_->TryPop(state_scratch_)
+                  : states_.TryTake(state_scratch_)) {
     events_.has_state = true;
     events_.state = state_scratch_.value;
     events_.state_rx_us = state_scratch_.rx_us;
   } else {
     events_.has_state = false;
+  }
+  if (simulation_) {
+    simulation::MessageIdentity m;
+    for (std::size_t i = 0; i < events_.result_count; ++i)
+      if (simulation::Identify(events_.results[i].value, &m))
+        simulation_->ControlDequeued(m);
+    if (events_.has_state && simulation::Identify(events_.state, &m))
+      simulation_->ControlDequeued(m);
   }
   return events_;
 }

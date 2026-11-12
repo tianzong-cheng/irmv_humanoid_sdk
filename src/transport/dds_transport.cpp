@@ -158,6 +158,7 @@ void DdsTransport::Impl::Run() {
       // and started() turns false.
       break;
     }
+    if (owner.simulation_) owner.simulation_->WorkerUpdate();
     if (data_available && !ReadInbound()) {
       break;
     }
@@ -187,7 +188,7 @@ bool DdsTransport::Impl::ReadInbound() {
 void DdsTransport::Impl::ReadRequests() {
   // All samples of one read share the host receive time of that read.
   {
-    const protocol::TimeUs rx_us = NowUs();
+    protocol::TimeUs rx_us = NowUs();
     auto samples = request_reader.select()
                        .max_samples(kReadBatch)
                        .state(dds::sub::status::DataState::any())
@@ -201,6 +202,19 @@ void DdsTransport::Impl::ReadRequests() {
         owner.inbound_rejected_.fetch_add(1, std::memory_order_relaxed);
         continue;
       }
+      simulation::MessageIdentity identity;
+      if (owner.simulation_) {
+        const int disposition =
+            simulation::Identify(value, &identity)
+                ? owner.simulation_->WorkerCheck(identity, &rx_us)
+                : -1;
+        if (disposition != 1) {
+          if (disposition < 0)
+            owner.inbound_rejected_.fetch_add(1, std::memory_order_relaxed);
+          continue;
+        }
+      }
+
       runtime::Received<protocol::ExecutionRequest> received{value, rx_us};
       // Both request lanes are FIFO, so a refusal costs this newest sample and
       // the entries already queued keep their order; a full ordinary queue
@@ -208,6 +222,7 @@ void DdsTransport::Impl::ReadRequests() {
       const bool stored = IsStopLaneOperation(value.operation)
                               ? owner.stop_requests_.TryPush(received)
                               : owner.requests_.TryPush(received);
+      if (owner.simulation_) owner.simulation_->WorkerStored(identity, stored);
       if (!stored) {
         owner.dropped_requests_.fetch_add(1, std::memory_order_relaxed);
       }
@@ -217,7 +232,7 @@ void DdsTransport::Impl::ReadRequests() {
 
 void DdsTransport::Impl::ReadCommands() {
   {
-    const protocol::TimeUs rx_us = NowUs();
+    protocol::TimeUs rx_us = NowUs();
     auto samples = command_reader.select()
                        .max_samples(kReadBatch)
                        .state(dds::sub::status::DataState::any())
@@ -231,12 +246,30 @@ void DdsTransport::Impl::ReadCommands() {
         owner.inbound_rejected_.fetch_add(1, std::memory_order_relaxed);
         continue;
       }
+      simulation::MessageIdentity identity;
+      if (owner.simulation_) {
+        const int disposition =
+            simulation::Identify(value, &identity)
+                ? owner.simulation_->WorkerCheck(identity, &rx_us)
+                : -1;
+        if (disposition != 1) {
+          if (disposition < 0)
+            owner.inbound_rejected_.fetch_add(1, std::memory_order_relaxed);
+          continue;
+        }
+      }
+
       // The command lane keeps only the newest entry: a sample that supersedes
       // an unread one, and one that cannot be stored at all, are both losses
       // the control thread would never see otherwise.
       bool evicted = false;
-      const bool stored = owner.commands_.Publish(
-          runtime::Received<protocol::JointCommand>{value, rx_us}, &evicted);
+      const bool stored =
+          owner.simulation_
+              ? owner.sim_commands_->TryPush({value, rx_us})
+              : owner.commands_.Publish(
+                    runtime::Received<protocol::JointCommand>{value, rx_us},
+                    &evicted);
+      if (owner.simulation_) owner.simulation_->WorkerStored(identity, stored);
       if (!stored || evicted) {
         owner.dropped_commands_.fetch_add(1, std::memory_order_relaxed);
       }
@@ -246,7 +279,7 @@ void DdsTransport::Impl::ReadCommands() {
 
 void DdsTransport::Impl::ReadHeartbeats() {
   {
-    const protocol::TimeUs rx_us = NowUs();
+    protocol::TimeUs rx_us = NowUs();
     auto samples = heartbeat_reader.select()
                        .max_samples(kReadBatch)
                        .state(dds::sub::status::DataState::any())
@@ -260,6 +293,19 @@ void DdsTransport::Impl::ReadHeartbeats() {
         owner.inbound_rejected_.fetch_add(1, std::memory_order_relaxed);
         continue;
       }
+      simulation::MessageIdentity identity;
+      if (owner.simulation_) {
+        const int disposition =
+            simulation::Identify(value, &identity)
+                ? owner.simulation_->WorkerCheck(identity, &rx_us)
+                : -1;
+        if (disposition != 1) {
+          if (disposition < 0)
+            owner.inbound_rejected_.fetch_add(1, std::memory_order_relaxed);
+          continue;
+        }
+      }
+
       // The heartbeat lane is a FIFO of kHeartbeatBatchCapacity, like the
       // request lanes: only the state machine can tell an owner heartbeat from
       // a foreign or reordered one, so every received sample has to reach it in
@@ -267,6 +313,7 @@ void DdsTransport::Impl::ReadHeartbeats() {
       // older ones the machine still has to judge.
       const bool stored = owner.heartbeats_.TryPush(
           runtime::Received<protocol::SupervisorHeartbeat>{value, rx_us});
+      if (owner.simulation_) owner.simulation_->WorkerStored(identity, stored);
       if (!stored) {
         owner.dropped_heartbeats_.fetch_add(1, std::memory_order_relaxed);
       } else {
@@ -284,10 +331,12 @@ void DdsTransport::Impl::WriteOutbound() {
   // reports nothing published; the wire representation is built only in the
   // first case, which keeps the loop cheap while no snapshot is pending.
   protocol::RobotState state;
-  if (owner.state_.TryTake(state)) {
+  while (owner.simulation_ ? owner.sim_states_out_->TryPop(state)
+                           : owner.state_.TryTake(state)) {
     wire::RobotState wire_state;
     codec::ToWire(state, wire_state);
     TryWrite(state_writer, wire_state, owner.dropped_states_);
+    if (!owner.simulation_) break;
   }
 
   // The result queue is FIFO and bounded, so it is drained until it is empty;
@@ -318,6 +367,34 @@ DdsTransport::DdsTransport(const configuration::RuntimeConfig &config)
     : config_(config) {}
 
 DdsTransport::~DdsTransport() { Stop(); }
+
+bool DdsTransport::ConfigureSimulation(const simulation::LogicalClock &clock) {
+  if (impl_ || simulation_) return false;
+  sim_commands_ = std::make_unique<
+      BoundedChannel<runtime::Received<protocol::JointCommand>, 64>>();
+  sim_states_out_ =
+      std::make_unique<BoundedChannel<protocol::RobotState, 64>>();
+  simulation_ =
+      std::make_unique<simulation::Ingress>(simulation::Role::Runtime, clock);
+  return true;
+}
+bool DdsTransport::BeginSimulationPhase(
+    const simulation::PhaseManifest &m) noexcept {
+  return simulation_ && simulation_->ControlBegin(m);
+}
+bool DdsTransport::TrySimulationReceipt(simulation::PhaseReceipt *r) noexcept {
+  return simulation_ && simulation_->ControlTakeReceipt(r);
+}
+bool DdsTransport::ReportSimulationProcessed(
+    const simulation::MessageIdentity &m) noexcept {
+  return simulation_ && simulation_->ControlProcessed(m);
+}
+bool DdsTransport::TrySimulationAck(simulation::Frame *f) noexcept {
+  return simulation_ && simulation_->ControlAck(f);
+}
+bool DdsTransport::SimulationFailed() const noexcept {
+  return simulation_ && simulation_->Failed();
+}
 
 void DdsTransport::Start() {
   if (impl_) {
@@ -378,13 +455,30 @@ const runtime::TickInput &DdsTransport::TakeInput() {
       stop_requests_.TryPop(input_.stop_requests[input_.stop_request_count])) {
     ++input_.stop_request_count;
   }
-  if (input_.command_count < runtime::kCommandBatchCapacity &&
-      commands_.TryTake(input_.commands[input_.command_count])) {
+  while (input_.command_count < runtime::kCommandBatchCapacity &&
+         (simulation_
+              ? sim_commands_->TryPop(input_.commands[input_.command_count])
+              : commands_.TryTake(input_.commands[input_.command_count]))) {
     ++input_.command_count;
+    if (!simulation_) break;
   }
   while (input_.heartbeat_count < runtime::kHeartbeatBatchCapacity &&
          heartbeats_.TryPop(input_.heartbeats[input_.heartbeat_count])) {
     ++input_.heartbeat_count;
+  }
+  if (simulation_) {
+    auto mark = [this](const auto &value) {
+      simulation::MessageIdentity m;
+      if (simulation::Identify(value, &m)) simulation_->ControlDequeued(m);
+    };
+    for (std::size_t i = 0; i < input_.request_count; ++i)
+      mark(input_.requests[i].value);
+    for (std::size_t i = 0; i < input_.stop_request_count; ++i)
+      mark(input_.stop_requests[i].value);
+    for (std::size_t i = 0; i < input_.command_count; ++i)
+      mark(input_.commands[i].value);
+    for (std::size_t i = 0; i < input_.heartbeat_count; ++i)
+      mark(input_.heartbeats[i].value);
   }
   return input_;
 }
@@ -393,7 +487,9 @@ void DdsTransport::Publish(const runtime::TickResult &result) {
   // The state lane keeps the newest snapshot: replacing an unread one is the
   // loss the counter reports, and so is a snapshot that cannot be stored.
   bool evicted = false;
-  if (!state_.Publish(result.state, &evicted) || evicted) {
+  if (!(simulation_ ? sim_states_out_->TryPush(result.state)
+                    : state_.Publish(result.state, &evicted)) ||
+      evicted) {
     dropped_states_.fetch_add(1, std::memory_order_relaxed);
   }
 

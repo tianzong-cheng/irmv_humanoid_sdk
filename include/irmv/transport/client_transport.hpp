@@ -9,6 +9,7 @@
 #include "irmv/configuration/application_config.hpp"
 #include "irmv/protocol/types.hpp"
 #include "irmv/runtime/command_gate.hpp"
+#include "irmv/simulation/ingress.hpp"
 #include "irmv/transport/bounded_channel.hpp"
 
 namespace irmv::transport {
@@ -31,15 +32,17 @@ struct ClientEvents {
              kClientResultCapacity>
       results{};
   std::size_t result_count{0};
-  // The newest state of the state lane, if one was received since the last
-  // call. The state lane keeps one entry, so an unread state that a newer
-  // sample replaced was counted as dropped instead of being delivered late.
+  // The next state (newest by default, FIFO in simulation), if received since
+  // the last call. The state lane keeps one entry, so an unread state that a
+  // newer sample replaced was counted as dropped instead of being delivered
+  // late.
   bool has_state{false};
   // `state` and `state_rx_us` are meaningful only while `has_state` is true:
   // they keep the previous take's values otherwise, which is what lets an empty
   // take cost nothing.
   protocol::RobotState state{};
-  // Host monotonic receive stamp of `state`.
+  // Receive stamp: host monotonic by default, sealed phase logical time when
+  // simulation is explicitly configured before Start.
   protocol::TimeUs state_rx_us{0};
 };
 
@@ -77,6 +80,17 @@ class ClientTransport {
   // Creates the participant, the endpoints and the transport thread.
   // Idempotent; throws dds::core::Error when the participant or an endpoint
   // cannot be created.
+  // Configure once before Start; clock is borrowed through Stop. All remaining
+  // simulation methods belong to the single control thread. No DDS calls here.
+  bool ConfigureSimulation(const simulation::LogicalClock &clock);
+  bool BeginSimulationPhase(const simulation::PhaseManifest &) noexcept;
+  bool TrySimulationReceipt(simulation::PhaseReceipt *) noexcept;
+  // Explicitly attest business processing, including rejection. A prior take
+  // is necessary, but never sufficient. This does not attest FSM acceptance.
+  bool ReportSimulationProcessed(const simulation::MessageIdentity &) noexcept;
+  bool TrySimulationAck(simulation::Frame *) noexcept;
+  bool SimulationFailed() const noexcept;
+
   void Start();
 
   // Asks the transport thread to stop and joins it. The wait for the thread to
@@ -215,6 +229,10 @@ class ClientTransport {
   // take neither clears the batch's state nor builds a twenty-four kilobyte
   // frame on the stack.
   runtime::Received<protocol::RobotState> state_scratch_{};
+  std::unique_ptr<simulation::Ingress> simulation_;
+  std::unique_ptr<BoundedChannel<runtime::Received<protocol::RobotState>, 64>>
+      sim_states_;
+  std::unique_ptr<BoundedChannel<protocol::JointCommand, 64>> sim_commands_out_;
   std::unique_ptr<Impl> impl_;
   std::atomic<bool> started_{false};
   std::atomic<std::uint64_t> stop_lane_published_{0};

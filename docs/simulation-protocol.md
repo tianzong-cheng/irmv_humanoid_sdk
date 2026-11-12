@@ -196,3 +196,82 @@ in both directions with that C++ binary, compares literal `GOLDEN_HEX` packets,
 and checks malformed inputs in both languages. No simulator, DDS peer, or GPU
 is needed. Run `ctest --test-dir build -R '^simulation_(codec|protocol)_test$'
 --output-on-failure`.
+
+## Consumer barrier API (Task 5)
+
+`simulation/barrier.hpp` defines control-thread-owned `PhaseManifest`,
+`PhaseReceipt`, and `Barrier`. Inventories contain at most 64 distinct sample
+identities, in declaration order. `Add(MessageIdentity)` deduplicates identical
+declarations and refuses conflicting content. Producer `Close()` generates the
+seal. A receiver sets the expected header, sender, consumer and required stage,
+uses `Add(Frame)` for each Manifest, then `Close(Frame)` for the received seal.
+These overloads validate the complete immutable phase header and sender;
+`Valid()` independently checks count, ordered digest, roles, kinds and closure.
+A seal without its complete inventory is never sufficient.
+
+`Identify(const protocol::{ExecutionRequest,ExecutionResult,RobotState,
+SupervisorHeartbeat,JointCommand}&, MessageIdentity*) noexcept -> bool` hashes
+all canonical content with bounded streaming SHA-256; it returns false for
+invalid counts or nonfinite active values. Projection fields follow the table
+above exactly, including literal zero enum values. Inactive tails are ignored.
+No allocating configuration SHA function is called. `PhaseReceipt` carries
+`StepIdentity identity`, both dt values, consumer, disposition and exact message.
+It attests a stage, never FSM acceptance.
+
+`Barrier(Role local)` retains at most 32 phase inventories. `Begin(manifest)`
+validates closure and monotonic identities; evicted/old phases cannot be
+reintroduced. `Observe(receipt)` matches every identity and stage independently;
+content conflicts poison the phase. `MakeAck(manifest, Frame*)` is available
+only to the actual local consumer, after all required receipts, including an
+explicit call for an empty phase. `Complete(manifest)` also requires that ACK.
+A remote checker uses `ObserveAck(frame, authenticated_peer_role)` and verifies
+the complete header, seal, consumer and required disposition. The caller must
+obtain peer role from its authenticated endpoint, never from the ACK itself.
+
+Both frozen transports expose these control-thread APIs:
+
+```cpp
+bool ConfigureSimulation(const simulation::LogicalClock&); // once, before Start
+bool BeginSimulationPhase(const simulation::PhaseManifest&) noexcept;
+bool TrySimulationReceipt(simulation::PhaseReceipt*) noexcept;
+bool ReportSimulationProcessed(const simulation::MessageIdentity&) noexcept;
+bool TrySimulationAck(simulation::Frame*) noexcept;
+bool SimulationFailed() const noexcept;
+```
+
+The injected clock is borrowed and must outlive the transport. Configuration
+allocates simulation-only FIFO storage before Start. The existing sole DDS
+worker receives inventories through an SPSC channel, independently computes
+sample identities, deduplicates before business handoff, and emits Ingress
+receipts only after successful storage. A matching sample receives the sealed
+phase's logical time, with the clock checked against that phase; host passage,
+retransmission and cached reads cannot refresh it. Identical cached resends are
+ignored; changed/undeclared or evicted old samples fail closed. A frozen sample
+cannot be redeclared for execution in a later phase. There is no DDS helper
+thread. Existing stop lanes and frozen DDS QoS/topics are unchanged.
+
+TakeInput/TakeEvents record only dequeue eligibility. After actual business
+handling (including explicit rejection), the control thread must call
+ReportSimulationProcessed for each exact delivered identity. This drains ingress
+receipts and records BusinessConsumed; a false return must be handled/retried
+under the host deadline, not treated as completion. TrySimulationAck also drains
+ingress receipts. TrySimulationReceipt exposes ingress records to a driver;
+it is not a second consumer and must be called on that same control thread.
+All simulation methods except the atomic Failed query have the stated single
+owner; lifecycle calls must not race them. Keep the current phase until it is
+ACKed and its business lanes drained. Install the next phase before sending its
+samples; any early packet is refused, so bounded identical retransmission and
+host deadlines remain driver responsibilities. Simulation FIFO refusal or
+receipt overflow latches failure. Ingress ACK proves bounded admission; a
+BusinessConsumed ACK additionally requires explicit processing reports.
+
+Task 7 must wire those reports after actual handling in production loops, using
+identities of the samples actually taken, not latest sequence counters. Runtime
+publication inventory must enumerate only the returned tick's state and
+`results[0:result_count]`, including emitted rejections/duplicate-request replies;
+a pending future Applied result is not part of that tick. Per-topic arrival
+order and DDS write success cannot close any consumer barrier. Coordinator
+scheduling, resend deadlines, endpoint frame relay and authenticated role routing
+remain future driver/coordinator obligations. Current production loops are
+unchanged. The real-DDS test runs serially on reserved domain 222; the scenario
+allocator excludes it (`tests/integration/dds_domains.json`).

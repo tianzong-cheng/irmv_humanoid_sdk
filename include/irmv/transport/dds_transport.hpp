@@ -8,6 +8,7 @@
 #include "irmv/configuration/config.hpp"
 #include "irmv/protocol/types.hpp"
 #include "irmv/runtime/execution_context.hpp"
+#include "irmv/simulation/ingress.hpp"
 #include "irmv/transport/bounded_channel.hpp"
 
 namespace irmv::transport {
@@ -95,6 +96,17 @@ class DdsTransport {
   // Creates the participant, the endpoints and the transport thread.
   // Idempotent; throws dds::core::Error when the participant or an endpoint
   // cannot be created.
+  // Configure once before Start; clock is borrowed through Stop. All remaining
+  // simulation methods belong to the single control thread. No DDS calls here.
+  bool ConfigureSimulation(const simulation::LogicalClock &clock);
+  bool BeginSimulationPhase(const simulation::PhaseManifest &) noexcept;
+  bool TrySimulationReceipt(simulation::PhaseReceipt *) noexcept;
+  // Explicitly attest business processing, including rejection. A prior take
+  // is necessary, but never sufficient. This does not attest FSM acceptance.
+  bool ReportSimulationProcessed(const simulation::MessageIdentity &) noexcept;
+  bool TrySimulationAck(simulation::Frame *) noexcept;
+  bool SimulationFailed() const noexcept;
+
   void Start();
 
   // Asks the transport thread to stop and joins it. The wait for the thread to
@@ -113,7 +125,8 @@ class DdsTransport {
   // the entries below the returned counts are written, and the counts are reset
   // on every call, so an empty call touches constant work. The reference stays
   // valid until the next call. Receive stamps come from the host monotonic
-  // clock at the moment the transport thread read the sample.
+  // clock at the moment the transport thread read the sample; with simulation
+  // configured they are the immutable declared phase logical time.
   const runtime::TickInput &TakeInput();
 
   // Hands one tick of output to the transport thread: the robot state and up to
@@ -142,7 +155,7 @@ class DdsTransport {
   std::uint64_t heartbeats_read_count() const;
   // Sequence of the newest heartbeat handed to the lane, 0 while none was read.
   protocol::Sequence last_read_heartbeat_seq() const;
-  // Host monotonic receive stamp of that sample, 0 while none was read.
+  // Receive stamp in the configured clock domain, 0 while none was read.
   protocol::TimeUs last_read_heartbeat_us() const;
   // Inbound samples that failed FromWire validation and were discarded whole.
   std::uint64_t inbound_rejected_count() const;
@@ -192,6 +205,10 @@ class DdsTransport {
   StateChannel state_;
   ResultChannel results_;
   runtime::TickInput input_;
+  std::unique_ptr<simulation::Ingress> simulation_;
+  std::unique_ptr<BoundedChannel<runtime::Received<protocol::JointCommand>, 64>>
+      sim_commands_;
+  std::unique_ptr<BoundedChannel<protocol::RobotState, 64>> sim_states_out_;
   std::unique_ptr<Impl> impl_;
   std::atomic<bool> started_{false};
   std::atomic<std::uint64_t> dropped_results_{0};

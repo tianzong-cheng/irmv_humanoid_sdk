@@ -710,6 +710,10 @@ def choose_domain(declared, work_dir, lock_dir=None):
               else Path(work_dir).resolve().parent)
     for offset in range(0, 40):
         candidate = 190 + ((declared - 190 + offset) % 40)
+        # Domain 222 is reserved by tests/integration/dds_domains.json for
+        # the serial simulation barrier peer; scenarios must never claim it.
+        if candidate == 222:
+            continue
         if candidate >= 230:
             continue
         if not domain_is_free(candidate):
