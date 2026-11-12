@@ -5,6 +5,7 @@
 #include <fstream>
 #include <limits>
 #include <locale>
+#include <nlohmann/json.hpp>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -299,6 +300,9 @@ int main() {
   CHECK(config.config_id.size() == 64);
   CHECK(config.layout_id.size() == 64);
   CHECK(fixture.config_id == config.config_id);
+  // Golden identity from the pre-simulation loader: absence adds no new field.
+  CHECK(fixture.config_id ==
+        "9067c8e115118bcf756571f97dce90bec74edc4d69a55228f3f53120fbc6edf2");
   CHECK(fixture.layout_id == config.layout_id);
 
   // A command line domain override is part of the configuration in effect, so
@@ -451,5 +455,153 @@ int main() {
   CHECK(twelve.target_velocity_limits[7] == 8.0);
 
   CHECK(ThrowsAt("{}", "schema_version"));
+
+  // A simulation must identify its environment and explicitly map every joint.
+  auto simulation_document = nlohmann::json::parse(ValidConfig());
+  simulation_document["deployment"] = "simulation";
+  simulation_document["backend"] = "sim";
+  simulation_document["simulation"] = nlohmann::json::parse(
+      R"SIM({
+  "socket_directory": "/tmp/irmv-simulation",
+  "engine": "mujoco_warp",
+  "engine_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "model_path": "robot.xml",
+  "asset_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "physics_dt_us": 1000,
+  "host_startup_timeout_us": 120000000,
+  "host_phase_timeout_us": 30000000,
+  "base_body": "base",
+  "imu_site": "imu",
+  "weld_name": "support",
+  "initial_base_position": [
+    0,
+    0,
+    1
+  ],
+  "initial_base_quaternion": [
+    1,
+    0,
+    0,
+    0
+  ],
+  "initial_joint_position": {
+    "test_left": 0,
+    "test_right": 0
+  },
+  "joint_mapping": {
+    "test_left": {
+      "joint": "left_hinge",
+      "actuator": "left_motor"
+    },
+    "test_right": {
+      "joint": "right_hinge",
+      "actuator": "right_motor"
+    }
+  }
+})SIM");
+  const TemporaryConfig simulation_file(simulation_document.dump());
+  const auto simulation = LoadConfig(simulation_file.path());
+  CHECK(simulation.simulation.has_value());
+  CHECK(simulation.simulation->physics_dt_us == 1000);
+  CHECK(simulation.simulation->joint_mapping[0].joint == "left_hinge");
+  CHECK(simulation.simulation->initial_joint_position[0] == 0);
+  CHECK(simulation.config_id != config.config_id);
+  // Walk every scalar leaf, including each pose coordinate and mapping name.
+  const auto leaves = simulation_document["simulation"].flatten();
+  for (auto leaf = leaves.begin(); leaf != leaves.end(); ++leaf) {
+    auto changed = simulation_document;
+    auto &value =
+        changed["simulation"][nlohmann::json::json_pointer(leaf.key())];
+    if (leaf.key() == "/engine") continue;  // only supported engine
+    if (leaf.key().find("sha256") != std::string::npos)
+      value = std::string(64, 'c');
+    else if (leaf.key() == "/physics_dt_us")
+      value = 500;
+    else if (leaf.key().find("quaternion") != std::string::npos) {
+      changed["simulation"]["initial_base_quaternion"] = {0, 1, 0, 0};
+    } else if (value.is_string())
+      value = value.get<std::string>() + "_other";
+    else
+      value = value.get<double>() + 1;
+    const TemporaryConfig changed_file(changed.dump());
+    CHECK(LoadConfig(changed_file.path()).config_id != simulation.config_id);
+  }
+  const std::pair<const char *, nlohmann::json> invalid_simulation[] = {
+      {"/physics_dt_us", 1000.5},
+      {"/physics_dt_us", 3000},
+      {"/physics_dt_us", 0},
+      {"/engine", "other"},
+      {"/engine_sha256", "bad"},
+      {"/asset_sha256", "BAD"},
+      {"/model_path", ""},
+      {"/socket_directory", "relative"},
+      {"/host_startup_timeout_us", 0},
+      {"/host_phase_timeout_us", 3600000001ULL},
+      {"/initial_base_quaternion", {0, 0, 0, 0}},
+      {"/initial_base_position", {0, 0}},
+      {"/initial_joint_position/test_left", nullptr},
+      {"/joint_mapping/test_right/joint", "left_hinge"},
+      {"/joint_mapping/test_right/actuator", "left_motor"},
+      {"/base_body", ""},
+      {"/imu_site", ""},
+      {"/weld_name", ""}};
+  for (const auto &invalid : invalid_simulation) {
+    auto changed = simulation_document;
+    changed["simulation"][nlohmann::json::json_pointer(invalid.first)] =
+        invalid.second;
+    const TemporaryConfig file(changed.dump());
+    bool rejected = false;
+    try {
+      (void)LoadConfig(file.path());
+    } catch (const ConfigError &) {
+      rejected = true;
+    }
+    CHECK(rejected);
+  }
+  for (const auto *required :
+       {"joint_mapping", "initial_joint_position", "asset_sha256"}) {
+    auto changed = simulation_document;
+    changed["simulation"].erase(required);
+    const TemporaryConfig file(changed.dump());
+    CHECK(ThrowsAt(changed.dump(), std::string("simulation.") + required));
+  }
+  auto unknown = simulation_document;
+  unknown["simulation"]["typo"] = 1;
+  CHECK(ThrowsAt(unknown.dump(), "simulation.typo"));
+  unknown = simulation_document;
+  unknown["simulation"]["joint_mapping"]["unknown"] = {{"joint", "extra"},
+                                                       {"actuator", "extra"}};
+  CHECK(ThrowsAt(unknown.dump(), "simulation.joint_mapping.unknown"));
+  unknown = simulation_document;
+  unknown["simulation"]["joint_mapping"]["test_left"]["typo"] = 1;
+  CHECK(ThrowsAt(unknown.dump(), "simulation.joint_mapping.test_left.typo"));
+  unknown = simulation_document;
+  unknown["simulation"]["initial_joint_position"]["test_left"] = 3;
+  CHECK(
+      ThrowsAt(unknown.dump(), "simulation.initial_joint_position.test_left"));
+  unknown = simulation_document;
+  unknown["runtime"]["control_hz"] = 499;
+  CHECK(ThrowsAt(unknown.dump(), "runtime.control_hz"));
+  auto missing_joint = simulation_document;
+  missing_joint["simulation"]["joint_mapping"].erase("test_right");
+  CHECK(ThrowsAt(missing_joint.dump(), "simulation.joint_mapping.test_right"));
+  auto wrong = simulation_document;
+  wrong["backend"] = "fake";
+  CHECK(ThrowsAt(wrong.dump(), "backend"));
+  wrong = simulation_document;
+  wrong["deployment"] = "fake_only";
+  wrong["backend"] = "fake";
+  CHECK(ThrowsAt(wrong.dump(), "simulation"));
+  wrong["deployment"] = "real";
+  wrong["backend"] = "real";
+  CHECK(ThrowsAt(wrong.dump(), "simulation"));
+  auto defaults = simulation_document;
+  defaults["simulation"].erase("host_startup_timeout_us");
+  defaults["simulation"].erase("host_phase_timeout_us");
+  const TemporaryConfig default_file(defaults.dump());
+  CHECK(LoadConfig(default_file.path()).config_id == simulation.config_id);
+  auto nonfinite = simulation_document.dump();
+  nonfinite = ReplaceOnce(nonfinite, "[0,0,1]", "[0,0,1e400]");
+  CHECK(ThrowsAt(nonfinite, "$"));
   return 0;
 }

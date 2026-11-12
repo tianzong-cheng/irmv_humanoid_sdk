@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://irmv.example/schema/runtime-sdk-v1.json",
-  "title": "IRMV runtime configuration (fake and real backends)",
+  "title": "IRMV runtime configuration (fake, real and simulation backends)",
   "type": "object",
   "$comment": "Conforming validation MUST evaluate the irmv-joint-name format as a nonempty string whose UTF-8 encoding is at most 64 bytes; validators that ignore format annotations do not implement this contract. LoadConfig additionally enforces; a real deployment requires explicit robot.buses and per-joint hardware fields, and the loader requires robot.imu when runtime.imu_required is true cross-field joint-name completeness, unique names, position_min < position_max, boot deadline ordering, minimum frequency versus control_hz, and state-window coverage. LoadApplicationConfig enforces joint-map completeness for the application sections, position limits, gain sign rules, trajectory and supervision ordering, and the input binding reservation; the $comments below state the units and the rules the schema cannot express.",
   "required": [
@@ -22,13 +22,15 @@
     "deployment": {
       "enum": [
         "fake_only",
-        "real"
+        "real",
+        "simulation"
       ]
     },
     "backend": {
       "enum": [
         "fake",
-        "real"
+        "real",
+        "sim"
       ]
     },
     "robot": {
@@ -577,6 +579,135 @@
           "minLength": 1
         }
       }
+    },
+    "simulation": {
+      "type": "object",
+      "required": [
+        "socket_directory",
+        "engine",
+        "engine_sha256",
+        "model_path",
+        "asset_sha256",
+        "physics_dt_us",
+        "base_body",
+        "imu_site",
+        "weld_name",
+        "initial_base_position",
+        "initial_base_quaternion",
+        "initial_joint_position",
+        "joint_mapping"
+      ],
+      "properties": {
+        "socket_directory": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^/[^\\u0000]*$",
+          "maxLength": 80,
+          "$comment": "Loader additionally limits UTF-8 byte length to 80 for Unix socket endpoint suffixes."
+        },
+        "engine": {
+          "const": "mujoco_warp"
+        },
+        "engine_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "model_path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "asset_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "physics_dt_us": {
+          "$ref": "#/$defs/positiveTimeUs"
+        },
+        "host_startup_timeout_us": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600000000,
+          "default": 120000000
+        },
+        "host_phase_timeout_us": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600000000,
+          "default": 30000000
+        },
+        "base_body": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "imu_site": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "weld_name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "initial_base_position": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "number"
+          }
+        },
+        "initial_base_quaternion": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "type": "number"
+          }
+        },
+        "initial_joint_position": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "$ref": "#/$defs/jointName"
+          },
+          "additionalProperties": {
+            "type": "number"
+          }
+        },
+        "joint_mapping": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 64,
+          "propertyNames": {
+            "$ref": "#/$defs/jointName"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "joint",
+              "actuator"
+            ],
+            "properties": {
+              "joint": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]+$"
+              },
+              "actuator": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^\\u0000]+$"
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false,
+      "$comment": "LoadConfig additionally requires exact SDK joint-map completeness and unique engine joint/actuator names, finite poses, unit wxyz quaternion (squared norm tolerance 1e-6), initial joints within limits, integral control microseconds, and physics_dt_us dividing control period. engine_sha256 identifies the engine environment; asset_sha256 identifies the referenced model/assets. LoadApplicationConfig requires periodic supervision to be integral control periods; ValidateSimulationPolicy validates selected local source and ONNX-owned policy period after model loading."
     }
   },
   "$defs": {
@@ -783,6 +914,92 @@
             ]
           }
         }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "deployment": {
+            "const": "fake_only"
+          }
+        },
+        "required": [
+          "deployment"
+        ]
+      },
+      "then": {
+        "properties": {
+          "backend": {
+            "const": "fake"
+          }
+        },
+        "not": {
+          "required": [
+            "simulation"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "deployment": {
+            "const": "real"
+          }
+        },
+        "required": [
+          "deployment"
+        ]
+      },
+      "then": {
+        "properties": {
+          "backend": {
+            "const": "real"
+          }
+        },
+        "not": {
+          "required": [
+            "simulation"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "deployment": {
+            "const": "simulation"
+          }
+        },
+        "required": [
+          "deployment"
+        ]
+      },
+      "then": {
+        "properties": {
+          "backend": {
+            "const": "sim"
+          },
+          "robot": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "buses"
+                  ]
+                },
+                {
+                  "required": [
+                    "imu"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        "required": [
+          "simulation"
+        ]
       }
     }
   ]

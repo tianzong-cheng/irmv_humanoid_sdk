@@ -454,6 +454,19 @@ Json CanonicalApplication(const ApplicationConfig &config) {
 
 }  // namespace
 
+void ValidateSimulationPolicy(const ApplicationConfig &config,
+                              const std::string &source,
+                              protocol::TimeUs policy_period_us) {
+  if (!config.runtime.simulation) return;
+  if (source != "local")
+    Fail("application.locomotion_source",
+         "simulation requires local ONNX policy");
+  if (policy_period_us == 0 ||
+      policy_period_us % config.runtime.control_period_us != 0)
+    Fail("application.policy.policy_period_us",
+         "must be a positive multiple of the control period");
+}
+
 ApplicationConfig LoadApplicationConfig(const std::filesystem::path &path,
                                         const ConfigOverrides &overrides) {
   ApplicationConfig config;
@@ -478,6 +491,20 @@ ApplicationConfig LoadApplicationConfig(const std::filesystem::path &path,
   ReadExternalProducer(application, application_path, config.supervision,
                        config.external_producer);
   ReadInput(ObjectMember(document, "input", ""), "input", config.input);
+  if (config.runtime.simulation) {
+    // The loop wakes each control tick; periodic work must land on that grid.
+    const std::pair<const char *, protocol::TimeUs> periods[] = {
+        {"application.supervision.target_period_us",
+         config.supervision.target_period_us},
+        {"application.supervision.heartbeat_period_us",
+         config.supervision.heartbeat_period_us},
+        {"application.supervision.request_retry_us",
+         config.supervision.request_retry_us}};
+    for (const auto &period : periods)
+      if (period.second % config.runtime.control_period_us != 0)
+        Fail(period.first,
+             "must be an integer multiple of the simulation control period");
+  }
   config.application_config_id = Sha256(CanonicalApplication(config).dump());
   return config;
 }

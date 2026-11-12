@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
 
@@ -821,5 +822,74 @@ int main() {
       ValidApplicationAfter("\"trajectory\": {", "\"trajectory_removed\": {"),
       trajectory));
 
+  auto sim_document =
+      nlohmann::json::parse(ValidWithApplication(kApplicationBody));
+  sim_document["deployment"] = "simulation";
+  sim_document["backend"] = "sim";
+  sim_document["simulation"] = nlohmann::json::parse(
+      R"SIM({
+  "socket_directory": "/tmp/irmv-simulation",
+  "engine": "mujoco_warp",
+  "engine_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "model_path": "robot.xml",
+  "asset_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "physics_dt_us": 1000,
+  "host_startup_timeout_us": 120000000,
+  "host_phase_timeout_us": 30000000,
+  "base_body": "base",
+  "imu_site": "imu",
+  "weld_name": "support",
+  "initial_base_position": [
+    0,
+    0,
+    1
+  ],
+  "initial_base_quaternion": [
+    1,
+    0,
+    0,
+    0
+  ],
+  "initial_joint_position": {
+    "test_left": 0,
+    "test_right": 0
+  },
+  "joint_mapping": {
+    "test_left": {
+      "joint": "left_hinge",
+      "actuator": "left_motor"
+    },
+    "test_right": {
+      "joint": "right_hinge",
+      "actuator": "right_motor"
+    }
+  }
+})SIM");
+  const TemporaryConfig sim_file(sim_document.dump());
+  const auto sim_config = LoadApplicationConfig(sim_file.path());
+  CHECK(sim_config.application_config_id == config.application_config_id);
+  ValidateSimulationPolicy(sim_config, "local", 20000);
+  for (const auto* source : {"external", "none"}) {
+    bool rejected = false;
+    try {
+      ValidateSimulationPolicy(sim_config, source, 20000);
+    } catch (const ConfigError& error) {
+      rejected = error.field_path() == "application.locomotion_source";
+    }
+    CHECK(rejected);
+  }
+  for (const auto period : {0ULL, 19999ULL}) {
+    bool rejected = false;
+    try {
+      ValidateSimulationPolicy(sim_config, "local", period);
+    } catch (const ConfigError& error) {
+      rejected = error.field_path() == "application.policy.policy_period_us";
+    }
+    CHECK(rejected);
+  }
+  ValidateSimulationPolicy(config, "external", 19999);
+  sim_document["application"]["supervision"]["heartbeat_period_us"] = 21001;
+  CHECK(ThrowsAt(sim_document.dump(),
+                 "application.supervision.heartbeat_period_us"));
   return 0;
 }

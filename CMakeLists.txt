@@ -96,6 +96,21 @@ target_include_directories(
 )
 target_link_libraries(irmv_configuration PRIVATE nlohmann_json::nlohmann_json)
 
+add_library(irmv_simulation_clock src/simulation/clock.cpp)
+target_compile_features(irmv_simulation_clock PUBLIC cxx_std_17)
+target_include_directories(
+  irmv_simulation_clock PUBLIC "${PROJECT_SOURCE_DIR}/include"
+)
+add_executable(simulation_clock_test tests/unit/simulation_clock_test.cpp)
+target_include_directories(
+  simulation_clock_test PRIVATE "${PROJECT_SOURCE_DIR}/tests"
+)
+target_link_libraries(
+  simulation_clock_test PRIVATE irmv_simulation_clock Threads::Threads
+)
+add_test(NAME simulation_clock_test COMMAND simulation_clock_test)
+set_tests_properties(simulation_clock_test PROPERTIES LABELS core)
+
 add_executable(config_test tests/unit/config_test.cpp)
 target_compile_features(config_test PRIVATE cxx_std_17)
 target_include_directories(
@@ -104,7 +119,9 @@ target_include_directories(
     "${PROJECT_SOURCE_DIR}/include"
     "${PROJECT_SOURCE_DIR}/tests"
 )
-target_link_libraries(config_test PRIVATE irmv_configuration)
+target_link_libraries(
+  config_test PRIVATE irmv_configuration nlohmann_json::nlohmann_json
+)
 
 add_test(NAME config_test COMMAND config_test)
 set_tests_properties(
@@ -139,7 +156,9 @@ target_include_directories(
     "${PROJECT_SOURCE_DIR}/include"
     "${PROJECT_SOURCE_DIR}/tests"
 )
-target_link_libraries(application_config_test PRIVATE irmv_configuration)
+target_link_libraries(
+  application_config_test PRIVATE irmv_configuration nlohmann_json::nlohmann_json
+)
 
 add_test(NAME application_config_test COMMAND application_config_test)
 set_tests_properties(

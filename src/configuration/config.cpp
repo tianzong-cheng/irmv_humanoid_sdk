@@ -47,6 +47,141 @@ Json JointMap(const std::vector<std::string> &names, const JointArray &values) {
   return mapping;
 }
 
+// Reject typos instead of silently excluding an intended behavior from
+// identity.
+void RejectUnknown(const Json &object, const std::string &path,
+                   std::initializer_list<const char *> fields) {
+  for (auto it = object.begin(); it != object.end(); ++it) {
+    bool known = false;
+    for (const auto *field : fields) known = known || it.key() == field;
+    if (!known) Fail(path + "." + it.key(), "is not supported");
+  }
+}
+
+SimulationConfig ReadSimulation(const Json &object,
+                                const RuntimeConfig &config) {
+  const std::string path = "simulation";
+  RejectUnknown(object, path,
+                {"socket_directory", "engine", "engine_sha256", "model_path",
+                 "asset_sha256", "physics_dt_us", "host_startup_timeout_us",
+                 "host_phase_timeout_us", "base_body", "imu_site", "weld_name",
+                 "initial_base_position", "initial_base_quaternion",
+                 "initial_joint_position", "joint_mapping"});
+  SimulationConfig sim;
+  const auto text = [&](const char *key) {
+    auto value = StringMember(object, key, path);
+    if (value.empty() || value.find('\0') != std::string::npos)
+      Fail(path + "." + key, "must be nonempty without NUL bytes");
+    return value;
+  };
+  sim.socket_directory = text("socket_directory");
+  if (!sim.socket_directory.is_absolute() ||
+      sim.socket_directory.string().size() > 80)
+    Fail(path + ".socket_directory",
+         "must be absolute and at most 80 UTF-8 bytes (socket path budget)");
+  sim.engine = text("engine");
+  if (sim.engine != "mujoco_warp")
+    Fail(path + ".engine", "must equal mujoco_warp");
+  const auto digest = [&](const char *key) {
+    const auto value = text(key);
+    if (value.size() != 64 ||
+        value.find_first_not_of("0123456789abcdef") != std::string::npos)
+      Fail(path + "." + key, "must be 64 lower-case hexadecimal characters");
+    return value;
+  };
+  sim.engine_sha256 = digest("engine_sha256");
+  sim.asset_sha256 = digest("asset_sha256");
+  sim.model_path = text("model_path");
+  sim.physics_dt_us = PositiveIntegerMember(object, "physics_dt_us", path);
+  if (std::abs(1'000'000.0 / config.control_hz - config.control_period_us) >
+      1e-8)
+    Fail("runtime.control_hz",
+         "simulation requires an integral microsecond control period");
+  if (config.control_period_us % sim.physics_dt_us != 0)
+    Fail(path + ".physics_dt_us", "must divide the control period exactly");
+  for (const auto *key : {"host_startup_timeout_us", "host_phase_timeout_us"}) {
+    if (object.contains(key)) {
+      const auto value = PositiveInteger(Member(object, key, path),
+                                         path + "." + key, 3'600'000'000ULL);
+      if (std::string(key) == "host_startup_timeout_us")
+        sim.host_startup_timeout_us = value;
+      else
+        sim.host_phase_timeout_us = value;
+    }
+  }
+  sim.base_body = text("base_body");
+  sim.imu_site = text("imu_site");
+  sim.weld_name = text("weld_name");
+  const auto pose = [&](const char *key, auto &target) {
+    const auto &values = Member(object, key, path);
+    const auto field = path + "." + key;
+    if (!values.is_array() || values.size() != target.size())
+      Fail(field, "has the wrong coordinate count");
+    for (std::size_t n = 0; n < target.size(); ++n)
+      target[n] = detail::FiniteNumber(values[n],
+                                       field + "[" + std::to_string(n) + "]");
+  };
+  pose("initial_base_position", sim.initial_base_position);
+  pose("initial_base_quaternion", sim.initial_base_quaternion);
+  double norm = 0;
+  for (const double v : sim.initial_base_quaternion) norm += v * v;
+  if (!std::isfinite(norm) || std::abs(norm - 1.0) > 1e-6)
+    Fail(path + ".initial_base_quaternion", "must be a unit wxyz quaternion");
+  ReadJointMap(Member(object, "initial_joint_position", path),
+               path + ".initial_joint_position", config.joint_names,
+               JointValueRule::Finite, sim.initial_joint_position);
+  const auto &mapping = ObjectMember(object, "joint_mapping", path);
+  detail::RejectUnknownJointKeys(mapping, path + ".joint_mapping",
+                                 config.joint_names);
+  std::unordered_set<std::string> joints, actuators;
+  for (std::size_t n = 0; n < config.joint_count(); ++n) {
+    const auto &name = config.joint_names[n];
+    const auto field = path + ".joint_mapping." + name;
+    const auto &entry =
+        ObjectMember(mapping, name.c_str(), path + ".joint_mapping");
+    RejectUnknown(entry, field, {"joint", "actuator"});
+    SimulationJointMapping parsed;
+    parsed.joint = StringMember(entry, "joint", field);
+    parsed.actuator = StringMember(entry, "actuator", field);
+    for (const auto *value : {&parsed.joint, &parsed.actuator})
+      if (value->empty() || value->find('\0') != std::string::npos)
+        Fail(field, "engine names must be nonempty without NUL bytes");
+    if (!joints.insert(parsed.joint).second)
+      Fail(field + ".joint", "must be unique");
+    if (!actuators.insert(parsed.actuator).second)
+      Fail(field + ".actuator", "must be unique");
+    sim.joint_mapping.push_back(std::move(parsed));
+    if (sim.initial_joint_position[n] < config.position_min[n] ||
+        sim.initial_joint_position[n] > config.position_max[n])
+      Fail(path + ".initial_joint_position." + name, "is outside joint limits");
+  }
+  return sim;
+}
+
+Json CanonicalSimulation(const SimulationConfig &sim,
+                         const std::vector<std::string> &names) {
+  Json mapping = Json::object();
+  for (std::size_t n = 0; n < names.size(); ++n)
+    mapping[names[n]] = {{"joint", sim.joint_mapping[n].joint},
+                         {"actuator", sim.joint_mapping[n].actuator}};
+  return {
+      {"socket_directory", sim.socket_directory.string()},
+      {"engine", sim.engine},
+      {"engine_sha256", sim.engine_sha256},
+      {"model_path", sim.model_path.string()},
+      {"asset_sha256", sim.asset_sha256},
+      {"physics_dt_us", sim.physics_dt_us},
+      {"host_startup_timeout_us", sim.host_startup_timeout_us},
+      {"host_phase_timeout_us", sim.host_phase_timeout_us},
+      {"base_body", sim.base_body},
+      {"imu_site", sim.imu_site},
+      {"weld_name", sim.weld_name},
+      {"initial_base_position", sim.initial_base_position},
+      {"initial_base_quaternion", sim.initial_base_quaternion},
+      {"initial_joint_position", JointMap(names, sim.initial_joint_position)},
+      {"joint_mapping", mapping}};
+}
+
 Json CanonicalConfig(const RuntimeConfig &config) {
   Json joints = Json::array();
   for (std::size_t index = 0; index < config.joint_count(); ++index) {
@@ -179,15 +314,19 @@ RuntimeConfig LoadConfig(const std::filesystem::path &path,
   config.schema_version = static_cast<std::uint32_t>(schema_version);
   config.deployment = StringMember(document, "deployment", "");
   const bool real_deployment = config.deployment == "real";
-  if (!real_deployment && config.deployment != "fake_only") {
-    Fail("deployment", "must equal fake_only or real");
+  const bool simulation_deployment = config.deployment == "simulation";
+  if (!real_deployment && !simulation_deployment &&
+      config.deployment != "fake_only") {
+    Fail("deployment", "must equal fake_only, real or simulation");
   }
   config.backend = StringMember(document, "backend", "");
-  if (config.backend != (real_deployment ? "real" : "fake")) {
-    Fail("backend", real_deployment
-                        ? "must equal real when deployment is real"
-                        : "must equal fake when deployment is fake_only");
-  }
+  if (config.backend != (real_deployment         ? "real"
+                         : simulation_deployment ? "sim"
+                                                 : "fake"))
+    Fail("backend",
+         "must match deployment (fake_only/fake, real/real, simulation/sim)");
+  if (!simulation_deployment && document.contains("simulation"))
+    Fail("simulation", "is only permitted for deployment=simulation");
 
   const Json &robot = ObjectMember(document, "robot", "");
   const Json &units = ObjectMember(robot, "units", "robot");
@@ -566,7 +705,17 @@ RuntimeConfig LoadConfig(const std::filesystem::path &path,
     config.dds.domain = *overrides.dds_domain;
   }
 
-  const Json canonical = CanonicalConfig(config);
+  if (simulation_deployment) {
+    if (config.hardware)
+      Fail("robot.buses", "simulation cannot configure hardware");
+    config.simulation =
+        ReadSimulation(ObjectMember(document, "simulation", ""), config);
+  }
+  Json canonical = CanonicalConfig(config);
+  // Absence deliberately retains the frozen Fake/Real canonical bytes.
+  if (config.simulation)
+    canonical["simulation"] =
+        CanonicalSimulation(*config.simulation, config.joint_names);
   config.config_id = Sha256(canonical.dump());
   config.layout_id = Sha256(Json(config.joint_names).dump());
   return config;

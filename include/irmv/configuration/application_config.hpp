@@ -169,6 +169,12 @@ struct ApplicationConfig {
   const DdsConfig &dds() const { return runtime.dds; }
 };
 
+// Called after source selection/model loading. The period remains owned by the
+// model contract; configuration does not carry a second policy schedule.
+void ValidateSimulationPolicy(const ApplicationConfig &config,
+                              const std::string &source,
+                              protocol::TimeUs policy_period_us);
+
 // Parses the runtime section through LoadConfig and validates `application` and
 // `input` from the same document. Configuration errors carry the JSON field
 // path in ConfigError.

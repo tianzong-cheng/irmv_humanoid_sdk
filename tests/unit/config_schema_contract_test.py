@@ -52,6 +52,35 @@ def main() -> int:
         "properties"
     ]["level"]["enum"]
 
+    assert "simulation" in schema["properties"]["deployment"]["enum"]
+    assert "sim" in schema["properties"]["backend"]["enum"]
+    sim = schema["properties"]["simulation"]
+    assert sim["additionalProperties"] is False
+    assert sim["properties"]["engine"] == {"const": "mujoco_warp"}
+    assert sim["properties"]["physics_dt_us"] == {"$ref": "#/$defs/positiveTimeUs"}
+    for key in ("engine_sha256", "asset_sha256"):
+        assert sim["properties"][key]["pattern"] == "^[0-9a-f]{64}$"
+    for key in ("host_startup_timeout_us", "host_phase_timeout_us"):
+        assert sim["properties"][key]["maximum"] == 3600000000
+        assert sim["properties"][key]["minimum"] == 1
+    assert set(sim["required"]) == set(sim["properties"]) - {
+        "host_startup_timeout_us", "host_phase_timeout_us"}
+
+    for key, count in (("initial_base_position", 3), ("initial_base_quaternion", 4)):
+        assert sim["properties"][key]["minItems"] == count
+        assert sim["properties"][key]["maxItems"] == count
+    mapping = sim["properties"]["joint_mapping"]["additionalProperties"]
+    assert set(mapping["required"]) == {"joint", "actuator"}
+    assert mapping["additionalProperties"] is False
+    pairs = {rule["if"]["properties"]["deployment"]["const"]:
+             rule["then"] for rule in schema["allOf"]
+             if "backend" in rule["then"].get("properties", {})}
+    assert pairs["simulation"]["required"] == ["simulation"]
+    for deployment, backend in (("fake_only", "fake"), ("real", "real"), ("simulation", "sim")):
+        assert pairs[deployment]["properties"]["backend"] == {"const": backend}
+    for deployment in ("fake_only", "real"):
+        assert pairs[deployment]["not"] == {"required": ["simulation"]}
+
     assert accepts_joint_name("a" * 64)
     assert not accepts_joint_name("a" * 65)
     assert accepts_joint_name("界" * 21)

@@ -146,6 +146,31 @@ struct DdsConfig {
   std::string interface;
 };
 
+// Startup-only, validated environment snapshot. Consumers hold a const config.
+struct SimulationJointMapping {
+  std::string joint;
+  std::string actuator;
+};
+
+struct SimulationConfig {
+  std::filesystem::path socket_directory;
+  std::string engine;
+  std::string engine_sha256;
+  std::filesystem::path model_path;
+  std::string asset_sha256;
+  protocol::TimeUs physics_dt_us{0};
+  protocol::TimeUs host_startup_timeout_us{120'000'000};
+  protocol::TimeUs host_phase_timeout_us{30'000'000};
+  std::string base_body;
+  std::string imu_site;
+  std::string weld_name;
+  std::array<double, 3> initial_base_position{};
+  std::array<double, 4> initial_base_quaternion{};  // wxyz, unit quaternion
+  JointArray initial_joint_position{};
+  // Aligned explicitly by SDK joint name, never by JSON member order.
+  std::vector<SimulationJointMapping> joint_mapping;
+};
+
 struct RuntimeConfig {
   std::uint32_t schema_version{0};
   std::string deployment;
@@ -171,6 +196,7 @@ struct RuntimeConfig {
   TelemetryConfig telemetry;
   DdsConfig dds;
   std::optional<HardwareConfig> hardware;
+  std::optional<SimulationConfig> simulation;
   std::string config_id;
   std::string layout_id;
 
