@@ -2046,3 +2046,16 @@ if(IRMV_TEST_SIMULATION_GPU)
     COMMAND "${IRMV_SIMULATION_PYTHON}" "${PROJECT_SOURCE_DIR}/tests/integration/mujoco_warp_capability_test.py")
   set_tests_properties(mujoco_warp_capability_test PROPERTIES LABELS integration TIMEOUT 180)
 endif()
+
+# Engine-neutral local simulation protocol. No runtime/policy link dependency.
+add_library(irmv_simulation_codec src/simulation/codec.cpp)
+target_compile_features(irmv_simulation_codec PUBLIC cxx_std_17)
+target_include_directories(irmv_simulation_codec PUBLIC "${PROJECT_SOURCE_DIR}/include")
+add_executable(simulation_codec_test tests/unit/simulation_codec_test.cpp)
+target_include_directories(simulation_codec_test PRIVATE "${PROJECT_SOURCE_DIR}/tests")
+target_link_libraries(simulation_codec_test PRIVATE irmv_simulation_codec)
+add_test(NAME simulation_codec_test COMMAND simulation_codec_test)
+set_tests_properties(simulation_codec_test PROPERTIES LABELS core)
+add_test(NAME simulation_protocol_test COMMAND "${Python3_EXECUTABLE}"
+  "${PROJECT_SOURCE_DIR}/tests/unit/simulation_protocol_test.py" "$<TARGET_FILE:simulation_codec_test>")
+set_tests_properties(simulation_protocol_test PROPERTIES LABELS core TIMEOUT 30)

@@ -1,0 +1,106 @@
+"""Cross-language contract; intentionally runs without engine dependencies."""
+import pathlib
+import subprocess
+import sys
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / 'tools'))
+try:
+    from simulation import protocol as p
+except ImportError:
+    raise AssertionError('Task 3 codec module is missing')
+for f in p.golden_frames():
+    wire = p.encode(f)
+    assert p.encode(p.decode(wire)) == wire
+    for n in range(len(wire)):
+        try:
+            p.decode(wire[:n])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError((f.kind, n))
+    if len(sys.argv) > 1:
+        result = subprocess.run([sys.argv[1], wire.hex()], capture_output=True, text=True, check=True)
+        assert result.stdout.strip() == wire.hex(), f.kind
+        result = subprocess.run([sys.argv[1], 'fixture', str(f.kind)], capture_output=True, text=True, check=True)
+        assert bytes.fromhex(result.stdout) == wire, f.kind
+for offset, value in [(0, 0), (4, 2), (6, 255)]:
+    bad = bytearray(p.encode(p.golden_frames()[0]))
+    bad[offset] = value
+    try:
+        p.decode(bytes(bad))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(offset)
+from dataclasses import replace
+import struct
+
+def rejected(wire):
+    try:
+        p.decode(wire)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('accepted malformed wire')
+    if len(sys.argv) > 1 and len(wire) <= 65536:
+        result = subprocess.run([sys.argv[1], wire.hex()], capture_output=True)
+        assert result.returncode == 1, result.stderr
+
+def changed(wire, offset, fmt, value):
+    b = bytearray(wire)
+    struct.pack_into('<' + fmt, b, offset, value)
+    return bytes(b)
+hello = p.golden_frames()[0]
+wire = p.encode(hello)
+for offset, fmt, value in [(4, 'H', 2), (6, 'H', 0), (24, 'Q', 2 ** 64 - 1), (40, 'Q', 0), (48, 'Q', 3), (60, 'I', 0)]:
+    rejected(changed(wire, offset, fmt, value))
+rejected(wire + b'x')
+rejected(bytes(65537))
+feedback = p.encode(p.golden_frames()[1])
+rejected(changed(feedback, 68, 'd', float('nan')))
+rejected(changed(feedback, 76, 'I', 65))
+rejected(changed(feedback, 76, 'I', 2 ** 32 - 1))
+manifest = p.encode(p.golden_frames()[3])
+rejected(changed(manifest, 64, 'I', 0))
+ack = p.encode(p.golden_frames()[4])
+rejected(changed(ack, 64, 'I', 3))
+a = hello.payload
+b = dict(a, engine_digest=bytes([255]) * 32)
+assert not p.matches_hello(a, b)
+assert p.matches_hello(a, dict(a, role=2))
+assert any(hello.run_id)
+assert p.GOLDEN_HEX == tuple((p.encode(f).hex() for f in p.golden_frames()))
+for count in (0, 64):
+    v = dict(p.golden_frames()[1].payload)
+    v.update(q=(0.0,) * count, dq=(0.0,) * count, tau=(0.0,) * count)
+    frame = replace(p.golden_frames()[1], payload=v, run_id=bytes(16))
+    wire = p.encode(frame)
+    assert p.encode(p.decode(wire)) == wire
+    if len(sys.argv) > 1:
+        result = subprocess.run([sys.argv[1], wire.hex()], capture_output=True, text=True, check=True)
+        assert result.stdout.strip() == wire.hex()
+    v['q'] = (0.0,) * 65
+    try:
+        p.encode(replace(frame, payload=v))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('oversized encode')
+for count in (0, 256):
+    frame = replace(p.golden_frames()[8], payload={'code': 0, 'reason': bytes(count)})
+    wire = p.encode(frame)
+    assert p.encode(p.decode(wire)) == wire
+    if len(sys.argv) > 1:
+        result = subprocess.run([sys.argv[1], wire.hex()], capture_output=True, text=True, check=True)
+        assert result.stdout.strip() == wire.hex()
+    rejected(changed(wire, 64, 'I', 257))
+for f in p.golden_frames():
+    payload = dict(f.payload)
+    if f.kind == 1:
+        payload['physics_dt_us'] = 999
+        try:
+            p.encode(replace(f, payload=payload))
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('conflicting dt')
+print('simulation protocol golden exchange and rejection checks passed')
