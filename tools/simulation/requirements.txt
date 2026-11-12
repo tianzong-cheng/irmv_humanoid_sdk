@@ -1,0 +1,5 @@
+# Released upstream package metadata verified; CUDA acceptance still required.
+# https://pypi.org/pypi/mujoco-warp/3.9.0/json declares mujoco>=3.8.0, warp-lang>=1.13.
+mujoco-warp==3.9.0
+mujoco==3.9.0
+warp-lang==1.15.0

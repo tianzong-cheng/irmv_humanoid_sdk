@@ -2010,3 +2010,20 @@ if(IRMV_BUILD_EXPERIMENT_WEB)
       WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
   )
 endif()
+
+# Simulation is isolated from the default Fake/Real dependency graph. Select an
+# isolated Python via IRMV_SIMULATION_PYTHON when opting into either check.
+option(IRMV_TEST_SIMULATION_GPU "Run real CUDA MuJoCo Warp capability acceptance" OFF)
+option(IRMV_TEST_SIMULATION_API "Run MuJoCo model validation without GPU" OFF)
+set(IRMV_SIMULATION_PYTHON "${Python3_EXECUTABLE}" CACHE FILEPATH
+    "Python interpreter with isolated simulation dependencies")
+if(IRMV_TEST_SIMULATION_API)
+  add_test(NAME simulation_engine_test
+    COMMAND "${IRMV_SIMULATION_PYTHON}" "${PROJECT_SOURCE_DIR}/tests/unit/simulation_engine_test.py")
+  set_tests_properties(simulation_engine_test PROPERTIES LABELS core TIMEOUT 30)
+endif()
+if(IRMV_TEST_SIMULATION_GPU)
+  add_test(NAME mujoco_warp_capability_test
+    COMMAND "${IRMV_SIMULATION_PYTHON}" "${PROJECT_SOURCE_DIR}/tests/integration/mujoco_warp_capability_test.py")
+  set_tests_properties(mujoco_warp_capability_test PROPERTIES LABELS integration TIMEOUT 180)
+endif()
