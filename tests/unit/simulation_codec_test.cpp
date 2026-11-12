@@ -144,6 +144,17 @@ AppliedToStep GoldenAppliedToStep() {
   v.physics_step_end = 0x0102030405060708ULL;
   return v;
 }
+PhaseSeal GoldenPhaseSeal() {
+  PhaseSeal seal;
+  seal.sender = Role::Runtime;
+  seal.manifest_count = 33;
+  for (std::size_t i = 0; i < seal.manifest_digest.size(); ++i)
+    seal.manifest_digest[i] = i + 1;
+  return seal;
+}
+PhaseAck GoldenPhaseAck() {
+  return {Role::Application, Disposition::BusinessConsumed, GoldenPhaseSeal()};
+}
 Payload GoldenPayload(FrameType kind) {
   switch (kind) {
     case FrameType::Hello:
@@ -166,6 +177,10 @@ Payload GoldenPayload(FrameType kind) {
       return GoldenAbort();
     case FrameType::AppliedToStep:
       return GoldenAppliedToStep();
+    case FrameType::PhaseSeal:
+      return GoldenPhaseSeal();
+    case FrameType::PhaseAck:
+      return GoldenPhaseAck();
   }
   return Hello{};
 }
@@ -192,7 +207,7 @@ int main(int argc, char** argv) {
     CHECK(encoded.size == wire.size);
     CHECK(encoded.bytes == wire.bytes);
   } else {
-    for (unsigned kind = 1; kind <= 10; ++kind) {
+    for (unsigned kind = 1; kind <= 12; ++kind) {
       frame.payload = GoldenPayload(static_cast<FrameType>(kind));
       forbid_allocation = true;
       CHECK(Encode(frame, &wire));
@@ -201,6 +216,16 @@ int main(int argc, char** argv) {
       for (std::size_t n = 0; n < wire.size; ++n)
         CHECK(!Decode({wire.bytes.data(), n}, &copy));
       forbid_allocation = false;
+    }
+    CHECK(kMaxPhaseManifestEntries == 64);
+    for (std::uint32_t count : {0U, 33U, 64U, 65U}) {
+      auto seal = GoldenPhaseSeal();
+      seal.manifest_count = count;
+      frame.payload = seal;
+      CHECK(Encode(frame, &wire) == (count <= 64));
+      frame.payload =
+          PhaseAck{Role::Application, Disposition::BusinessConsumed, seal};
+      CHECK(Encode(frame, &wire) == (count <= 64));
     }
     frame.physics_dt_us = 3;
     CHECK(!Encode(frame, &wire));

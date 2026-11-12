@@ -8,6 +8,7 @@ inline constexpr std::uint16_t kLocalProtocolVersion = 1;
 inline constexpr std::size_t kMaxPacketBytes = 65536;
 inline constexpr std::size_t kFrameQueueCapacity = 32;
 inline constexpr std::size_t kMaxJoints = 64;
+inline constexpr std::size_t kMaxPhaseManifestEntries = 64;
 using Digest = std::array<std::uint8_t, 32>;
 using A3 = std::array<double, 3>;
 using A4 = std::array<double, 4>;
@@ -39,7 +40,9 @@ enum class FrameType : std::uint16_t {
   LeaveReady = 7,
   LeaveCommitted = 8,
   Abort = 9,
-  AppliedToStep = 10
+  AppliedToStep = 10,
+  PhaseSeal = 11,
+  PhaseAck = 12
 };
 // Exact DDS projection plus digest of all sample content; see protocol docs.
 struct MessageIdentity {
@@ -130,8 +133,21 @@ struct AppliedToStep {
   std::uint64_t physics_step_begin{};
   std::uint64_t physics_step_end{};
 };
-using Payload = std::variant<Hello, Feedback, Torque, Manifest, Ack, ReleaseArm,
-                             LeaveReady, LeaveCommitted, Abort, AppliedToStep>;
+// Explicit inventory closure, including count=0. Header identifies the phase.
+struct PhaseSeal {
+  Role sender{Role::Coordinator};
+  std::uint32_t manifest_count{0};
+  Digest manifest_digest{};
+};
+// Echo the seal under its original run/step/phase header, never host arrival.
+struct PhaseAck {
+  Role consumer{Role::Coordinator};
+  Disposition disposition{Disposition::Ingress};
+  PhaseSeal seal{};
+};
+using Payload =
+    std::variant<Hello, Feedback, Torque, Manifest, Ack, ReleaseArm, LeaveReady,
+                 LeaveCommitted, Abort, AppliedToStep, PhaseSeal, PhaseAck>;
 struct Frame {
   StepIdentity identity{};
   std::uint64_t physics_dt_us{1000};

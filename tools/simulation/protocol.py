@@ -6,6 +6,7 @@ VERSION = 1
 MAX_PACKET_BYTES = 65536
 MAX_JOINTS = 64
 FRAME_QUEUE_CAPACITY = 32
+MAX_PHASE_MANIFEST_ENTRIES = 64
 # Ordered wire fields; this schema is independent of the C++ implementation.
 SCHEMA = {'MessageIdentity': [('MessageKind', 'kind'),
                      ('Id', 'runtime_id'),
@@ -67,8 +68,12 @@ SCHEMA = {'MessageIdentity': [('MessageKind', 'kind'),
  'Abort': [('u32', 'code'), ('Text256', 'reason')],
  'AppliedToStep': [('u64', 'write_id'),
                    ('u64', 'physics_step_begin'),
-                   ('u64', 'physics_step_end')]}
-KINDS = ['Hello', 'Feedback', 'Torque', 'Manifest', 'Ack', 'ReleaseArm', 'LeaveReady', 'LeaveCommitted', 'Abort', 'AppliedToStep']
+                   ('u64', 'physics_step_end')],
+ 'PhaseSeal': [('Role', 'sender'), ('u32', 'manifest_count'),
+               ('Digest', 'manifest_digest')],
+ 'PhaseAck': [('Role', 'consumer'), ('Disposition', 'disposition'),
+              ('PhaseSeal', 'seal')]}
+KINDS = ['Hello', 'Feedback', 'Torque', 'Manifest', 'Ack', 'ReleaseArm', 'LeaveReady', 'LeaveCommitted', 'Abort', 'AppliedToStep', 'PhaseSeal', 'PhaseAck']
 
 @dataclass(frozen=True)
 class Frame:
@@ -127,6 +132,10 @@ def _valid(f):
     if not 0 <= f.control_step <= (2 ** 64 - 2) // f.control_dt_us or f.logical_us != 1 + f.control_step * f.control_dt_us:
         raise ValueError('step/time overflow')
     v = f.payload
+    if f.kind in (11, 12):
+        seal = v if f.kind == 11 else v['seal']
+        if not 0 <= seal['manifest_count'] <= MAX_PHASE_MANIFEST_ENTRIES:
+            raise ValueError('phase inventory capacity')
     if f.kind == 1 and (v['physics_dt_us'] != f.physics_dt_us or v['control_dt_us'] != f.control_dt_us):
         raise ValueError('hello dt')
     if f.kind == 2 and (not len(v['q']) == len(v['dq']) == len(v['tau'])):
@@ -203,6 +212,11 @@ def golden_frames():
     result = []
     for i, k in enumerate(KINDS, 1):
         v = _default(k)
+        if k == 'PhaseSeal':
+            v.update(sender=2, manifest_count=33)
+        if k == 'PhaseAck':
+            v.update(consumer=3, disposition=2)
+            v['seal'].update(sender=2, manifest_count=33)
         if k == 'Hello':
             v.update(physics_dt_us=1000, control_dt_us=2000)
         result.append(Frame(i, v, bytes(range(1, 17)), 66051, 16909060, 1 + 66051 * 2000))
@@ -316,5 +330,18 @@ GOLDEN_HEX = (
         '5400000001000a000102030405060708090a0b0c0d0e0f1003020100000000000403020171b7df07'
         '00000000e803000000000000d0070000000000000807060504030201080706050403020108070605'
         '04030201'
+    ),
+)
+
+GOLDEN_HEX += (
+    (
+        '6400000001000b000102030405060708090a0b0c0d0e0f1003020100000000000403020171b7df07'
+        '00000000e803000000000000d00700000000000002000000210000000102030405060708090a0b0c'
+        '0d0e0f101112131415161718191a1b1c1d1e1f20'
+    ),
+    (
+        '6c00000001000c000102030405060708090a0b0c0d0e0f1003020100000000000403020171b7df07'
+        '00000000e803000000000000d0070000000000000300000002000000020000002100000001020304'
+        '05060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20'
     ),
 )

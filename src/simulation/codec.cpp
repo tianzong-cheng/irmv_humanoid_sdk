@@ -306,6 +306,34 @@ template <class A>
 void Visit(A& a, const AppliedToStep& v) noexcept {
   VisitAppliedToStep(a, v);
 }
+template <class A, class V>
+void VisitPhaseSeal(A& a, V& v) noexcept {
+  a(v.sender);
+  a(v.manifest_count);
+  a(v.manifest_digest);
+}
+template <class A>
+void Visit(A& a, PhaseSeal& v) noexcept {
+  VisitPhaseSeal(a, v);
+}
+template <class A>
+void Visit(A& a, const PhaseSeal& v) noexcept {
+  VisitPhaseSeal(a, v);
+}
+template <class A, class V>
+void VisitPhaseAck(A& a, V& v) noexcept {
+  a(v.consumer);
+  a(v.disposition);
+  a(v.seal);
+}
+template <class A>
+void Visit(A& a, PhaseAck& v) noexcept {
+  VisitPhaseAck(a, v);
+}
+template <class A>
+void Visit(A& a, const PhaseAck& v) noexcept {
+  VisitPhaseAck(a, v);
+}
 bool Valid(const Frame& f) noexcept {
   const auto dt = f.control_dt_us;
   if (!dt || !f.physics_dt_us || dt % f.physics_dt_us ||
@@ -331,6 +359,10 @@ bool Valid(const Frame& f) noexcept {
            a->manifest.sender <= Role::Application &&
            a->manifest.message.kind >= MessageKind::Request &&
            a->manifest.message.kind <= MessageKind::Command;
+  if (auto seal = std::get_if<PhaseSeal>(&f.payload))
+    return seal->manifest_count <= kMaxPhaseManifestEntries;
+  if (auto ack = std::get_if<PhaseAck>(&f.payload))
+    return ack->seal.manifest_count <= kMaxPhaseManifestEntries;
   if (auto a = std::get_if<AppliedToStep>(&f.payload))
     return a->physics_step_end >= a->physics_step_begin;
   return true;
@@ -437,6 +469,18 @@ bool Decode(ByteView b, Frame* out) noexcept {
     }
     case 10: {
       AppliedToStep v;
+      a(v);
+      f.payload = v;
+      break;
+    }
+    case 11: {
+      PhaseSeal v;
+      a(v);
+      f.payload = v;
+      break;
+    }
+    case 12: {
+      PhaseAck v;
       a(v);
       f.payload = v;
       break;

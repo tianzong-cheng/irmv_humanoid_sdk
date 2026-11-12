@@ -104,3 +104,41 @@ for f in p.golden_frames():
         else:
             raise AssertionError('conflicting dt')
 print('simulation protocol golden exchange and rejection checks passed')
+
+# A phase is explicitly sealed, including empty phases; queue capacity is separate.
+assert p.MAX_PHASE_MANIFEST_ENTRIES == 64
+assert p.KINDS[10:] == ['PhaseSeal', 'PhaseAck']
+assert len(p.GOLDEN_HEX) == 12
+for kind in (11, 12):
+    for count in (0, 33, 64):
+        seal = {'sender': 2, 'manifest_count': count,
+                'manifest_digest': bytes(range(32))}
+        payload = seal if kind == 11 else {
+            'consumer': 3, 'disposition': 2, 'seal': seal}
+        frame = replace(hello, kind=kind, payload=payload)
+        wire = p.encode(frame)
+        assert p.decode(wire) == frame
+        if len(sys.argv) > 1:
+            result = subprocess.run([sys.argv[1], wire.hex()], capture_output=True,
+                                    text=True, check=True)
+            assert result.stdout.strip() == wire.hex()
+        rejected(changed(wire, 6, 'H', 13))
+        count_offset = 64 if kind == 11 else 72
+        sender_offset = 60 if kind == 11 else 68
+        for invalid in (65, 2**32-1):
+            rejected(changed(wire, count_offset, 'I', invalid))
+        for invalid in (0, 4):
+            rejected(changed(wire, sender_offset, 'I', invalid))
+        if kind == 12:
+            for invalid in (0, 4):
+                rejected(changed(wire, 60, 'I', invalid))
+            for invalid in (0, 3):
+                rejected(changed(wire, 64, 'I', invalid))
+        seal['manifest_count'] = 65
+        try:
+            p.encode(frame)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('oversized phase inventory encode')
+print('explicit bounded phase seal/ack checks passed')

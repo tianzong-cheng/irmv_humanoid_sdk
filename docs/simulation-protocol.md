@@ -4,7 +4,8 @@ This engine-neutral contract is separate from frozen DDS protocol v2. It adds
 no DDS topics or fields. No socket, coordinator, runtime driver, or inference
 code is implemented here. All participant queues must be bounded to 32 frames;
 this codec does not own a queue. A packet is at most 65,536 bytes, including its
-header. Joint arrays have at most 64 entries. All encode/decode operations in
+header. A phase inventory has at most 64 manifests, independently of the
+32-frame transport queue. Joint arrays have at most 64 entries. All encode/decode operations in
 C++ use fixed storage and are `noexcept`, without allocation, locks, or I/O.
 
 ## Packet representation
@@ -19,7 +20,7 @@ not hexadecimal ASCII. No codec rule treats a zero ID as a missing identity.
 | --- | --- | --- |
 | 0 | u32 | Complete packet byte count, including this field |
 | 4 | u16 | Local protocol version, exactly 1 |
-| 6 | u16 | Payload type, 1 through 10 |
+| 6 | u16 | Payload type, 1 through 12 |
 | 8 | byte[16] | Run ID |
 | 24 | u64 | Control step index |
 | 32 | u32 | Immutable phase identifier |
@@ -59,6 +60,8 @@ are not implicitly UTF-8 decoded.
 | LeaveCommitted | 8 | Echoed LeaveReady proof; authorization revoked, session closed, heartbeat resolved flags |
 | Abort | 9 | Numeric code and bounded reason bytes |
 | AppliedToStep | 10 | Write ID, inclusive physics start index and exclusive physics end index |
+| PhaseSeal | 11 | Sender role, u32 manifest_count (0..64), ordered manifest SHA-256 digest[32] |
+| PhaseAck | 12 | Actual consumer role, ingress/consumed disposition, echoed PhaseSeal |
 
 Feedback mirrors Task 1 `engine.Feedback` without converting its coordinate
 conventions: q/dq/tau are output-side rad, rad/s, N m; tau is actuator generalized
@@ -77,7 +80,7 @@ completion. The authenticated endpoint role and the expected disposition must
 be checked by later barrier code. Ingress reserves the message for the next
 runtime tick; it does not assert business execution.
 
-C++ `Payload` is a fixed-capacity `std::variant` of these ten structures.
+C++ `Payload` is a fixed-capacity `std::variant` of these twelve structures.
 `Frame` contains identity, physics_dt_us, control_dt_us, payload. The variant's
 index plus one is the type number. No type-erased byte payload is exposed.
 
@@ -138,13 +141,43 @@ transports the supplied digest; it does not serialize DDS samples or compute
 SHA-256. Producer and actual consumer must independently compute and compare
 this digest before generating a completion ACK.
 
-A Manifest represents one exact sample, never an aggregate count or a claim
-that the whole phase finished. Multiple expected samples require multiple
-Manifest/Ack exchanges. The brief supplies no batch format or phase-closing
-marker: later endpoint/barrier workers must define the expected phase inventory
-explicitly and must not treat the last received manifest as phase completion.
-If that work requires a batched manifest or an on-wire inventory seal, controller
-approval is needed before changing this v1 format.
+A Manifest represents one exact sample. A **PhaseSeal** explicitly closes its
+sender's inventory for the run/control_step/phase in its frame header, including
+an empty inventory (`manifest_count=0`). `kMaxPhaseManifestEntries=64` in C++ and
+`MAX_PHASE_MANIFEST_ENTRIES=64` in Python are distinct from queue capacity 32:
+one runtime tick may emit 32 results plus its state. Counts over 64 are rejected
+on encode and decode. A seal has exactly 40 payload bytes; a PhaseAck has 48.
+Types 1..10 keep their existing wire representation; these append types 11/12
+within the new local v1. Frozen DDS is unchanged.
+
+The ordered inventory digest is precisely
+`SHA256(C(M[0]) || C(M[1]) || ... || C(M[count-1]))`. Each `C(M)` is the
+180-byte **Manifest payload**: sender role as LE u32, followed by the complete
+176-byte MessageIdentity in the order above (including the per-sample content
+digest). Equivalently, it is bytes `[60:]` of that Manifest's canonical encoded
+packet. Exclude the local packet header, counts, length prefixes, padding, ACKs,
+and seal itself from the digest input. Preserve sender declaration order; do
+not sort by message kind or DDS arrival time. Retransmission of an identical
+entry does not add a new inventory entry. Each entry must belong to the same
+sender and immutable phase header as the seal. For zero entries the digest is
+SHA256 of empty bytes:
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+
+A seal identity is its complete frame header's run/control_step/phase,
+logical_us, physics_dt_us, control_dt_us plus its sender, manifest_count and
+manifest_digest. **PhaseAck** uses that same header (not the later host receive
+time), echoes all three PhaseSeal fields in `seal`, and adds the actual
+`consumer` and required `disposition` (Ingress=1 or BusinessConsumed=2).
+Thus it attests one exact sealed inventory, not a count alone. Count 0 also
+requires a consumer PhaseAck; silence does not close an empty phase.
+
+Task 5 owns cryptographic generation and exact inventory validation, including
+entry ordering, duplication/conflicts, actual consumer provenance, matching the
+required disposition and complete seal identity, and whether all expected
+business messages have reached their required stage. The stateless codec
+carries all these fields and bounds the count but cannot establish those facts.
+No per-sample ACK, last received ACK, sender seal, or merely decodable PhaseAck
+is by itself proof of whole-phase business completion.
 
 ReleaseArm must bind the matching run/runtime/session/producer, new epoch,
 Locomotion Tracking request, first-command sequence/source state, consumed
@@ -156,7 +189,7 @@ release or removal from a barrier.
 
 ## Verification
 
-`simulation_codec_test` checks all frame types, truncation at every byte,
+`simulation_codec_test` checks all twelve frame types, truncation at every byte,
 structural failures, and encode/decode with heap allocation forbidden.
 `simulation_protocol_test` exchanges independently constructed nonzero fixtures
 in both directions with that C++ binary, compares literal `GOLDEN_HEX` packets,
