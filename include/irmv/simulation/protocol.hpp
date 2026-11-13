@@ -42,7 +42,10 @@ enum class FrameType : std::uint16_t {
   Abort = 9,
   AppliedToStep = 10,
   PhaseSeal = 11,
-  PhaseAck = 12
+  PhaseAck = 12,
+  InventoryReady = 13,
+  PublishPermit = 14,
+  TickPermit = 15
 };
 // Exact DDS projection plus digest of all sample content; see protocol docs.
 struct MessageIdentity {
@@ -145,9 +148,23 @@ struct PhaseAck {
   Disposition disposition{Disposition::Ingress};
   PhaseSeal seal{};
 };
+// Installation is separate from business completion (PhaseAck).
+struct InventoryReady {
+  Role consumer{Role::Coordinator};
+  PhaseSeal seal{};
+};
+struct PublishPermit {
+  PhaseSeal seal{};
+};
+// stage 1: runtime normal tick; stage 2: application output computation.
+struct TickPermit {
+  Role role{Role::Runtime};
+  std::uint32_t stage{1};
+};
 using Payload =
     std::variant<Hello, Feedback, Torque, Manifest, Ack, ReleaseArm, LeaveReady,
-                 LeaveCommitted, Abort, AppliedToStep, PhaseSeal, PhaseAck>;
+                 LeaveCommitted, Abort, AppliedToStep, PhaseSeal, PhaseAck,
+                 InventoryReady, PublishPermit, TickPermit>;
 struct Frame {
   StepIdentity identity{};
   std::uint64_t physics_dt_us{1000};

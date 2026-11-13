@@ -334,6 +334,40 @@ template <class A>
 void Visit(A& a, const PhaseAck& v) noexcept {
   VisitPhaseAck(a, v);
 }
+template <class A, class V>
+void VisitInventoryReady(A& a, V& v) noexcept {
+  a(v.consumer);
+  a(v.seal);
+}
+template <class A>
+void Visit(A& a, InventoryReady& v) noexcept {
+  VisitInventoryReady(a, v);
+}
+template <class A>
+void Visit(A& a, const InventoryReady& v) noexcept {
+  VisitInventoryReady(a, v);
+}
+template <class A>
+void Visit(A& a, PublishPermit& v) noexcept {
+  a(v.seal);
+}
+template <class A>
+void Visit(A& a, const PublishPermit& v) noexcept {
+  a(v.seal);
+}
+template <class A, class V>
+void VisitTickPermit(A& a, V& v) noexcept {
+  a(v.role);
+  a(v.stage);
+}
+template <class A>
+void Visit(A& a, TickPermit& v) noexcept {
+  VisitTickPermit(a, v);
+}
+template <class A>
+void Visit(A& a, const TickPermit& v) noexcept {
+  VisitTickPermit(a, v);
+}
 bool Valid(const Frame& f) noexcept {
   const auto dt = f.control_dt_us;
   if (!dt || !f.physics_dt_us || dt % f.physics_dt_us ||
@@ -363,6 +397,12 @@ bool Valid(const Frame& f) noexcept {
     return seal->manifest_count <= kMaxPhaseManifestEntries;
   if (auto ack = std::get_if<PhaseAck>(&f.payload))
     return ack->seal.manifest_count <= kMaxPhaseManifestEntries;
+  if (auto ready = std::get_if<InventoryReady>(&f.payload))
+    return ready->seal.manifest_count <= kMaxPhaseManifestEntries;
+  if (auto permit = std::get_if<PublishPermit>(&f.payload))
+    return permit->seal.manifest_count <= kMaxPhaseManifestEntries;
+  if (auto permit = std::get_if<TickPermit>(&f.payload))
+    return permit->stage == 1 || permit->stage == 2;
   if (auto a = std::get_if<AppliedToStep>(&f.payload))
     return a->physics_step_end >= a->physics_step_begin;
   return true;
@@ -481,6 +521,24 @@ bool Decode(ByteView b, Frame* out) noexcept {
     }
     case 12: {
       PhaseAck v;
+      a(v);
+      f.payload = v;
+      break;
+    }
+    case 13: {
+      InventoryReady v;
+      a(v);
+      f.payload = v;
+      break;
+    }
+    case 14: {
+      PublishPermit v;
+      a(v);
+      f.payload = v;
+      break;
+    }
+    case 15: {
+      TickPermit v;
       a(v);
       f.payload = v;
       break;

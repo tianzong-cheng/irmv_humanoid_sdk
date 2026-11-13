@@ -24,7 +24,8 @@ def main():
             dot = abs(sum(a*b for a, b in zip(held.imu_quaternion, initial.imu_quaternion)))
             assert 2 * math.acos(min(1., dot)) < 1e-4
         assert held.physics_step == 100
-        assert abs(held.engine_time_s - .1) < 1e-6
+        # 100 incremental float32 additions of float32(.001); two ULPs.
+        assert abs(held.engine_time_s - 0.10000002384185791) <= 2**-26
         assert max(abs(x) for x in held.imu_angular_velocity) < 1e-4
         assert abs(held.imu_specific_force[2] - 9.81) < .02
         engine.apply_torque([.01])

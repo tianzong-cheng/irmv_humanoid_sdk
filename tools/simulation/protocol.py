@@ -72,8 +72,11 @@ SCHEMA = {'MessageIdentity': [('MessageKind', 'kind'),
  'PhaseSeal': [('Role', 'sender'), ('u32', 'manifest_count'),
                ('Digest', 'manifest_digest')],
  'PhaseAck': [('Role', 'consumer'), ('Disposition', 'disposition'),
-              ('PhaseSeal', 'seal')]}
-KINDS = ['Hello', 'Feedback', 'Torque', 'Manifest', 'Ack', 'ReleaseArm', 'LeaveReady', 'LeaveCommitted', 'Abort', 'AppliedToStep', 'PhaseSeal', 'PhaseAck']
+              ('PhaseSeal', 'seal')],
+ 'InventoryReady': [('Role', 'consumer'), ('PhaseSeal', 'seal')],
+ 'PublishPermit': [('PhaseSeal', 'seal')],
+ 'TickPermit': [('Role', 'role'), ('u32', 'stage')]}
+KINDS = ['Hello', 'Feedback', 'Torque', 'Manifest', 'Ack', 'ReleaseArm', 'LeaveReady', 'LeaveCommitted', 'Abort', 'AppliedToStep', 'PhaseSeal', 'PhaseAck', 'InventoryReady', 'PublishPermit', 'TickPermit']
 
 @dataclass(frozen=True)
 class Frame:
@@ -132,10 +135,12 @@ def _valid(f):
     if not 0 <= f.control_step <= (2 ** 64 - 2) // f.control_dt_us or f.logical_us != 1 + f.control_step * f.control_dt_us:
         raise ValueError('step/time overflow')
     v = f.payload
-    if f.kind in (11, 12):
+    if f.kind in (11, 12, 13, 14):
         seal = v if f.kind == 11 else v['seal']
         if not 0 <= seal['manifest_count'] <= MAX_PHASE_MANIFEST_ENTRIES:
             raise ValueError('phase inventory capacity')
+    if f.kind == 15 and v['stage'] not in (1, 2):
+        raise ValueError('tick stage')
     if f.kind == 1 and (v['physics_dt_us'] != f.physics_dt_us or v['control_dt_us'] != f.control_dt_us):
         raise ValueError('hello dt')
     if f.kind == 2 and (not len(v['q']) == len(v['dq']) == len(v['tau'])):
@@ -217,6 +222,11 @@ def golden_frames():
         if k == 'PhaseAck':
             v.update(consumer=3, disposition=2)
             v['seal'].update(sender=2, manifest_count=33)
+        if k in ('InventoryReady', 'PublishPermit'):
+            v['seal'].update(sender=2, manifest_count=33)
+            if k == 'InventoryReady': v['consumer']=3
+        if k == 'TickPermit':
+            v.update(role=2, stage=1)
         if k == 'Hello':
             v.update(physics_dt_us=1000, control_dt_us=2000)
         result.append(Frame(i, v, bytes(range(1, 17)), 66051, 16909060, 1 + 66051 * 2000))
@@ -345,3 +355,6 @@ GOLDEN_HEX += (
         '05060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20'
     ),
 )
+
+# Task 6 typed local permission frames (literal independent wire fixtures).
+GOLDEN_HEX += ('6800000001000d000102030405060708090a0b0c0d0e0f1003020100000000000403020171b7df0700000000e803000000000000d0070000000000000300000002000000210000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20', '6400000001000e000102030405060708090a0b0c0d0e0f1003020100000000000403020171b7df0700000000e803000000000000d00700000000000002000000210000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20', '4400000001000f000102030405060708090a0b0c0d0e0f1003020100000000000403020171b7df0700000000e803000000000000d0070000000000000200000001000000')

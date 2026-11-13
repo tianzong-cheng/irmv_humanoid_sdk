@@ -8,7 +8,7 @@ refer to the same endpoint. CPU MuJoCo is used only for model/data storage.
 import math
 from typing import Sequence
 
-from .engine import Feedback
+from .engine import Feedback, EngineTimeDiagnostic
 
 
 def validate_model(model, config: dict) -> dict:
@@ -100,6 +100,7 @@ class MujocoWarpEngine:
         self._device = devices[0]
         self._host = mj.MjData(self._model)
         self._physics_step = 0
+        self._time_diagnostic = EngineTimeDiagnostic(round(self.timestep_s * 1000000))
         try:
             with wp.ScopedDevice(self._device):
                 self._gpu_model = mjw.put_model(self._model)
@@ -131,12 +132,7 @@ class MujocoWarpEngine:
         values = (h.qpos, h.qvel, h.qacc, h.qfrc_actuator, h.sensordata)
         if any(not math.isfinite(float(v)) for array in values for v in array):
             raise RuntimeError("nonfinite engine state")
-        # Float32 accumulated engine time is diagnostic only, never logical time.
-        # Bound experiments to 100000 steps and allow the worst-case sum error.
-        expected = self._physics_step * self.timestep_s
-        tolerance = max(1e-7, expected * self._physics_step * 1.2e-7)
-        if not math.isfinite(h.time) or abs(h.time - expected) > tolerance:
-            raise RuntimeError("engine time inconsistent with completed steps")
+        self._time_diagnostic.validate(float(h.time))
         q, v = layout["root_q"], layout["root_v"]
         sensors = [tuple(float(x) for x in h.sensordata[a:a+n]) for a, n in layout["sensors"]]
         return Feedback(self._physics_step, float(h.time),
@@ -160,14 +156,15 @@ class MujocoWarpEngine:
 
     def step(self, substeps: int) -> Feedback:
         self._require_ready()
-        if type(substeps) is not int or substeps <= 0 or self._physics_step + substeps > 100000:
-            raise ValueError("require positive substeps within 100000-step experiment limit")
+        if type(substeps) is not int or substeps <= 0 or (self._physics_step + substeps) * round(self.timestep_s * 1000000) > 3600000000:
+            raise ValueError("require positive substeps within 3600-logical-second experiment limit")
         with self._wp.ScopedDevice(self._device):
             for _ in range(substeps):
                 self._mjw.step(self._gpu_model, self._data)
                 self._wp.synchronize_device(self._device)
                 self._check_overflow()
                 self._physics_step += 1
+                self._time_diagnostic.advance()
             self._mjw.forward(self._gpu_model, self._data)
         return self.read_feedback()
 

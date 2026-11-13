@@ -290,3 +290,141 @@ scheduling, resend deadlines, endpoint frame relay and authenticated role routin
 remain future driver/coordinator obligations. Current production loops are
 unchanged. The real-DDS test runs serially on reserved domain 222; the scenario
 allocator excludes it (`tests/integration/dds_domains.json`).
+
+## Coordinator scheduling and driver contract (Task 6)
+
+`python3 -m tools.simulation.main --bootstrap NORMALIZED.json --socket PATH`
+starts only the independent coordinator/engine runner. It does not start or
+signal either SDK process. Parent PATH must already be owned by the current
+user with mode 0700. The runner owns a Unix SOCK_SEQPACKET listener, checks
+SO_PEERCRED, accepts exactly one Runtime and one Application, bounds each output
+queue to 32 packets, and only removes its own socket inode on exit. Existing
+files, symlinks and stale sockets are never removed to make startup succeed.
+
+The bootstrap JSON is an explicit normalized manifest, **not sdk.json**. Required
+keys are `run_id`, `runtime_id` (32 hex digits each), `config_digest`,
+`application_digest`, `engine_digest` (64 hex digits each), `physics_dt_us`,
+`control_dt_us`, and `engine_config` (adapter configuration object). Optional
+integer microsecond keys: `startup_timeout_us` (120000000), `phase_timeout_us`
+(30000000), `max_duration_us` (3600000000, never above one logical hour).
+The independent launcher must generate fresh, independent run and simulation
+runtime IDs before starting either SDK process, and pass these SAME identities
+and normalized digests to all three processes. It must obtain canonical digests
+from the C++ loader normalization interface (Task 9); Python never reimplements
+canonical configuration JSON. A new run requires new processes/endpoints.
+Runtime must use this supplied runtime ID from its first DDS output. Hello does
+not wait for or discover a runtime ID from a DDS state.
+
+Both SDK peers send Hello at step=0, phase=0, logical_us=1, with role=Runtime(2)
+or Application(3), after their configuration/model/transport preparation is
+complete (application policy load/prewarm included). Coordinator replies Hello
+with role=Coordinator(1), matching every digest, ID and dt. Engine initialization
+and valid initial completed feedback at physics_step=0 are additionally required
+before any tick permit. Initial engine time is 0, SDK time starts at 1 us.
+
+New **local v1 only** types (old type numbers/layouts and all DDS remain unchanged):
+
+| Type | Number | Ordered payload fields |
+|---|---:|---|
+| InventoryReady | 13 | Role consumer; PhaseSeal seal |
+| PublishPermit | 14 | PhaseSeal seal |
+| TickPermit | 15 | Role role; u32 stage (1 or 2) |
+
+All repeat the exact run/step/phase/time/dt header being authorized. Stage is a
+computation permission; numeric phase identifies an inventory or physics
+handoff. They are deliberately different concepts:
+
+| Header phase | Owner/inventory | Required consumer completion |
+|---|---|---|
+| 0 | startup Hello only, step 0 | both process Hellos plus completed engine feedback |
+| 1 | runtime state and actual tick results at t | application BusinessConsumed (2) |
+| 2 | application requests/heartbeat/command computed at t | runtime Ingress (1), retained for the next normal tick |
+| 3 | engine handoff for [t,t+control_dt) | completed engine feedback, exact integer physics step |
+
+For each control step, drivers MUST follow this order:
+
+1. Coordinator sends Runtime Feedback then TickPermit(role=Runtime, stage=1),
+   both phase 1 at `1 + step*control_dt_us`. Runtime installs that feedback and
+   performs **one** normal tick with the preceding application phase's ingress.
+   Runtime computes final torque and all state/results without publishing DDS.
+2. Runtime sends Torque, then one Manifest per actual state/result, then
+   PhaseSeal, all phase 1. Torque write_id increases; accepted must be true.
+   Task 7 enriches the Task 4 backend TorqueFrame with actual state_seq and
+   command identity (including the bootstrap runtime_id, even when no command
+   is active). The sole state identity must match torque.state_seq and time t;
+   initialization/stop/Fault states are still normal states, not release proofs.
+3. Coordinator streams manifests to Application, verifies the ordered inventory
+   hash/count on seal, and forwards seal. The receiving driver assembles the
+   exact PhaseManifest, calls BeginSimulationPhase, then **bounded-polls
+   SimulationPhaseInstalled(the exact manifest)**. Only after this succeeds may
+   it send InventoryReady(consumer=Application, same seal), phase 1.
+4. Coordinator sends PublishPermit(same seal) to Runtime AND
+   TickPermit(role=Application, stage=2) to Application, **both phase 1**.
+   This stage-2 permission must precede application business processing, not
+   wait for its completion ACK. Runtime now publishes/retransmits only its
+   buffered exact DDS outputs. Application waits for the exact inventory,
+   processes results/state through the real business path, runs its per-tick
+   processing and any due inference at frozen t, and buffers all outputs.
+   ReportSimulationProcessed uses the actual delivered identities; a false
+   handoff is retried with the SAME identity under a host deadline, not a new
+   dequeue. Once actual business consumption completes, Application sends
+   PhaseAck(consumer=Application, disposition=BusinessConsumed, original seal),
+   still phase 1. Receiving state alone is not completion.
+5. On the SAME application socket, after that ACK, send the buffered output
+   Manifest entries and PhaseSeal under **phase 2**, at the same step/time.
+   Coordinator forwards these to Runtime. Runtime calls BeginSimulationPhase,
+   waits for exact SimulationPhaseInstalled, then sends InventoryReady under
+   phase 2. Coordinator replies PublishPermit to Application under phase 2.
+   Only now does Application publish/retransmit its exact DDS outputs.
+6. Runtime sends PhaseAck(disposition=Ingress, exact phase-2 seal) only after
+   the declared messages are in its bounded ingress. These messages are NOT
+   consumed by an extra same-time normal tick. Even an empty application output
+   inventory needs seal -> installed -> ready -> permit -> empty phase ACK.
+7. Coordinator gives the engine worker the OLD tick's final torque, held across
+   `control_dt/physics_dt` substeps. It accepts only completed coherent feedback
+   at `(step+1)*substeps`. It reports AppliedToStep to Runtime using the OLD
+   step's phase-3 header/write_id and exact [begin,end) physics indices, then
+   sends next step's phase-1 Feedback/TickPermit. A target generated at t is
+   first usable by the normal runtime tick at t+control_dt, never during the
+   physics interval just authorized.
+
+A sender must retain exact output payloads/identities until the corresponding
+consumer completion. BestEffort retry after PublishPermit must reuse identity,
+payload and original logical timestamps; drivers supply bounded retries for
+DDS loss (Task 7). A coordinator control frame is reliable local transport and
+is not evidence that DDS was consumed. Per-message Ack is not a substitute for
+PhaseAck. Manifest maximum is 64; recent completed phase caches are 32; bounded
+socket queues remain 32 independently of inventory size. Exact duplicates are
+idempotent without extending deadlines, including members of a full inventory.
+Conflicting identities/seals, unexpected roles/phases/runs/digests or late
+uncached phases fail the run. A runtime inventory cannot omit its tick state.
+
+`SimulationCoordinator.advance(Event, host_now_us) -> tuple[Action,...]` is pure
+with respect to I/O and clocks; it mutates only its owned state. Event fields:
+`kind`, `peer` (authenticated 2/3), `frame`, `feedback`, `reason`. Kinds are
+`start`, `poll`, `frame`, `feedback`, `engine_error`, `disconnect`, `stop`.
+Call start once, poll under bounded host time, deliver worker feedback only
+for initialization or an outstanding physics action. Action kinds:
+`initialize` (use bootstrap.engine_config), `send` (peer + complete Frame),
+`step` (immutable torque tuple + positive substeps), `cancel` (reason).
+Unknown actions/events fail; none stands in for a real SDK call or DDS send.
+The runner executes these actions; only its sole daemon engine worker creates,
+initializes, reads, writes, steps or closes the adapter. Selectors/control/host
+phase deadlines continue while GPU work blocks. Integer SDK time never uses
+engine time. Adapter checks actual GPU synchronization and capacity each step.
+MuJoCo Warp time diagnostics compare incremental float32 additions, within two
+ULPs, not accumulated exact dt with a growing relative tolerance. Coordinator
+also validates finite coherent feedback, expected integer steps, quaternion,
+and an incremental per-handoff float32 error bound.
+
+Lifecycle extension points are explicit: Handshake, RuntimeTick,
+ApplicationPhase, IngressWait, PhysicsAdvance are active normal states;
+Stopping/Failed implement fail-closed termination today. RuntimeOnly/Closed and
+successful Leave/ZeroTorque shutdown require Task 8 proofs; this runner never
+claims successful shutdown from a stop request. ReleaseArm/LeaveReady are
+rejected until those proofs exist, and no Tracking state can release the base.
+A stop/death/deadline cancels future scheduling, sends best-effort local Abort,
+and exits nonzero. A hung GPU thread may remain alive after the bounded join;
+Python cannot kill it. This is logical cancellation, with physical stop
+**unproven**. Late results after failure do not restart physics. No recovery,
+reset, UI or release mechanism is implemented here.

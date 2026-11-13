@@ -2091,3 +2091,10 @@ target_include_directories(simulation_barrier_peer PRIVATE "${PROJECT_SOURCE_DIR
 target_link_libraries(simulation_barrier_peer PRIVATE irmv_transport irmv_simulation_clock)
 add_test(NAME simulation_dds_barrier_test COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/integration/simulation_dds_barrier_test.py" "$<TARGET_FILE:simulation_barrier_peer>")
 set_tests_properties(simulation_dds_barrier_test PROPERTIES LABELS integration TIMEOUT 30 RUN_SERIAL TRUE WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+
+# Engine-independent coordinator/runner contracts: standard library only.
+foreach(contract coordinator runner time)
+  add_test(NAME simulation_${contract}_test COMMAND "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/unit/simulation_${contract}_test.py")
+  set_tests_properties(simulation_${contract}_test PROPERTIES LABELS core TIMEOUT 15)
+endforeach()

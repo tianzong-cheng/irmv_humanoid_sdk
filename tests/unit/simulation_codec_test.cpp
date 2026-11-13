@@ -181,6 +181,12 @@ Payload GoldenPayload(FrameType kind) {
       return GoldenPhaseSeal();
     case FrameType::PhaseAck:
       return GoldenPhaseAck();
+    case FrameType::InventoryReady:
+      return InventoryReady{Role::Application, GoldenPhaseSeal()};
+    case FrameType::PublishPermit:
+      return PublishPermit{GoldenPhaseSeal()};
+    case FrameType::TickPermit:
+      return TickPermit{Role::Runtime, 1};
   }
   return Hello{};
 }
@@ -207,7 +213,7 @@ int main(int argc, char** argv) {
     CHECK(encoded.size == wire.size);
     CHECK(encoded.bytes == wire.bytes);
   } else {
-    for (unsigned kind = 1; kind <= 12; ++kind) {
+    for (unsigned kind = 1; kind <= 15; ++kind) {
       frame.payload = GoldenPayload(static_cast<FrameType>(kind));
       forbid_allocation = true;
       CHECK(Encode(frame, &wire));

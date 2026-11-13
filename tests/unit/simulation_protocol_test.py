@@ -107,8 +107,8 @@ print('simulation protocol golden exchange and rejection checks passed')
 
 # A phase is explicitly sealed, including empty phases; queue capacity is separate.
 assert p.MAX_PHASE_MANIFEST_ENTRIES == 64
-assert p.KINDS[10:] == ['PhaseSeal', 'PhaseAck']
-assert len(p.GOLDEN_HEX) == 12
+assert p.KINDS[10:] == ['PhaseSeal', 'PhaseAck', 'InventoryReady', 'PublishPermit', 'TickPermit']
+assert len(p.GOLDEN_HEX) == 15
 for kind in (11, 12):
     for count in (0, 33, 64):
         seal = {'sender': 2, 'manifest_count': count,
@@ -122,7 +122,7 @@ for kind in (11, 12):
             result = subprocess.run([sys.argv[1], wire.hex()], capture_output=True,
                                     text=True, check=True)
             assert result.stdout.strip() == wire.hex()
-        rejected(changed(wire, 6, 'H', 13))
+        rejected(changed(wire, 6, 'H', 16))
         count_offset = 64 if kind == 11 else 72
         sender_offset = 60 if kind == 11 else 68
         for invalid in (65, 2**32-1):
@@ -142,3 +142,21 @@ for kind in (11, 12):
         else:
             raise AssertionError('oversized phase inventory encode')
 print('explicit bounded phase seal/ack checks passed')
+
+# Task 6 control frames share the sealed inventory bounds and enum checks.
+for kind in (13,14):
+    for count in (0,64):
+        seal=dict(sender=2,manifest_count=count,manifest_digest=bytes(range(32)))
+        payload=dict(consumer=3,seal=seal) if kind==13 else dict(seal=seal)
+        frame=replace(hello,kind=kind,payload=payload)
+        wire=p.encode(frame)
+        assert p.decode(wire)==frame
+        if len(sys.argv)>1:
+            result=subprocess.run([sys.argv[1],wire.hex()],capture_output=True,text=True,check=True)
+            assert result.stdout.strip()==wire.hex()
+        rejected(changed(wire,68 if kind==13 else 64,'I',65))
+        rejected(changed(wire,64 if kind==13 else 60,'I',0))
+        if kind==13: rejected(changed(wire,60,'I',4))
+wire=p.encode(p.golden_frames()[14])
+for stage in (0,3,2**32-1): rejected(changed(wire,64,'I',stage))
+print('installation/publication/tick permission golden and rejection checks passed')

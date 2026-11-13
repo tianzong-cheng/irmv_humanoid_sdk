@@ -52,7 +52,8 @@ class ValidationTest(unittest.TestCase):
                     engine.apply_torque(torque)
             engine.apply_torque([.01])
             self.assertAlmostEqual(float(engine._data.ctrl.numpy()[0, 0]), .01, places=8)
-            for steps in (0, -1, True, 1.5, 100001):
+            engine.timestep_s = .001
+            for steps in (0, -1, True, 1.5, 3600001):
                 engine._physics_step = 0
                 with self.assertRaises(ValueError):
                     engine.step(steps)
