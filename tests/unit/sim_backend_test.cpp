@@ -52,6 +52,8 @@ int main() {
   CHECK(out.torque.tau.values[0] == 4);
   CHECK(!b.Write(1, t).accepted);
   CHECK(x.InstallFeedback(next));
+  CHECK(b.Read(999999).joints[0].freq_hz == 500);
+  CHECK(b.Read(9999999).joints[0].freq_hz == 500);
   CHECK(!b.Write(1, t).accepted);
   CHECK(b.Write(2001, t).accepted);
   CHECK(x.TryTakeTorque(&out));
@@ -76,6 +78,7 @@ int main() {
   stop_phase.identity.phase = 1;
   CHECK(x.InstallFeedback(stop_phase));
   CHECK(b.Read(999999).stamp_us == 6001);
+  CHECK(b.Read(999999).joints[0].freq_hz == 500);
   CHECK(b.Write(6001, t).accepted);
   CHECK(!x.InstallFeedback(stop_phase));
   CHECK(x.TryTakeTorque(&out));

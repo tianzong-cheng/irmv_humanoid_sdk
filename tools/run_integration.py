@@ -708,11 +708,12 @@ def choose_domain(declared, work_dir, lock_dir=None):
     """
     shared = (Path(lock_dir).resolve() if lock_dir is not None
               else Path(work_dir).resolve().parent)
+    reserved = json.loads((Path(__file__).resolve().parents[1] /
+                           "tests/integration/dds_domains.json").read_text())["reserved"]
     for offset in range(0, 40):
         candidate = 190 + ((declared - 190 + offset) % 40)
-        # Domain 222 is reserved by tests/integration/dds_domains.json for
-        # the serial simulation barrier peer; scenarios must never claim it.
-        if candidate == 222:
+        # Serial test domains are maintained in one registry.
+        if str(candidate) in reserved:
             continue
         if candidate >= 230:
             continue

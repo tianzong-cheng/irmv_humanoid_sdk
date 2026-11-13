@@ -29,6 +29,7 @@
 #include "irmv/policy/inference.hpp"
 #include "irmv/policy/observation.hpp"
 #include "irmv/policy/onnx_model.hpp"
+#include "irmv/simulation/application_driver.hpp"
 #include "irmv/telemetry/record_context.hpp"
 #include "irmv/telemetry/velocity_record.hpp"
 #include "irmv/transport/client_transport.hpp"
@@ -302,10 +303,11 @@ bool ReadTerminal(InputRouter *router, std::array<char, kReadChunk> *buffer,
 // last. irmv_transport must not depend on irmv_application, so ClientTransport
 // cannot implement ClientSink itself, and the application executable is the
 // only place that knows both.
-class SinkAdapter final : public ClientSink {
+class StageSink final : public ClientSink {
  public:
-  explicit SinkAdapter(transport::ClientTransport &transport)
-      : transport_(transport) {}
+  explicit StageSink(transport::ClientTransport &transport,
+                     simulation::ApplicationDriver *simulation = nullptr)
+      : transport_(transport), simulation_(simulation) {}
 
   bool PublishRequest(const protocol::ExecutionRequest &request) override {
     // Recorded before the lane decides: the display shows the operation of the
@@ -313,16 +315,19 @@ class SinkAdapter final : public ClientSink {
     // queue that copy of it.
     last_operation_ = request.operation;
     have_operation_ = true;
-    return transport_.PublishRequest(request);
+    return simulation_ ? simulation_->PublishRequest(request)
+                       : transport_.PublishRequest(request);
   }
 
   bool PublishCommand(const protocol::JointCommand &command) override {
-    return transport_.PublishCommand(command);
+    return simulation_ ? simulation_->PublishCommand(command)
+                       : transport_.PublishCommand(command);
   }
 
   bool PublishHeartbeat(
       const protocol::SupervisorHeartbeat &heartbeat) override {
-    return transport_.PublishHeartbeat(heartbeat);
+    return simulation_ ? simulation_->PublishHeartbeat(heartbeat)
+                       : transport_.PublishHeartbeat(heartbeat);
   }
 
   const char *PendingOperation() const {
@@ -331,6 +336,7 @@ class SinkAdapter final : public ClientSink {
 
  private:
   transport::ClientTransport &transport_;
+  simulation::ApplicationDriver *simulation_;
   protocol::Operation last_operation_{protocol::Operation::AcquireSession};
   bool have_operation_{false};
 };
@@ -406,7 +412,7 @@ const char *SessionField(const RobotClient &client, const ClientView &view) {
 
 // The pending request of the display: the operation of the request the client
 // is waiting on, and nothing while none is pending.
-void PendingField(const RobotClient &client, const SinkAdapter &sink,
+void PendingField(const RobotClient &client, const StageSink &sink,
                   StatusFields *fields) {
   fields->pending = client.request_pending() ? sink.PendingOperation() : "-";
 }
@@ -558,7 +564,29 @@ int RunApplication(const ApplicationOptions &options,
   // The transport is the first thing of this process that touches DDS, and
   // after this point every decision of the loop is a decision about a live
   // link.
+  std::optional<simulation::EndpointConfig> simulation_config;
+  std::unique_ptr<simulation::SimulationClock> simulation_clock;
+  if (config.runtime.backend == "sim") {
+    try {
+      simulation_config = simulation::LoadBootstrap(
+          config.runtime, simulation::Role::Application,
+          config.application_config_id);
+      simulation_clock = std::make_unique<simulation::SimulationClock>(
+          simulation_config->run_id, config.runtime.control_period_us);
+    } catch (const std::exception &error) {
+      std::fprintf(stderr, "application: simulation startup: %s\n",
+                   error.what());
+      return kExitStartupError;
+    }
+  }
   transport::ClientTransport transport(config);
+  std::unique_ptr<simulation::ApplicationDriver> simulation_driver;
+  if (simulation_clock) {
+    if (!transport.ConfigureSimulation(*simulation_clock))
+      return kExitStartupError;
+    simulation_driver = std::make_unique<simulation::ApplicationDriver>(
+        *simulation_config, *simulation_clock, transport);
+  }
   try {
     transport.Start();
   } catch (const std::exception &error) {
@@ -579,7 +607,12 @@ int RunApplication(const ApplicationOptions &options,
   const LocomotionSource source = options.locomotion_source.value_or(
       config.policy.model_path.empty() ? LocomotionSource::None
                                        : LocomotionSource::Local);
-  SinkAdapter sink(transport);
+  if (simulation_driver && source == LocomotionSource::External) {
+    std::fprintf(stderr,
+                 "application: external simulation source is unsupported\n");
+    return kExitStartupError;
+  }
+  StageSink sink(transport, simulation_driver.get());
   RobotClient client(sink, config, MakeSupervisorId());
   BehaviorFsm fsm(config, client, source);
   InputRouter router(config);
@@ -659,6 +692,33 @@ int RunApplication(const ApplicationOptions &options,
           record.applied_kd);
     }
     std::fflush(stdout);
+  }
+  if (simulation_driver) {
+    try {
+      configuration::ValidateSimulationPolicy(
+          config, source == LocomotionSource::Local ? "local" : "none",
+          model ? model->contract().policy_period_us : 0);
+      // Warm the actual session under the startup host deadline before Hello.
+      policy::PolicyRequest warmup;
+      warmup.observation.count = model->contract().observation.dimension;
+      worker->Submit(warmup);
+      policy::PolicyResponse warmed;
+      const auto end = simulation::DriverHostUs() +
+                       config.runtime.simulation->host_startup_timeout_us;
+      while (!worker->TryTake(&warmed)) {
+        if (stop_requested.load() || simulation::DriverHostUs() >= end)
+          throw std::runtime_error(
+              "simulation model warmup cancelled or timed out");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      if (!warmed.ok)
+        throw std::runtime_error("simulation model warmup failed");
+      simulation_driver->Start();
+    } catch (const std::exception &error) {
+      std::fprintf(stderr, "application: simulation policy/startup: %s\n",
+                   error.what());
+      return kExitStartupError;
+    }
   }
   // The external source: a producer process that registers over DDS. The
   // transport of that interface exists only in this mode, so a local or
@@ -787,6 +847,7 @@ int RunApplication(const ApplicationOptions &options,
   // (so the transition out of it can be detected), whether a result is on its
   // way, and the raw action the observation carries.
   std::uint64_t generation = 0;
+  simulation::InferencePhase inference_phase;
   bool armed_previously = false;
   bool result_outstanding = false;
   bool submitted_once = false;
@@ -838,6 +899,19 @@ int RunApplication(const ApplicationOptions &options,
   protocol::TimeUs worst_tx_us = 0;
 
   while (true) {
+    if (simulation_driver) {
+      simulation::StepPermit permit;
+      while (!simulation_driver->TakePermit(&permit)) {
+        if (simulation_driver->Failed() ||
+            stop_requested.load(std::memory_order_relaxed)) {
+          std::fprintf(stderr,
+                       "application: simulation aborted; successful stop "
+                       "requires Task 8\n");
+          return kExitStopUnknown;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+    }
     // Two instants per iteration, both from the one monotonic host clock and
     // both named for what they time. `input_now` is read before the terminal
     // is drained and stamps only the keystrokes that read produced: a key is
@@ -855,7 +929,8 @@ int RunApplication(const ApplicationOptions &options,
     // decision_now` for every event of the iteration, and no decision predates
     // the data it acts on. The loop reads no other clock, and the runtime's
     // stamps are only ever compared against a host receive stamp.
-    const protocol::TimeUs input_now = MonotonicUs();
+    const protocol::TimeUs input_now =
+        simulation_clock ? simulation_clock->NowUs() : MonotonicUs();
 
     // (1) The terminal. A read that would block is not the loop's pacing: the
     // poll at the end of the iteration is, so the terminal can never stall the
@@ -865,7 +940,9 @@ int RunApplication(const ApplicationOptions &options,
     }
 
     // (2) Everything the transport thread received since the last iteration.
-    const transport::ClientEvents &events = transport.TakeEvents();
+    const transport::ClientEvents &events = simulation_driver
+                                                ? simulation_driver->Events()
+                                                : transport.TakeEvents();
     protocol::TimeUs newest_rx_us = 0;
     for (std::size_t index = 0; index < events.result_count; ++index) {
       client.ObserveResult(events.results[index].value,
@@ -880,11 +957,14 @@ int RunApplication(const ApplicationOptions &options,
         newest_rx_us = events.state_rx_us;
       }
     }
-    const protocol::TimeUs decision_now =
-        DecisionInstant(MonotonicUs(), newest_rx_us);
+    const protocol::TimeUs decision_now = DecisionInstant(
+        simulation_clock ? simulation_clock->NowUs() : MonotonicUs(),
+        newest_rx_us);
     ++iterations;
     if (previous_start_us != 0) {
-      const protocol::TimeUs gap = decision_now - previous_start_us;
+      const protocol::TimeUs gap =
+          (simulation_driver ? MonotonicUs() : decision_now) -
+          previous_start_us;
       if (gap > worst_gap_us) {
         worst_gap_us = gap;
       }
@@ -895,7 +975,7 @@ int RunApplication(const ApplicationOptions &options,
         ++overruns;
       }
     }
-    previous_start_us = decision_now;
+    previous_start_us = simulation_driver ? MonotonicUs() : decision_now;
     router.Tick(decision_now);
 
     // (3) Exactly one poll per iteration: the outcome it reports is edge
@@ -922,7 +1002,8 @@ int RunApplication(const ApplicationOptions &options,
     protocol::TimeUs sends_us = 0;
     for (;;) {
       const InputEvent event = router.TakeEvent();
-      behavior = fsm.Step(decision_now, event, view);
+      behavior =
+          fsm.Step(decision_now, event, view, simulation_driver != nullptr);
       if (behavior.initialization_refused) {
         initialization_refused = true;
       }
@@ -984,6 +1065,7 @@ int RunApplication(const ApplicationOptions &options,
         // the next one starts from the contract's own initial action, and the
         // generation makes the identity of the two unmistakable.
         ++generation;
+        if (simulation_driver) inference_phase.Cancel();
         policy::PolicyResponse withdrawn;
         while (worker->TryTake(&withdrawn)) {
         }
@@ -1019,10 +1101,14 @@ int RunApplication(const ApplicationOptions &options,
           request.state_stamp_us = view.state.stamp_us;
           request.submitted_us = decision_now;
           request.observation = observation;
-          worker->Submit(request);
-          result_outstanding = true;
-          submitted_once = true;
-          last_submit_us = decision_now;
+          if (!simulation_driver ||
+              inference_phase.Begin(decision_now, generation, request.epoch,
+                                    model->contract().policy_period_us)) {
+            worker->Submit(request);
+            result_outstanding = true;
+            submitted_once = true;
+            last_submit_us = decision_now;
+          }
         }
       }
       if (result_outstanding &&
@@ -1035,7 +1121,48 @@ int RunApplication(const ApplicationOptions &options,
         fsm.LatchLocalPolicyFault(decision_now);
       }
       policy::PolicyResponse response;
-      if (worker->TryTake(&response)) {
+      auto take_response = [&]() {
+        while (worker->TryTake(&response)) {
+          if (!simulation_driver ||
+              inference_phase.Matches(response.submitted_us,
+                                      response.generation, response.epoch))
+            return true;
+        }
+        return false;
+      };
+      bool have_response = take_response();
+      if (simulation_driver && result_outstanding && !have_response) {
+        const auto end = simulation::DriverHostUs() +
+                         config.runtime.simulation->host_phase_timeout_us;
+        while (!have_response) {
+          if (stop_requested.load() || simulation_driver->Failed() ||
+              simulation::DriverHostUs() >= end) {
+            std::fprintf(
+                stderr,
+                "application: simulation inference cancelled or timed out\n");
+            return kExitStopUnknown;
+          }
+          if (!input_lost)
+            input_lost = ReadTerminal(&router, &bytes, decision_now);
+          const auto event = router.TakeEvent();
+          if (event != InputEvent::None) {
+            behavior = fsm.Step(decision_now, event, view, true);
+            if (behavior.send_command)
+              client.SendCommand(&behavior.command, decision_now);
+            if (behavior.send_heartbeat) client.SendHeartbeat(decision_now);
+            if (!behavior.locomotion_armed) {
+              ++generation;
+              inference_phase.Cancel();
+              result_outstanding = false;
+              submitted_once = false;
+              break;
+            }
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          have_response = take_response();
+        }
+      }
+      if (have_response) {
         // The result of the step this loop is waiting for is the only one that
         // may reopen the lane or drive a frame. The identity is checked whole -
         // the submission instant that names the step, the local generation, the
@@ -1047,6 +1174,9 @@ int RunApplication(const ApplicationOptions &options,
         const bool current =
             result_outstanding && response.submitted_us == last_submit_us;
         if (current) {
+          if (simulation_driver)
+            inference_phase.Complete(response.submitted_us, response.generation,
+                                     response.epoch);
           result_outstanding = false;
         }
         switch (policy::JudgePolicyResult(
@@ -1108,6 +1238,12 @@ int RunApplication(const ApplicationOptions &options,
       }
     }
 
+    if (simulation_driver && worker && behavior.locomotion_armed) {
+      behavior = fsm.Step(decision_now, InputEvent::None, view);
+      if (behavior.send_command)
+        client.SendCommand(&behavior.command, decision_now);
+      if (behavior.send_heartbeat) client.SendHeartbeat(decision_now);
+    }
     // (5c) The external producer source. The behaviour above decided whether a
     // source is wanted and the runtime is the only thing that authorizes an
     // execution context; this is the one place that talks to a producer
@@ -1362,6 +1498,12 @@ int RunApplication(const ApplicationOptions &options,
     // (7) The exit. `exit_ready` is the FSM's own statement that the sequence
     // it was asked for is over: either a fresh lower state shows the damping
     // stop, or the sequence reached its own deadline and proved nothing.
+    if (simulation_driver && behavior.exit_ready) {
+      std::fprintf(stderr,
+                   "application: simulation exit requested; successful leave "
+                   "requires Task 8\n");
+      return kExitStopUnknown;
+    }
     if (behavior.exit_ready) {
       const char *lower = behavior.runtime_state_known
                               ? StateName(behavior.runtime_state)
@@ -1466,6 +1608,31 @@ int RunApplication(const ApplicationOptions &options,
       return exit_code;
     }
 
+    if (simulation_driver) {
+      const auto end = simulation::DriverHostUs() +
+                       config.runtime.simulation->host_phase_timeout_us;
+      auto report = [&](const auto &sample) {
+        simulation::MessageIdentity id;
+        if (!simulation::Identify(sample, &id)) return false;
+        while (!simulation_driver->Processed(id)) {
+          if (simulation_driver->Failed() || stop_requested.load() ||
+              simulation::DriverHostUs() >= end)
+            return false;
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return true;
+      };
+      for (std::size_t i = 0; i < events.result_count; ++i)
+        if (!report(events.results[i].value)) return kExitStopUnknown;
+      if (events.has_state && !report(events.state)) return kExitStopUnknown;
+      while (!simulation_driver->CompletePhase(simulation_driver->Outputs())) {
+        if (simulation_driver->Failed() || stop_requested.load() ||
+            simulation::DriverHostUs() >= end)
+          return kExitStopUnknown;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      continue;
+    }
     // The wait that paces the iteration, and the terminal wait with it. Once
     // the input device is gone the descriptor reports it forever, so the
     // pacing becomes a plain sleep instead of a spin. In both forms the wait is

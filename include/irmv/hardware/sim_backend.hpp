@@ -34,6 +34,7 @@ class SimulationExchange {
   TorqueFrame torque_{};
   bool observed_{false}, pending_{false}, written_{false};
   std::uint64_t write_id_{0};
+  double feedback_hz_{0};
 };
 }  // namespace irmv::simulation
 namespace irmv::hardware {

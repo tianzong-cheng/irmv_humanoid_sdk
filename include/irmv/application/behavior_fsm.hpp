@@ -129,7 +129,7 @@ class BehaviorFsm {
   BehaviorFsm(const BehaviorFsm &) = delete;
   BehaviorFsm &operator=(const BehaviorFsm &) = delete;
 
-  // One iteration: `now_us` is the host monotonic instant, `event` the semantic
+  // One iteration: `now_us` is the logical instant, `event` the semantic
   // input event of this iteration (None when there is none) and `view` the
   // ClientView of the Poll this iteration already made. Step never polls.
   //
@@ -139,8 +139,10 @@ class BehaviorFsm {
   // first Step that sees that serial acts on it, every later Step on the same
   // view sees None), and a stop an earlier Step of the iteration began is
   // visible to the later ones.
+  // defer_local_target leaves local locomotion emission for a same-time
+  // policy-completion Step; defaults preserve realtime scheduling.
   BehaviorStep Step(protocol::TimeUs now_us, InputEvent event,
-                    const ClientView &view);
+                    const ClientView &view, bool defer_local_target = false);
 
   BehaviorState state() const { return state_; }
   FaultCause fault_cause() const { return fault_cause_; }

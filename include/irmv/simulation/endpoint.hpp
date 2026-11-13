@@ -25,6 +25,10 @@ class Endpoint {
   // Only control thread produces outbound and consumes inbound. Worker owns
   // opposite sides and all socket calls. Overflow fails the run, never evicts.
   bool TrySend(const Frame&) noexcept;
+  // Producer-owned readiness: lets the outer driver wait without overflowing.
+  bool SendAvailable() const noexcept {
+    return Ready() && !Failed() && !outbound_.full();
+  }
   bool TryTake(Frame*) noexcept;
   void Stop();
   bool Ready() const noexcept { return ready_.load(); }

@@ -24,7 +24,9 @@
 
 #include "irmv/build_identity.hpp"
 #include "irmv/hardware/backend_factory.hpp"
+#include "irmv/hardware/sim_backend.hpp"
 #include "irmv/runtime/execution_fsm.hpp"
+#include "irmv/simulation/runtime_driver.hpp"
 #include "irmv/telemetry/diagnostic_write.hpp"
 #include "irmv/telemetry/logger.hpp"
 #include "irmv/telemetry/record_context.hpp"
@@ -1883,10 +1885,33 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
     }
   }
 
-  const RuntimeIdentity identity = MakeRuntimeId();
+  std::optional<simulation::EndpointConfig> simulation_config;
+  std::unique_ptr<simulation::SimulationClock> simulation_clock;
+  std::unique_ptr<simulation::SimulationExchange> simulation_exchange;
+  RuntimeIdentity identity = MakeRuntimeId();
+  if (config.backend == "sim") {
+    try {
+      simulation_config =
+          simulation::LoadBootstrap(config, simulation::Role::Runtime);
+      identity.id = simulation_config->local_hello.runtime_id;
+      identity.entropy_fallback = false;
+      simulation_clock = std::make_unique<simulation::SimulationClock>(
+          simulation_config->run_id, config.control_period_us);
+      simulation_exchange = std::make_unique<simulation::SimulationExchange>(
+          config.joint_count());
+    } catch (const std::exception &error) {
+      StderrFormat("robot_runtime: simulation startup: %s\n", error.what());
+      return kExitStartupError;
+    }
+  }
   std::unique_ptr<hardware::Backend> backend;
   try {
-    backend = hardware::MakeBackend(config);
+    if (simulation_exchange) {
+      backend =
+          std::make_unique<hardware::SimBackend>(config, *simulation_exchange);
+    } else {
+      backend = hardware::MakeBackend(config);
+    }
     backend->Initialize();
   } catch (const std::exception &error) {
     StderrFormat("robot_runtime: backend start failed: %s\n", error.what());
@@ -1984,8 +2009,16 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
   }
 
   transport::DdsTransport transport(config);
+  std::unique_ptr<simulation::RuntimeDriver> simulation_driver;
+  if (simulation_clock) {
+    if (!transport.ConfigureSimulation(*simulation_clock))
+      return kExitStartupError;
+    simulation_driver = std::make_unique<simulation::RuntimeDriver>(
+        *simulation_config, *simulation_clock, *simulation_exchange, transport);
+  }
   try {
     transport.Start();
+    if (simulation_driver) simulation_driver->Start();
   } catch (const std::exception &error) {
     StderrFormat("robot_runtime: transport start failed: %s\n", error.what());
     logger.Stop();
@@ -1999,7 +2032,7 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
     applier.emplace(scenario.value_or(FakeScenario{}), config);
   }
   LogStartup(logger, config, identity.id, fsm.execution_state(),
-             process_start_us);
+             simulation_clock ? simulation_clock->NowUs() : process_start_us);
   if (identity.entropy_fallback) {
     LogRecord record(configuration::LogLevel::Warning, process_start_us, 0,
                      "runtime",
@@ -2018,12 +2051,30 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
   ShutdownPlanner shutdown;
 
   while (true) {
+    if (simulation_driver) {
+      simulation::StepPermit permit;
+      while (!simulation_driver->TakePermit(&permit)) {
+        if (simulation_driver->Failed() ||
+            g_stop_requested.load(std::memory_order_relaxed)) {
+          StderrLine(
+              "robot_runtime: simulation aborted; successful stop requires "
+              "Task 8\n");
+          transport.Stop();
+          logger.Stop();
+          if (recorder) recorder->Stop();
+          backend->Close();
+          return kExitStartupError;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+    }
     // The read starts at this instant, but the tick is evaluated at a later
     // instant: a frame may arrive while the coherent snapshot is being copied.
     // Reading the evaluation clock after the feedback keeps a legitimately
     // newer receive stamp from looking like a timestamp from the future. A
     // genuinely future stamp is still rejected by the safety check.
-    const protocol::TimeUs read_started_us = MonotonicUs();
+    const protocol::TimeUs read_started_us =
+        simulation_clock ? simulation_clock->NowUs() : MonotonicUs();
     // Due scenario entries are applied before the read of this tick, so the
     // snapshot the state machine sees is the one the scenario describes at this
     // instant - including the entry due at process start.
@@ -2039,9 +2090,43 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
       input = shutdown.PlanStop(*input, fsm);
     }
     const protocol::FeedbackSnapshot feedback = backend->Read(read_started_us);
-    const protocol::TimeUs now = MonotonicUs();
+    const protocol::TimeUs now =
+        simulation_clock ? simulation_clock->NowUs() : MonotonicUs();
     const TickResult result = fsm.Tick(now, feedback, *input, *backend);
-    transport.Publish(result);
+    if (simulation_driver) {
+      const auto end =
+          simulation::DriverHostUs() + config.simulation->host_phase_timeout_us;
+      auto report = [&](const auto &sample) {
+        simulation::MessageIdentity id;
+        if (!simulation::Identify(sample, &id)) return false;
+        while (!simulation_driver->Processed(id)) {
+          if (simulation_driver->Failed() ||
+              simulation::DriverHostUs() >= end || g_stop_requested.load())
+            return false;
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return true;
+      };
+      bool processed = true;
+      for (std::size_t i = 0; i < input->stop_request_count; ++i)
+        processed = report(input->stop_requests[i].value) && processed;
+      for (std::size_t i = 0; i < input->request_count; ++i)
+        processed = report(input->requests[i].value) && processed;
+      for (std::size_t i = 0; i < input->heartbeat_count; ++i)
+        processed = report(input->heartbeats[i].value) && processed;
+      for (std::size_t i = 0; i < input->command_count; ++i)
+        processed = report(input->commands[i].value) && processed;
+      const auto *target =
+          result.state.execution_state == protocol::ExecutionState::Tracking &&
+                  result.state.output_action == protocol::OutputAction::Tracking
+              ? &fsm.current_target()
+              : nullptr;
+      if (!processed || !simulation_driver->CompleteTick({result, target})) {
+        StderrLine("robot_runtime: simulation tick handoff failed\n");
+        return kExitStartupError;
+      }
+    } else
+      transport.Publish(result);
     ++counters.ticks;
     counters.fsm_dropped =
         result.dropped_result_count + result.dropped_event_count;
@@ -2148,18 +2233,20 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
       return kExitOk;
     }
 
-    if (now >= next_status_us) {
+    const auto status_now = simulation_driver ? MonotonicUs() : now;
+    if (status_now >= next_status_us) {
       LogSummary(logger, "status", fsm, counters, transport, logger.Dropped(),
                  now);
       // Anchored on the current time: a delayed loop reports late instead of
       // printing a burst of catch-up lines.
-      next_status_us = now + kStatusIntervalUs;
+      next_status_us = status_now + kStatusIntervalUs;
     }
 
     // Absolute deadline, advanced by exactly one period: the phase never
     // accumulates drift and no tick busy-waits. A tick that ran past its
     // deadline is counted and reported; one that ran a whole period late
     // re-anchors the schedule instead of starting a catch-up burst.
+    if (simulation_driver) continue;
     deadline += std::chrono::microseconds(period_us);
     const Clock::time_point work_end = Clock::now();
     if (work_end < deadline) {

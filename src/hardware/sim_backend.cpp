@@ -54,6 +54,9 @@ bool SimulationExchange::InstallFeedback(const FeedbackFrame& f) noexcept {
     if (!std::isfinite(v)) return false;
   for (double v : f.feedback.imu_specific_force)
     if (!std::isfinite(v)) return false;
+  if (observed_ && f.identity.logical_us > feedback_.identity.logical_us)
+    feedback_hz_ = 1e6 / static_cast<double>(f.identity.logical_us -
+                                             feedback_.identity.logical_us);
   feedback_ = f;
   observed_ = true;
   written_ = false;
@@ -91,6 +94,7 @@ protocol::FeedbackSnapshot SimBackend::Read(protocol::TimeUs) {
     j.dq = v.dq.values[i];
     j.tau_est = v.tau.values[i];
     j.rx_stamp_us = r.stamp_us;
+    j.freq_hz = exchange_.feedback_hz_;
   }
   r.imu.valid = v.imu_valid;
   r.imu.rx_stamp_us = r.stamp_us;

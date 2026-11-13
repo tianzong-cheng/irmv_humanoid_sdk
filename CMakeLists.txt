@@ -2098,3 +2098,27 @@ foreach(contract coordinator runner time)
     "${PROJECT_SOURCE_DIR}/tests/unit/simulation_${contract}_test.py")
   set_tests_properties(simulation_${contract}_test PROPERTIES LABELS core TIMEOUT 15)
 endforeach()
+
+add_library(irmv_simulation_drivers src/simulation/bootstrap.cpp
+  src/simulation/driver_session.cpp src/simulation/runtime_driver.cpp
+  src/simulation/application_driver.cpp)
+target_compile_features(irmv_simulation_drivers PUBLIC cxx_std_17)
+target_include_directories(irmv_simulation_drivers PUBLIC "${PROJECT_SOURCE_DIR}/include")
+target_link_libraries(irmv_simulation_drivers PUBLIC irmv_transport irmv_simulation_endpoint
+  irmv_simulation_clock irmv_hardware nlohmann_json::nlohmann_json)
+foreach(target robot_runtime scenario_test real_backend_runtime application)
+  if(TARGET ${target})
+    target_link_libraries(${target} PRIVATE irmv_simulation_drivers)
+  endif()
+endforeach()
+add_executable(simulation_driver_test tests/unit/simulation_driver_test.cpp)
+target_include_directories(simulation_driver_test PRIVATE "${PROJECT_SOURCE_DIR}/tests")
+target_link_libraries(simulation_driver_test PRIVATE irmv_simulation_drivers)
+add_test(NAME simulation_driver_test COMMAND simulation_driver_test)
+set_tests_properties(simulation_driver_test PROPERTIES LABELS core)
+
+if(IRMV_BUILD_APPLICATION)
+  add_test(NAME simulation_lockstep_test COMMAND "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/integration/simulation_lockstep_test.py" "${CMAKE_CURRENT_BINARY_DIR}")
+  set_tests_properties(simulation_lockstep_test PROPERTIES LABELS integration RUN_SERIAL TRUE TIMEOUT 120 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+endif()

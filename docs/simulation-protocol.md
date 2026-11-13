@@ -515,3 +515,76 @@ Short real-GPU checkpoint probes verify the pinned addition behavior; injected
 missing clock updates fail before host physics count advancement. These probes
 are not an hour-long rollout, malicious-peer authentication, motor execution,
 or a substitute for all numerical/physical validation.
+
+## SDK loop drivers (Task 7)
+
+The real robot_runtime and application executables select simulation drivers only
+for backend=sim. Fake/Real retain host pacing, backend construction and random
+identities. Runtime loads only its RuntimeConfig; it never loads an application
+configuration or model. The independently supplied runtime_id is used from its
+first state. Both transports borrow a SimulationClock before Start. FSM/client,
+input/trajectory, policy submission/verdict and business stamps use committed
+logical time; terminal polling, cancellation, warmup/inference waits, diagnostic
+cadence and performance durations use the host monotonic clock.
+
+`LoadBootstrap(RuntimeConfig, Role, application_digest={}) -> EndpointConfig`
+reads socket_directory/bootstrap.json without creating or changing it, walks
+parents without symlinks, requires a same-user0700 final directory, and reads a
+same-user regular non-symlink artifact <=65536bytes without group/other writes.
+Required SDK fields are run_id/runtime_id (distinct nonzero lower-case32hex),
+config_digest/application_digest/engine_digest (nonzero lower-case64hex), and
+positive integer physics_dt_us/control_dt_us. Runtime verifies its own normalized
+config_id, engine_sha256 and both dt values. Application additionally verifies
+its normalized application_config_id. engine_config and coordinator timeout/duration
+fields remain owned by the independent runner. SDK host deadlines come from the
+validated SimulationConfig; Endpoint rounds these up to milliseconds. Both peers
+connect only bridge.sock in that directory. Task9 owns the production normalizer
+and launcher artifact creation; the integration test's C++ loader mode emits
+actual loader digests, never a Python reproduction of canonical hashing.
+
+RuntimeDriver::TakePermit(StepPermit*) and CompleteTick(TickCompletion) surround
+one existing ExecutionFsm::Tick. TickCompletion borrows the actual TickResult and
+FSM current_target only when the actual output is Tracking. Runtime state and
+all actually emitted results are buffered. Torque carries that actual state_seq
+and independently identified current target; other outputs use the zero-unused
+Command/runtime-id sentinel. Simulation feedback frequency derives from successive
+logical samples; cached or same-time reads preserve it and the receive stamp.
+
+ApplicationDriver::TakePermit waits for phase1 installation, stage2 permission
+and the complete exact DDS inventory before returning its aggregated Events.
+The executable's StageSink forwards all three ClientSink methods to the bounded
+simulation staging buffer, or to their original transports in realtime.
+CompletePhase(Outputs()) is retried under the host deadline until actual business
+reports yield PhaseAck1, then queues exact phase2 manifests, auxiliary
+FirstCommandProof from each actual buffered Tracking request.first_command, and
+seal on that same endpoint. Proofs never become phantom Command DDS inventory.
+FirstCommandProof precedes the seal; each output retains its original payload and
+identity until the next permitted computation. Exact DDS retransmission occurs
+every20host milliseconds only after PublishPermit. Endpoint::SendAvailable is a
+producer-side capacity query so the140frame control staging queue can feed the
+unchanged32frame endpoint queue without intentionally overflowing it.
+
+DriverSession polls BeginSimulationPhase -> exact SimulationPhaseInstalled ->
+InventoryReady before the sender can publish. Application reports actual handled
+results/state; runtime reports actual dequeued requests/stops/commands/heartbeats
+after its real tick. False reports retry the same captured identity under the
+host deadline. Runtime phase2 ACK remains Ingress; those inputs are consumed only
+by the next normal tick. Empty inventories still use all installation/ACK gates.
+
+InferencePhase is a pure ownership/schedule gate with explicit logical instants,
+generation and epoch. A completion for another epoch cannot reopen a pending
+submission; repeated host polling at one instant cannot resubmit. The actual
+worker is warmed once under the startup host deadline before SDK Hello. Due
+inference is awaited without repeating the normal loop, and terminal events can
+withdraw ownership while it is pending. A default-preserving BehaviorFsm::Step
+argument defers only local locomotion target emission until the same-time policy
+completion event. This avoids sending the previous strategy frame for one extra
+policy period; every stop/fault/request/heartbeat check still runs first.
+
+Focused real-process testing uses reserved DDS223 (RUN_SERIAL), generated ONNX,
+the actual robot_runtime/application binaries and test-only FakeEngine. It checks
+50/500Hz, exact next-tick fresh-source adoption, identical adoption steps under
+engine/socket/actual ONNX worker delays, and terminal exit while inference is
+pending. Pure tests inject completions/epochs/cancellation without DDS or waits.
+Normal simulation exit still returns nonzero; successful Leave, release and
+RuntimeOnly continuation require Task8. This is not GPU/HIL or dynamics evidence.

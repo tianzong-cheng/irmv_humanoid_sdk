@@ -22,12 +22,14 @@
 // channel and picks the newest finished result up on a later tick. Neither side
 // blocks the other, a submission that is superseded before the worker reached
 // it is counted rather than queued, and a result the loop did not collect is
-// replaced the same way.
+// replaced the same way. In simulation the outer runner waits at frozen logical
+// time under a separate host deadline; it never resubmits a due step while
+// waiting.
 //
 // A request carries the identity of the step it belongs to - the local
 // authorization generation, the epoch, the state sequence and stamp the
-// observation was taken from, and the host instant it was submitted - and the
-// response carries exactly the same identity back. The loop is what decides
+// observation was taken from, and the logical instant it was submitted - and
+// the response carries exactly the same identity back. The loop is what decides
 // whether a result is still usable; the worker only runs the model and reports
 // whether it produced one.
 //

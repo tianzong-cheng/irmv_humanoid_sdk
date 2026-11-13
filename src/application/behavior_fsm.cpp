@@ -68,7 +68,8 @@ BehaviorFsm::BehaviorFsm(const configuration::ApplicationConfig &config,
               : config.policy.inference_timeout_us) {}
 
 BehaviorStep BehaviorFsm::Step(protocol::TimeUs now_us, InputEvent event,
-                               const ClientView &view) {
+                               const ClientView &view,
+                               bool defer_local_target) {
   BehaviorStep out;
   // The lower layer's facts, as the last trustworthy state reported them. A
   // state that is known but no longer current is not a present fact: the loop
@@ -125,7 +126,13 @@ BehaviorStep BehaviorFsm::Step(protocol::TimeUs now_us, InputEvent event,
     // have been begun by an earlier Step of this very iteration, and the target
     // frame that would leave now belongs to the authorization the stop is
     // withdrawing.
-    EmitTarget(now_us, view, &out);
+    // The simulation runner delivers a due local policy result at this same
+    // logical instant before emitting its target. All safety/stop/request and
+    // heartbeat work above/below still runs. Default callers emit as before.
+    if (!(defer_local_target && locomotion_source_ == LocomotionSource::Local &&
+          state_ == BehaviorState::Locomotion)) {
+      EmitTarget(now_us, view, &out);
+    }
   }
 
   // Phase 4 - the supervision heartbeat, and only after every check above:
