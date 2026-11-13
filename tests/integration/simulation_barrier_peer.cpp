@@ -21,6 +21,22 @@ bool WaitFor(Predicate predicate) {
   } while (std::chrono::steady_clock::now() < deadline);
   return false;
 }
+// A business value may be dequeued before the DDS worker publishes its ingress
+// receipt. Retry only the captured delivered identity, without taking events
+// again or confusing receipt/processing with FSM acceptance.
+template <class Transport>
+bool ReportProcessed(Transport& transport,
+                     const simulation::MessageIdentity& delivered) {
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  do {
+    if (transport.SimulationFailed()) return false;
+    if (transport.ReportSimulationProcessed(delivered))
+      return !transport.SimulationFailed();
+    std::this_thread::yield();
+  } while (std::chrono::steady_clock::now() < deadline);
+  return false;
+}
 }  // namespace
 int main(int argc, char** argv) {
   CHECK(argc == 2);
@@ -120,40 +136,51 @@ int main(int argc, char** argv) {
   const auto& first = *first_batch;
   CHECK(first.has_state == state_first);
   CHECK(first.result_count == (state_first ? 0 : 1));
-  CHECK(upper->ReportSimulationProcessed(state_first ? state : result));
+  simulation::MessageIdentity delivered_first;
+  CHECK(state_first
+            ? simulation::Identify(first.state, &delivered_first)
+            : simulation::Identify(first.results[0].value, &delivered_first));
+  CHECK(
+      simulation::SameIdentity(delivered_first, state_first ? state : result));
+  CHECK(ReportProcessed(*upper, delivered_first));
   CHECK(!upper->TrySimulationAck(&ack));
   if (state_first)
     result_writer.write(wire_result);
   else
     state_writer.write(wire_state);
   bool got_state = state_first, got_result = !state_first;
+  simulation::MessageIdentity delivered_second;
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
   while (std::chrono::steady_clock::now() < deadline &&
          (!got_state || !got_result)) {
     const auto& events = upper->TakeEvents();
     if (events.has_state) {
       CHECK(events.state_rx_us == 1);
+      CHECK(simulation::Identify(events.state, &delivered_second));
       got_state = true;
     }
     for (std::size_t i = 0; i < events.result_count; ++i) {
       CHECK(events.results[i].rx_us == 1);
+      CHECK(simulation::Identify(events.results[i].value, &delivered_second));
       got_result = true;
     }
     std::this_thread::yield();
   }
   CHECK(got_state && got_result);
   CHECK(!upper->TrySimulationAck(&ack));  // dequeued, not processed
-  CHECK(upper->ReportSimulationProcessed(state_first ? state : result));
+  CHECK(ReportProcessed(*upper, delivered_first));
   CHECK(!upper->TrySimulationAck(&ack));
-  CHECK(upper->ReportSimulationProcessed(state_first ? result : state));
+  CHECK(
+      simulation::SameIdentity(delivered_second, state_first ? result : state));
+  CHECK(ReportProcessed(*upper, delivered_second));
   CHECK(upper->TrySimulationAck(&ack));
   CHECK(clock.Commit({{1}, 1, 0, 2001}));
   state_writer.write(wire_state);
   result_writer.write(wire_result);  // delayed old phase retransmission
 
-  CHECK(!upper->TakeEvents().has_state);
-  CHECK(upper->TakeEvents().result_count == 0);
-  CHECK(!upper->SimulationFailed());
+  // Publication alone is not evidence the worker observed these resends.
+  // Old-sample deduplication/no restamping is proved deterministically in the
+  // core Ingress test; later exact ingress receipts check forward DDS progress.
   auto burst = phase;
   burst.closed = false;
   burst.count = 0;

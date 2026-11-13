@@ -82,7 +82,8 @@ int main() {
   s.feedback.count = 65;
   CHECK(!Identify(s, &state));
   struct Clock : LogicalClock {
-    irmv::protocol::TimeUs NowUs() const noexcept override { return 2001; }
+    irmv::protocol::TimeUs now_us{2001};
+    irmv::protocol::TimeUs NowUs() const noexcept override { return now_us; }
   } clock;
   auto ingress = std::make_unique<Ingress>(Role::Application, clock);
   // I1: the worker can check installs immediately BEFORE ControlBegin.
@@ -114,10 +115,15 @@ int main() {
   CHECK(ingress->WorkerCheck(n.messages[0], &stamp) == 1);
   CHECK(stamp == 2001);
   CHECK(!ingress->ControlProcessed(n.messages[0]));
+  // N1: the business queue can be popped before WorkerStored publishes ingress.
+  CHECK(ingress->ControlDequeued(n.messages[0]));
+  CHECK(!ingress->ControlProcessed(n.messages[0]));
+  CHECK(!ingress->Failed());
+  CHECK(!ingress->ControlAck(&ack));
   ingress->WorkerStored(n.messages[0], true);
   CHECK(ingress->WorkerCheck(n.messages[0], &stamp) == 0);
-  CHECK(ingress->ControlDequeued(n.messages[0]));
-  CHECK(ingress->ControlProcessed(n.messages[0]));
+  CHECK(
+      ingress->ControlProcessed(n.messages[0]));  // retry same dequeue succeeds
   CHECK(!ingress->ControlAck(&ack));
   CHECK(ingress->WorkerCheck(n.messages[1], &stamp) == 1);
   ingress->WorkerStored(n.messages[1], true);
@@ -172,6 +178,42 @@ int main() {
   }
   CHECK(overflow->Failed());
   CHECK(!overflow->ControlInstalled(empty_install));
+  // N2: explicitly run the worker check for a cached old sample after time
+  // advances and after the next inventory installs. No host/DDS timing assumed.
+  Clock dedup_clock;
+  auto dedup = std::make_unique<Ingress>(Role::Application, dedup_clock);
+  auto old_phase = n;
+  old_phase.closed = false;
+  old_phase.count = 1;
+  CHECK(old_phase.Close());
+  CHECK(dedup->ControlBegin(old_phase));
+  dedup->WorkerUpdate();
+  CHECK(dedup->ControlInstalled(old_phase));
+  irmv::protocol::TimeUs original_stamp = 0;
+  CHECK(dedup->WorkerCheck(old_phase.messages[0], &original_stamp) == 1);
+  CHECK(original_stamp == 2001);
+  dedup->WorkerStored(old_phase.messages[0], true);
+  CHECK(dedup->ControlDequeued(old_phase.messages[0]));
+  CHECK(dedup->ControlProcessed(old_phase.messages[0]));
+  CHECK(dedup->ControlAck(&ack));
+  dedup_clock.now_us = 4001;
+  CHECK(dedup->WorkerCheck(old_phase.messages[0], &original_stamp) == 0);
+  CHECK(original_stamp == 2001);
+  auto after_old = old_phase;
+  after_old.closed = false;
+  after_old.count = 0;
+  after_old.identity.control_step = 2;
+  after_old.identity.logical_us = 4001;
+  CHECK(after_old.Close());
+  CHECK(dedup->ControlBegin(after_old));
+  dedup->WorkerUpdate();
+  CHECK(dedup->ControlInstalled(after_old));
+  CHECK(dedup->WorkerCheck(old_phase.messages[0], &original_stamp) == 0);
+  CHECK(original_stamp ==
+        2001);  // never replaced with new logical receive time
+  PhaseReceipt duplicate_receipt;
+  CHECK(!dedup->ControlTakeReceipt(&duplicate_receipt));
+  CHECK(!dedup->Failed());
   // Independent Python hashlib/struct golden, IDL traversal (no CDR padding).
   irmv::protocol::JointCommand command;
   command.command_seq = 17;
