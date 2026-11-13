@@ -41,8 +41,10 @@ int main() {
   n.closed = false;
   irmv::protocol::RobotState s;
   s.state_seq = 7;
+  s.last_applied_command_seq = 19;
   MessageIdentity state;
   CHECK(Identify(s, &state));
+  CHECK(state.source_state_seq == 19);
   CHECK(n.Add(state));
   irmv::protocol::ExecutionResult r;
   r.request_id = 2;

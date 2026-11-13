@@ -46,6 +46,33 @@ def main():
         assert max(abs(x) for x in fallen.imu_specific_force) < .02
         assert fallen.physics_step == 201
         assert fallen == engine.read_feedback(), "read must observe completed coherent step"
+        # Short arithmetic probes, not elapsed-time rollouts. Verify the pinned
+        # Warp time kernel's binary32 addition at long diagnostic checkpoints.
+        import numpy as np
+        for checkpoint, expected in ((1024., 1024.0009765625),
+                                     (2048., 2048.0009765625)):
+            engine._data.time.assign(np.array([checkpoint],dtype=np.float32))
+            engine._time_diagnostic.expected_s=checkpoint
+            actual=engine.step(1)
+            assert actual.engine_time_s==expected
+        # Inject a missing device clock increment after a real completed step.
+        # The adapter must fail before incrementing its host completion count.
+        previous_step=engine._physics_step
+        checkpoint=engine._time_diagnostic.expected_s
+        original_step=engine._mjw.step
+        def missing_increment(model,data):
+            original_step(model,data)
+            engine._wp.synchronize_device(engine._device)
+            data.time.assign(np.array([checkpoint],dtype=np.float32))
+        engine._mjw.step=missing_increment
+        try:
+            try:engine.step(1)
+            except RuntimeError as exc:
+                assert 'exact completed float32 additions' in str(exc)
+            else:raise AssertionError('missing GPU increment accepted')
+            assert engine._physics_step==previous_step
+        finally:engine._mjw.step=original_step
+        print('PASS: pinned Warp checkpoint additions and missing-increment rejection')
         print("PASS: CUDA hold/release/torque/completed feedback/IMU/no overflow")
     finally:
         engine.close()

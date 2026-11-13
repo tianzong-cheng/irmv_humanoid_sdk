@@ -70,6 +70,7 @@ class ValidationTest(unittest.TestCase):
         # These defects would silently alter output-side torque or support/IMU semantics.
         for old, new in [('gear="1"', 'gear="2"'),
                          ('timestep="0.001"', 'timestep="0.0010005"'),
+                         ('timestep="0.001"', 'timestep="0.0001"'),
                          ('damping="0"', 'damping="1"'),
                          ('ctrllimited="false"', 'ctrllimited="true" ctrlrange="-1 1"'), ('<motor ', '<position '),
                          ('<freejoint name="root"/>', ''),

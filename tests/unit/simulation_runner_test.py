@@ -87,13 +87,15 @@ class RunnerTest(unittest.TestCase):
                     f=p.decode(s.recv(65536));self.assertEqual(f.kind,kind);return f
                 recv(rt,1);recv(app,1)
                 f=recv(rt,2);recv(rt,15)
-                m=p._default('MessageIdentity');m['runtime_id']=b't'*16
+                m={name:(bytes(16) if field=='Id' else bytes(32) if field=='Digest' else 0)
+                   for field,name in p.SCHEMA['MessageIdentity']}
+                m.update(kind=5,runtime_id=b't'*16)
                 rt.send(p.encode(dataclasses.replace(f,kind=3, payload=dict(write_id=1,
                     accepted=True,state_seq=1,command=m,tau=(2.,)))))
                 for sender,consumer,role,phase,disposition in ((rt,app,2,1,2),(app,rt,3,2,1)):
                     messages=[]
                     if role==2:
-                        state=dict(m,kind=3,sequence=1,stamp_us=1)
+                        state=dict(m,kind=3,sequence=1,stamp_us=1,execution_state=2,output_action=1)
                         messages=[dict(sender=2,message=state)]
                     else:
                         command=dict(m,kind=5,sequence=1,source_state_seq=1,stamp_us=1)

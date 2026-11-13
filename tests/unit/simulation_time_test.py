@@ -20,6 +20,31 @@ class TimeTest(unittest.TestCase):
         d.validate(0.)
         with self.assertRaises(RuntimeError):d.validate(1e-8)
 
+    def test_review_one_ulp_missing_increment_is_rejected(self):
+        # Arithmetic probe only: float32(1024 + float32(100us)) is one ULP.
+        import struct
+        f32=lambda x:struct.unpack('<f',struct.pack('<f',x))[0]
+        expected=f32(1024.+f32(.0001))
+        self.assertEqual(expected,1024.0001220703125)
+        d=engine.EngineTimeDiagnostic(1000)
+        d.expected_s=expected
+        with self.assertRaises(RuntimeError):d.validate(1024.)
+        d.validate(1024.0001220703125)
+
+    def test_hour_range_rejects_timesteps_that_can_stall(self):
+        for dt in (1,10,100,999):
+            with self.subTest(dt=dt),self.assertRaises(ValueError):
+                engine.EngineTimeDiagnostic(dt)
+
+    def test_supported_long_checkpoint_rejects_single_missing_increment(self):
+        d=engine.EngineTimeDiagnostic(1000)
+        # Known checkpoint; validates addition arithmetic, not a GPU rollout.
+        d.expected_s=2048.
+        d.advance()
+        self.assertEqual(d.expected_s,2048.0009765625)
+        d.validate(2048.0009765625)
+        with self.assertRaises(RuntimeError):d.validate(2048.)
+
     def test_one_hour_duration_guard(self):
         self.assertTrue(hasattr(engine,'EngineTimeDiagnostic'),'duration guard missing')
         d=engine.EngineTimeDiagnostic(1000000)

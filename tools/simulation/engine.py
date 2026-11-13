@@ -28,16 +28,17 @@ class EngineAdapter(Protocol):
 
 
 class EngineTimeDiagnostic:
-    """Predict Data.time's incremental float32 additions, up to 3600 logical s.
+    """Exact pinned-Warp binary32 addition check, never an SDK clock.
 
-    Comparing with steps*dt is wrong after long float32 runs. Two ULPs allow
-    device arithmetic representation differences without an elapsed-time-relative
-    tolerance that could hide seconds of error. This never supplies SDK time.
+    The Warp 3.9 time kernel adds two float32 values once per physical substep.
+    Host prediction rounds the float32 sum to float32; no tolerance is needed.
+    This engine-specific one-hour contract requires integer dt >= 1000 us.
+    Smaller timesteps are rejected at startup rather than allowing time stalls.
     """
     def __init__(self, physics_dt_us: int):
         import struct
-        if type(physics_dt_us) is not int or not 0 < physics_dt_us <= 3600000000:
-            raise ValueError('physics dt')
+        if type(physics_dt_us) is not int or not 1000 <= physics_dt_us <= 3600000000:
+            raise ValueError('Warp one-hour diagnostic requires integer physics_dt_us >= 1000')
         self.dt_us = physics_dt_us
         self.steps = 0
         self.expected_s = 0.0
@@ -52,8 +53,5 @@ class EngineTimeDiagnostic:
 
     def validate(self, actual_s):
         import math
-        # IEEE float32 spacing, including the zero/subnormal binade.
-        ulp = (2.0 ** -149 if self.expected_s == 0 else
-               2.0 ** max(-149, math.frexp(self.expected_s)[1] - 24))
-        if not math.isfinite(actual_s) or abs(actual_s - self.expected_s) > 2 * ulp:
-            raise RuntimeError('engine time inconsistent with completed float32 steps')
+        if not math.isfinite(actual_s) or actual_s != self.expected_s:
+            raise RuntimeError('engine time differs from exact completed float32 additions')

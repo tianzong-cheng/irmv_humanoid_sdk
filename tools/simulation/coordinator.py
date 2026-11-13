@@ -4,6 +4,7 @@ Only advance mutates state. Each event is consumed atomically; actions are order
 The runner owns host time and executes all actions outside this object.
 """
 from collections import deque
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 import hashlib
 import math
@@ -76,11 +77,16 @@ class SimulationCoordinator:
         self.torque=None
         self.last_write_id=0
         self.inventory=[]
+        self.first_commands=[]
         self.seal=None
         self.permitted=False
         self.recent=deque(maxlen=32)  # Completed phase caches, not just 32 frames.
         self.seen=set()
         self.failure=''
+        # Metadata evidence, independent of replay/dedup phase cache rotation.
+        self.states=deque(maxlen=8192)  # Runtime's maximum source-state window.
+        self.candidates=deque(maxlen=32)  # <=128 targets per completed app phase.
+        self.current_target=None  # Pinned (command, actual source state) pair.
 
     def frame(self, name, payload, phase=None):
         return p.Frame(p.KINDS.index(name)+1,payload,self.b.run_id,self.step,
@@ -105,6 +111,7 @@ class SimulationCoordinator:
         self.phase=phase
         self.deadline=self.host+self.b.phase_timeout_us
         self.inventory=[]
+        self.first_commands=[]
         self.seal=None
         self.permitted=False
 
@@ -142,12 +149,68 @@ class SimulationCoordinator:
             upper=self.feedback.engine_time_s+count*dt
             ulp=2.0**max(-149, math.frexp(upper)[1]-24)
             # Local handoff bound: each float32 addition rounds by <= half ULP.
-            # The adapter additionally checks the exact incremental prediction.
+            # This is only a sanity diagnostic, never execution evidence.
+            # The adapter must verify device completion at every physical substep.
             tolerance=(count+2)*ulp + count*dt*2**-23
             if abs(feedback.engine_time_s-upper)>tolerance:
                 raise ValueError('engine time inconsistent with physics handoff')
         # EngineAdapter validates incremental float32 accumulation at each substep.
         # Integer physics_step is authoritative, engine time is diagnostic only.
+
+    def source_state(self, command):
+        for state in reversed(self.states):
+            if state['sequence']==command['source_state_seq']:
+                return state
+        if self.current_target and self.current_target[1]['sequence']==command['source_state_seq']:
+            return self.current_target[1]
+        return None
+
+    def commit_ingress(self):
+        # A request's nested first command is not a separate DDS sample.
+        requests=[m for m in self.inventory if m['kind']==1 and m['operation']==3]
+        if len(requests)!=len(self.first_commands):
+            raise ValueError('Tracking request requires exact first-command proof')
+        targets=[(m,self.source_state(m)) for m in self.inventory if m['kind']==5]
+        for proof in self.first_commands:
+            request,command=proof['request'],proof['command']
+            if request not in requests:
+                raise ValueError('first-command proof is not in sealed request inventory')
+            if (request['runtime_id']!=command['runtime_id'] or
+                    request['session_id']!=command['session_id'] or
+                    request['producer_id']!=command['producer_id'] or
+                    request['proposed_epoch']!=command['epoch']):
+                raise ValueError('nested first-command context mismatch')
+            source=self.source_state(command)
+            if source is None:
+                raise ValueError('nested first-command source state was never observed')
+            targets.append((command,source))
+        self.candidates.append(tuple(targets))
+
+    def bind_tick_target(self, state):
+        command=self.torque['command']
+        if state['output_action']!=2:
+            # Exact local sentinel, not Identify(default JointCommand): no DDS
+            # sample/content digest exists for a tick with no active output.
+            empty={name:(bytes(16) if field=='Id' else bytes(32) if field=='Digest' else 0)
+                   for field,name in p.SCHEMA['MessageIdentity']}
+            empty.update(kind=5,runtime_id=self.b.runtime_id)
+            if command!=empty:
+                raise ValueError('non-Tracking output must name exact no-active-command metadata')
+            self.current_target=None
+            # Revoked targets cannot be resurrected from an old evidence cache.
+            self.candidates.clear()
+            return
+        if state['execution_state']!=3 or command['kind']!=5:
+            raise ValueError('Tracking output requires an actual Command target')
+        evidence=[self.current_target] if self.current_target else []
+        evidence.extend(target for phase in self.candidates for target in phase)
+        target=next((target for target in evidence if target[0]==command),None)
+        if target is None or target[1] is None:
+            raise ValueError('tick target has no completed ingress/source-state provenance')
+        if (any(state[k]!=command[k] for k in ('runtime_id','session_id','producer_id','epoch'))
+                or state['source_state_seq']!=command['sequence']):
+            raise ValueError('tick state and actual current_target metadata disagree')
+        self.current_target=target
 
     def advance(self, event: Event, host_now_us: int) -> tuple[Action,...]:
         if self.state in ('Failed','Closed'):
@@ -158,7 +221,8 @@ class SimulationCoordinator:
         if self.deadline is not None and self.host>=self.deadline:
             return self.fail('host phase deadline')
         try:
-            return self._advance(event)
+            # Actions are caller-owned, including every nested payload dictionary.
+            return deepcopy(self._advance(event))
         except (ValueError,TypeError,KeyError,AttributeError,OverflowError) as exc:
             return self.fail(str(exc))
 
@@ -199,7 +263,7 @@ class SimulationCoordinator:
         if key in self.seen or any(key in phase for phase in self.recent): return ()
         if (f.control_step!=self.step or f.logical_us!=1+self.step*self.b.control_dt_us
                 or f.phase!=self.phase): raise ValueError('wrong phase')
-        if len(self.seen)>=70: raise ValueError('phase frame capacity')
+        if len(self.seen)>=(134 if self.phase==2 else 70): raise ValueError('phase frame capacity')
         self.seen.add(key)
         # Detach caller-owned dictionaries before retaining protocol facts.
         f=p.decode(wire)
@@ -222,6 +286,12 @@ class SimulationCoordinator:
                 raise ValueError('torque identity or shape')
             self.torque=v
             self.last_write_id=v['write_id']
+        elif name=='FirstCommandProof':
+            if e.peer!=3 or self.phase!=2 or self.state!='ApplicationPhase' or self.seal is not None:
+                raise ValueError('first-command proof outside application inventory')
+            if len(self.first_commands)==64 or any(proof['request']==v['request'] for proof in self.first_commands):
+                raise ValueError('conflicting or excess first-command proof')
+            self.first_commands.append(v)
         elif name in ('Manifest','PhaseSeal','InventoryReady','PhaseAck'):
             if self.state not in ('RuntimeTick','ApplicationPhase','IngressWait'):
                 raise ValueError('inventory outside phase')
@@ -266,12 +336,15 @@ class SimulationCoordinator:
                         if (len(states)!=1 or states[0]['sequence']!=self.torque['state_seq']
                                 or states[0]['stamp_us']!=1+self.step*self.b.control_dt_us):
                             raise ValueError('tick state does not match torque')
+                        self.bind_tick_target(states[0])
+                        self.states.append(states[0])
                         self.enter('ApplicationPhase',2)
                         actions=()
                     else:
                         next_us=(self.step+1)*self.b.control_dt_us
                         if next_us>self.b.max_duration_us or next_us>=2**64-1:
                             raise ValueError('logical duration or overflow')
+                        self.commit_ingress()
                         self.enter('PhysicsAdvance',3)
                         actions=(Action('step',torque=tuple(self.torque['tau']),
                             substeps=self.b.control_dt_us//self.b.physics_dt_us),)

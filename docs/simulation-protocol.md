@@ -1,8 +1,9 @@
 # Local simulation bridge protocol v1
 
 This engine-neutral contract is separate from frozen DDS protocol v2. It adds
-no DDS topics or fields. No socket, coordinator, runtime driver, or inference
-code is implemented here. All participant queues must be bounded to 32 frames;
+no DDS topics or fields. A local socket endpoint, coordinator and independent
+engine runner are implemented; SDK loop/inference wiring remains Task 7.
+All participant queues must be bounded to 32 frames;
 this codec does not own a queue. A packet is at most 65,536 bytes, including its
 header. A phase inventory has at most 64 manifests, independently of the
 32-frame transport queue. Joint arrays have at most 64 entries. All encode/decode operations in
@@ -20,7 +21,7 @@ not hexadecimal ASCII. No codec rule treats a zero ID as a missing identity.
 | --- | --- | --- |
 | 0 | u32 | Complete packet byte count, including this field |
 | 4 | u16 | Local protocol version, exactly 1 |
-| 6 | u16 | Payload type, 1 through 12 |
+| 6 | u16 | Payload type, 1 through 16 |
 | 8 | byte[16] | Run ID |
 | 24 | u64 | Control step index |
 | 32 | u32 | Immutable phase identifier |
@@ -62,6 +63,10 @@ are not implicitly UTF-8 decoded.
 | AppliedToStep | 10 | Write ID, inclusive physics start index and exclusive physics end index |
 | PhaseSeal | 11 | Sender role, u32 manifest_count (0..64), ordered manifest SHA-256 digest[32] |
 | PhaseAck | 12 | Actual consumer role, ingress/consumed disposition, echoed PhaseSeal |
+| InventoryReady | 13 | Actual consumer role and exact installed PhaseSeal |
+| PublishPermit | 14 | PhaseSeal authorized for DDS publication |
+| TickPermit | 15 | Role and stage (1 runtime tick; 2 application processing) |
+| FirstCommandProof | 16 | Exact outer Request identity and nested first-command identity; auxiliary local evidence, not DDS inventory |
 
 Feedback mirrors Task 1 `engine.Feedback` without converting its coordinate
 conventions: q/dq/tau are output-side rad, rad/s, N m; tau is actuator generalized
@@ -80,7 +85,7 @@ completion. The authenticated endpoint role and the expected disposition must
 be checked by later barrier code. Ingress reserves the message for the next
 runtime tick; it does not assert business execution.
 
-C++ `Payload` is a fixed-capacity `std::variant` of these twelve structures.
+C++ `Payload` is a fixed-capacity `std::variant` of these sixteen structures.
 `Frame` contains identity, physics_dt_us, control_dt_us, payload. The variant's
 index plus one is the type number. No type-erased byte payload is exposed.
 
@@ -118,7 +123,7 @@ Heartbeat=4, Command=5.
 | --- | --- |
 | ExecutionRequest | All four IDs, request_id, epoch=expected_epoch, proposed_epoch, fault_id, operation |
 | ExecutionResult | All four IDs, request_id, epoch, fault_id, stamp_us, status, reason, execution_state, output_action |
-| RobotState | runtime/session/producer IDs, epoch, sequence=state_seq, fault_id, stamp_us, reason=stop_reason, execution_state, output_action |
+| RobotState | runtime/session/producer IDs, epoch, sequence=state_seq, source_state_seq=last_applied_command_seq (historical), fault_id, stamp_us, reason=stop_reason, execution_state, output_action |
 | SupervisorHeartbeat | runtime/supervisor/session IDs, sequence=heartbeat_seq, stamp_us |
 | JointCommand | runtime/session/producer IDs, epoch, sequence=command_seq, source_state_seq, stamp_us |
 
@@ -189,7 +194,7 @@ release or removal from a barrier.
 
 ## Verification
 
-`simulation_codec_test` checks all twelve frame types, truncation at every byte,
+`simulation_codec_test` checks all sixteen frame types, truncation at every byte,
 structural failures, and encode/decode with heap allocation forbidden.
 `simulation_protocol_test` exchanges independently constructed nonzero fixtures
 in both directions with that C++ binary, compares literal `GOLDEN_HEX` packets,
@@ -329,6 +334,7 @@ New **local v1 only** types (old type numbers/layouts and all DDS remain unchang
 | InventoryReady | 13 | Role consumer; PhaseSeal seal |
 | PublishPermit | 14 | PhaseSeal seal |
 | TickPermit | 15 | Role role; u32 stage (1 or 2) |
+| FirstCommandProof | 16 | MessageIdentity request; MessageIdentity command |
 
 All repeat the exact run/step/phase/time/dt header being authorized. Stage is a
 computation permission; numeric phase identifies an inventory or physics
@@ -412,10 +418,13 @@ The runner executes these actions; only its sole daemon engine worker creates,
 initializes, reads, writes, steps or closes the adapter. Selectors/control/host
 phase deadlines continue while GPU work blocks. Integer SDK time never uses
 engine time. Adapter checks actual GPU synchronization and capacity each step.
-MuJoCo Warp time diagnostics compare incremental float32 additions, within two
-ULPs, not accumulated exact dt with a growing relative tolerance. Coordinator
-also validates finite coherent feedback, expected integer steps, quaternion,
-and an incremental per-handoff float32 error bound.
+MuJoCo Warp time checks compare incremental float32 additions **exactly**, at
+EVERY completed physical substep, before advancing the host physics counter.
+The pinned engine requires integer physics_dt_us >= 1000 for its one-hour range;
+smaller timesteps fail model validation before CUDA startup. Coordinator's
+finite/coherent feedback, integer indices, quaternion and coarse per-handoff
+time bound are sanity diagnostics, not execution proof; the adapter's synchronized
+device time/capacity checks establish the handoff contract.
 
 Lifecycle extension points are explicit: Handshake, RuntimeTick,
 ApplicationPhase, IngressWait, PhysicsAdvance are active normal states;
@@ -428,3 +437,81 @@ and exits nonzero. A hung GPU thread may remain alive after the bounded join;
 Python cannot kill it. This is logical cancellation, with physical stop
 **unproven**. Late results after failure do not restart physics. No recovery,
 reset, UI or release mechanism is implemented here.
+
+
+### Fix-round-1 exact provenance and ownership contract
+
+No existing Frame/MessageIdentity layout, DDS layout, 180-byte inventory hash
+recipe or receipt semantics changed. `Identify(RobotState)` now projects the
+actual `last_applied_command_seq` into that kind's previously unused
+`MessageIdentity.source_state_seq` slot. This is historical state metadata, NOT
+an assertion that a target is currently active. For Command this slot continues
+to mean the command's source state sequence.
+
+Application sends one `FirstCommandProof` (type16) under phase2 for each declared
+Tracking Request (operation3), before that phase's seal. Its payload is the exact
+outer Request MessageIdentity and `Identify(request.first_command)` computed
+from that very buffered request. It MUST NOT add an extra Command Manifest for
+a nested command that was never independently published as JointCommand DDS.
+Proofs are auxiliary coordinator input: no forwarding, inventory count, hash
+member or consumer receipt is synthesized for them. Same header/run/phase/dt
+validation applies. At actual runtime Ingress PhaseAck2, coordinator pairs each
+proof with its exact sealed Request identity, including outer content digest,
+and checks nested runtime/session/producer/proposed_epoch context plus an actual
+previously emitted and application-consumed source-state fact. Missing,
+conflicting, unsealed or unknown-source proofs fail. At most64 proofs per phase;
+phase2 dedup storage accommodates at most134 frames (other phases70). Transport
+queue32, inventory64 and completed-phase cache32 remain separate bounds.
+
+For standalone Command manifests, completed PhaseAck2 records the exact identity
+and any observed source-state fact. Unknown-source/rejected standalone inputs
+are not turned into accepted targets by the coordinator: if a later Tracking
+Torque claims one as active, it must have an actual source-state fact. Runtime
+safety still decides acceptance, freshness, discontinuity, ownership, and faults.
+Coordinator does not reproduce those rules or reinterpret an ingress receipt as
+Applied. Candidate evidence is bounded to32 completed application phases, up to
+128 command/proof candidates each; the actual state index is bounded to8192,
+the runtime's maximum source window. No freshness/time-limit decisions are made
+from these caches.
+
+Runtime Task7 MUST set `Torque.command` from its independently observed actual
+FSM/CommandGate.current_target(), never from the coordinator's last ACK or the
+latest application declaration. At phase1 completion a Tracking output requires
+execution_state=Tracking(3), output_action=Tracking(2), exact completed-ingress
+command identity (all fields AND content digest), and actual source-state fact.
+State runtime/session/producer/epoch must equal the current target's fields;
+state's projected historical last-applied sequence must equal target.sequence.
+The selected (command,source-state) pair is pinned independently of BOTH phase
+cache and candidate cache rotation until replaced or cleared. Holding a target
+does not require fake ingress or refreshed business timestamps.
+
+For non-Tracking output, the exact no-active metadata is a MessageIdentity with
+kind=Command(5), runtime_id=bootstrap runtime ID, every other ID/digest byte zero,
+and every other scalar zero. C++ construction: value-initialize MessageIdentity,
+set kind=Command and runtime_id; do NOT Identify(default JointCommand), which
+would create a content hash for a nonexistent sample. This sentinel is not a DDS
+inventory member. Damping/ZeroTorque/Fault can retain a NONZERO historical state
+last-applied sequence with this no-active metadata. No FSM fields are reset or
+changed. Clearing also discards previously active candidate evidence; fresh
+completed ingress is required to claim an active target again.
+
+All Action frames returned by advance are deeply detached caller-owned payloads.
+Mutating a returned Hello, Manifest, PhaseSeal, nested PublishPermit, or the
+original input cannot change retained coordinator facts or later ACK matching.
+
+The Warp3.9 `_next_time` kernel uses float32 time and timestep and one binary32
+addition per physical substep. Host prediction rounds the sum of those binary32
+operands back to binary32, with exact comparison (no ULP allowance). For dt>=1ms,
+one logical hour entails at most3.6million additions. Even bounding each rounding
+error below8192s by half its largest float32 ULP (2^-12s), and timestep conversion
+by relative2^-24, total diagnostic time stays below
+3600*(1+2^-24)+3600000*2^-12 < 4480s < 8192s. Thus that bound is self-consistent;
+minimum timestep exceeds two ULPs in that range and no addition can stall.
+Exact validation rejects a single missed update, including the review's
+100us/1024s one-ULP arithmetic probe; that timestep itself is now explicitly
+outside this engine's startup range. This restriction belongs to the pinned
+Warp adapter, not the generic integer SDK clock or a claim about all engines.
+Short real-GPU checkpoint probes verify the pinned addition behavior; injected
+missing clock updates fail before host physics count advancement. These probes
+are not an hour-long rollout, malicious-peer authentication, motor execution,
+or a substitute for all numerical/physical validation.

@@ -395,6 +395,7 @@ bool Identify(const protocol::RobotState& v, MessageIdentity* out) noexcept {
   m.fault_id = v.fault_id;
   m.stamp_us = v.stamp_us;
   m.sequence = static_cast<decltype(m.sequence)>(v.state_seq);
+  m.source_state_seq = v.last_applied_command_seq;
   m.reason = static_cast<decltype(m.reason)>(v.stop_reason);
   m.execution_state =
       static_cast<decltype(m.execution_state)>(v.execution_state);

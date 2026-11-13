@@ -75,8 +75,9 @@ SCHEMA = {'MessageIdentity': [('MessageKind', 'kind'),
               ('PhaseSeal', 'seal')],
  'InventoryReady': [('Role', 'consumer'), ('PhaseSeal', 'seal')],
  'PublishPermit': [('PhaseSeal', 'seal')],
- 'TickPermit': [('Role', 'role'), ('u32', 'stage')]}
-KINDS = ['Hello', 'Feedback', 'Torque', 'Manifest', 'Ack', 'ReleaseArm', 'LeaveReady', 'LeaveCommitted', 'Abort', 'AppliedToStep', 'PhaseSeal', 'PhaseAck', 'InventoryReady', 'PublishPermit', 'TickPermit']
+ 'TickPermit': [('Role', 'role'), ('u32', 'stage')],
+ 'FirstCommandProof': [('MessageIdentity', 'request'), ('MessageIdentity', 'command')]}
+KINDS = ['Hello', 'Feedback', 'Torque', 'Manifest', 'Ack', 'ReleaseArm', 'LeaveReady', 'LeaveCommitted', 'Abort', 'AppliedToStep', 'PhaseSeal', 'PhaseAck', 'InventoryReady', 'PublishPermit', 'TickPermit', 'FirstCommandProof']
 
 @dataclass(frozen=True)
 class Frame:
@@ -139,6 +140,8 @@ def _valid(f):
         seal = v if f.kind == 11 else v['seal']
         if not 0 <= seal['manifest_count'] <= MAX_PHASE_MANIFEST_ENTRIES:
             raise ValueError('phase inventory capacity')
+    if f.kind == 16 and (v['request']['kind'] != 1 or v['command']['kind'] != 5):
+        raise ValueError('first-command proof kinds')
     if f.kind == 15 and v['stage'] not in (1, 2):
         raise ValueError('tick stage')
     if f.kind == 1 and (v['physics_dt_us'] != f.physics_dt_us or v['control_dt_us'] != f.control_dt_us):
@@ -225,6 +228,8 @@ def golden_frames():
         if k in ('InventoryReady', 'PublishPermit'):
             v['seal'].update(sender=2, manifest_count=33)
             if k == 'InventoryReady': v['consumer']=3
+        if k == 'FirstCommandProof':
+            v['command']['kind']=5
         if k == 'TickPermit':
             v.update(role=2, stage=1)
         if k == 'Hello':
@@ -358,3 +363,6 @@ GOLDEN_HEX += (
 
 # Task 6 typed local permission frames (literal independent wire fixtures).
 GOLDEN_HEX += ('6800000001000d000102030405060708090a0b0c0d0e0f1003020100000000000403020171b7df0700000000e803000000000000d0070000000000000300000002000000210000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20', '6400000001000e000102030405060708090a0b0c0d0e0f1003020100000000000403020171b7df0700000000e803000000000000d00700000000000002000000210000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20', '4400000001000f000102030405060708090a0b0c0d0e0f1003020100000000000403020171b7df0700000000e803000000000000d0070000000000000200000001000000')
+
+# Auxiliary proof; existing fifteen golden packets remain byte-for-byte unchanged.
+GOLDEN_HEX += ('9c010000010010000102030405060708090a0b0c0d0e0f1003020100000000000403020171b7df0700000000e803000000000000d007000000000000010000000102030405060708090a0b0c0d0e0f100102030405060708090a0b0c0d0e0f100102030405060708090a0b0c0d0e0f100102030405060708090a0b0c0d0e0f10080706050403020108070605040302010807060504030201080706050403020108070605040302010807060504030201080706050403020104030201040302010403020104030201040302010102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20050000000102030405060708090a0b0c0d0e0f100102030405060708090a0b0c0d0e0f100102030405060708090a0b0c0d0e0f100102030405060708090a0b0c0d0e0f10080706050403020108070605040302010807060504030201080706050403020108070605040302010807060504030201080706050403020104030201040302010403020104030201040302010102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20',)

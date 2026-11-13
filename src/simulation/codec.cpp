@@ -368,6 +368,19 @@ template <class A>
 void Visit(A& a, const TickPermit& v) noexcept {
   VisitTickPermit(a, v);
 }
+template <class A, class V>
+void VisitFirstCommandProof(A& a, V& v) noexcept {
+  a(v.request);
+  a(v.command);
+}
+template <class A>
+void Visit(A& a, FirstCommandProof& v) noexcept {
+  VisitFirstCommandProof(a, v);
+}
+template <class A>
+void Visit(A& a, const FirstCommandProof& v) noexcept {
+  VisitFirstCommandProof(a, v);
+}
 bool Valid(const Frame& f) noexcept {
   const auto dt = f.control_dt_us;
   if (!dt || !f.physics_dt_us || dt % f.physics_dt_us ||
@@ -403,6 +416,9 @@ bool Valid(const Frame& f) noexcept {
     return permit->seal.manifest_count <= kMaxPhaseManifestEntries;
   if (auto permit = std::get_if<TickPermit>(&f.payload))
     return permit->stage == 1 || permit->stage == 2;
+  if (auto proof = std::get_if<FirstCommandProof>(&f.payload))
+    return proof->request.kind == MessageKind::Request &&
+           proof->command.kind == MessageKind::Command;
   if (auto a = std::get_if<AppliedToStep>(&f.payload))
     return a->physics_step_end >= a->physics_step_begin;
   return true;
@@ -539,6 +555,12 @@ bool Decode(ByteView b, Frame* out) noexcept {
     }
     case 15: {
       TickPermit v;
+      a(v);
+      f.payload = v;
+      break;
+    }
+    case 16: {
+      FirstCommandProof v;
       a(v);
       f.payload = v;
       break;

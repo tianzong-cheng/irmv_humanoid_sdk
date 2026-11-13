@@ -25,6 +25,25 @@ def feedback(step=0):
                     (1.,0.,0.,0.), (0.,)*3, (0.,0.,9.81), (0.,)*3, (0.,)*6)
 
 
+def identity(kind=5, **values):
+    # Explicit protocol-neutral test fixture; all unused projections are zero.
+    m={name:(bytes(16) if field=='Id' else bytes(32) if field=='Digest' else 0)
+       for field,name in p.SCHEMA['MessageIdentity']}
+    m.update(kind=kind,runtime_id=b't'*16)
+    m.update(values)
+    return m
+
+
+def state_identity(step, command=None, **values):
+    m=identity(3,sequence=step+1,stamp_us=1+step*2000,execution_state=2,
+               output_action=1,content_digest=b's'*32)
+    if command:
+        m.update(execution_state=3,output_action=2,source_state_seq=command['sequence'],
+                 session_id=command['session_id'],producer_id=command['producer_id'],epoch=command['epoch'])
+    m.update(values)
+    return m
+
+
 class CoordinatorTest(unittest.TestCase):
     def setUp(self):
         self.c = SimulationCoordinator(bootstrap(phase_timeout_us=100, startup_timeout_us=1000))
@@ -50,9 +69,7 @@ class CoordinatorTest(unittest.TestCase):
         if messages is None:
             messages=()
             if role==2:
-                m=p._default('MessageIdentity')
-                m.update(runtime_id=b't'*16,kind=3,sequence=self.c.step+1,
-                         stamp_us=1+self.c.step*2000)
+                m=state_identity(self.c.step)
                 messages=(m,)
         data = [dict(sender=role, message=m) for m in messages]
         for m in data:
@@ -75,7 +92,7 @@ class CoordinatorTest(unittest.TestCase):
                     disposition=2 if role==2 else 1,seal=seal),phase)
 
     def torque(self, value=4.):
-        m = p._default('MessageIdentity'); m['runtime_id']=b't'*16
+        m = identity()
         return dict(write_id=self.c.step+1, accepted=True,state_seq=self.c.step+1,
                     command=m,tau=(value,))
 
@@ -186,6 +203,153 @@ class CoordinatorTest(unittest.TestCase):
         seal=self.inventory(2,1,())
         self.finish(2,1,seal)
         self.assertEqual(self.c.state,'Failed')
+
+    def test_returned_actions_cannot_mutate_retained_facts(self):
+        hello=dict(self.c.hello,role=2)
+        a=self.send(2,'Hello',hello,phase=0,now=1)
+        a[0].frame.payload['config_digest']=b'x'*32
+        self.assertEqual(self.c.hello['config_digest'],b'c'*32)
+        hello['engine_digest']=b'x'*32
+        self.send(3,'Hello',dict(self.c.hello,role=3),phase=0,now=1)
+        self.c.advance(Event('feedback',feedback=feedback()),2)
+        self.send(2,'Torque',self.torque())
+        m=state_identity(0)
+        original=dict(m)
+        a=self.send(2,'Manifest',dict(sender=2,message=m))
+        a[0].frame.payload['message']['sequence']=999
+        m['content_digest']=b'x'*32
+        self.assertEqual(self.c.inventory[0],original)
+        seal=dict(sender=2,manifest_count=1,manifest_digest=hashlib.sha256(
+            p._pack('Manifest',dict(sender=2,message=original))).digest())
+        a=self.send(2,'PhaseSeal',seal)
+        a[0].frame.payload['manifest_count']=0
+        self.assertEqual(self.c.seal,seal)
+        a=self.send(3,'InventoryReady',dict(consumer=3,seal=seal))
+        a[0].frame.payload['seal']['manifest_digest']=b'x'*32
+        self.assertEqual(self.c.seal,seal)
+        self.send(3,'PhaseAck',dict(consumer=3,disposition=2,seal=seal))
+        self.assertEqual(self.c.state,'ApplicationPhase')
+        self.assertEqual(self.c.phase,2)
+
+    def command(self, **values):
+        m=identity(5,session_id=b'u'*16,producer_id=b'p'*16,epoch=7,
+                   sequence=9,source_state_seq=1,stamp_us=1,content_digest=b'd'*32)
+        m.update(values)
+        return m
+
+    def cycle(self, command=None, messages=(), proofs=()):
+        torque=self.torque()
+        if command:torque['command']=command
+        self.send(2,'Torque',torque)
+        seal=self.inventory(2,1,(state_identity(self.c.step,command),))
+        self.finish(2,1,seal)
+        self.assertEqual(self.c.state,'ApplicationPhase',self.c.failure)
+        for proof in proofs:self.send(3,'FirstCommandProof',proof,phase=2)
+        seal=self.inventory(3,2,messages)
+        actions=self.finish(3,2,seal)
+        self.assertEqual([a.kind for a in actions],['step'],self.c.failure)
+        self.c.advance(Event('feedback',feedback=feedback((self.c.step+1)*2)),self.c.host+1)
+        self.assertEqual(self.c.state,'RuntimeTick',self.c.failure)
+
+    def test_invented_tracking_command_never_reaches_physics(self):
+        self.ready()
+        torque=self.torque();torque['command']=self.command()
+        self.send(2,'Torque',torque)
+        seal=self.inventory(2,1,(state_identity(0,torque['command']),))
+        self.finish(2,1,seal)
+        self.assertEqual(self.c.state,'Failed')
+
+    def test_changed_ingressed_identity_and_tick_metadata_are_rejected(self):
+        for change in (dict(content_digest=b'x'*32),dict(source_state_seq=2),
+                       dict(session_id=b'x'*16),dict(epoch=8),dict(sequence=10),dict(kind=1)):
+            with self.subTest(change=change):
+                self.setUp();self.ready();command=self.command()
+                self.cycle(messages=(command,))
+                changed=dict(command,**change)
+                torque=self.torque();torque['command']=changed
+                self.send(2,'Torque',torque)
+                if self.c.state!='Failed':
+                    seal=self.inventory(2,1,(state_identity(1,changed),))
+                    self.finish(2,1,seal)
+                self.assertEqual(self.c.state,'Failed')
+        for change in (dict(source_state_seq=999),dict(session_id=b'x'*16),
+                       dict(producer_id=b'x'*16),dict(epoch=8)):
+            with self.subTest(state_change=change):
+                self.setUp();self.ready();command=self.command();self.cycle(messages=(command,))
+                torque=self.torque();torque['command']=command
+                self.send(2,'Torque',torque)
+                seal=self.inventory(2,1,(state_identity(1,command,**change),))
+                self.finish(2,1,seal)
+                self.assertEqual(self.c.state,'Failed')
+
+    def test_legitimate_held_target_survives_phase_cache_rotation_then_clear(self):
+        self.ready();command=self.command();self.cycle(messages=(command,))
+        for _ in range(40):self.cycle(command)
+        # No-active metadata is valid in Damping and ZeroTorque even if the
+        # state retains the historical last-applied sequence.
+        for state,output in ((2,1),(1,0),(4,1),(4,0)):
+            torque=self.torque();self.send(2,'Torque',torque)
+            seal=self.inventory(2,1,(state_identity(self.c.step,execution_state=state,
+                output_action=output,source_state_seq=9),))
+            self.finish(2,1,seal)
+            self.assertEqual(self.c.state,'ApplicationPhase',self.c.failure)
+            seal=self.inventory(3,2);self.finish(3,2,seal)
+            self.c.advance(Event('feedback',feedback=feedback((self.c.step+1)*2)),self.c.host+1)
+
+        torque=self.torque();torque['command']=command
+        self.send(2,'Torque',torque)
+        seal=self.inventory(2,1,(state_identity(self.c.step,command),))
+        self.finish(2,1,seal)
+        self.assertEqual(self.c.state,'Failed','cleared target must need fresh ingress')
+
+    def test_no_active_representation_is_exact(self):
+        for change in (dict(content_digest=b'x'*32),dict(session_id=b'u'*16),dict(kind=1)):
+            with self.subTest(change=change):
+                self.setUp();self.ready();torque=self.torque()
+                torque['command'].update(change)
+                self.send(2,'Torque',torque)
+                seal=self.inventory(2,1);self.finish(2,1,seal)
+                self.assertEqual(self.c.state,'Failed')
+
+    def test_nested_first_command_is_auxiliary_not_a_dds_inventory_entry(self):
+        self.assertIn('FirstCommandProof',p.KINDS,'typed nested-command proof missing')
+        self.ready();command=self.command()
+        request=identity(1,request_id=5,session_id=b'u'*16,producer_id=b'p'*16,
+                         proposed_epoch=7,operation=3,content_digest=b'r'*32)
+        self.cycle(messages=(request,),proofs=(dict(request=request,command=command),))
+        self.cycle(command)
+
+    def test_actual_target_must_match_nested_command_digest(self):
+        self.ready();command=self.command()
+        request=identity(1,request_id=5,session_id=b'u'*16,producer_id=b'p'*16,
+                         proposed_epoch=7,operation=3,content_digest=b'r'*32)
+        self.cycle(messages=(request,),proofs=(dict(request=request,
+            command=dict(command,content_digest=b'x'*32)),))
+        torque=self.torque();torque['command']=command
+        self.send(2,'Torque',torque)
+        seal=self.inventory(2,1,(state_identity(self.c.step,command),))
+        self.finish(2,1,seal)
+        self.assertEqual(self.c.state,'Failed')
+
+    def test_first_command_proof_conflicts_and_unknown_source_fail(self):
+        self.assertIn('FirstCommandProof',p.KINDS,'typed nested-command proof missing')
+        for change in ('outer','session','epoch','source','unsealed'):
+            with self.subTest(change=change):
+                self.setUp();self.ready();self.send(2,'Torque',self.torque())
+                seal=self.inventory(2,1);self.finish(2,1,seal)
+                command=self.command()
+                request=identity(1,request_id=5,session_id=b'u'*16,producer_id=b'p'*16,
+                                 proposed_epoch=7,operation=3,content_digest=b'r'*32)
+                declared=dict(request)
+                if change=='outer':request=dict(request,content_digest=b'x'*32)
+                if change=='session':command=dict(command,session_id=b'x'*16)
+                if change=='epoch':command=dict(command,epoch=8)
+                if change=='source':command=dict(command,source_state_seq=999)
+                self.send(3,'FirstCommandProof',dict(request=request,command=command),phase=2)
+                if self.c.state!='Failed':
+                    seal=self.inventory(3,2,() if change=='unsealed' else (declared,))
+                    self.finish(3,2,seal)
+                self.assertEqual(self.c.state,'Failed')
 
     def test_disconnect_and_stop_fail_closed_no_release(self):
         self.ready()

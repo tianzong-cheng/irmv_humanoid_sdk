@@ -45,7 +45,8 @@ enum class FrameType : std::uint16_t {
   PhaseAck = 12,
   InventoryReady = 13,
   PublishPermit = 14,
-  TickPermit = 15
+  TickPermit = 15,
+  FirstCommandProof = 16
 };
 // Exact DDS projection plus digest of all sample content; see protocol docs.
 struct MessageIdentity {
@@ -161,10 +162,15 @@ struct TickPermit {
   Role role{Role::Runtime};
   std::uint32_t stage{1};
 };
+// Auxiliary evidence for a nested command, not another DDS sample/receipt.
+struct FirstCommandProof {
+  MessageIdentity request{};
+  MessageIdentity command{};
+};
 using Payload =
     std::variant<Hello, Feedback, Torque, Manifest, Ack, ReleaseArm, LeaveReady,
                  LeaveCommitted, Abort, AppliedToStep, PhaseSeal, PhaseAck,
-                 InventoryReady, PublishPermit, TickPermit>;
+                 InventoryReady, PublishPermit, TickPermit, FirstCommandProof>;
 struct Frame {
   StepIdentity identity{};
   std::uint64_t physics_dt_us{1000};

@@ -75,6 +75,8 @@ def validate_model(model, config: dict) -> dict:
     dt = float(model.opt.timestep)
     if not math.isfinite(dt) or dt <= 0 or abs(dt * 1e6 - round(dt * 1e6)) > 1e-8:
         raise ValueError("physics timestep must be positive integer microseconds")
+    # Fail unsupported precision ranges before CUDA initialization.
+    EngineTimeDiagnostic(round(dt * 1000000))
     return dict(mapping=mapping, root_q=int(model.jnt_qposadr[root]),
                 root_v=int(model.jnt_dofadr[root]), weld=weld, sensors=sensors, timestep=dt)
 
@@ -163,8 +165,9 @@ class MujocoWarpEngine:
                 self._mjw.step(self._gpu_model, self._data)
                 self._wp.synchronize_device(self._device)
                 self._check_overflow()
-                self._physics_step += 1
                 self._time_diagnostic.advance()
+                self._time_diagnostic.validate(float(self._data.time.numpy()[0]))
+                self._physics_step += 1
             self._mjw.forward(self._gpu_model, self._data)
         return self.read_feedback()
 
