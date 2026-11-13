@@ -11,6 +11,9 @@ class Ingress {
   Ingress(Role consumer, const LogicalClock& clock) noexcept
       : consumer_(consumer), clock_(clock), barrier_(consumer) {}
   bool ControlBegin(const PhaseManifest&) noexcept;
+  // True only after the DDS worker installed this exact current inventory.
+  // Separate from ingress/business ACK; caller gates publication on this.
+  bool ControlInstalled(const PhaseManifest&) noexcept;
   bool ControlTakeReceipt(PhaseReceipt*) noexcept;
   bool ControlDequeued(const MessageIdentity&) noexcept;
   bool ControlProcessed(const MessageIdentity&) noexcept;
@@ -22,6 +25,14 @@ class Ingress {
   void WorkerStored(const MessageIdentity&, bool stored) noexcept;
 
  private:
+  struct Installation {
+    StepIdentity identity{};
+    std::uint64_t physics_dt_us{0}, control_dt_us{0};
+    Role consumer{Role::Coordinator};
+    Disposition required{Disposition::Ingress};
+    PhaseSeal seal{};
+    bool Matches(const PhaseManifest&) const noexcept;
+  };
   struct Cached {
     PhaseManifest manifest{};
     std::array<bool, kMaxPhaseManifestEntries> seen{};
@@ -32,6 +43,9 @@ class Ingress {
   Barrier barrier_;
   PhaseManifest current_{};
   bool begun_{false};
+  bool installation_observed_{false};
+  Installation installed_{};  // control-owned, never directly written by worker
+  transport::BoundedChannel<Installation, 2> installed_notifications_;
   std::array<bool, kMaxPhaseManifestEntries> dequeued_{};
   transport::BoundedChannel<PhaseManifest, 2> installs_;
   transport::BoundedChannel<PhaseReceipt, kMaxPhaseManifestEntries> receipts_;

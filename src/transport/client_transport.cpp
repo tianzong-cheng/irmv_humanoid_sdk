@@ -303,6 +303,10 @@ bool ClientTransport::BeginSimulationPhase(
     const simulation::PhaseManifest &m) noexcept {
   return simulation_ && simulation_->ControlBegin(m);
 }
+bool ClientTransport::SimulationPhaseInstalled(
+    const simulation::PhaseManifest &m) noexcept {
+  return simulation_ && simulation_->ControlInstalled(m);
+}
 bool ClientTransport::TrySimulationReceipt(
     simulation::PhaseReceipt *r) noexcept {
   return simulation_ && simulation_->ControlTakeReceipt(r);

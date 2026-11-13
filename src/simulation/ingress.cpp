@@ -1,5 +1,25 @@
 #include "irmv/simulation/ingress.hpp"
 namespace irmv::simulation {
+bool Ingress::Installation::Matches(const PhaseManifest& m) const noexcept {
+  return m.Valid() && SamePhase(identity, m.identity) &&
+         physics_dt_us == m.physics_dt_us && control_dt_us == m.control_dt_us &&
+         consumer == m.consumer && required == m.required &&
+         seal.sender == m.sender && seal.sender == m.seal.sender &&
+         seal.manifest_count == m.seal.manifest_count &&
+         seal.manifest_digest == m.seal.manifest_digest;
+}
+bool Ingress::ControlInstalled(const PhaseManifest& m) noexcept {
+  if (Failed() || !begun_) return false;
+  Installation observed;
+  while (installed_notifications_.TryPop(observed)) {
+    if (observed.Matches(current_)) {
+      installed_ = observed;
+      installation_observed_ = true;
+    }
+  }
+  return !Failed() && installation_observed_ && installed_.Matches(current_) &&
+         installed_.Matches(m);
+}
 bool Ingress::ControlBegin(const PhaseManifest& m) noexcept {
   if (Failed() || m.consumer != consumer_ ||
       clock_.NowUs() != m.identity.logical_us || !m.Valid())
@@ -13,6 +33,7 @@ bool Ingress::ControlBegin(const PhaseManifest& m) noexcept {
     return false;
   }
   current_ = m;
+  installation_observed_ = false;
   dequeued_.fill(false);
   begun_ = true;
   return true;
@@ -64,6 +85,15 @@ void Ingress::WorkerUpdate() noexcept {
     c.manifest = m;
     next_ = (next_ + 1) % cache_.size();
     active_valid_ = true;
+    // Release/acquire SPSC publication establishes installation before
+    // readiness. No producer other than this original DDS worker may publish
+    // this record.
+    if (!installed_notifications_.TryPush({m.identity, m.physics_dt_us,
+                                           m.control_dt_us, m.consumer,
+                                           m.required, m.seal})) {
+      failed_ = true;
+      return;
+    }
   }
 }
 int Ingress::WorkerCheck(const MessageIdentity& m,

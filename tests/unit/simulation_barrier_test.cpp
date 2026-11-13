@@ -85,8 +85,31 @@ int main() {
     irmv::protocol::TimeUs NowUs() const noexcept override { return 2001; }
   } clock;
   auto ingress = std::make_unique<Ingress>(Role::Application, clock);
-  CHECK(ingress->ControlBegin(n));
+  // I1: the worker can check installs immediately BEFORE ControlBegin.
   ingress->WorkerUpdate();
+  CHECK(!ingress->ControlInstalled(n));
+  CHECK(ingress->ControlBegin(n));
+  CHECK(!ingress->ControlInstalled(n));
+  ingress->WorkerUpdate();
+  CHECK(ingress->ControlInstalled(n));
+  auto mismatched_install = n;
+  mismatched_install.identity.phase++;
+  CHECK(!ingress->ControlInstalled(mismatched_install));
+  mismatched_install = n;
+  mismatched_install.seal.manifest_digest[0] ^= 1;
+  CHECK(!ingress->ControlInstalled(mismatched_install));
+  mismatched_install = n;
+  mismatched_install.physics_dt_us = 500;
+  CHECK(!ingress->ControlInstalled(mismatched_install));
+  CHECK(ingress->ControlInstalled(n));
+  auto other_inventory = n;
+  other_inventory.closed = false;
+  other_inventory.count = 1;
+  CHECK(other_inventory.Close());
+  CHECK(!ingress->ControlInstalled(other_inventory));
+  auto other_stage = n;
+  other_stage.required = Disposition::Ingress;
+  CHECK(!ingress->ControlInstalled(other_stage));
   irmv::protocol::TimeUs stamp = 0;
   CHECK(ingress->WorkerCheck(n.messages[0], &stamp) == 1);
   CHECK(stamp == 2001);
@@ -102,6 +125,53 @@ int main() {
   CHECK(!ingress->ControlAck(&ack));  // dequeue isn't business processing
   CHECK(ingress->ControlProcessed(n.messages[1]));
   CHECK(ingress->ControlAck(&ack));
+  auto empty_install = m;
+  empty_install.identity = n.identity;
+  empty_install.identity.phase = 1;
+  ingress->WorkerUpdate();  // no next inventory yet
+  CHECK(ingress->ControlBegin(empty_install));
+  CHECK(
+      !ingress->ControlInstalled(n));  // stale readiness cannot satisfy current
+  CHECK(!ingress->ControlInstalled(empty_install));
+  CHECK(
+      ingress->ControlAck(&ack));  // empty business ACK is NOT an install fence
+  CHECK(!ingress->ControlInstalled(empty_install));
+  ingress->WorkerUpdate();
+  CHECK(ingress->ControlInstalled(empty_install));
+  CHECK(!ingress->ControlInstalled(n));
+  auto next_empty = empty_install;
+  next_empty.identity.phase++;
+  ingress->WorkerUpdate();
+  CHECK(ingress->ControlBegin(next_empty));
+  CHECK(!ingress->ControlInstalled(next_empty));
+  CHECK(!ingress->ControlInstalled(empty_install));
+  forbid_allocation = true;
+  ingress->WorkerUpdate();
+  CHECK(ingress->ControlInstalled(next_empty));
+  forbid_allocation = false;
+  CHECK(ingress->ControlAck(&ack));
+  auto unread = next_empty;
+  unread.identity.phase++;
+  CHECK(ingress->ControlBegin(unread));
+  ingress->WorkerUpdate();  // deliberately leave its notification unread
+  CHECK(ingress->ControlAck(&ack));
+  auto following = unread;
+  following.identity.phase++;
+  CHECK(ingress->ControlBegin(following));
+  CHECK(!ingress->ControlInstalled(following));  // drains stale queued notice
+  CHECK(!ingress->ControlInstalled(unread));
+  ingress->WorkerUpdate();
+  CHECK(ingress->ControlInstalled(following));
+  auto overflow = std::make_unique<Ingress>(Role::Application, clock);
+  for (unsigned i = 0; i < 3; ++i) {
+    auto e = empty_install;
+    e.identity.phase = i;
+    CHECK(overflow->ControlBegin(e));
+    overflow->WorkerUpdate();  // third unread notice exhausts bounded capacity2
+    if (i < 2) CHECK(overflow->ControlAck(&ack));
+  }
+  CHECK(overflow->Failed());
+  CHECK(!overflow->ControlInstalled(empty_install));
   // Independent Python hashlib/struct golden, IDL traversal (no CDR padding).
   irmv::protocol::JointCommand command;
   command.command_seq = 17;

@@ -233,6 +233,7 @@ Both frozen transports expose these control-thread APIs:
 ```cpp
 bool ConfigureSimulation(const simulation::LogicalClock&); // once, before Start
 bool BeginSimulationPhase(const simulation::PhaseManifest&) noexcept;
+bool SimulationPhaseInstalled(const simulation::PhaseManifest&) noexcept;
 bool TrySimulationReceipt(simulation::PhaseReceipt*) noexcept;
 bool ReportSimulationProcessed(const simulation::MessageIdentity&) noexcept;
 bool TrySimulationAck(simulation::Frame*) noexcept;
@@ -241,8 +242,18 @@ bool SimulationFailed() const noexcept;
 
 The injected clock is borrowed and must outlive the transport. Configuration
 allocates simulation-only FIFO storage before Start. The existing sole DDS
-worker receives inventories through an SPSC channel, independently computes
-sample identities, deduplicates before business handoff, and emits Ingress
+worker receives inventories through an SPSC channel. BeginSimulationPhase only
+confirms enqueueing. After actually installing the inventory, WorkerUpdate
+publishes a separate fixed installation record through a capacity-2 worker-to-
+control SPSC channel. SimulationPhaseInstalled drains this channel on the control
+owner and returns true only for the exact current closed inventory: complete
+run/step/phase/logical time, both dt values, sender, consumer, required disposition,
+seal count and ordered digest. Stale notifications are ignored, and installation
+notification overflow latches SimulationFailed. This query is nonblocking and
+allocation-free; no helper DDS owner or thread is introduced. An empty inventory
+also requires this worker observation. Ingress/business PhaseAck is a separate
+stage and cannot substitute for installation readiness. The worker independently
+computes sample identities, deduplicates before business handoff, and emits Ingress
 receipts only after successful storage. A matching sample receives the sealed
 phase's logical time, with the clock checked against that phase; host passage,
 retransmission and cached reads cannot refresh it. Identical cached resends are
@@ -259,9 +270,13 @@ ingress receipts. TrySimulationReceipt exposes ingress records to a driver;
 it is not a second consumer and must be called on that same control thread.
 All simulation methods except the atomic Failed query have the stated single
 owner; lifecycle calls must not race them. Keep the current phase until it is
-ACKed and its business lanes drained. Install the next phase before sending its
-samples; any early packet is refused, so bounded identical retransmission and
-host deadlines remain driver responsibilities. Simulation FIFO refusal or
+ACKed and its business lanes drained. Enqueue the next phase, then poll
+SimulationPhaseInstalled for that exact inventory under a bounded host deadline before authorizing any publication.
+Enqueue success, elapsed host time, and even an empty PhaseAck do not prove
+installation. Early new-phase traffic can permanently latch failure against the
+previous active inventory; no retry/recovery guarantee is provided for sends
+before readiness. After readiness, bounded identical retransmission for DDS loss
+and host deadlines remain driver responsibilities. Simulation FIFO refusal or
 receipt overflow latches failure. Ingress ACK proves bounded admission; a
 BusinessConsumed ACK additionally requires explicit processing reports.
 

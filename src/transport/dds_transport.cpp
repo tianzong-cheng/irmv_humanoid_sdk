@@ -382,6 +382,10 @@ bool DdsTransport::BeginSimulationPhase(
     const simulation::PhaseManifest &m) noexcept {
   return simulation_ && simulation_->ControlBegin(m);
 }
+bool DdsTransport::SimulationPhaseInstalled(
+    const simulation::PhaseManifest &m) noexcept {
+  return simulation_ && simulation_->ControlInstalled(m);
+}
 bool DdsTransport::TrySimulationReceipt(simulation::PhaseReceipt *r) noexcept {
   return simulation_ && simulation_->ControlTakeReceipt(r);
 }

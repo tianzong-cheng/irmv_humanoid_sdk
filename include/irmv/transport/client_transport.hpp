@@ -84,6 +84,9 @@ class ClientTransport {
   // simulation methods belong to the single control thread. No DDS calls here.
   bool ConfigureSimulation(const simulation::LogicalClock &clock);
   bool BeginSimulationPhase(const simulation::PhaseManifest &) noexcept;
+  // Begin only enqueues. Wait under a host deadline for exact worker readiness
+  // before authorizing any sample of this phase, including an empty inventory.
+  bool SimulationPhaseInstalled(const simulation::PhaseManifest &) noexcept;
   bool TrySimulationReceipt(simulation::PhaseReceipt *) noexcept;
   // Explicitly attest business processing, including rejection. A prior take
   // is necessary, but never sufficient. This does not attest FSM acceptance.

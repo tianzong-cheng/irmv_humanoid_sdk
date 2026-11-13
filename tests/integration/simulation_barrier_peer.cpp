@@ -1,5 +1,6 @@
 #include <chrono>
 #include <dds/dds.hpp>
+#include <iostream>
 #include <memory>
 #include <thread>
 
@@ -9,6 +10,18 @@
 #include "irmv/transport/dds_transport.hpp"
 #include "support/check.hpp"
 using namespace irmv;
+namespace {
+template <class Predicate>
+bool WaitFor(Predicate predicate) {
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  do {
+    if (predicate()) return true;
+    std::this_thread::yield();
+  } while (std::chrono::steady_clock::now() < deadline);
+  return false;
+}
+}  // namespace
 int main(int argc, char** argv) {
   CHECK(argc == 2);
   auto cfg = configuration::LoadConfig("config/sdk.json", {222});
@@ -23,6 +36,7 @@ int main(int argc, char** argv) {
   CHECK(!upper->ConfigureSimulation(clock));
   simulation::PhaseManifest phase;
   phase.identity.run_id[0] = 1;
+  phase.identity.phase = 1;
   phase.sender = simulation::Role::Runtime;
   phase.consumer = simulation::Role::Application;
   phase.required = simulation::Disposition::BusinessConsumed;
@@ -39,11 +53,35 @@ int main(int argc, char** argv) {
   CHECK(phase.Add(state));
   CHECK(phase.Add(result));
   CHECK(phase.Close());
-  CHECK(upper->BeginSimulationPhase(phase));
   simulation::Frame ack;
+  auto empty = phase;
+  empty.closed = false;
+  empty.count = 0;
+  empty.identity.phase = 0;
+  CHECK(empty.Close());
+  CHECK(!upper->SimulationPhaseInstalled(empty));
+  CHECK(upper->BeginSimulationPhase(empty));
+  CHECK(WaitFor([&] { return upper->SimulationPhaseInstalled(empty); }));
+  CHECK(upper->TrySimulationAck(&ack));
+  auto lower_empty = empty;
+  lower_empty.sender = simulation::Role::Application;
+  lower_empty.consumer = simulation::Role::Runtime;
+  lower_empty.closed = false;
+  CHECK(lower_empty.Close());
+  CHECK(!lower->SimulationPhaseInstalled(lower_empty));
+  CHECK(lower->BeginSimulationPhase(lower_empty));
+  CHECK(WaitFor([&] { return lower->SimulationPhaseInstalled(lower_empty); }));
+  CHECK(lower->TrySimulationAck(&ack));
+  CHECK(upper->BeginSimulationPhase(phase));
+  CHECK(!upper->SimulationPhaseInstalled(empty));
+  CHECK(WaitFor([&] { return upper->SimulationPhaseInstalled(phase); }));
+  auto mismatch = phase;
+  mismatch.count = 1;
+  mismatch.closed = false;
+  CHECK(mismatch.Close());
+  CHECK(!upper->SimulationPhaseInstalled(mismatch));
   CHECK(!upper->TrySimulationAck(&ack));
-  // Discovery and manifest installation have finite host allowance.
-  std::this_thread::sleep_for(std::chrono::milliseconds(400));
+  // Installation was observed above, separately from DDS discovery and ingress.
   // Independent test publisher has its own DDS owner (this main thread).
   // Transports still have exactly their original worker and no helper DDS
   // calls.
@@ -64,14 +102,22 @@ int main(int argc, char** argv) {
   wire::ExecutionResult wire_result;
   transport::codec::ToWire(tick.state, wire_state);
   transport::codec::ToWire(tick.results[0], wire_result);
-  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  CHECK(WaitFor([&] {
+    return state_writer.publication_matched_status().current_count() > 0 &&
+           result_writer.publication_matched_status().current_count() > 0;
+  }));
   bool state_first = std::string(argv[1]) == "state-first";
   if (state_first)
     state_writer.write(wire_state);
   else
     result_writer.write(wire_result);
-  std::this_thread::sleep_for(std::chrono::milliseconds(60));
-  const auto& first = upper->TakeEvents();
+  const transport::ClientEvents* first_batch = nullptr;
+  CHECK(WaitFor([&] {
+    first_batch = &upper->TakeEvents();
+    return state_first ? first_batch->has_state
+                       : first_batch->result_count == 1;
+  }));
+  const auto& first = *first_batch;
   CHECK(first.has_state == state_first);
   CHECK(first.result_count == (state_first ? 0 : 1));
   CHECK(upper->ReportSimulationProcessed(state_first ? state : result));
@@ -93,7 +139,7 @@ int main(int argc, char** argv) {
       CHECK(events.results[i].rx_us == 1);
       got_result = true;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    std::this_thread::yield();
   }
   CHECK(got_state && got_result);
   CHECK(!upper->TrySimulationAck(&ack));  // dequeued, not processed
@@ -104,7 +150,7 @@ int main(int argc, char** argv) {
   CHECK(clock.Commit({{1}, 1, 0, 2001}));
   state_writer.write(wire_state);
   result_writer.write(wire_result);  // delayed old phase retransmission
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
   CHECK(!upper->TakeEvents().has_state);
   CHECK(upper->TakeEvents().result_count == 0);
   CHECK(!upper->SimulationFailed());
@@ -125,13 +171,17 @@ int main(int argc, char** argv) {
   CHECK(burst.Add(four));
   CHECK(burst.Close());
   CHECK(upper->BeginSimulationPhase(burst));
-  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  CHECK(!upper->SimulationPhaseInstalled(phase));
+  CHECK(WaitFor([&] { return upper->SimulationPhaseInstalled(burst); }));
   transport::codec::ToWire(s3, wire_state);
   state_writer.write(wire_state);
-  std::this_thread::sleep_for(std::chrono::milliseconds(60));
+  simulation::PhaseReceipt ingress_receipt;
+  CHECK(WaitFor([&] { return upper->TrySimulationReceipt(&ingress_receipt); }));
+  CHECK(simulation::SameIdentity(ingress_receipt.message, three));
   transport::codec::ToWire(s4, wire_state);
   state_writer.write(wire_state);
-  std::this_thread::sleep_for(std::chrono::milliseconds(60));
+  CHECK(WaitFor([&] { return upper->TrySimulationReceipt(&ingress_receipt); }));
+  CHECK(simulation::SameIdentity(ingress_receipt.message, four));
   CHECK(upper->TakeEvents().state.state_seq == 3);
   CHECK(upper->ReportSimulationProcessed(three));
   CHECK(!upper->TrySimulationAck(&ack));
@@ -169,13 +219,25 @@ int main(int argc, char** argv) {
   CHECK(inbound.Add(hb_id));
   CHECK(inbound.Close());
   CHECK(lower->BeginSimulationPhase(inbound));
-  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  CHECK(!lower->SimulationPhaseInstalled(lower_empty));
+  CHECK(WaitFor([&] { return lower->SimulationPhaseInstalled(inbound); }));
+  mismatch = inbound;
+  mismatch.count = 1;
+  mismatch.closed = false;
+  CHECK(mismatch.Close());
+  CHECK(!lower->SimulationPhaseInstalled(mismatch));
   CHECK(upper->PublishCommand(c1));
   CHECK(upper->PublishRequest(stop));
   CHECK(upper->PublishHeartbeat(heartbeat));
-  std::this_thread::sleep_for(std::chrono::milliseconds(60));
+  // Observe all first-burst admissions without dequeuing the business lanes.
+  unsigned receipts = 0;
+  CHECK(WaitFor([&] {
+    if (lower->TrySimulationReceipt(&ingress_receipt)) ++receipts;
+    return receipts == 3;
+  }));
   CHECK(upper->PublishCommand(c2));
-  std::this_thread::sleep_for(std::chrono::milliseconds(60));
+  CHECK(WaitFor([&] { return lower->TrySimulationReceipt(&ingress_receipt); }));
+  CHECK(simulation::SameIdentity(ingress_receipt.message, two));
   const auto& input = lower->TakeInput();
   CHECK(input.command_count == 2);
   CHECK(input.stop_request_count == 1);
@@ -194,10 +256,11 @@ int main(int argc, char** argv) {
   // A changed payload under the same command sequence is rejected whole.
   c2.joints.q[0] = 1;
   CHECK(upper->PublishCommand(c2));
-  std::this_thread::sleep_for(std::chrono::milliseconds(60));
-  CHECK(lower->SimulationFailed());
+  CHECK(WaitFor([&] { return lower->SimulationFailed(); }));
   CHECK(lower->TakeInput().command_count == 0);
   upper->Stop();
   lower->Stop();
+  std::cout << "installation-ready empty/nonempty both-transports " << argv[1]
+            << "\n";
   return 0;
 }
