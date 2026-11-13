@@ -20,7 +20,11 @@ bool ApplicationDriver::Stage(const Sample& s) {
   return true;
 }
 bool ApplicationDriver::PublishRequest(const protocol::ExecutionRequest& v) {
-  return Stage(v);
+  if (!Stage(v)) return false;
+  for (std::size_t i = 0; i < std::min(request_count_, requests_.size()); ++i)
+    if (requests_[i].request_id == v.request_id) return true;
+  requests_[request_count_++ % requests_.size()] = v;
+  return true;
 }
 bool ApplicationDriver::PublishCommand(const protocol::JointCommand& v) {
   return Stage(v);
@@ -88,6 +92,69 @@ bool ApplicationDriver::TakePermit(StepPermit* p) noexcept {
   *p = permit_;
   return true;
 }
+bool ApplicationDriver::CancelRelease() noexcept {
+  arm_pending_ = false;
+  if (!armed_request_ || cancelled_request_ == armed_request_) return true;
+  auto f = session_.Make(outputs_.identity);
+  f.payload = ReleaseCancel{Role::Application};
+  if (!session_.Queue(f)) return false;
+  cancelled_request_ = armed_request_;
+  return session_.Poll();
+}
+bool ApplicationDriver::PrepareLifecycle(bool locomotion,
+                                         protocol::Sequence first_seq,
+                                         bool exiting) noexcept {
+  if (!events_.has_state) return !exiting;
+  if (!locomotion) arm_pending_ = false;
+  const auto& state = events_.state;
+  if (exiting && state.execution_state == protocol::ExecutionState::Fault) {
+    leave_ = LeaveReady{};
+    leave_.stop_request.kind = MessageKind::Request;
+    leave_.stop_request.runtime_id = state.runtime_id;
+    leave_.stop_result.kind = MessageKind::Result;
+    leave_.stop_result.runtime_id = state.runtime_id;
+    if (!Identify(state, &leave_.stopped_state)) return false;
+    leave_pending_ = true;
+    return true;
+  }
+  for (std::size_t r = 0; r < events_.result_count; ++r) {
+    const auto& result = events_.results[r].value;
+    for (std::size_t i = 0; i < std::min(request_count_, requests_.size());
+         ++i) {
+      const auto& request = requests_[i];
+      if (request.request_id != result.request_id ||
+          request.session_id != result.session_id ||
+          request.runtime_id != result.runtime_id ||
+          request.supervisor_id != result.supervisor_id)
+        continue;
+      if (locomotion && request.request_id != armed_request_ &&
+          request.operation == protocol::Operation::Tracking &&
+          request.first_command.command_seq == first_seq &&
+          result.status == protocol::ResultStatus::Applied &&
+          result.epoch == request.proposed_epoch &&
+          state.epoch == result.epoch &&
+          state.execution_state == protocol::ExecutionState::Tracking) {
+        if (!Identify(request, &arm_.tracking_request) ||
+            !Identify(request.first_command, &arm_.first_command) ||
+            !Identify(result, &arm_.applied_result) ||
+            !Identify(state, &arm_.tracking_state))
+          return false;
+        arm_pending_ = true;
+      }
+      if (exiting && request.operation == protocol::Operation::Damping &&
+          (state.execution_state == protocol::ExecutionState::Fault ||
+           (result.status == protocol::ResultStatus::Applied &&
+            state.execution_state == protocol::ExecutionState::Damping))) {
+        if (!Identify(request, &leave_.stop_request) ||
+            !Identify(result, &leave_.stop_result) ||
+            !Identify(state, &leave_.stopped_state))
+          return false;
+        leave_pending_ = true;
+      }
+    }
+  }
+  return !exiting || leave_pending_;
+}
 bool ApplicationDriver::CompletePhase(const PhaseManifest& p) noexcept {
   if (!permitted_ || !SamePhase(p.identity, outputs_.identity) ||
       p.count != count_)
@@ -99,6 +166,18 @@ bool ApplicationDriver::CompletePhase(const PhaseManifest& p) noexcept {
   // its host deadline. Poll emits ACK only once the transport can prove all
   // actual consumption. The caller reports every dequeued identity before
   // reaching this operation.
+  if (leave_pending_) {
+    if (!session_.Leave(leave_)) return false;
+    permitted_ = false;
+    return true;
+  }
+  if (arm_pending_) {
+    auto f = session_.Make(outputs_.identity);
+    f.payload = arm_;
+    if (!session_.Queue(f)) return false;
+    armed_request_ = arm_.tracking_request.request_id;
+    arm_pending_ = false;
+  }
   for (std::uint32_t i = 0; i < count_; ++i) {
     if (auto request = std::get_if<protocol::ExecutionRequest>(&samples_[i]);
         request && request->operation == protocol::Operation::Tracking) {

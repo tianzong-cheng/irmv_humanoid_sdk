@@ -11,7 +11,7 @@ import unittest
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[2]/'tools'))
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]/'support'/'simulation'))
 from simulation import protocol as p
-from simulation.coordinator import Bootstrap
+from simulation.coordinator import Bootstrap, Action
 try:
     from simulation.main import Runner
     from fake_engine import FakeEngine
@@ -25,6 +25,71 @@ def boot(**kw):
 
 
 class RunnerTest(unittest.TestCase):
+    def test_stop_completion_waits_for_actual_engine_close(self):
+        entered=threading.Event()
+        unblock=threading.Event()
+        class Closing(FakeEngine):
+            def close(self):
+                entered.set()
+                unblock.wait(2)
+                super().close()
+        with tempfile.TemporaryDirectory() as d:
+            runner=Runner(boot(),str(pathlib.Path(d)/'bridge.sock'),Closing)
+            thread=threading.Thread(target=runner._engine_worker,daemon=True)
+            thread.start()
+            try:
+                runner.jobs.put(Action('initialize'));runner.results.get(timeout=1)
+                runner.jobs.put(Action('stop_output',torque=(0.,)))
+                self.assertTrue(entered.wait(.3), 'stop output never closed engine')
+                self.assertTrue(runner.results.empty(), 'reported stop before close completed')
+                unblock.set()
+                self.assertEqual(runner.results.get(timeout=1).kind,'stopped')
+            finally:
+                unblock.set();runner.stop.set();thread.join(1)
+
+    def test_worker_release_precedes_step_and_preserves_feedback(self):
+        events=[]
+        class Observed(FakeEngine):
+            def release_base(self):
+                before=self.read_feedback()
+                events.append(('release',before))
+                super().release_base()
+                self_test.assertEqual(before,self.read_feedback())
+            def step(self,n):
+                events.append(('step',self.released))
+                return super().step(n)
+        self_test=self
+        with tempfile.TemporaryDirectory() as d:
+            runner=Runner(boot(),str(pathlib.Path(d)/'bridge.sock'),Observed)
+            thread=threading.Thread(target=runner._engine_worker,daemon=True)
+            thread.start()
+            try:
+                runner.jobs.put(Action('initialize'))
+                runner.results.get(timeout=1)
+                runner.jobs.put(Action('step',torque=(1.,),substeps=2,release=True))
+                result=runner.results.get(timeout=1)
+                self.assertTrue(result.released)
+                self.assertEqual([v[0] for v in events],['release','step'])
+                self.assertTrue(events[1][1])
+                self.assertEqual(result.feedback.physics_step,2)
+            finally: runner.stop.set();thread.join(1)
+
+    def test_shutdown_gate_cancels_queued_release_without_engine_call(self):
+        events=[]
+        class Observed(FakeEngine):
+            def release_base(self): events.append('release');super().release_base()
+            def step(self,n): events.append('step');return super().step(n)
+        with tempfile.TemporaryDirectory() as d:
+            runner=Runner(boot(),str(pathlib.Path(d)/'bridge.sock'),Observed)
+            thread=threading.Thread(target=runner._engine_worker,daemon=True);thread.start()
+            try:
+                runner.jobs.put(Action('initialize'));runner.results.get(timeout=1)
+                runner.request_shutdown()
+                runner.jobs.put(Action('step',torque=(1.,),substeps=2,release=True))
+                self.assertEqual(runner.results.get(timeout=1).kind,'cancelled')
+                self.assertEqual(events,[])
+            finally: runner.stop.set();thread.join(1)
+
     def test_timeout_responsive_during_stuck_initialize(self):
         unblock=threading.Event()
         class Stuck(FakeEngine):
@@ -66,10 +131,22 @@ class RunnerTest(unittest.TestCase):
             self.assertEqual(runner.coordinator.failure,'engine exploded')
             self.assertFalse(runner.worker.is_alive())
 
+    def test_runtime_eof_after_commit_is_not_lost(self):
+        self.two_socket_peers(graceful=True)
+
     def test_two_socket_peers_complete_one_step_then_stop(self):
+        self.two_socket_peers(graceful=False)
+
+    def two_socket_peers(self, graceful):
         with tempfile.TemporaryDirectory() as d:
             path=str(pathlib.Path(d)/'bridge.sock')
-            runner=Runner(boot(),path,FakeEngine)
+            committed_closed=threading.Event()
+            class ObservedRunner(Runner):
+                def _advance(self,event):
+                    super()._advance(event)
+                    if event.kind=='stopped':
+                        committed_closed.wait(1)
+            runner=ObservedRunner(boot(),path,FakeEngine)
             result=[]
             thread=threading.Thread(target=lambda:result.append(runner.run()))
             thread.start()
@@ -117,9 +194,24 @@ class RunnerTest(unittest.TestCase):
                 self.assertEqual(f.payload['tau'],(2.,))
                 self.assertEqual(f.payload['q'],(.000006,))
                 self.assertEqual(f.payload['dq'],(.004,))
-                runner.request_stop()
+                if graceful:
+                    recv(rt,15)
+                    runner.request_shutdown()
+                    stop=recv(rt,17);recv(rt,2)
+                    rt.send(p.encode(dataclasses.replace(stop,kind=3,payload=dict(
+                        write_id=2,accepted=True,state_seq=3,command=m,tau=(0.,)))))
+                    state=dict(m,kind=3,sequence=3,stamp_us=2001,
+                               execution_state=1,output_action=0)
+                    manifest=dict(sender=2,message=state)
+                    rt.send(p.encode(dataclasses.replace(stop,kind=4,payload=manifest)))
+                    seal=dict(sender=2,manifest_count=1,manifest_digest=hashlib.sha256(
+                        p._pack('Manifest',manifest)).digest())
+                    rt.send(p.encode(dataclasses.replace(stop,kind=11,payload=seal)))
+                    recv(rt,19)
+                    rt.close();committed_closed.set()
+                else: runner.request_stop()
                 thread.join(1)
-                self.assertFalse(thread.is_alive());self.assertEqual(result,[1])
+                self.assertFalse(thread.is_alive());self.assertEqual(result,[0 if graceful else 1])
             finally:
                 runner.request_stop()
                 for s in sockets:s.close()

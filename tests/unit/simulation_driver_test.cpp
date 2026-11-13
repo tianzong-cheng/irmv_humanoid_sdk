@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 
 #include "irmv/configuration/application_config.hpp"
+#include "irmv/runtime/shutdown_authorization.hpp"
 #include "irmv/simulation/application_driver.hpp"
 #include "irmv/simulation/bootstrap.hpp"
 #include "irmv/simulation/runtime_driver.hpp"
@@ -16,6 +17,13 @@ int main(int argc, char** argv) {
     std::cout << c.runtime.config_id << " " << c.application_config_id << "\n";
     return 0;
   }
+  using irmv::protocol::ExecutionState;
+  using irmv::runtime::MayPlanLocalStop;
+  CHECK(!MayPlanLocalStop(ExecutionState::Damping, false));
+  CHECK(MayPlanLocalStop(ExecutionState::Damping, false, true));
+  CHECK(MayPlanLocalStop(ExecutionState::Tracking, true));
+  CHECK(!MayPlanLocalStop(ExecutionState::Fault, true, true));
+  CHECK(!MayPlanLocalStop(ExecutionState::Boot, true, true));
   char name[] = "/tmp/irmv-driver-XXXXXX";
   CHECK(mkdtemp(name) != nullptr);
   const std::filesystem::path directory(name);

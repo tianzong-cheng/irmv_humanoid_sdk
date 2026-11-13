@@ -381,6 +381,47 @@ template <class A>
 void Visit(A& a, const FirstCommandProof& v) noexcept {
   VisitFirstCommandProof(a, v);
 }
+template <class A, class V>
+void VisitLifecycleRole(A& a, V& v) noexcept {
+  a(v.role);
+}
+template <class A>
+void Visit(A& a, ShutdownPermit& v) noexcept {
+  VisitLifecycleRole(a, v);
+}
+template <class A>
+void Visit(A& a, const ShutdownPermit& v) noexcept {
+  VisitLifecycleRole(a, v);
+}
+template <class A>
+void Visit(A& a, RuntimeOnlyPermit& v) noexcept {
+  VisitLifecycleRole(a, v);
+}
+template <class A>
+void Visit(A& a, const RuntimeOnlyPermit& v) noexcept {
+  VisitLifecycleRole(a, v);
+}
+template <class A, class V>
+void VisitShutdownCommitted(A& a, V& v) noexcept {
+  a(v.write_id);
+  a(v.state_seq);
+}
+template <class A>
+void Visit(A& a, ShutdownCommitted& v) noexcept {
+  VisitShutdownCommitted(a, v);
+}
+template <class A>
+void Visit(A& a, const ShutdownCommitted& v) noexcept {
+  VisitShutdownCommitted(a, v);
+}
+template <class A>
+void Visit(A& a, ReleaseCancel& v) noexcept {
+  VisitLifecycleRole(a, v);
+}
+template <class A>
+void Visit(A& a, const ReleaseCancel& v) noexcept {
+  VisitLifecycleRole(a, v);
+}
 bool Valid(const Frame& f) noexcept {
   const auto dt = f.control_dt_us;
   if (!dt || !f.physics_dt_us || dt % f.physics_dt_us ||
@@ -388,6 +429,12 @@ bool Valid(const Frame& f) noexcept {
           (std::numeric_limits<std::uint64_t>::max() - 1) / dt ||
       f.identity.logical_us != 1 + f.identity.control_step * dt)
     return false;
+  if (auto p = std::get_if<ReleaseCancel>(&f.payload))
+    return p->role >= Role::Coordinator && p->role <= Role::Application;
+  if (auto p = std::get_if<ShutdownPermit>(&f.payload))
+    return p->role >= Role::Coordinator && p->role <= Role::Application;
+  if (auto p = std::get_if<RuntimeOnlyPermit>(&f.payload))
+    return p->role >= Role::Coordinator && p->role <= Role::Application;
   if (auto h = std::get_if<Hello>(&f.payload))
     return h->physics_dt_us == f.physics_dt_us && h->control_dt_us == dt &&
            h->role >= Role::Coordinator && h->role <= Role::Application;
@@ -561,6 +608,30 @@ bool Decode(ByteView b, Frame* out) noexcept {
     }
     case 16: {
       FirstCommandProof v;
+      a(v);
+      f.payload = v;
+      break;
+    }
+    case 17: {
+      ShutdownPermit v;
+      a(v);
+      f.payload = v;
+      break;
+    }
+    case 18: {
+      RuntimeOnlyPermit v;
+      a(v);
+      f.payload = v;
+      break;
+    }
+    case 19: {
+      ShutdownCommitted v;
+      a(v);
+      f.payload = v;
+      break;
+    }
+    case 20: {
+      ReleaseCancel v;
       a(v);
       f.payload = v;
       break;

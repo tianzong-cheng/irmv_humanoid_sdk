@@ -2122,3 +2122,9 @@ if(IRMV_BUILD_APPLICATION)
     "${PROJECT_SOURCE_DIR}/tests/integration/simulation_lockstep_test.py" "${CMAKE_CURRENT_BINARY_DIR}")
   set_tests_properties(simulation_lockstep_test PROPERTIES LABELS integration RUN_SERIAL TRUE TIMEOUT 120 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
 endif()
+
+if(IRMV_BUILD_APPLICATION)
+  add_test(NAME simulation_lifecycle_test COMMAND "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/integration/simulation_lifecycle_test.py" "${CMAKE_CURRENT_BINARY_DIR}")
+  set_tests_properties(simulation_lifecycle_test PROPERTIES LABELS integration RUN_SERIAL TRUE TIMEOUT 180 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+endif()

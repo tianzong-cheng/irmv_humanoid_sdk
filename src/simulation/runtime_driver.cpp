@@ -31,6 +31,10 @@ bool RuntimeDriver::CompleteTick(const TickCompletion& c) noexcept {
   auto f = session_.Make(permit_.identity);
   f.payload = torque.torque;
   if (!session_.Queue(f)) return false;
+  if (permit_.stop_control) {
+    stop_write_ = torque.torque.write_id;
+    stop_state_ = torque.torque.state_seq;
+  }
   buffered_ = c.result;
   PhaseManifest p;
   p.identity = permit_.identity;
@@ -44,5 +48,8 @@ bool RuntimeDriver::CompleteTick(const TickCompletion& c) noexcept {
   if (!p.Close() || !session_.Declare(p)) return false;
   outstanding_ = false;
   return true;
+}
+bool RuntimeDriver::FinishStop() noexcept {
+  return session_.Poll() && session_.StopCommitted(stop_write_, stop_state_);
 }
 }  // namespace irmv::simulation

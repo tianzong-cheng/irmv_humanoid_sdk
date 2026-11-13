@@ -2,7 +2,8 @@
 
 This engine-neutral contract is separate from frozen DDS protocol v2. It adds
 no DDS topics or fields. A local socket endpoint, coordinator and independent
-engine runner are implemented; SDK loop/inference wiring remains Task 7.
+engine runner, SDK logical-phase drivers and lifecycle are implemented.
+Production bootstrap normalization and launcher UI belong to Task9.
 All participant queues must be bounded to 32 frames;
 this codec does not own a queue. A packet is at most 65,536 bytes, including its
 header. A phase inventory has at most 64 manifests, independently of the
@@ -21,7 +22,7 @@ not hexadecimal ASCII. No codec rule treats a zero ID as a missing identity.
 | --- | --- | --- |
 | 0 | u32 | Complete packet byte count, including this field |
 | 4 | u16 | Local protocol version, exactly 1 |
-| 6 | u16 | Payload type, 1 through 16 |
+| 6 | u16 | Payload type, 1 through 20 |
 | 8 | byte[16] | Run ID |
 | 24 | u64 | Control step index |
 | 32 | u32 | Immutable phase identifier |
@@ -67,6 +68,10 @@ are not implicitly UTF-8 decoded.
 | PublishPermit | 14 | PhaseSeal authorized for DDS publication |
 | TickPermit | 15 | Role and stage (1 runtime tick; 2 application processing) |
 | FirstCommandProof | 16 | Exact outer Request identity and nested first-command identity; auxiliary local evidence, not DDS inventory |
+| ShutdownPermit | 17 | Role (Runtime); authenticated independent whole-experiment shutdown, phase4 |
+| RuntimeOnlyPermit | 18 | Role (Runtime); application membership removed, phase2 |
+| ShutdownCommitted | 19 | u64 write_id, u64 state_seq; engine completed guarded zero output and close |
+| ReleaseCancel | 20 | Role (Application); cancel pending release, original phase2 header |
 
 Feedback mirrors Task 1 `engine.Feedback` without converting its coordinate
 conventions: q/dq/tau are output-side rad, rad/s, N m; tau is actuator generalized
@@ -85,7 +90,7 @@ completion. The authenticated endpoint role and the expected disposition must
 be checked by later barrier code. Ingress reserves the message for the next
 runtime tick; it does not assert business execution.
 
-C++ `Payload` is a fixed-capacity `std::variant` of these sixteen structures.
+C++ `Payload` is a fixed-capacity `std::variant` of these twenty structures.
 `Frame` contains identity, physics_dt_us, control_dt_us, payload. The variant's
 index plus one is the type number. No type-erased byte payload is exposed.
 
@@ -194,7 +199,7 @@ release or removal from a barrier.
 
 ## Verification
 
-`simulation_codec_test` checks all sixteen frame types, truncation at every byte,
+`simulation_codec_test` checks all twenty frame types, truncation at every byte,
 structural failures, and encode/decode with heap allocation forbidden.
 `simulation_protocol_test` exchanges independently constructed nonzero fixtures
 in both directions with that C++ binary, compares literal `GOLDEN_HEX` packets,
@@ -426,17 +431,10 @@ finite/coherent feedback, integer indices, quaternion and coarse per-handoff
 time bound are sanity diagnostics, not execution proof; the adapter's synchronized
 device time/capacity checks establish the handoff contract.
 
-Lifecycle extension points are explicit: Handshake, RuntimeTick,
-ApplicationPhase, IngressWait, PhysicsAdvance are active normal states;
-Stopping/Failed implement fail-closed termination today. RuntimeOnly/Closed and
-successful Leave/ZeroTorque shutdown require Task 8 proofs; this runner never
-claims successful shutdown from a stop request. ReleaseArm/LeaveReady are
-rejected until those proofs exist, and no Tracking state can release the base.
-A stop/death/deadline cancels future scheduling, sends best-effort local Abort,
-and exits nonzero. A hung GPU thread may remain alive after the bounded join;
-Python cannot kill it. This is logical cancellation, with physical stop
-**unproven**. Late results after failure do not restart physics. No recovery,
-reset, UI or release mechanism is implemented here.
+Lifecycle uses the additional local controls documented below. Normal phase
+ordering remains unchanged; stop-control phase4 is distinct from a normal tick.
+Engine work already started cannot be undone or Python-killed; failure/deadline
+leaves physical stop unproven and late completions cannot resume an experiment.
 
 
 ### Fix-round-1 exact provenance and ownership contract
@@ -586,5 +584,112 @@ the actual robot_runtime/application binaries and test-only FakeEngine. It check
 50/500Hz, exact next-tick fresh-source adoption, identical adoption steps under
 engine/socket/actual ONNX worker delays, and terminal exit while inference is
 pending. Pure tests inject completions/epochs/cancellation without DDS or waits.
-Normal simulation exit still returns nonzero; successful Leave, release and
-RuntimeOnly continuation require Task8. This is not GPU/HIL or dynamics evidence.
+Task8 adds confirmed leave and RuntimeOnly continuation below. This is not
+GPU/HIL or dynamics evidence.
+
+
+## Release and bounded lifecycle (Task8)
+
+Only the executable's actual local BehaviorState::Locomotion, armed and not
+exiting, may prepare ReleaseArm. ApplicationDriver caches actual request payloads
+(up to64), uses fsm.locomotion_first_command_seq(), and binds the actual nested
+first command and consumed Applied/Tracking state. It queues the arm AFTER the
+actual phase1 BusinessConsumed ACK, before phase2 inventory. Initialization and
+Ready Tracking do not arm. Coordinator requires the exact earlier completed
+FirstCommandProof/ingress, full identities/digests/epoch, fresh matching state,
+and the runtime's accepted torque/current-target fact. Result status is actual
+Applied0; result/state stamp and context match. Cached or stale-epoch results
+cannot substitute. This adds no safety decision inside either FSM.
+
+Armed release is carried by a SINGLE worker step action. The worker executes
+release_base -> apply_torque -> step, in that order, and reports actual release
+completion with feedback. It never resets q/dq/base position or velocity. The
+coordinator records Armed/Released identities and step (64 diagnostic records,
+explicit release_event_drops); Released never becomes fixed again. Later
+independent authorizations can arm if an earlier arm was cancelled before
+release, and cannot cause another constraint call after Released. Stop/reset
+inventory, LeaveReady, ReleaseCancel or whole-run shutdown cancels pending arms.
+
+ReleaseCancel20 carries Role::Application and the original phase2 header. It is
+idempotent for an older completed step and never supplies DDS receipts or refreshes
+business ages. At the worker gate the runner distinguishes queued work from an
+operation already started. Cancellation can prevent queued release; it cannot
+undo a constraint call/physics operation already started. Such in-flight work is
+awaited under the host deadline; if unreachable the run fails stopped-unproven.
+There is no successful physical cancellation or Python thread-kill claim.
+
+Normal application exit follows actual existing Damping request/result/fresh-state
+confirmation. After reporting real business consumption, ApplicationDriver sends
+LeaveReady instead of declaring another phase2 inventory. Coordinator checks its
+actual completed request/result/state facts, accepted matching torque, no-active
+command sentinel and revoked producer. It sends LeaveCommitted with exact proof,
+authorization_revoked=true, session_closed reflecting the ACTUAL session field
+(normally false), heartbeat_resolved=true, plus RuntimeOnlyPermit to runtime.
+Heartbeat resolution means the existing natural supervisor expiry in Damping or
+Fault; no session release, new session or fake heartbeat is sent. Application
+waits for this commitment before ordinary exit cleanup. Death before commitment
+aborts; disconnect after commitment is expected.
+
+If actual fresh Fault output already holds, no Damping request is fabricated.
+LeaveReady has exact absent Request/Result identities: respective kind and
+runtime_id only, every other scalar/byte including digest zero. These are LOCAL
+sentinels, not DDS samples or Applied evidence. The stopped_state is the actual
+consumed Fault state matching an accepted torque write with output0 or1. The
+application retains its existing stop-unknown/code3 outcome for Fault.
+
+RuntimeOnly removes application from the required barrier membership. Runtime
+continues normal feedback/tick/torque/state-inventory/physics cycles directly with
+the coordinator, without an invented App ACK or publisher receipt. Logical time
+continues beyond the supervisor timeout using unchanged ExecutionFsm semantics.
+New Tracking output or application rejoin fails the experiment. Historical state
+last_applied_command_seq remains intact with the exact no-active target sentinel.
+
+`Runner.request_shutdown()` is the independent owner's graceful whole-experiment
+close API; CLI signals invoke it. `request_stop()` force-aborts and never claims
+successful stop. Application never launches/stops/signals runtime. Shutdown waits
+for any already-started physics operation (or times out), cancels pending release,
+and issues ShutdownPermit17 + exact cached feedback under phase4. This is a
+DISTINCT frozen-logical-time stop-control tick, not another normal control step.
+state_seq can advance without physics/control_step; never assume state_seq=step+1.
+Late cancelled normal phase frames cannot satisfy a stop proof.
+
+DriverSession validates bootstrap run/dt at its authenticated endpoint and
+ShutdownPermit runtime role, phase4, allowed step and logical-clock order. Only
+this capability enables `ShutdownPlanner::PlanStop(..., coordinator_shutdown)`;
+its last argument defaults FALSE. Fake/Real and raw runtime SIGINT/SIGTERM keep
+sessionless Damping refusal. The explicit simulation capability permits this
+local stop after natural lease expiry, with the unchanged route:
+ShutdownPlanner -> local_stop_requested -> HandleLocalStop -> backend Write.
+Boot/Fault and accepted-write guards remain; no Reset or fault bypass exists.
+
+Runtime reports actual accepted torque and fresh state under phase4. Coordinator
+requires increasing state_seq, actual ZeroTorque/output0, exact no-active target
+and zero torque, then asks the worker to apply that stop output WITHOUT advancing
+physics. The worker applies zero output and completes engine.close(); only then
+does it produce ShutdownCommitted19 with matching write_id/state_seq. Runtime's FinishStop waits for this exact commitment before
+clean-stop cleanup. Runner keeps the socket alive until runtime closes its own
+driver under a host deadline. Engine close remains on the sole worker and shares
+the stop-phase host deadline; a hung close cannot produce Closed. Failure of
+engine, required peer, state/write proof or deadline gives nonzero/stopped-unproven;
+a local accepted write or stop request alone is insufficient. A stuck daemon can
+outlive the bounded runner return; later completions do not restart physics.
+
+App signal during due inference uses the existing ordered Exit path, withdraws
+inference phase/generation, discards late results and completes real Damping/Leave.
+Driver/terminal polling remains host-bounded while logical time is frozen. No
+normal same-time tick or repeated inference submission is synthesized.
+
+APIs added: StepPermit.stop_control; RuntimeDriver.ShutdownAuthorized/FinishStop;
+ApplicationDriver.PrepareLifecycle/CancelRelease/Poll/LeaveComplete; session
+RuntimeOnly/ShutdownAuthorized/StopCommitted/Leave/Left. Runner actions additionally
+carry step.release, and stop_output; events add released feedback, cancelled and
+stopped. No execution DDS format/version/QoS or existing local payload changed.
+
+`simulation_lifecycle_test` uses actual SDK binaries, generated ONNX, real DDS and
+the deterministic test engine on reserved224 (RUN_SERIAL). Domains222 and223 stay
+reserved; the scenario allocator consumes the same registry. It covers release
+continuity/order, leave and expiry, app death, in-flight inference/physics signals,
+actual Fault leave and a hung engine close during StopEngine. These are lifecycle and
+host-path acceptance tests, not GPU dynamics or physical motor execution evidence.
+Task9 supplies the normalizer, assets/policy selection and launcher UI, using the
+library shutdown API and independently checking process exit codes.

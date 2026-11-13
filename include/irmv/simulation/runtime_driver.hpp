@@ -15,6 +15,10 @@ class RuntimeDriver {
   bool Processed(const MessageIdentity& id) noexcept {
     return session_.Processed(id);
   }
+  bool ShutdownAuthorized() const noexcept {
+    return session_.ShutdownAuthorized();
+  }
+  bool FinishStop() noexcept;
   bool Failed() const noexcept { return session_.Failed(); }
 
  private:
@@ -24,5 +28,6 @@ class RuntimeDriver {
   StepPermit permit_{};
   runtime::TickResult buffered_{};
   bool outstanding_{false};
+  std::uint64_t stop_write_{0}, stop_state_{0};
 };
 }  // namespace irmv::simulation

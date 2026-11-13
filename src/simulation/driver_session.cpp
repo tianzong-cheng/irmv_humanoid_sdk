@@ -75,6 +75,16 @@ bool DriverSession::TakeFeedback(FeedbackFrame* f) noexcept {
   feedback_pending_ = false;
   return true;
 }
+bool DriverSession::Leave(const LeaveReady& proof) noexcept {
+  if (lower_ || leaving_) return false;
+  auto f = Make(inbound_.identity);
+  f.identity.phase = 2;
+  f.payload = proof;
+  if (!Queue(f)) return false;
+  leaving_ = true;
+  leave_ = proof;
+  return true;
+}
 bool DriverSession::Poll() noexcept {
   if (Failed()) return false;
   const auto now = DriverHostUs();
@@ -91,6 +101,56 @@ bool DriverSession::Poll() noexcept {
   }
   Frame f;
   while (endpoint_.TryTake(&f)) {
+    if (auto permit = std::get_if<ShutdownPermit>(&f.payload)) {
+      if (!lower_ || shutdown_authorized_ || permit->role != Role::Runtime ||
+          f.identity.phase != 4 || f.identity.control_step + 1 < next_step_ ||
+          f.identity.control_step > next_step_ || !clock_.Commit(f.identity)) {
+        failed_ = true;
+        return false;
+      }
+      shutdown_authorized_ = true;
+      shutdown_identity_ = f.identity;
+      tick_pending_ = feedback_pending_ = publishing_ = installing_ = false;
+      read_ = write_;
+      deadline_ =
+          now + static_cast<std::uint64_t>(config_.io_timeout_ms) * 1000;
+      continue;
+    }
+    if (auto permit = std::get_if<RuntimeOnlyPermit>(&f.payload)) {
+      if (!lower_ || runtime_only_ || permit->role != Role::Runtime ||
+          f.identity.phase != 2 || f.identity.control_step + 1 != next_step_ ||
+          !clock_.Commit(f.identity)) {
+        failed_ = true;
+        return false;
+      }
+      runtime_only_ = true;
+      publishing_ = installing_ = false;
+      continue;
+    }
+    if (auto committed = std::get_if<ShutdownCommitted>(&f.payload)) {
+      if (!lower_ || !shutdown_authorized_ ||
+          !SamePhase(f.identity, shutdown_identity_) || !committed->write_id ||
+          !committed->state_seq) {
+        failed_ = true;
+        return false;
+      }
+      stop_committed_ = *committed;
+      continue;
+    }
+    if (auto committed = std::get_if<LeaveCommitted>(&f.payload)) {
+      if (lower_ || !leaving_ || f.identity.phase != 2 ||
+          f.identity.control_step + 1 != next_step_ ||
+          !SameIdentity(committed->proof.stop_request, leave_.stop_request) ||
+          !SameIdentity(committed->proof.stop_result, leave_.stop_result) ||
+          !SameIdentity(committed->proof.stopped_state, leave_.stopped_state) ||
+          !committed->authorization_revoked || !committed->heartbeat_resolved) {
+        failed_ = true;
+        return false;
+      }
+      left_ = true;
+      publishing_ = false;
+      continue;
+    }
     if (std::holds_alternative<Abort>(f.payload)) {
       failed_ = true;
       return false;
@@ -102,6 +162,19 @@ bool DriverSession::Poll() noexcept {
       continue;
     }
     if (auto feedback = std::get_if<Feedback>(&f.payload)) {
+      if (shutdown_authorized_ && f.identity.phase == 4 &&
+          SamePhase(f.identity, shutdown_identity_)) {
+        if (stop_feedback_received_) {
+          failed_ = true;
+          return false;
+        }
+        stop_feedback_received_ = true;
+        feedback_ = {f.identity, *feedback};
+        feedback_pending_ = true;
+        tick_ = {f.identity, {}, true};
+        tick_pending_ = true;
+        continue;
+      }
       if (!lower_ || feedback_pending_ || f.identity.phase != 1 ||
           f.identity.control_step != next_step_ || !clock_.Commit(f.identity)) {
         failed_ = true;

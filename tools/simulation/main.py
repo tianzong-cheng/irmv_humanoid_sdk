@@ -47,6 +47,10 @@ class Runner:
         self.path=Path(socket_path).absolute()
         self.engine_factory=engine_factory
         self.stop=threading.Event()
+        self.shutdown=threading.Event()
+        self.engine_gate=threading.Lock()
+        self.release_cancel=threading.Event()
+        self.step_started=False
         self.jobs=queue.Queue(maxsize=32)
         self.results=queue.Queue(maxsize=32)
         self.worker=None
@@ -60,12 +64,18 @@ class Runner:
     def request_stop(self):
         self.stop.set()
 
+    def request_shutdown(self):
+        # Independent owner capability. Application never signals runtime.
+        with self.engine_gate:
+            self.shutdown.set()
+
     def _engine_worker(self):
         engine=None
         try:
             while not self.stop.is_set():
                 try: action=self.jobs.get(timeout=.01)
                 except queue.Empty: continue
+                released=False
                 if action.kind=='initialize':
                     engine=self.engine_factory()
                     engine.initialize(self.coordinator.b.engine_config)
@@ -73,11 +83,30 @@ class Runner:
                         raise ValueError('engine timestep differs from bootstrap')
                     feedback=engine.read_feedback()
                 elif action.kind=='step':
+                    with self.engine_gate:
+                        cancelled=self.shutdown.is_set() or self.stop.is_set()
+                        release=action.release and not self.release_cancel.is_set()
+                        if not cancelled: self.step_started=True
+                    if cancelled:
+                        self.results.put_nowait(Event('cancelled'))
+                        continue
+                    # Passing the gate commits this worker operation. Cancellation
+                    # cannot undo an already executing GPU call or release.
+                    if release:
+                        engine.release_base()
+                        released=True
                     engine.apply_torque(action.torque)
                     feedback=engine.step(action.substeps)
+                elif action.kind=='stop_output':
+                    engine.apply_torque(action.torque)
+                    # Completion includes resource close, not just zero-output submission.
+                    engine.close()
+                    engine=None
+                    self.results.put_nowait(Event('stopped'))
+                    continue
                 else: raise ValueError('invalid engine action')
                 if not self.stop.is_set():
-                    self.results.put_nowait(Event('feedback',feedback=feedback))
+                    self.results.put_nowait(Event('feedback',feedback=feedback,released=released))
         except Exception as exc:
             if not self.stop.is_set():
                 try:self.results.put_nowait(Event('engine_error',reason=str(exc)))
@@ -117,7 +146,7 @@ class Runner:
 
     def _actions(self,actions):
         for a in actions:
-            if a.kind in ('initialize','step'):
+            if a.kind in ('initialize','step','stop_output'):
                 self.jobs.put_nowait(a)
             elif a.kind=='send':
                 conn=self.peers.get(a.peer)
@@ -130,6 +159,18 @@ class Runner:
             else:raise ValueError('unknown action')
 
     def _advance(self,event):
+        if event.kind in ('feedback','cancelled'):
+            with self.engine_gate:
+                self.step_started=False
+                self.release_cancel.clear()
+        if event.frame and event.frame.kind==p.KINDS.index('ReleaseCancel')+1:
+            with self.engine_gate:
+                started=self.step_started
+                if event.frame.control_step==self.coordinator.step and not started:
+                    self.release_cancel.set()
+            if started:
+                from dataclasses import replace
+                event=replace(event,reason='operation_started')
         self._actions(self.coordinator.advance(event,host_us()))
 
     def run(self):
@@ -139,17 +180,19 @@ class Runner:
             self.worker.start()
             self._advance(Event('start'))
             while self.coordinator.state not in ('Failed','Closed'):
+                if self.shutdown.is_set() and not self.coordinator.shutdown_pending:
+                    self._advance(Event('stop',reason='independent experiment shutdown'))
                 if self.stop.is_set():
-                    self._advance(Event('stop',reason='runner stop requested'))
+                    self._actions(self.coordinator.fail('forced stop; stopped-unproven'))
                     break
                 for _ in range(32):
                     try:event=self.results.get_nowait()
                     except queue.Empty:break
                     self._advance(event)
-                    if self.coordinator.state=='Failed':break
-                if self.coordinator.state=='Failed':break
+                    if self.coordinator.state in ('Failed','Closed'):break
+                if self.coordinator.state in ('Failed','Closed'):break
                 self._advance(Event('poll'))
-                if self.coordinator.state=='Failed':break
+                if self.coordinator.state in ('Failed','Closed'):break
                 wait=max(0,min(.01,(self.coordinator.deadline-host_us())/1000000))
                 for key,mask in self.selector.select(wait):
                     conn=key.fileobj
@@ -165,7 +208,14 @@ class Runner:
                         if mask & selectors.EVENT_WRITE:self._flush(conn)
                         if mask & selectors.EVENT_READ:
                             packet,_,flags,_=conn.recvmsg(p.MAX_PACKET_BYTES)
-                            if not packet:raise ValueError('peer disconnected')
+                            if not packet:
+                                peer=self.connections[conn]['peer']
+                                self.selector.unregister(conn)
+                                del self.connections[conn]
+                                self.peers.pop(peer,None)
+                                conn.close()
+                                self._advance(Event('disconnect',peer,reason='peer disconnected'))
+                                continue
                             if flags & socket.MSG_TRUNC:raise ValueError('oversized packet')
                             f=p.decode(packet)
                             entry=self.connections[conn]
@@ -176,7 +226,31 @@ class Runner:
                                 if role in self.peers:raise ValueError('duplicate peer role')
                                 entry['peer']=role;self.peers[role]=conn
                             self._advance(Event('frame',entry['peer'],f))
-                    if self.coordinator.state=='Failed':break
+                    if self.coordinator.state in ('Failed','Closed'):break
+            if self.coordinator.state=='Closed':
+                # The engine has acknowledged zero output. Keep the socket alive
+                # until runtime consumes ShutdownCommitted and closes its own
+                # driver; a fixed sleep could race endpoint delivery under load.
+                end=host_us()+self.coordinator.b.phase_timeout_us
+                runtime_closed=False
+                while not runtime_closed and host_us()<end:
+                    for key,mask in self.selector.select(.01):
+                        conn=key.fileobj
+                        if conn is self.listener: continue
+                        if mask & selectors.EVENT_WRITE: self._flush(conn)
+                        if mask & selectors.EVENT_READ:
+                            packet=conn.recv(p.MAX_PACKET_BYTES)
+                            if packet: raise ValueError('unexpected output after shutdown commit')
+                            peer=self.connections[conn]['peer']
+                            self.selector.unregister(conn)
+                            del self.connections[conn]
+                            self.peers.pop(peer,None)
+                            conn.close()
+                            if peer==2: runtime_closed=True
+                            elif not self.coordinator.runtime_only:
+                                raise ValueError('required application died before leave commit')
+                if not runtime_closed:
+                    self.coordinator.fail('stopped-unproven: runtime close deadline')
             return 0 if self.coordinator.state=='Closed' else 1
         except (OSError,ValueError,queue.Full) as exc:
             actions=self.coordinator.fail(str(exc))
@@ -206,7 +280,7 @@ def main():
     args=parser.parse_args()
     runner=Runner(load_bootstrap(args.bootstrap),args.socket)
     for sig in (signal.SIGINT,signal.SIGTERM):
-        signal.signal(sig,lambda *_:runner.request_stop())
+        signal.signal(sig,lambda *_:runner.request_shutdown())
     result=runner.run()
     if result:print('simulation failed: '+runner.coordinator.failure)
     return result

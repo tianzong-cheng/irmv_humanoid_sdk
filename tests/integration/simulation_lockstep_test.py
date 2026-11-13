@@ -105,9 +105,11 @@ def run(build,delay=0,worker_delay=False,stop_pending=False):
                 assert runner.stop_sent,('did not exercise pending inference',runner.coordinator.state,output)
                 processes[1].wait(timeout=max(.01,2-(time.monotonic()-runner.stop_at)))
                 assert processes[1].poll() is not None,('stop not responsive',output)
-                assert processes[1].returncode!=0,('Task8 success was claimed',output)
+                assert processes[1].returncode==0,('graceful leave was not confirmed',output)
+                assert runner.coordinator.runtime_only,runner.coordinator.failure
+                assert processes[0].poll() is None,output
                 assert time.monotonic()-runner.stop_at<2,('stop exceeded host bound',output)
-                print('PASS actual application stop while inference pending; Task8 success not claimed')
+                print('PASS actual application stop while inference pending; LeaveCommitted and runtime retained')
                 return None
             assert runner.coordinator.step>=180,(runner.coordinator.failure,runner.coordinator.state,output)
             assert not runner.coordinator.failure,runner.coordinator.failure

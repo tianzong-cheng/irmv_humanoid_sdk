@@ -107,8 +107,8 @@ print('simulation protocol golden exchange and rejection checks passed')
 
 # A phase is explicitly sealed, including empty phases; queue capacity is separate.
 assert p.MAX_PHASE_MANIFEST_ENTRIES == 64
-assert p.KINDS[10:] == ['PhaseSeal', 'PhaseAck', 'InventoryReady', 'PublishPermit', 'TickPermit', 'FirstCommandProof']
-assert len(p.GOLDEN_HEX) == 16
+assert p.KINDS[10:] == ['PhaseSeal', 'PhaseAck', 'InventoryReady', 'PublishPermit', 'TickPermit', 'FirstCommandProof', 'ShutdownPermit', 'RuntimeOnlyPermit', 'ShutdownCommitted', 'ReleaseCancel']
+assert len(p.GOLDEN_HEX) == 20
 for kind in (11, 12):
     for count in (0, 33, 64):
         seal = {'sender': 2, 'manifest_count': count,
@@ -166,3 +166,8 @@ proof=p.encode(p.golden_frames()[15])
 for offset,value in ((60,5),(236,1)):
     rejected(changed(proof,offset,'I',value))
 print('auxiliary first-command proof kind validation passed')
+
+for kind in (17,18,20):
+    wire=p.encode(p.golden_frames()[kind-1])
+    for role in (0,4): rejected(changed(wire,60,'I',role))
+print('lifecycle capability roles validated')

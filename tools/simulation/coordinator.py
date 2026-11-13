@@ -34,6 +34,7 @@ class Event:
     frame: p.Frame | None = None
     feedback: object = None
     reason: str = ''
+    released: bool = False
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ class Action:
     frame: p.Frame | None = None
     torque: tuple = ()
     substeps: int = 0
+    release: bool = False
     reason: str = ''
 
 
@@ -86,6 +88,17 @@ class SimulationCoordinator:
         # Metadata evidence, independent of replay/dedup phase cache rotation.
         self.states=deque(maxlen=8192)  # Runtime's maximum source-state window.
         self.candidates=deque(maxlen=32)  # <=128 targets per completed app phase.
+        self.runtime_only=False
+        self.shutdown_pending=False
+        self.stop_proven=False
+        self.release_state='Fixed'
+        self.arm=None
+        self.release_events=deque(maxlen=64)
+        self.release_event_drops=0
+        self.requests=deque(maxlen=64)
+        self.proofs=deque(maxlen=64)
+        self.consumed=()
+        self.highest_state_seq=0
         self.current_target=None  # Pinned (command, actual source state) pair.
 
     def frame(self, name, payload, phase=None):
@@ -100,6 +113,9 @@ class SimulationCoordinator:
     def fail(self, reason):
         self.state='Failed'
         self.failure=reason
+        self.stop_proven=False
+        self.arm=None
+        if self.release_state=='Armed': self.release_state='Fixed'
         return tuple(self.send(peer,'Abort',dict(code=1,reason=reason.encode()[:256]))
                      for peer in sorted(self.peers))+(Action('cancel',reason=reason),)
 
@@ -185,6 +201,10 @@ class SimulationCoordinator:
                 raise ValueError('nested first-command source state was never observed')
             targets.append((command,source))
         self.candidates.append(tuple(targets))
+        self.requests.extend(m for m in self.inventory if m['kind']==1)
+        self.proofs.extend(self.first_commands)
+        if any(m['kind']==1 and m['operation'] in (1,2,4) for m in self.inventory):
+            self.cancel_arm()
 
     def bind_tick_target(self, state):
         command=self.torque['command']
@@ -212,6 +232,99 @@ class SimulationCoordinator:
             raise ValueError('tick state and actual current_target metadata disagree')
         self.current_target=target
 
+    def cancel_arm(self):
+        if self.release_state=='Armed':
+            self.arm=None
+            self.release_state='Fixed'
+
+    def stop_tick(self):
+        if self.feedback is None or 2 not in self.peers:
+            return self.fail('shutdown stopped-unproven: runtime/feedback unavailable')
+        self.cancel_arm()
+        self.enter('StopTick',4)
+        self.torque=None
+        payload=asdict(self.feedback)
+        payload.update(valid=True,imu_valid=True)
+        return (self.send(2,'ShutdownPermit',dict(role=2)),
+                self.send(2,'Feedback',payload))
+
+    def start_physics(self):
+        next_us=(self.step+1)*self.b.control_dt_us
+        if next_us>self.b.max_duration_us or next_us>=2**64-1:
+            raise ValueError('logical duration or overflow')
+        release=self.arm is not None and self.release_state=='Armed'
+        if release:
+            self.release_state='Releasing'
+        self.enter('PhysicsAdvance',3)
+        return (Action('step',torque=tuple(self.torque['tau']),
+                       substeps=self.b.control_dt_us//self.b.physics_dt_us,
+                       release=release),)
+
+    def validate_tick(self):
+        states=[m for m in self.inventory if m['kind']==3]
+        if (self.torque is None or len(states)!=1 or
+                states[0]['sequence']!=self.torque['state_seq'] or
+                states[0]['stamp_us']!=1+self.step*self.b.control_dt_us):
+            raise ValueError('tick state does not match torque')
+        state=states[0]
+        if state['sequence']<=self.highest_state_seq:
+            raise ValueError('tick state sequence did not advance')
+        self.highest_state_seq=state['sequence']
+        self.bind_tick_target(state)
+        self.states.append(state)
+        return state
+
+    def arm_release(self,v):
+        request,command,result,state=(v[k] for k in (
+            'tracking_request','first_command','applied_result','tracking_state'))
+        if (dict(request=request,command=command) not in self.proofs or
+                request not in self.requests or request['operation']!=3 or
+                result not in self.consumed or state not in self.consumed or
+                state!=self.states[-1] or self.torque['command']!=command or
+                self.torque['state_seq']!=state['sequence'] or
+                result['kind']!=2 or result['status']!=0 or
+                result['execution_state']!=3 or result['output_action']!=2 or
+                state['execution_state']!=3 or state['output_action']!=2 or
+                result['request_id']!=request['request_id'] or
+                result['supervisor_id']!=request['supervisor_id'] or
+                result['stamp_us']!=state['stamp_us'] or
+                any(result[k]!=command[k] or state[k]!=command[k]
+                    for k in ('runtime_id','session_id','producer_id','epoch'))):
+            raise ValueError('ReleaseArm lacks exact consumed first-policy confirmation')
+        if self.release_state=='Released': return
+        if self.release_state=='Releasing': raise ValueError('release already in flight')
+        self.arm=v
+        self.release_state='Armed'
+        if len(self.release_events)==64: self.release_event_drops+=1
+        self.release_events.append(('Armed',self.step,v))
+
+    def leave(self,v):
+        request,result,state=(v[k] for k in ('stop_request','stop_result','stopped_state'))
+        fault=state['execution_state']==4 and state['output_action'] in (0,1)
+        damping=state['execution_state']==2 and state['output_action']==1
+        def absent(kind):
+            m={name:(bytes(16) if field=='Id' else bytes(32) if field=='Digest' else 0)
+               for field,name in p.SCHEMA['MessageIdentity']}
+            m.update(kind=kind,runtime_id=self.b.runtime_id)
+            return m
+        stopped=(state in self.consumed and state==self.states[-1] and
+                 state['producer_id']==bytes(16) and self.torque is not None and
+                 self.torque['state_seq']==state['sequence'])
+        fault_proof=fault and request==absent(1) and result==absent(2)
+        damping_proof=(damping and request in self.requests and request['operation']==1 and
+                 result in self.consumed and result['status']==0 and
+                 result['request_id']==request['request_id'] and
+                 all(result[k]==request[k] for k in ('runtime_id','supervisor_id','session_id')) and
+                 result['execution_state']==2 and result['output_action']==1)
+        if not stopped or not (fault_proof or damping_proof):
+            raise ValueError('LeaveReady lacks actual stopped output/consumption proof')
+        self.cancel_arm()
+        self.runtime_only=True
+        committed=self.send(3,'LeaveCommitted',dict(proof=v,authorization_revoked=True,
+            session_closed=state['session_id']==bytes(16),heartbeat_resolved=True))
+        permit=self.send(2,'RuntimeOnlyPermit',dict(role=2))
+        return (committed,permit)+self.start_physics()
+
     def advance(self, event: Event, host_now_us: int) -> tuple[Action,...]:
         if self.state in ('Failed','Closed'):
             return ()
@@ -234,11 +347,29 @@ class SimulationCoordinator:
             return (Action('initialize'),)
         if not self.started: raise ValueError('not started')
         if e.kind=='poll': return ()
-        if e.kind in ('disconnect','engine_error','stop'):
-            # Task 8 will add guarded stop/leave proofs. Fail closed today; never
-            # claim ZeroTorque, physical stop, release or a successful GPU cancel.
-            self.state='Stopping'
-            return self.fail(e.reason or e.kind)
+        if e.kind=='disconnect':
+            self.peers.discard(e.peer)
+            if e.peer==3 and self.runtime_only: return ()
+            return self.fail('stopped-unproven: '+(e.reason or 'required peer disconnected'))
+        if e.kind=='engine_error': return self.fail(e.reason)
+        if e.kind=='stop':
+            if self.shutdown_pending: return ()
+            self.shutdown_pending=True
+            self.cancel_arm()
+            if self.state=='PhysicsAdvance': return ()
+            return self.stop_tick()
+        if e.kind=='cancelled':
+            if self.release_state=='Releasing':
+                self.release_state='Fixed'; self.arm=None
+            if not self.shutdown_pending: raise ValueError('unsolicited cancellation')
+            return self.stop_tick()
+        if e.kind=='stopped':
+            if self.state!='StopEngine': raise ValueError('unsolicited engine stop completion')
+            self.stop_proven=True
+            self.state='Closed'
+            return (self.send(2,'ShutdownCommitted',dict(write_id=self.torque['write_id'],
+                         state_seq=self.torque['state_seq'])),)
+
         if e.kind=='feedback':
             if self.state=='Handshake':
                 if self.feedback is not None: raise ValueError('duplicate initial feedback')
@@ -253,7 +384,14 @@ class SimulationCoordinator:
                 physics_step_end=expected))
             self.feedback=e.feedback
             self.step+=1
-            return (applied,)+self.tick()
+            if e.released:
+                if self.release_state!='Releasing': raise ValueError('unsolicited release')
+                self.release_state='Released'
+                if len(self.release_events)==64: self.release_event_drops+=1
+                self.release_events.append(('Released',self.step,self.arm))
+                self.arm=None
+            elif self.release_state=='Releasing': raise ValueError('missing worker release completion')
+            return (applied,)+(self.stop_tick() if self.shutdown_pending else self.tick())
         if e.kind!='frame' or e.peer not in (2,3): raise ValueError('event or role')
         f=e.frame
         wire=p.encode(f)
@@ -261,6 +399,17 @@ class SimulationCoordinator:
                 or f.control_dt_us!=self.b.control_dt_us): raise ValueError('run or dt')
         key=(e.peer,hashlib.sha256(wire).digest())
         if key in self.seen or any(key in phase for phase in self.recent): return ()
+        if f.kind==p.KINDS.index('ReleaseCancel')+1:
+            if e.peer!=3 or f.payload['role']!=3 or f.phase!=2 or f.control_step>self.step:
+                raise ValueError('invalid release cancellation')
+            if f.control_step==self.step:
+                self.cancel_arm()
+                if self.release_state=='Releasing' and e.reason!='operation_started':
+                    self.release_state='Fixed'; self.arm=None
+            return ()
+        if self.shutdown_pending and f.control_step<=self.step and f.phase<4:
+            return ()  # Cancelled normal phase; never used as stop proof.
+        if self.runtime_only and e.peer==3: raise ValueError('application membership revoked')
         if (f.control_step!=self.step or f.logical_us!=1+self.step*self.b.control_dt_us
                 or f.phase!=self.phase): raise ValueError('wrong phase')
         if len(self.seen)>=(134 if self.phase==2 else 70): raise ValueError('phase frame capacity')
@@ -279,13 +428,18 @@ class SimulationCoordinator:
         elif e.peer not in self.peers: raise ValueError('peer not ready')
         elif name=='Abort': raise ValueError('peer aborted')
         elif name=='Torque':
-            if self.state!='RuntimeTick' or e.peer!=2 or self.torque is not None or not v['accepted']:
+            if self.state not in ('RuntimeTick','StopTick') or e.peer!=2 or self.torque is not None or not v['accepted']:
                 raise ValueError('unexpected torque')
             if (len(v['tau'])!=len(self.feedback.q) or v['write_id']<=self.last_write_id
                     or v['command']['runtime_id']!=self.b.runtime_id):
                 raise ValueError('torque identity or shape')
             self.torque=v
             self.last_write_id=v['write_id']
+        elif name in ('ReleaseArm','LeaveReady'):
+            if e.peer!=3 or self.phase!=2 or self.state!='ApplicationPhase':
+                raise ValueError('lifecycle proof outside consumed application phase')
+            if name=='ReleaseArm': self.arm_release(v)
+            else: return self.leave(v)
         elif name=='FirstCommandProof':
             if e.peer!=3 or self.phase!=2 or self.state!='ApplicationPhase' or self.seal is not None:
                 raise ValueError('first-command proof outside application inventory')
@@ -293,9 +447,9 @@ class SimulationCoordinator:
                 raise ValueError('conflicting or excess first-command proof')
             self.first_commands.append(v)
         elif name in ('Manifest','PhaseSeal','InventoryReady','PhaseAck'):
-            if self.state not in ('RuntimeTick','ApplicationPhase','IngressWait'):
+            if self.state not in ('RuntimeTick','ApplicationPhase','IngressWait','StopTick'):
                 raise ValueError('inventory outside phase')
-            sender=2 if self.phase==1 else 3
+            sender=2 if self.phase in (1,4) else 3
             consumer=5-sender
             if name=='Manifest':
                 if e.peer!=sender or v['sender']!=sender or self.seal is not None:
@@ -308,7 +462,7 @@ class SimulationCoordinator:
                     raise ValueError('conflicting manifest')
                 if len(self.inventory)==64: raise ValueError('manifest capacity')
                 self.inventory.append(m)
-                actions=(Action('send',consumer,f),)
+                actions=() if self.runtime_only or self.phase==4 else (Action('send',consumer,f),)
             elif name=='PhaseSeal':
                 digest=hashlib.sha256(b''.join(p._pack('Manifest',dict(sender=sender,message=m))
                                              for m in self.inventory)).digest()
@@ -316,7 +470,17 @@ class SimulationCoordinator:
                     raise ValueError('seal mismatch')
                 self.seal=v
                 if self.phase==2: self.state='IngressWait'
-                actions=(Action('send',consumer,f),)
+                if self.phase==4 or (self.runtime_only and self.phase==1):
+                    state=self.validate_tick()
+                    if self.phase==4:
+                        if state['execution_state']!=1 or state['output_action']!=0 or any(self.torque['tau']):
+                            raise ValueError('shutdown stopped-unproven: fresh ZeroTorque required')
+                        self.state='StopEngine'
+                        actions=(Action('stop_output',torque=tuple(self.torque['tau'])),)
+                    else:
+                        if state['execution_state']==3: raise ValueError('RuntimeOnly forbids Tracking')
+                        actions=self.start_physics()
+                else: actions=(Action('send',consumer,f),)
             else:
                 if e.peer!=consumer or v['consumer']!=consumer or self.seal is None or v['seal']!=self.seal:
                     raise ValueError('consumer seal mismatch')
@@ -332,21 +496,12 @@ class SimulationCoordinator:
                         raise ValueError('completion before install or wrong disposition')
                     if self.phase==1:
                         if self.torque is None: raise ValueError('missing tick torque')
-                        states=[m for m in self.inventory if m['kind']==3]
-                        if (len(states)!=1 or states[0]['sequence']!=self.torque['state_seq']
-                                or states[0]['stamp_us']!=1+self.step*self.b.control_dt_us):
-                            raise ValueError('tick state does not match torque')
-                        self.bind_tick_target(states[0])
-                        self.states.append(states[0])
+                        self.validate_tick()
+                        self.consumed=tuple(self.inventory)
                         self.enter('ApplicationPhase',2)
                         actions=()
                     else:
-                        next_us=(self.step+1)*self.b.control_dt_us
-                        if next_us>self.b.max_duration_us or next_us>=2**64-1:
-                            raise ValueError('logical duration or overflow')
                         self.commit_ingress()
-                        self.enter('PhysicsAdvance',3)
-                        actions=(Action('step',torque=tuple(self.torque['tau']),
-                            substeps=self.b.control_dt_us//self.b.physics_dt_us),)
+                        actions=self.start_physics()
         else: raise ValueError('unsupported control frame')
         return actions

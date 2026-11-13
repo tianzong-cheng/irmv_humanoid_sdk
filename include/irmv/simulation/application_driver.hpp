@@ -46,6 +46,14 @@ class ApplicationDriver final : public application::ClientSink {
   bool Processed(const MessageIdentity& id) noexcept {
     return session_.Processed(id);
   }
+  bool CancelRelease() noexcept;
+  bool Poll() noexcept { return session_.Poll(); }
+  bool PrepareLifecycle(bool locomotion, protocol::Sequence first_seq,
+                        bool exiting) noexcept;
+  bool LeaveComplete() noexcept {
+    session_.Poll();
+    return session_.Left();
+  }
   bool Failed() const noexcept { return failed_ || session_.Failed(); }
   bool PublishRequest(const protocol::ExecutionRequest&) override;
   bool PublishCommand(const protocol::JointCommand&) override;
@@ -65,5 +73,11 @@ class ApplicationDriver final : public application::ClientSink {
   std::uint32_t count_{0}, received_{0};
   bool permitted_{false}, failed_{false};
   StepPermit permit_{};
+  std::array<protocol::ExecutionRequest, 64> requests_{};
+  std::size_t request_count_{0};
+  ReleaseArm arm_{};
+  LeaveReady leave_{};
+  bool arm_pending_{false}, leave_pending_{false};
+  std::uint64_t armed_request_{0}, cancelled_request_{0};
 };
 }  // namespace irmv::simulation

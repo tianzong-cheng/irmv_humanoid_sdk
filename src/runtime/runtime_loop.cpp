@@ -26,6 +26,7 @@
 #include "irmv/hardware/backend_factory.hpp"
 #include "irmv/hardware/sim_backend.hpp"
 #include "irmv/runtime/execution_fsm.hpp"
+#include "irmv/runtime/shutdown_authorization.hpp"
 #include "irmv/simulation/runtime_driver.hpp"
 #include "irmv/telemetry/diagnostic_write.hpp"
 #include "irmv/telemetry/logger.hpp"
@@ -1569,14 +1570,18 @@ class ShutdownPlanner {
   // (TickInput::local_stop_requested); every other tick passes the transport
   // input through. No supervisor identity, session or request id is fabricated,
   // every received stop of the tick is still answered, and no received stop can
-  // be displaced because the local stop is not part of a lane.
-  const TickInput *PlanStop(const TickInput &inbound, const ExecutionFsm &fsm) {
+  // be displaced because the local stop is not part of a lane. The final
+  // argument defaults false: only the authenticated simulation coordinator's
+  // whole-experiment ShutdownPermit authorizes a sessionless local stop.
+  const TickInput *PlanStop(const TickInput &inbound, const ExecutionFsm &fsm,
+                            bool coordinator_shutdown = false) {
     const protocol::ExecutionState state = fsm.execution_state();
     if (state != protocol::ExecutionState::Damping &&
         state != protocol::ExecutionState::Tracking) {
       return &inbound;
     }
-    if (fsm.session_id() == protocol::kNoId) {
+    if (!MayPlanLocalStop(state, fsm.session_id() != protocol::kNoId,
+                          coordinator_shutdown)) {
       // Damping holds without a session only when a supervisor stopped
       // tracking and its lease expired, or when it stopped from Tracking. The
       // local stop is only taken while a session can still be answered, so the
@@ -2057,8 +2062,8 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
         if (simulation_driver->Failed() ||
             g_stop_requested.load(std::memory_order_relaxed)) {
           StderrLine(
-              "robot_runtime: simulation aborted; successful stop requires "
-              "Task 8\n");
+              "robot_runtime: simulation stopped-unproven (peer failure or raw "
+              "signal)\n");
           transport.Stop();
           logger.Stop();
           if (recorder) recorder->Stop();
@@ -2084,10 +2089,13 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
     }
 
     const bool stop_requested =
-        g_stop_requested.load(std::memory_order_relaxed);
+        g_stop_requested.load(std::memory_order_relaxed) ||
+        (simulation_driver && simulation_driver->ShutdownAuthorized());
     const TickInput *input = &transport.TakeInput();
     if (stop_requested) {
-      input = shutdown.PlanStop(*input, fsm);
+      input = shutdown.PlanStop(
+          *input, fsm,
+          simulation_driver && simulation_driver->ShutdownAuthorized());
     }
     const protocol::FeedbackSnapshot feedback = backend->Read(read_started_us);
     const protocol::TimeUs now =
@@ -2206,6 +2214,24 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
       shutdown.FlushNotice();
     }
     if (stop_requested && shutdown.MayExit(result, fsm)) {
+      if (simulation_driver) {
+        const auto end = simulation::DriverHostUs() +
+                         config.simulation->host_phase_timeout_us;
+        while (!simulation_driver->FinishStop()) {
+          if (simulation_driver->Failed() ||
+              simulation::DriverHostUs() >= end) {
+            StderrLine(
+                "robot_runtime: simulation ZeroTorque engine handoff "
+                "stopped-unproven\n");
+            return kExitStartupError;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        // Acknowledge consumption by closing the phase endpoint now. DDS and
+        // telemetry teardown have separate lifetimes and must not hold the
+        // coordinator's completed stop-phase socket open.
+        simulation_driver.reset();
+      }
       LogSummary(logger, "shutdown", fsm, counters, transport, logger.Dropped(),
                  now);
       transport.Stop();

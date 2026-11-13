@@ -351,6 +351,151 @@ class CoordinatorTest(unittest.TestCase):
                     self.finish(3,2,seal)
                 self.assertEqual(self.c.state,'Failed')
 
+    def test_shutdown_is_distinct_frozen_phase_and_needs_engine_completion(self):
+        self.ready()
+        actions=self.c.advance(Event('stop'),4)
+        self.assertEqual(self.c.state,'StopTick',self.c.failure)
+        self.assertEqual(self.c.phase,4)
+        self.assertEqual(self.c.step,0)
+        self.assertEqual([p.KINDS[a.frame.kind-1] for a in actions],
+                         ['ShutdownPermit','Feedback'])
+        torque=self.torque(0.);torque['state_seq']=2
+        self.send(2,'Torque',torque,4)
+        state=state_identity(0,sequence=2,execution_state=1,output_action=0)
+        self.send(2,'Manifest',dict(sender=2,message=state),4)
+        seal=dict(sender=2,manifest_count=1,manifest_digest=hashlib.sha256(
+            p._pack('Manifest',dict(sender=2,message=state))).digest())
+        actions=self.send(2,'PhaseSeal',seal,4)
+        self.assertEqual([a.kind for a in actions],['stop_output'])
+        self.assertEqual(self.c.state,'StopEngine')
+        self.assertNotEqual(self.c.state,'Closed')
+        actions=self.c.advance(Event('stopped'),5)
+        self.assertEqual(self.c.state,'Closed')
+        self.assertEqual(p.KINDS[actions[0].frame.kind-1],'ShutdownCommitted')
+
+    def test_shutdown_fault_never_bypasses_guard(self):
+        self.ready();self.c.advance(Event('stop'),4)
+        self.send(2,'Torque',self.torque(),4)
+        state=state_identity(0,execution_state=4,output_action=1)
+        self.send(2,'Manifest',dict(sender=2,message=state),4)
+        seal=dict(sender=2,manifest_count=1,manifest_digest=hashlib.sha256(
+            p._pack('Manifest',dict(sender=2,message=state))).digest())
+        self.send(2,'PhaseSeal',seal,4)
+        self.assertEqual(self.c.state,'Failed')
+        self.assertIn('ZeroTorque',self.c.failure)
+
+    def test_release_pairs_exact_policy_proof_and_is_one_worker_action(self):
+        self.ready();command=self.command()
+        request=identity(1,request_id=5,session_id=b'u'*16,producer_id=b'p'*16,
+                         proposed_epoch=7,operation=3,content_digest=b'r'*32)
+        self.cycle(messages=(request,),proofs=(dict(request=request,command=command),))
+        torque=self.torque();torque['command']=command
+        self.send(2,'Torque',torque)
+        state=state_identity(1,command)
+        result=identity(2,request_id=5,session_id=b'u'*16,producer_id=b'p'*16,
+                        epoch=7,stamp_us=2001,execution_state=3,output_action=2,
+                        content_digest=b'z'*32)
+        seal=self.inventory(2,1,(state,result));self.finish(2,1,seal)
+        arm=dict(tracking_request=request,first_command=command,
+                 applied_result=result,tracking_state=state)
+        self.send(3,'ReleaseArm',arm,2)
+        self.assertEqual(self.c.release_state,'Armed',self.c.failure)
+        seal=self.inventory(3,2);actions=self.finish(3,2,seal)
+        self.assertTrue(actions[0].release)
+        self.assertEqual([a.kind for a in actions],['step'])
+
+    def armed_phase(self):
+        self.ready();command=self.command()
+        request=identity(1,request_id=5,session_id=b'u'*16,producer_id=b'p'*16,
+                         proposed_epoch=7,operation=3,content_digest=b'r'*32)
+        self.cycle(messages=(request,),proofs=(dict(request=request,command=command),))
+        torque=self.torque();torque['command']=command
+        self.send(2,'Torque',torque)
+        state=state_identity(1,command)
+        result=identity(2,request_id=5,session_id=b'u'*16,producer_id=b'p'*16,
+                        epoch=7,stamp_us=2001,execution_state=3,output_action=2,
+                        content_digest=b'z'*32)
+        seal=self.inventory(2,1,(state,result));self.finish(2,1,seal)
+        return dict(tracking_request=request,first_command=command,applied_result=result,tracking_state=state)
+
+    def test_stale_or_changed_arm_cannot_release(self):
+        for field,change in (('applied_result',dict(epoch=6)),
+                             ('first_command',dict(content_digest=b'x'*32)),
+                             ('tracking_state',dict(sequence=1)),
+                             ('tracking_request',dict(request_id=4))):
+            with self.subTest(field=field):
+                self.setUp();arm=self.armed_phase()
+                arm[field]=dict(arm[field],**change)
+                self.send(3,'ReleaseArm',arm,2)
+                self.assertEqual(self.c.state,'Failed')
+                self.assertNotEqual(self.c.release_state,'Released')
+
+    def test_stop_after_arm_cancels_before_worker_step(self):
+        arm=self.armed_phase();self.send(3,'ReleaseArm',arm,2)
+        actions=self.c.advance(Event('stop'),5)
+        self.assertEqual(self.c.release_state,'Fixed')
+        self.assertIsNone(self.c.arm)
+        self.assertNotIn('step',[a.kind for a in actions])
+        self.assertEqual(self.c.state,'StopTick')
+
+    def test_stop_inventory_cancels_arm_and_later_authorization_can_rearm(self):
+        arm=self.armed_phase();self.send(3,'ReleaseArm',arm,2)
+        stop=identity(1,request_id=6,operation=1,session_id=b'u'*16,content_digest=b'x'*32)
+        seal=self.inventory(3,2,(stop,));a=self.finish(3,2,seal)
+        self.assertFalse(a[0].release)
+        self.assertEqual(self.c.release_state,'Fixed')
+        # A later independently proven first policy frame can arm again; no
+        # constraint call occurred for the cancelled authorization.
+        self.c.advance(Event('feedback',feedback=feedback(4)),6)
+        cmd=self.command(epoch=9,sequence=11,source_state_seq=3,stamp_us=4001)
+        req=identity(1,request_id=7,session_id=b'u'*16,producer_id=b'p'*16,
+                     proposed_epoch=9,operation=3,content_digest=b'n'*32)
+        self.cycle(messages=(req,),proofs=(dict(request=req,command=cmd),))
+        torque=self.torque();torque['command']=cmd
+        self.send(2,'Torque',torque)
+        state=state_identity(3,cmd)
+        result=identity(2,request_id=7,session_id=b'u'*16,producer_id=b'p'*16,
+                        epoch=9,stamp_us=6001,execution_state=3,output_action=2,content_digest=b'w'*32)
+        seal=self.inventory(2,1,(state,result));self.finish(2,1,seal)
+        self.send(3,'ReleaseArm',dict(tracking_request=req,first_command=cmd,
+                                    applied_result=result,tracking_state=state),2)
+        self.assertEqual(self.c.release_state,'Armed',self.c.failure)
+
+    def test_app_cancel_between_arm_and_advance_prevents_release(self):
+        self.assertIn('ReleaseCancel',p.KINDS)
+        arm=self.armed_phase();self.send(3,'ReleaseArm',arm,2)
+        self.send(3,'ReleaseCancel',dict(role=3),2)
+        seal=self.inventory(3,2);a=self.finish(3,2,seal)
+        self.assertFalse(a[0].release)
+        self.assertEqual(self.c.release_state,'Fixed')
+
+    def test_fault_leave_needs_actual_output_but_no_fabricated_stop(self):
+        self.ready();self.send(2,'Torque',self.torque())
+        state=state_identity(0,execution_state=4,output_action=1)
+        seal=self.inventory(2,1,(state,));self.finish(2,1,seal)
+        a=self.send(3,'LeaveReady',dict(stop_request=identity(1),stop_result=identity(2),stopped_state=state),2)
+        self.assertTrue(self.c.runtime_only,self.c.failure)
+        self.assertEqual(a[0].frame.payload['proof']['stop_request']['content_digest'],bytes(32))
+
+    def test_leave_removes_app_without_fabricating_receipt(self):
+        self.ready()
+        request=identity(1,request_id=8,session_id=b'u'*16,operation=1,
+                         content_digest=b'r'*32)
+        self.cycle(messages=(request,))
+        self.send(2,'Torque',self.torque())
+        state=state_identity(1,session_id=b'u'*16)
+        result=identity(2,request_id=8,session_id=b'u'*16,stamp_us=2001,
+                        execution_state=2,output_action=1,content_digest=b'z'*32)
+        seal=self.inventory(2,1,(state,result));self.finish(2,1,seal)
+        a=self.send(3,'LeaveReady',dict(stop_request=request,stop_result=result,
+                                     stopped_state=state),2)
+        self.assertTrue(self.c.runtime_only,self.c.failure)
+        self.assertEqual([p.KINDS[x.frame.kind-1] for x in a if x.kind=='send'],
+                         ['LeaveCommitted','RuntimeOnlyPermit'])
+        self.assertFalse(a[0].frame.payload['session_closed'])
+        self.assertEqual(self.c.advance(Event('disconnect',3),5),())
+        self.assertNotEqual(self.c.state,'Failed')
+
     def test_disconnect_and_stop_fail_closed_no_release(self):
         self.ready()
         a=self.c.advance(Event('disconnect',2),4)

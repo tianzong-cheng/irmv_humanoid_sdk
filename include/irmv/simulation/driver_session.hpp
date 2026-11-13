@@ -10,6 +10,7 @@ namespace irmv::simulation {
 struct StepPermit {
   StepIdentity identity{};
   PhaseManifest required{};
+  bool stop_control{false};
 };
 MessageIdentity InactiveCommand(protocol::Id) noexcept;
 // Outer-runner coordination only. Never invoked by a backend or pure FSM.
@@ -29,6 +30,14 @@ class DriverSession {
   bool TakeFeedback(FeedbackFrame*) noexcept;
   const PhaseManifest& Inbound() const noexcept { return inbound_; }
   bool AckQueued() const noexcept { return ack_sent_; }
+  bool ShutdownAuthorized() const noexcept { return shutdown_authorized_; }
+  bool RuntimeOnly() const noexcept { return runtime_only_; }
+  bool StopCommitted(std::uint64_t write, std::uint64_t state) const noexcept {
+    return stop_committed_.write_id == write &&
+           stop_committed_.state_seq == state && write != 0;
+  }
+  bool Leave(const LeaveReady&) noexcept;
+  bool Left() const noexcept { return left_; }
   bool Publishing() const noexcept { return publishing_; }
   void OnPublish(std::function<bool()> fn) { publish_ = std::move(fn); }
 
@@ -51,6 +60,12 @@ class DriverSession {
   std::uint64_t next_step_{0};
   protocol::TimeUs deadline_{0}, last_publish_{0};
   std::function<bool()> publish_;
+  bool stop_feedback_received_{false};
+  bool shutdown_authorized_{false}, runtime_only_{false}, leaving_{false},
+      left_{false};
+  StepIdentity shutdown_identity_{};
+  ShutdownCommitted stop_committed_{};
+  LeaveReady leave_{};
 };
 protocol::TimeUs DriverHostUs() noexcept;
 }  // namespace irmv::simulation

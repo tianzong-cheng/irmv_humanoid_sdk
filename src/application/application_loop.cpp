@@ -901,34 +901,23 @@ int RunApplication(const ApplicationOptions &options,
   while (true) {
     if (simulation_driver) {
       simulation::StepPermit permit;
+      if (stop_requested.load() && !simulation_driver->CancelRelease())
+        return kExitStopUnknown;
       while (!simulation_driver->TakePermit(&permit)) {
-        if (simulation_driver->Failed() ||
-            stop_requested.load(std::memory_order_relaxed)) {
+        if (stop_requested.load() && !simulation_driver->CancelRelease())
+          return kExitStopUnknown;
+        if (simulation_driver->Failed()) {
           std::fprintf(stderr,
-                       "application: simulation aborted; successful stop "
-                       "requires Task 8\n");
+                       "application: simulation stopped-unproven: coordinator "
+                       "unavailable\n");
           return kExitStopUnknown;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
     }
-    // Two instants per iteration, both from the one monotonic host clock and
-    // both named for what they time. `input_now` is read before the terminal
-    // is drained and stamps only the keystrokes that read produced: a key is
-    // one event in the byte stream, and its timestamp is the moment it was
-    // read, not the moment its effect is judged. `decision_now` is read after
-    // the transport events of the iteration were drained, raised by
-    // DecisionInstant to the newest receive stamp among them, and it is the
-    // instant of every supervision judgement (the router tick, the client
-    // poll, the request exit, the Step of each input event, the sends and the
-    // status cadence). The raise is why the second read exists: a state the
-    // transport thread received while this iteration was starting is stamped
-    // after `input_now`, so judging it with `input_now` would call a legal
-    // state stale in the initializer while the client's clamped receive age
-    // calls it fresh. With `decision_now` the loop has `stamp_us <= rx_us <=
-    // decision_now` for every event of the iteration, and no decision predates
-    // the data it acts on. The loop reads no other clock, and the runtime's
-    // stamps are only ever compared against a host receive stamp.
+    // Business instants use committed logical time in simulation and host
+    // monotonic time otherwise. Receive stamps use that same business domain;
+    // host time separately bounds waits, cancellation and display cadence.
     const protocol::TimeUs input_now =
         simulation_clock ? simulation_clock->NowUs() : MonotonicUs();
 
@@ -1135,7 +1124,7 @@ int RunApplication(const ApplicationOptions &options,
         const auto end = simulation::DriverHostUs() +
                          config.runtime.simulation->host_phase_timeout_us;
         while (!have_response) {
-          if (stop_requested.load() || simulation_driver->Failed() ||
+          if (!simulation_driver->Poll() || simulation_driver->Failed() ||
               simulation::DriverHostUs() >= end) {
             std::fprintf(
                 stderr,
@@ -1144,13 +1133,15 @@ int RunApplication(const ApplicationOptions &options,
           }
           if (!input_lost)
             input_lost = ReadTerminal(&router, &bytes, decision_now);
-          const auto event = router.TakeEvent();
+          const auto event =
+              stop_requested.load() ? InputEvent::Exit : router.TakeEvent();
           if (event != InputEvent::None) {
             behavior = fsm.Step(decision_now, event, view, true);
             if (behavior.send_command)
               client.SendCommand(&behavior.command, decision_now);
             if (behavior.send_heartbeat) client.SendHeartbeat(decision_now);
             if (!behavior.locomotion_armed) {
+              if (!simulation_driver->CancelRelease()) return kExitStopUnknown;
               ++generation;
               inference_phase.Cancel();
               result_outstanding = false;
@@ -1498,11 +1489,46 @@ int RunApplication(const ApplicationOptions &options,
     // (7) The exit. `exit_ready` is the FSM's own statement that the sequence
     // it was asked for is over: either a fresh lower state shows the damping
     // stop, or the sequence reached its own deadline and proved nothing.
+    if (simulation_driver) {
+      if (!simulation_driver->PrepareLifecycle(
+              source == LocomotionSource::Local &&
+                  behavior.state == BehaviorState::Locomotion &&
+                  behavior.locomotion_armed && !behavior.exit_ready,
+              fsm.locomotion_first_command_seq(), behavior.exit_ready))
+        return kExitStopUnknown;
+      const auto end = simulation::DriverHostUs() +
+                       config.runtime.simulation->host_phase_timeout_us;
+      auto report = [&](const auto &sample) {
+        simulation::MessageIdentity id;
+        if (!simulation::Identify(sample, &id)) return false;
+        while (!simulation_driver->Processed(id)) {
+          if (simulation_driver->Failed() || simulation::DriverHostUs() >= end)
+            return false;
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return true;
+      };
+      for (std::size_t i = 0; i < events.result_count; ++i)
+        if (!report(events.results[i].value)) return kExitStopUnknown;
+      if (events.has_state && !report(events.state)) return kExitStopUnknown;
+      while (!simulation_driver->CompletePhase(simulation_driver->Outputs())) {
+        if (simulation_driver->Failed() || simulation::DriverHostUs() >= end)
+          return kExitStopUnknown;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      if (!behavior.exit_ready) continue;
+    }
     if (simulation_driver && behavior.exit_ready) {
-      std::fprintf(stderr,
-                   "application: simulation exit requested; successful leave "
-                   "requires Task 8\n");
-      return kExitStopUnknown;
+      const auto end = simulation::DriverHostUs() +
+                       config.runtime.simulation->host_phase_timeout_us;
+      while (!simulation_driver->LeaveComplete()) {
+        if (simulation_driver->Failed() || simulation::DriverHostUs() >= end) {
+          std::fprintf(stderr,
+                       "application: LeaveCommitted stopped-unproven\n");
+          return kExitStopUnknown;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
     }
     if (behavior.exit_ready) {
       const char *lower = behavior.runtime_state_known
@@ -1608,31 +1634,6 @@ int RunApplication(const ApplicationOptions &options,
       return exit_code;
     }
 
-    if (simulation_driver) {
-      const auto end = simulation::DriverHostUs() +
-                       config.runtime.simulation->host_phase_timeout_us;
-      auto report = [&](const auto &sample) {
-        simulation::MessageIdentity id;
-        if (!simulation::Identify(sample, &id)) return false;
-        while (!simulation_driver->Processed(id)) {
-          if (simulation_driver->Failed() || stop_requested.load() ||
-              simulation::DriverHostUs() >= end)
-            return false;
-          std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
-        return true;
-      };
-      for (std::size_t i = 0; i < events.result_count; ++i)
-        if (!report(events.results[i].value)) return kExitStopUnknown;
-      if (events.has_state && !report(events.state)) return kExitStopUnknown;
-      while (!simulation_driver->CompletePhase(simulation_driver->Outputs())) {
-        if (simulation_driver->Failed() || stop_requested.load() ||
-            simulation::DriverHostUs() >= end)
-          return kExitStopUnknown;
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      }
-      continue;
-    }
     // The wait that paces the iteration, and the terminal wait with it. Once
     // the input device is gone the descriptor reports it forever, so the
     // pacing becomes a plain sleep instead of a spin. In both forms the wait is

@@ -46,7 +46,11 @@ enum class FrameType : std::uint16_t {
   InventoryReady = 13,
   PublishPermit = 14,
   TickPermit = 15,
-  FirstCommandProof = 16
+  FirstCommandProof = 16,
+  ShutdownPermit = 17,
+  RuntimeOnlyPermit = 18,
+  ShutdownCommitted = 19,
+  ReleaseCancel = 20
 };
 // Exact DDS projection plus digest of all sample content; see protocol docs.
 struct MessageIdentity {
@@ -167,10 +171,25 @@ struct FirstCommandProof {
   MessageIdentity request{};
   MessageIdentity command{};
 };
+struct ReleaseCancel {
+  Role role{Role::Application};
+};
+struct ShutdownPermit {
+  Role role{Role::Runtime};
+};
+struct RuntimeOnlyPermit {
+  Role role{Role::Runtime};
+};
+struct ShutdownCommitted {
+  std::uint64_t write_id{};
+  std::uint64_t state_seq{};
+};
 using Payload =
     std::variant<Hello, Feedback, Torque, Manifest, Ack, ReleaseArm, LeaveReady,
                  LeaveCommitted, Abort, AppliedToStep, PhaseSeal, PhaseAck,
-                 InventoryReady, PublishPermit, TickPermit, FirstCommandProof>;
+                 InventoryReady, PublishPermit, TickPermit, FirstCommandProof,
+                 ShutdownPermit, RuntimeOnlyPermit, ShutdownCommitted,
+                 ReleaseCancel>;
 struct Frame {
   StepIdentity identity{};
   std::uint64_t physics_dt_us{1000};

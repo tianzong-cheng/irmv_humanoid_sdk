@@ -187,6 +187,14 @@ Payload GoldenPayload(FrameType kind) {
       return PublishPermit{GoldenPhaseSeal()};
     case FrameType::TickPermit:
       return TickPermit{Role::Runtime, 1};
+    case FrameType::ReleaseCancel:
+      return ReleaseCancel{Role::Coordinator};
+    case FrameType::ShutdownPermit:
+      return ShutdownPermit{Role::Coordinator};
+    case FrameType::RuntimeOnlyPermit:
+      return RuntimeOnlyPermit{Role::Coordinator};
+    case FrameType::ShutdownCommitted:
+      return ShutdownCommitted{0x0102030405060708ULL, 0x0102030405060708ULL};
     case FrameType::FirstCommandProof: {
       auto command = GoldenMessageIdentity();
       command.kind = MessageKind::Command;
@@ -218,7 +226,7 @@ int main(int argc, char** argv) {
     CHECK(encoded.size == wire.size);
     CHECK(encoded.bytes == wire.bytes);
   } else {
-    for (unsigned kind = 1; kind <= 16; ++kind) {
+    for (unsigned kind = 1; kind <= 20; ++kind) {
       frame.payload = GoldenPayload(static_cast<FrameType>(kind));
       forbid_allocation = true;
       CHECK(Encode(frame, &wire));
