@@ -645,7 +645,12 @@ New Tracking output or application rejoin fails the experiment. Historical state
 last_applied_command_seq remains intact with the exact no-active target sentinel.
 
 `Runner.request_shutdown()` is the independent owner's graceful whole-experiment
-close API; CLI signals invoke it. `request_stop()` force-aborts and never claims
+close API; CLI signal handlers only assign a pending notification flag. Normal
+runner control flow performs the gated request_shutdown transition; the worker
+checks the pending flag at its gate before committing queued physics/release.
+Repeated signals acquire no locks and set no threading Events in the handler.
+Already-started engine work remains in flight under the existing host deadline.
+`request_stop()` force-aborts and never claims
 successful stop. Application never launches/stops/signals runtime. Shutdown waits
 for any already-started physics operation (or times out), cancels pending release,
 and issues ShutdownPermit17 + exact cached feedback under phase4. This is a

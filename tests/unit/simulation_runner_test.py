@@ -90,6 +90,46 @@ class RunnerTest(unittest.TestCase):
                 self.assertEqual(events,[])
             finally: runner.stop.set();thread.join(1)
 
+    def test_pending_signal_cancels_queued_release_before_control_loop(self):
+        calls=[]
+        class Observed(FakeEngine):
+            def release_base(self): calls.append('release');super().release_base()
+            def step(self,n): calls.append('step');return super().step(n)
+        with tempfile.TemporaryDirectory() as d:
+            runner=Runner(boot(),str(pathlib.Path(d)/'bridge.sock'),Observed)
+            thread=threading.Thread(target=runner._engine_worker,daemon=True);thread.start()
+            try:
+                runner.jobs.put(Action('initialize'));runner.results.get(timeout=1)
+                runner._notify_shutdown(0,None)
+                self.assertFalse(runner.shutdown.is_set())
+                runner.jobs.put(Action('step',torque=(1.,),substeps=2,release=True))
+                self.assertEqual(runner.results.get(timeout=1).kind,'cancelled')
+                self.assertEqual(calls,[])
+            finally: runner.stop.set();thread.join(1)
+
+    def test_pending_signal_does_not_undo_started_release_or_physics(self):
+        entered=threading.Event();finish=threading.Event()
+        class InFlight(FakeEngine):
+            def step(self,n):
+                entered.set()
+                if not finish.wait(1): raise RuntimeError('test handoff deadline')
+                return super().step(n)
+        with tempfile.TemporaryDirectory() as d:
+            runner=Runner(boot(),str(pathlib.Path(d)/'bridge.sock'),InFlight)
+            thread=threading.Thread(target=runner._engine_worker,daemon=True);thread.start()
+            try:
+                runner.jobs.put(Action('initialize'));runner.results.get(timeout=1)
+                runner.jobs.put(Action('step',torque=(1.,),substeps=2,release=True))
+                self.assertTrue(entered.wait(1))
+                runner._notify_shutdown(0,None)
+                runner.request_shutdown()
+                finish.set()
+                result=runner.results.get(timeout=1)
+                self.assertEqual(result.kind,'feedback')
+                self.assertTrue(result.released)
+                self.assertEqual(result.feedback.physics_step,2)
+            finally: finish.set();runner.stop.set();thread.join(1)
+
     def test_timeout_responsive_during_stuck_initialize(self):
         unblock=threading.Event()
         class Stuck(FakeEngine):

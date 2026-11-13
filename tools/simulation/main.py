@@ -48,6 +48,7 @@ class Runner:
         self.engine_factory=engine_factory
         self.stop=threading.Event()
         self.shutdown=threading.Event()
+        self._shutdown_notified=False
         self.engine_gate=threading.Lock()
         self.release_cancel=threading.Event()
         self.step_started=False
@@ -63,6 +64,10 @@ class Runner:
 
     def request_stop(self):
         self.stop.set()
+
+    def _notify_shutdown(self,signum,frame):
+        # Signal context: assignment only, even if this thread owns engine_gate.
+        self._shutdown_notified=True
 
     def request_shutdown(self):
         # Independent owner capability. Application never signals runtime.
@@ -84,7 +89,8 @@ class Runner:
                     feedback=engine.read_feedback()
                 elif action.kind=='step':
                     with self.engine_gate:
-                        cancelled=self.shutdown.is_set() or self.stop.is_set()
+                        cancelled=(self._shutdown_notified or
+                                   self.shutdown.is_set() or self.stop.is_set())
                         release=action.release and not self.release_cancel.is_set()
                         if not cancelled: self.step_started=True
                     if cancelled:
@@ -180,6 +186,8 @@ class Runner:
             self.worker.start()
             self._advance(Event('start'))
             while self.coordinator.state not in ('Failed','Closed'):
+                if self._shutdown_notified and not self.shutdown.is_set():
+                    self.request_shutdown()
                 if self.shutdown.is_set() and not self.coordinator.shutdown_pending:
                     self._advance(Event('stop',reason='independent experiment shutdown'))
                 if self.stop.is_set():
@@ -280,7 +288,7 @@ def main():
     args=parser.parse_args()
     runner=Runner(load_bootstrap(args.bootstrap),args.socket)
     for sig in (signal.SIGINT,signal.SIGTERM):
-        signal.signal(sig,lambda *_:runner.request_shutdown())
+        signal.signal(sig,runner._notify_shutdown)
     result=runner.run()
     if result:print('simulation failed: '+runner.coordinator.failure)
     return result
