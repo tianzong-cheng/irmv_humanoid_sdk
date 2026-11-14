@@ -106,8 +106,48 @@ invented safety thresholds. Saturation refers to the **configured SDK torque
 limit**, whose physical motor validity is not established by this experiment.
 World linear velocity is rotated into the gravity-aligned yaw frame. Local
 angular qvel is rotated by full measured base orientation to world yaw rate.
+Application intent coverage is required on the entire configured sampling grid
+inside the released interval, anchored at logical origin 1. Each row must have
+the grid's sample sequence and name the exact runtime state and session consumed
+for that control step, after the runtime phase acknowledgement and before
+application phase publication. The evaluator merges a second streaming replay
+with the next velocity row; an internally complete export with a missing prefix,
+suffix or interior interval cannot prove persistent intent. First/last stamps,
+expected/observed row counts and maximum observed gap are reported. Full-horizon
+velocity tracking RMSE stays `null` until both measured and intent coverage are
+proved; manifest intentions and completeness flags alone are insufficient.
+
+Failure does not discard observations. Reports retain validated-prefix release,
+applied intervals, feedback duration, measured torque, observed fall/fault and
+protection facts, plus file/replay/rollout/intent coverage flags. `null` means
+unavailable: no observed fault during incomplete rollout coverage is not a measured zero;
+no release means fall coverage is unavailable. An observed fall/fault remains
+true even if later evidence is incomplete. Counts under incomplete coverage are
+observed lower bounds. Separate `recorded_runtime_fault_count` and
+`recorded_protection_count` name counts over the available recorded interval;
+a known zero there does not establish zero events over an unrecorded 60-second
+horizon. Maximum measured torque covers all validated feedback,
+including startup; minimum base height covers observed released intervals.
+Joint errors and saturation use available SDK numeric rows with a separate
+coverage flag. Failed-owner outcomes keep these facts and still fail acceptance.
+An application initialization fault is distinguished from a runtime fault.
+
 Host operation metrics are never labeled logical control latency. See
 [recording](simulation-recording.md) for units, association and relocation.
+
+Existing artifact groups can be re-evaluated without starting any experiment:
+
+```sh
+python3 tests/integration/simulation_policy_acceptance_test.py \
+  --reevaluate /path/to/original-group --output /path/to/new-derived-group
+```
+
+The output directory must be new. Original manifests, records and reports remain
+unchanged and byte-bound; derived reports name their sources. Only the recorded
+standing attempt has observed metrics. Forward/yaw reports retain its failed
+prerequisite reference and do not inherit standing measurements as their own;
+unsupported lateral retains unavailable metrics. This command never creates an
+engine, changes a configuration or reruns a model.
 
 ## Current evidence and limits
 
