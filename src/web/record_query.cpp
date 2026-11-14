@@ -339,6 +339,27 @@ std::string StringMember(const Json &object, const char *key) {
   return std::string();
 }
 
+void AddSimulationContext(Json *context, const RunEntry &run) {
+  if (!run.metadata.contains("simulation")) return;
+  (*context)["simulation"] = run.metadata["simulation"];
+  const auto relative =
+      run.metadata["simulation"].value("sidecar", std::string());
+  std::error_code code;
+  const auto path =
+      std::filesystem::weakly_canonical(run.directory / relative, code);
+  telemetry::RecordClockIdentity clock;
+  std::string summary, error;
+  if (!relative.empty() && !std::filesystem::path(relative).is_absolute() &&
+      !code && IsWithin(run.directory.parent_path(), path) &&
+      telemetry::DecodeRecordClock(ClockOf(run.metadata).dump(), &clock)) {
+    telemetry::ReadSimulationEvidence(path, clock, {}, &summary, &error);
+    (*context)["simulation_evidence"] = Json::parse(summary);
+  } else
+    (*context)["simulation_evidence"] = {
+        {"evidence_complete", false},
+        {"error", "invalid simulation reference"}};
+}
+
 Json RuntimeContext(const RunEntry &run) {
   const telemetry::RecordReader &reader = *run.reader;
   Json context;
@@ -352,6 +373,7 @@ Json RuntimeContext(const RunEntry &run) {
   context["backend"] = StringMember(run.metadata, "backend");
   context["sdk_git_sha"] = StringMember(run.metadata, "sdk_git_sha");
   context["clock"] = ClockOf(run.metadata);
+  AddSimulationContext(&context, run);
   context["control_hz"] = run.metadata.value("control_hz", 0.0);
   context["sample_hz"] = run.metadata.value("sample_hz", 0U);
   context["joint_count"] = reader.metadata().joint_count;
@@ -466,6 +488,7 @@ Json ApplicationContext(const RunEntry &run, const AppRead &read) {
   context["sdk_git_sha"] = StringMember(run.metadata, "sdk_git_sha");
   context["source"] = StringMember(run.metadata, "source");
   context["clock"] = ClockOf(run.metadata);
+  AddSimulationContext(&context, run);
   context["sample_hz"] = run.metadata.value("sample_hz", 0U);
   context["joint_count"] = run.metadata.value("joint_count", 0U);
   if (run.metadata.contains("model")) {
@@ -546,6 +569,13 @@ Json Association(const Json &runtime_context, const RunEntry &application,
   const std::string app_boot = BootIdOf(application.metadata);
   const bool boot_match =
       !runtime_boot.empty() && !app_boot.empty() && runtime_boot == app_boot;
+  telemetry::RecordClockIdentity runtime_clock, app_clock;
+  const bool clock_match =
+      telemetry::DecodeRecordClock(ClockOf(runtime_context["metadata"]).dump(),
+                                   &runtime_clock) &&
+      telemetry::DecodeRecordClock(ClockOf(application.metadata).dump(),
+                                   &app_clock) &&
+      telemetry::SameRecordClock(runtime_clock, app_clock);
   std::set<std::pair<std::string, std::string>> runtime_identities;
   for (const Json &entry : runtime_context["runtime_identities"]) {
     runtime_identities.insert({entry.value("runtime_id", std::string()),
@@ -564,9 +594,13 @@ Json Association(const Json &runtime_context, const RunEntry &application,
   }
   association["boot_id_match"] = boot_match;
   association["identity_match"] = identity_match;
-  association["ok"] = boot_match && identity_match;
-  if (!boot_match) {
-    association["reason"] = "boot_id mismatch";
+  association["clock_identity_match"] = clock_match;
+  association["ok"] = clock_match && identity_match;
+  if (!clock_match) {
+    association["reason"] = runtime_clock.clock_domain == "simulation" ||
+                                    app_clock.clock_domain == "simulation"
+                                ? "simulation clock identity mismatch"
+                                : "boot_id mismatch";
   } else if (!identity_match) {
     association["reason"] = "no matching runtime/session identity";
   } else {

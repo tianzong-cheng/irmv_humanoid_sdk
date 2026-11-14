@@ -35,6 +35,9 @@ class Event:
     feedback: object = None
     reason: str = ''
     released: bool = False
+    host_operation_start_us: int = 0
+    host_operation_duration_us: int = 0
+    host_release_duration_us: int = 0
 
 
 @dataclass(frozen=True)
@@ -135,6 +138,7 @@ class SimulationCoordinator:
         self.enter('RuntimeTick',1)
         self.torque=None
         payload=asdict(self.feedback)
+        payload.pop("base_quaternion",None)
         payload.update(valid=True,imu_valid=True)
         return (self.send(2,'Feedback',payload),
                 self.send(2,'TickPermit',dict(role=2,stage=1)))
@@ -153,6 +157,9 @@ class SimulationCoordinator:
                 ('imu_quaternion',4),('imu_angular_velocity',3),('imu_specific_force',3),
                 ('base_position',3),('base_velocity',6))):
             raise ValueError('feedback shape')
+        if feedback.base_quaternion and (len(feedback.base_quaternion)!=4 or
+                abs(sum(x*x for x in feedback.base_quaternion)-1)>1e-6):
+            raise ValueError('invalid measured base quaternion')
         if expected==0 and feedback.engine_time_s!=0:
             raise ValueError('initial engine time')
         if self.feedback is not None and feedback.engine_time_s<=self.feedback.engine_time_s:
@@ -244,6 +251,7 @@ class SimulationCoordinator:
         self.enter('StopTick',4)
         self.torque=None
         payload=asdict(self.feedback)
+        payload.pop("base_quaternion",None)
         payload.update(valid=True,imu_valid=True)
         return (self.send(2,'ShutdownPermit',dict(role=2)),
                 self.send(2,'Feedback',payload))

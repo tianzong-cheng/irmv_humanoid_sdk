@@ -9,6 +9,7 @@
 
 #include "irmv/protocol/types.hpp"
 #include "irmv/telemetry/record.hpp"
+#include "irmv/telemetry/record_context.hpp"
 
 // The read side of a recorded run: the metadata, the chunks and the gaps a run
 // left behind, read by time rather than by replaying the run.
@@ -30,8 +31,18 @@
 // silently decoded into data the run never recorded.
 namespace irmv::telemetry {
 
+// Streaming sidecar read: at most 64 KiB per line, no retained event history.
+// Validates the declared clock against the owning run; missing footer/loss is
+// explicitly incomplete. Visitor receives only structurally valid event JSON.
+bool ReadSimulationEvidence(
+    const std::filesystem::path &, const RecordClockIdentity &,
+    const std::function<void(const std::string &)> &visitor,
+    std::string *summary_json, std::string *error);
+
 // What one run declares about itself.
 struct RunMetadata {
+  RecordClockIdentity clock;
+  std::string simulation_json;
   std::uint32_t schema_version{0};
   std::string config_id;
   std::string layout_id;

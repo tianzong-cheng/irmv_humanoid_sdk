@@ -2,6 +2,7 @@
   "reserved": {
     "222": "simulation_dds_barrier_test (RUN_SERIAL)",
     "223": "simulation_lockstep_test (RUN_SERIAL)",
-    "224": "simulation_lifecycle_test (RUN_SERIAL)"
+    "224": "simulation_lifecycle_test (RUN_SERIAL)",
+    "226": "simulation_record_test (RUN_SERIAL)"
   }
 }

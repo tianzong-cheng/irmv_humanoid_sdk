@@ -5,6 +5,9 @@ process startup, with independent fresh run/runtime IDs. Configuration canonical
 hashing belongs to the C++ loader, not this module.
 """
 import argparse
+from dataclasses import asdict
+import platform
+import importlib.metadata
 from collections import deque
 import json
 import os
@@ -20,6 +23,7 @@ import time
 
 from . import protocol as p
 from .coordinator import Bootstrap, Event, SimulationCoordinator
+from .record import Writer
 
 
 def host_us():
@@ -61,6 +65,19 @@ class Runner:
         self.listener=None
         self.directory=None
         self.socket_inode=None
+        b=bootstrap
+        versions={}
+        for name in ('mujoco','mujoco-warp','warp-lang'):
+            try:versions[name]=importlib.metadata.version(name)
+            except importlib.metadata.PackageNotFoundError:versions[name]='unavailable'
+        self.record=Writer(self.path.parent/'simulation.jsonl',dict(
+            clock='simulation',clock_domain='simulation',available=True,
+            clock_run_id=b.run_id.hex(),logical_origin_us=1,
+            physics_dt_us=b.physics_dt_us,control_dt_us=b.control_dt_us),provenance=dict(
+                runtime_id=b.runtime_id.hex(),config_digest=b.config_digest.hex(),
+                application_digest=b.application_digest.hex(),engine_digest=b.engine_digest.hex(),
+                engine_config=b.engine_config,engine_factory=engine_factory.__module__+'.'+engine_factory.__qualname__,
+                python=platform.python_version(),dependencies=versions))
 
     def request_stop(self):
         self.stop.set()
@@ -81,6 +98,8 @@ class Runner:
                 try: action=self.jobs.get(timeout=.01)
                 except queue.Empty: continue
                 released=False
+                operation_start=host_us()
+                release_duration=0
                 if action.kind=='initialize':
                     engine=self.engine_factory()
                     engine.initialize(self.coordinator.b.engine_config)
@@ -99,7 +118,9 @@ class Runner:
                     # Passing the gate commits this worker operation. Cancellation
                     # cannot undo an already executing GPU call or release.
                     if release:
+                        release_start=host_us()
                         engine.release_base()
+                        release_duration=host_us()-release_start
                         released=True
                     engine.apply_torque(action.torque)
                     feedback=engine.step(action.substeps)
@@ -108,11 +129,11 @@ class Runner:
                     # Completion includes resource close, not just zero-output submission.
                     engine.close()
                     engine=None
-                    self.results.put_nowait(Event('stopped'))
+                    self.results.put_nowait(Event('stopped',host_operation_start_us=operation_start,host_operation_duration_us=host_us()-operation_start))
                     continue
                 else: raise ValueError('invalid engine action')
                 if not self.stop.is_set():
-                    self.results.put_nowait(Event('feedback',feedback=feedback,released=released))
+                    self.results.put_nowait(Event('feedback',feedback=feedback,released=released,host_operation_start_us=operation_start,host_operation_duration_us=host_us()-operation_start,host_release_duration_us=release_duration))
         except Exception as exc:
             if not self.stop.is_set():
                 try:self.results.put_nowait(Event('engine_error',reason=str(exc)))
@@ -164,6 +185,19 @@ class Runner:
             elif a.kind=='cancel':self.stop.set()
             else:raise ValueError('unknown action')
 
+    def _evidence(self,kind,frame=None,**facts):
+        c=self.coordinator
+        row=dict(kind=kind,control_step=c.step,phase=c.phase,
+                 logical_us=1+c.step*c.b.control_dt_us,coordinator_state=c.state,
+                 host_observed_us=host_us(),**facts)
+        if frame:
+            row.update(control_step=frame.control_step,phase=frame.phase,logical_us=frame.logical_us)
+            row['frame']=dict(name=p.KINDS[frame.kind-1],payload=frame.payload)
+        def encode(value):
+            if isinstance(value,bytes):return value.hex()
+            raise TypeError('unsupported evidence value')
+        self.record.offer(json.loads(json.dumps(row,default=encode)))
+
     def _advance(self,event):
         if event.kind in ('feedback','cancelled'):
             with self.engine_gate:
@@ -177,10 +211,32 @@ class Runner:
             if started:
                 from dataclasses import replace
                 event=replace(event,reason='operation_started')
-        self._actions(self.coordinator.advance(event,host_us()))
+        old_torque=self.coordinator.torque
+        actions=self.coordinator.advance(event,host_us())
+        c=self.coordinator
+        if event.kind!='poll':
+            self._evidence('event_'+event.kind,event.frame,peer=event.peer,
+                reason=event.reason,released=event.released,
+                host_operation_start_us=event.host_operation_start_us,
+                host_operation_duration_us=event.host_operation_duration_us,
+                host_release_duration_us=event.host_release_duration_us,
+                host_stop_duration_us=event.host_operation_duration_us if event.kind=='stopped' else 0,
+                engine_time_s=event.feedback.engine_time_s if event.feedback else None,
+                completed_physics_step=event.feedback.physics_step if event.feedback else None,
+                feedback=asdict(event.feedback) if event.feedback else None,
+                feedback_validated=event.feedback is not None and event.feedback is c.feedback,
+                stop_proven=c.stop_proven,release_state=c.release_state,failure=c.failure)
+        if event.frame and p.KINDS[event.frame.kind-1]=='Torque' and c.torque is not None and c.torque is not old_torque:
+            self._evidence('write_accepted',event.frame)
+        for action in actions:
+            if action.frame and p.KINDS[action.frame.kind-1] in (
+                    'AppliedToStep','ShutdownCommitted','LeaveCommitted'):
+                self._evidence(p.KINDS[action.frame.kind-1],action.frame)
+        self._actions(actions)
 
     def run(self):
         try:
+            self.record.start()
             self._listen()
             self.worker=threading.Thread(target=self._engine_worker,daemon=True,name='simulation-engine')
             self.worker.start()
@@ -266,6 +322,9 @@ class Runner:
             except (OSError,ValueError,queue.Full):pass
             return 1
         finally:
+            self._evidence('runner_final',stop_proven=self.coordinator.stop_proven,
+                           failure=self.coordinator.failure)
+            self.record.close()
             self.stop.set()
             # Bounded logical cancellation, never a physical-stop assertion.
             if self.worker is not None:self.worker.join(.05)

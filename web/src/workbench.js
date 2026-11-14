@@ -536,7 +536,9 @@ export class Workbench {
       detail.textContent = [
         context.kind,
         context.sdk_git_sha ? `SDK ${String(context.sdk_git_sha).slice(0, 12)}` : '',
-        context.clock?.boot_id ? `boot ${context.clock.boot_id}` : '',
+        context.clock?.clock_domain === 'simulation'
+          ? `simulation run ${context.clock.clock_run_id} · origin ${context.clock.logical_origin_us} us · physics/control ${context.clock.physics_dt_us}/${context.clock.control_dt_us} us`
+          : (context.clock?.boot_id ? `boot ${context.clock.boot_id}` : ''),
         context.clock?.clock ?? '',
         this.appRun ? 'Application stream included' : '',
       ].filter(Boolean).join(' · ');

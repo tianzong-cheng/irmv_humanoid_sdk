@@ -20,6 +20,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1107,9 +1108,62 @@ int ReadAfterSigkill() {
   return 0;
 }
 
+int SimulationEvidence() {
+  using namespace irmv::telemetry;
+  const auto directory = MakeDirectory();
+  const auto path = directory / "simulation.jsonl";
+  irmv::protocol::Id run{};
+  run.fill(0x12);
+  const auto clock = SimulationRecordClock(run, 1000, 2000);
+  nlohmann::json header = {
+      {"schema", "irmv.simulation_evidence"},
+      {"version", 1},
+      {"record_type", "header"},
+      {"clock", nlohmann::json::parse(EncodeRecordClock(clock))}};
+  nlohmann::json row = {{"record_type", "event"},   {"sequence", 1},
+                        {"kind", "write_accepted"}, {"logical_us", 1},
+                        {"control_step", 0},        {"phase", 4},
+                        {"state_seq", 87}};
+  {
+    std::ofstream f(path);
+    f << header.dump() << '\n' << row.dump() << '\n';
+  }
+  std::string summary, error;
+  int count = 0;
+  CHECK(ReadSimulationEvidence(
+      path, clock, [&](const std::string &) { ++count; }, &summary, &error));
+  CHECK(count == 1);
+  CHECK(!nlohmann::json::parse(summary)["evidence_complete"].get<bool>());
+  {
+    std::ofstream f(path, std::ios::app);
+    f << R"({"record_type":"footer","offered":1,"written":1,"dropped":0,"write_failures":0})"
+      << '\n';
+  }
+  CHECK(ReadSimulationEvidence(path, clock, {}, &summary, &error));
+  CHECK(nlohmann::json::parse(summary)["evidence_complete"] == true);
+  CHECK(nlohmann::json::parse(summary)["measured_feedback_complete"] == false);
+  auto foreign = clock;
+  foreign.clock_run_id = std::string(32, 'a');
+  CHECK(!ReadSimulationEvidence(path, foreign, {}, &summary, &error));
+  {
+    std::ofstream f(path, std::ios::app);
+    f << row.dump() << '\n';
+  }
+  CHECK(!ReadSimulationEvidence(path, clock, {}, &summary, &error));
+  CHECK(nlohmann::json::parse(summary)["evidence_complete"] == false);
+  {
+    std::ofstream f(path);
+    f << std::string(65537, 'x') << '\n';
+  }
+  CHECK(!ReadSimulationEvidence(path, clock, {}, &summary, &error));
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
 int main() {
   int failures = 0;
   failures += FullRead();
+  failures += SimulationEvidence();
   failures += RangeRead();
   failures += TruncatedChunk();
   failures += JointTruncatedChunk();

@@ -474,12 +474,13 @@ std::string BuildVelocityMetadata(
       source == LocomotionSource::Local
           ? "local"
           : (source == LocomotionSource::External ? "external" : "none");
-  metadata["clock"] = {{"clock", clock.clock},
-                       {"boot_id", clock.boot_id},
-                       {"available", clock.available}};
+  metadata["clock"] = json::parse(telemetry::EncodeRecordClock(clock));
   if (!clock.available) {
     metadata["clock"]["diagnostic"] = clock_error;
   }
+  if (config.runtime.simulation)
+    metadata["simulation"] = nlohmann::json::parse(
+        telemetry::SimulationRecordMetadata(config.runtime));
   metadata["units"] = {
       {"forward", "m_s"}, {"lateral", "m_s"}, {"yaw", "rad_s"}, {"time", "us"}};
   json model_info;
@@ -507,7 +508,7 @@ std::string BuildVelocityMetadata(
       "one due body-velocity intent sample: the values the application held, "
       "the runtime/session identity and latest state sequence in force, and "
       "the "
-      "monotonic host stamp; a due deadline missed by the loop is not replayed";
+      "declared business-clock stamp; missed deadlines are not replayed";
   return metadata.dump(1);
 }
 
@@ -522,7 +523,8 @@ void RecordPolicySession(application::PolicySessionRecorder *recorder,
                          const policy::ResolvedGains &resolved_gains,
                          const policy::OnnxModel *model,
                          const configuration::ApplicationConfig &config,
-                         const protocol::JointCommand &first_frame) {
+                         const protocol::JointCommand &first_frame,
+                         protocol::TimeUs logical_us) {
   if (recorder == nullptr) {
     return;
   }
@@ -547,7 +549,7 @@ void RecordPolicySession(application::PolicySessionRecorder *recorder,
     event.contract_sha256 = model->contract_sha256();
     application::FillGainOverrides(resolved_gains, &event.gains);
   }
-  if (!recorder->TryRecord(event)) {
+  if (!recorder->TryRecord(event, logical_us)) {
     std::fprintf(stderr, "application: session record dropped\n");
     std::fflush(stderr);
   }
@@ -777,6 +779,10 @@ int RunApplication(const ApplicationOptions &options,
                    record_clock_error.c_str());
       std::fflush(stderr);
     }
+    if (simulation_config)
+      record_clock = telemetry::SimulationRecordClock(
+          simulation_config->run_id, config.runtime.simulation->physics_dt_us,
+          config.runtime.control_period_us);
     if (!velocity_schedule.Enabled()) {
       std::fprintf(stderr,
                    "application: velocity record unavailable: sample_hz %u "
@@ -1448,7 +1454,8 @@ int RunApplication(const ApplicationOptions &options,
     // known.
     if (behavior.state == BehaviorState::Locomotion && !locomotion_previously) {
       RecordPolicySession(session_recorder.get(), source, client, fsm, gains,
-                          model.get(), config, supervisor.candidate());
+                          model.get(), config, supervisor.candidate(),
+                          simulation_clock ? decision_now : 0);
     }
     locomotion_previously = behavior.state == BehaviorState::Locomotion;
 

@@ -1,8 +1,10 @@
 #include "irmv/telemetry/record_context.hpp"
 
 #include <cstddef>
+#include <filesystem>
 #include <fstream>
 #include <limits>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -59,6 +61,112 @@ bool ReadBootId(const std::string& path, std::string* boot_id,
 
 }  // namespace
 
+std::string SimulationRecordMetadata(const configuration::RuntimeConfig& c) {
+  if (!c.simulation) return "{}";
+  const auto& s = *c.simulation;
+  // The run directory is one child of recorder.directory. Keep the entire
+  // experiment tree together when moving it; no source/install path is baked
+  // in.
+  const auto relative =
+      std::filesystem::path("..") /
+      std::filesystem::relative(s.socket_directory / "simulation.jsonl",
+                                c.telemetry.recorder.directory);
+  return nlohmann::json{
+      {"sidecar", relative.generic_string()},
+      {"sidecar_schema", "irmv.simulation_evidence"},
+      {"sidecar_version", 1},
+      {"engine", s.engine},
+      {"engine_sha256", s.engine_sha256},
+      {"asset_sha256", s.asset_sha256},
+      {"config_sha256", c.config_id},
+      {"random_seed", "not configured"},
+      {"logical_origin_us", 1},
+      {"physics_dt_us", s.physics_dt_us},
+      {"control_dt_us", c.control_period_us},
+      {"host_clock", "linux_clock_monotonic"},
+      {"host_origin",
+       "kernel boot; elapsed host durations are not control latency"},
+      {"logical_origin",
+       "1us at control step0; stop phase4 can advance state_seq at frozen "
+       "time"},
+      {"versions",
+       "actual engine factory and dependency versions in sidecar header"}}
+      .dump();
+}
+
+std::string EncodeRecordClock(const RecordClockIdentity& c) {
+  return nlohmann::json{{"clock", c.clock},
+                        {"boot_id", c.boot_id},
+                        {"available", c.available},
+                        {"clock_domain", c.clock_domain},
+                        {"clock_run_id", c.clock_run_id},
+                        {"logical_origin_us", c.logical_origin_us},
+                        {"physics_dt_us", c.physics_dt_us},
+                        {"control_dt_us", c.control_dt_us}}
+      .dump();
+}
+bool DecodeRecordClock(std::string_view text, RecordClockIdentity* c) {
+  if (!c) return false;
+  *c = {};
+  try {
+    const auto j = nlohmann::json::parse(text);
+    c->clock = j.value("clock", std::string());
+    c->boot_id = j.value("boot_id", std::string());
+    c->available = j.value("available", false);
+    c->clock_domain = j.value("clock_domain", std::string("host_monotonic"));
+    if (c->clock_domain == "host_monotonic") return c->clock == kRecordClock;
+    if (c->clock_domain != "simulation" || c->clock != "simulation")
+      return false;
+    c->clock_run_id = j.at("clock_run_id").get<std::string>();
+    if (c->clock_run_id.size() != 32 ||
+        c->clock_run_id.find_first_not_of("0123456789abcdef") !=
+            std::string::npos ||
+        c->clock_run_id.find_first_not_of('0') == std::string::npos)
+      return false;
+    for (const char* key :
+         {"logical_origin_us", "physics_dt_us", "control_dt_us"})
+      if (!j.at(key).is_number_unsigned()) return false;
+    c->logical_origin_us = j.at("logical_origin_us");
+    c->physics_dt_us = j.at("physics_dt_us");
+    c->control_dt_us = j.at("control_dt_us");
+    return c->available && c->logical_origin_us == 1 && c->physics_dt_us > 0 &&
+           c->control_dt_us >= c->physics_dt_us &&
+           c->control_dt_us % c->physics_dt_us == 0;
+  } catch (...) {
+    return false;
+  }
+}
+bool SameRecordClock(const RecordClockIdentity& a,
+                     const RecordClockIdentity& b) {
+  if (!a.available || !b.available || a.clock_domain != b.clock_domain ||
+      a.clock != b.clock)
+    return false;
+  if (a.clock_domain == "simulation")
+    return !a.clock_run_id.empty() && a.clock_run_id == b.clock_run_id &&
+           a.logical_origin_us == b.logical_origin_us &&
+           a.physics_dt_us == b.physics_dt_us &&
+           a.control_dt_us == b.control_dt_us;
+  return a.clock_domain == "host_monotonic" && a.clock == kRecordClock &&
+         !a.boot_id.empty() && a.boot_id == b.boot_id;
+}
+RecordClockIdentity SimulationRecordClock(const protocol::Id& run,
+                                          protocol::TimeUs physics,
+                                          protocol::TimeUs control) {
+  RecordClockIdentity c;
+  c.clock = "simulation";
+  c.clock_domain = "simulation";
+  c.available = true;
+  constexpr char hex[] = "0123456789abcdef";
+  for (auto b : run) {
+    c.clock_run_id += hex[b >> 4];
+    c.clock_run_id += hex[b & 15];
+  }
+  c.logical_origin_us = 1;
+  c.physics_dt_us = physics;
+  c.control_dt_us = control;
+  return c;
+}
+
 bool LoadRecordClockIdentityFromFile(std::string_view boot_id_path,
                                      RecordClockIdentity* identity,
                                      std::string* error) {
@@ -68,6 +176,7 @@ bool LoadRecordClockIdentityFromFile(std::string_view boot_id_path,
     }
     return false;
   }
+  *identity = {};
   identity->clock = std::string(kRecordClock);
   identity->boot_id.clear();
   identity->available = false;

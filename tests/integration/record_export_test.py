@@ -1818,6 +1818,37 @@ def main() -> int:
                 f"or version: {result.stderr.strip()}"
             )
 
+        # Explicit simulation policy business stamps must select the logical
+        # window while retaining host timing; missing logical evidence refuses.
+        sim_policy = work / "simulation-policy"
+        shutil.copytree(app_run, sim_policy)
+        sim_meta = json.loads((sim_policy / "meta.json").read_text())
+        sim_meta["clock"] = dict(clock="simulation", clock_domain="simulation",
+            available=True, clock_run_id="12"*16, logical_origin_us=1,
+            physics_dt_us=1000, control_dt_us=2000)
+        write_json(sim_policy / "meta.json", sim_meta)
+        policy_path = sim_policy / "policy_sessions.jsonl"
+        policy_entry = json.loads(policy_path.read_text().splitlines()[0])
+        policy_entry["logical_us"] = t0
+        policy_entry["monotonic_us"] = t0 + 100_000_000
+        policy_path.write_text(json.dumps(policy_entry) + "\n")
+        windowed = subprocess.run([str(reader), "--run", str(sim_policy),
+            "--from-us", str(t0), "--to-us", str(t0+1)],
+            capture_output=True, text=True)
+        if windowed.returncode != 0:
+            fail("explicit logical policy stamp was refused: " + windowed.stderr)
+        else:
+            selected = [json.loads(line) for line in windowed.stdout.splitlines()[:-1]
+                        if json.loads(line).get("record_type") == "policy_session"]
+            if len(selected) != 1 or selected[0]["monotonic_us"] != t0+100_000_000:
+                fail("policy logical window selection lost independent host timing")
+        del policy_entry["logical_us"]
+        policy_path.write_text(json.dumps(policy_entry) + "\n")
+        missing = subprocess.run([str(reader), "--run", str(sim_policy)],
+                                 capture_output=True, text=True)
+        if missing.returncode == 0:
+            fail("simulation policy row missing logical_us silently reused host monotonic time")
+
         corrupt_fault = work / "corrupt-fault"
         shutil.copytree(fault_run, corrupt_fault)
         with (corrupt_fault / "faults.jsonl").open("a", encoding="utf-8") as stream:

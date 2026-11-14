@@ -15,6 +15,9 @@ class Feedback:
     imu_specific_force: tuple[float, ...]  # m/s^2, local frame, includes gravity at rest.
     base_position: tuple[float, ...]  # World metres.
     base_velocity: tuple[float, ...]  # Free-joint qvel (world linear, local angular).
+    # Recording-only measured world orientation (wxyz). Not part of SDK IPC.
+    # Empty means unavailable in a legacy/test adapter, never identity inferred.
+    base_quaternion: tuple[float, ...] = ()
 
 
 class EngineAdapter(Protocol):

@@ -36,7 +36,7 @@ Fault occurrences are events, not samples: ``fault_*`` arrays have their own
 length, never the joint row count, and a joint-less fault becomes the int64
 sentinel -1 rather than an object array. With ``--application-record``, the
 application's independent velocity stream is associated only when both runs
-declare the same monotonic clock and boot id and the application carries the
+declare the same host clock and boot id, or the same simulation run/origin/dt and the application carries the
 runtime record's session identity; foreign and unknown-identity rows are
 excluded and counted, never merged. The selected samples are exported as
 ``velocity_*`` arrays, the policy-session sidecar as text, and
@@ -149,6 +149,10 @@ GAP_REASON_DTYPE = np.dtype(f"<U{max(len(name) for name in (*GAP_REASONS.values(
 # The clock every recorded stamp in both streams must come from, and the two
 # facts that make two independent runs comparable. A run whose identity could
 # not be read is never merged automatically.
+# Simulation exports add logical_stamp_us and simulation_logical_us; host engine,
+# release and stop durations have explicit host_*_duration_us array names. Event
+# JSON retains write IDs, physics intervals, phase/state identity and loss facts.
+# A sidecar footer means file completeness, never physical/GPU acceptance.
 CLOCK_NAME = "linux_clock_monotonic"
 
 # The fault columns. A fault is an event, not a sample: its arrays have their
@@ -310,7 +314,8 @@ def read_experiment(
             f"{summary['faults'].get('rows_in_range')}"
         )
 
-    result = {"samples": samples, "faults": faults, "summary": summary}
+    result = {"samples": samples, "faults": faults, "summary": summary,
+              "simulation_events": [r for r in records if r.get("record_type")=="simulation_event"]}
     if application_directory is None:
         result["application"] = None
         return result
@@ -340,11 +345,11 @@ def read_experiment(
         policy = [
             row
             for row in policy
-            if begin_us <= int(row["monotonic_us"]) < end_us
+            if begin_us <= int(row["logical_us"] if app_summary.get("clock",{}).get("clock_domain")=="simulation" else row["monotonic_us"]) < end_us
         ]
     elif begin_us:
         policy = [
-            row for row in policy if int(row["monotonic_us"]) >= begin_us
+            row for row in policy if int(row["logical_us"] if app_summary.get("clock",{}).get("clock_domain")=="simulation" else row["monotonic_us"]) >= begin_us
         ]
     result["application"] = {
         "summary": app_summary,
@@ -354,12 +359,27 @@ def read_experiment(
     return result
 
 
-def _clock_identity(summary: dict, label: str) -> tuple[str | None, str | None]:
-    """Return (clock, boot_id) or (None, reason) for one run's metadata."""
+def _clock_identity(summary: dict, label: str) -> tuple[tuple | None, str | None]:
+    """Return explicit identity or (None, reason) for one run's metadata."""
 
     clock = summary.get("clock")
     if not isinstance(clock, dict):
         return None, f"the {label} metadata carries no clock identity"
+    domain = clock.get("clock_domain", "host_monotonic")
+    if domain == "simulation":
+        run = clock.get("clock_run_id")
+        origin, physics, control = (clock.get(k) for k in
+            ("logical_origin_us", "physics_dt_us", "control_dt_us"))
+        if (clock.get("clock") != "simulation" or not clock.get("available")
+                or not isinstance(run, str) or len(run) != 32
+                or any(c not in "0123456789abcdef" for c in run) or set(run) == {"0"}
+                or type(origin) is not int or origin != 1
+                or type(physics) is not int or physics <= 0
+                or type(control) is not int or control < physics or control % physics):
+            return None, f"invalid {label} simulation clock identity"
+        return (domain, run, origin, physics, control), None
+    if domain != "host_monotonic":
+        return None, f"unknown {label} clock domain"
     if clock.get("clock") != CLOCK_NAME:
         return None, (
             f"the {label} run declares clock {clock.get('clock')!r}, "
@@ -370,7 +390,7 @@ def _clock_identity(summary: dict, label: str) -> tuple[str | None, str | None]:
     boot_id = clock.get("boot_id")
     if not isinstance(boot_id, str) or not boot_id:
         return None, f"the {label} metadata carries no boot id"
-    return boot_id, None
+    return (domain, boot_id), None
 
 
 def associate(
@@ -392,7 +412,9 @@ def associate(
         application_boot, reason = _clock_identity(application_summary, "application")
     if reason is None and runtime_boot != application_boot:
         reason = (
-            "the runs come from different boots: "
+            ("the runs have different simulation clock identities: "
+             if runtime_boot[0] == "simulation" or application_boot[0] == "simulation"
+             else "the runs come from different boots: ") +
             f"{runtime_boot!r} and {application_boot!r}"
         )
     if reason is not None:
@@ -618,7 +640,7 @@ def _text_scalar(value, width: int):
     )
 
 
-def to_archive(rows, summary, faults=None, application=None) -> dict:
+def to_archive(rows, summary, faults=None, application=None, simulation_events=None) -> dict:
     count = len(rows)
     arrays = {}
     for column, dtype in SCALAR_DTYPES.items():
@@ -900,6 +922,25 @@ def to_archive(rows, summary, faults=None, application=None) -> dict:
         arrays["policy_session_json"] = np.array(
             policy_json, dtype=np.dtype(f"<U{max(1, width)}")
         )
+    clock = summary.get("clock") or {}
+    arrays["clock_domain"] = _text_scalar(clock.get("clock_domain", "host_monotonic"), 32)
+    arrays["clock_identity_json"] = np.array(json.dumps(clock,sort_keys=True))
+    if clock.get("clock_domain") == "simulation":
+        arrays["logical_stamp_us"] = np.array([r["stamp_us"] for r in rows],dtype=np.uint64)
+        arrays["clock_run_id"] = _text_scalar(clock.get("clock_run_id"),32)
+        for key in ("logical_origin_us","physics_dt_us","control_dt_us"):
+            arrays[key] = np.uint64(clock[key])
+        events=simulation_events or []
+        for key in ("logical_us","control_step","phase","sequence",
+                    "host_observed_us","host_operation_start_us","host_operation_duration_us",
+                    "host_release_duration_us","host_stop_duration_us"):
+            arrays["simulation_"+key]=np.array([e.get(key,0) for e in events],dtype=np.uint64)
+        arrays["simulation_event_kind"]=_text_array([e["kind"] for e in events],64)
+        lines=[json.dumps(e,sort_keys=True) for e in events]
+        arrays["simulation_event_json"]=np.array(lines,dtype=f"<U{max(map(len,lines),default=1)}")
+        arrays["simulation_evidence_json"]=np.array(json.dumps(summary.get("simulation_evidence",{}),sort_keys=True))
+        arrays["simulation_metadata_json"]=np.array(json.dumps(summary.get("simulation",{}),sort_keys=True))
+        arrays["simulation_evidence_complete"]=np.bool_(summary.get("simulation_evidence",{}).get("evidence_complete",False))
     return arrays
 
 
@@ -990,6 +1031,7 @@ def main() -> int:
         summary,
         experiment["faults"],
         application_payload,
+        experiment.get("simulation_events"),
     )
     np.savez_compressed(args.out_path, **arrays)
     message = (

@@ -454,9 +454,25 @@ int BlockedWriterBoundsStop() {
   return 0;
 }
 
+int ExplicitLogicalStamp() {
+  const auto directory = MakeDirectory();
+  PolicySessionRecorder recorder(directory.string());
+  CHECK(recorder.TryRecord(MakeLocalEvent(), 2001));
+  CHECK(recorder.Stop());
+  const auto lines = ReadLines(SidecarPath(directory));
+  CHECK(lines.size() == 1);
+  const auto row = nlohmann::json::parse(lines[0]);
+  CHECK(row["logical_us"] == 2001);
+  CHECK(row["monotonic_us"].get<std::uint64_t>() > 2001);
+  CHECK(row["host_us"].get<std::uint64_t>() > 2001);
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
 int main() {
   int failures = 0;
   failures += RoundTrip();
+  failures += ExplicitLogicalStamp();
   failures += GainOverridesAreFilled();
   failures += FrameGainsAreFilled();
   failures += BoundedQueueDropsAndCounts();

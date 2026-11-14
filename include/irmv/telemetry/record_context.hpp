@@ -4,11 +4,12 @@
 #include <string>
 #include <string_view>
 
+#include "irmv/configuration/config.hpp"
 #include "irmv/protocol/types.hpp"
 
 namespace irmv::telemetry {
 
-// The clock every record timestamp is taken from. `CLOCK_MONOTONIC` on Linux
+// The legacy/default host record clock. `CLOCK_MONOTONIC` on Linux
 // does not jump with wall-clock adjustments, so two processes on one host can
 // be lined up only when they also agree on the boot those readings belong to.
 inline constexpr std::string_view kRecordClock = "linux_clock_monotonic";
@@ -27,7 +28,21 @@ struct RecordClockIdentity {
   std::string clock;
   std::string boot_id;
   bool available{false};
+  std::string clock_domain{"host_monotonic"};
+  std::string clock_run_id;
+  protocol::TimeUs logical_origin_us{0};
+  protocol::TimeUs physics_dt_us{0};
+  protocol::TimeUs control_dt_us{0};
 };
+
+// Startup/offline JSON extension; missing domain preserves v4 host semantics.
+std::string SimulationRecordMetadata(const configuration::RuntimeConfig&);
+std::string EncodeRecordClock(const RecordClockIdentity&);
+bool DecodeRecordClock(std::string_view, RecordClockIdentity*);
+bool SameRecordClock(const RecordClockIdentity&, const RecordClockIdentity&);
+RecordClockIdentity SimulationRecordClock(const protocol::Id& run,
+                                          protocol::TimeUs physics_dt_us,
+                                          protocol::TimeUs control_dt_us);
 
 // Reads the boot id once at startup. On success the identity carries the clock
 // name and the trimmed boot id, `available` is true and `error` is cleared. On

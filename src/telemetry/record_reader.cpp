@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -487,6 +488,152 @@ bool DecodeChunk(const std::vector<std::uint8_t> &bytes,
 
 }  // namespace
 
+bool ReadSimulationEvidence(
+    const std::filesystem::path &path, const RecordClockIdentity &expected,
+    const std::function<void(const std::string &)> &visitor,
+    std::string *summary_json, std::string *error) {
+  Json summary = {{"evidence_complete", false},
+                  {"footer_present", false},
+                  {"rows", 0},
+                  {"sequence_gaps", 0},
+                  {"dropped", 0},
+                  {"write_failures", 0}};
+  auto fail = [&](const std::string &why) {
+    *error = why;
+    summary["evidence_complete"] = false;
+    summary["error"] = why;
+    *summary_json = summary.dump();
+    return false;
+  };
+  std::ifstream f(path, std::ios::binary);
+  if (!f) return fail("simulation evidence unavailable");
+  std::uint64_t last = 0, count = 0, holes = 0, measured_count = 0;
+  bool header = false, footer = false, measured_complete = true;
+  try {
+    while (true) {
+      std::string line;
+      char ch;
+      bool newline = false;
+      while (f.get(ch)) {
+        if (ch == '\n') {
+          newline = true;
+          break;
+        }
+        if (line.size() >= 65536)
+          return fail("oversized simulation evidence line");
+        line += ch;
+      }
+      if (!newline) break;  // Interrupted final line never supplies a footer.
+      const auto row = Json::parse(line);
+      if (!row.is_object()) return fail("simulation evidence object required");
+      if (!header) {
+        if (row.value("schema", std::string()) != "irmv.simulation_evidence" ||
+            row.value("version", 0) != 1 ||
+            row.value("record_type", std::string()) != "header")
+          return fail("unknown simulation evidence schema/version");
+        RecordClockIdentity clock;
+        if (!DecodeRecordClock(row.at("clock").dump(), &clock) ||
+            clock.clock_domain != "simulation" ||
+            !SameRecordClock(expected, clock))
+          return fail("simulation evidence clock mismatch");
+        summary["clock"] = row["clock"];
+        summary["provenance"] = row.value("provenance", Json::object());
+        summary["feedback_units"] = row.value("feedback_units", Json::object());
+        header = true;
+        continue;
+      }
+      if (footer) return fail("data after simulation footer");
+      if (row.value("record_type", std::string()) == "footer") {
+        for (const char *key :
+             {"offered", "written", "dropped", "write_failures"})
+          if (!row.at(key).is_number_unsigned())
+            return fail("invalid simulation footer");
+        summary["dropped"] = row["dropped"];
+        summary["write_failures"] = row["write_failures"];
+        summary["offered"] = row["offered"];
+        summary["written"] = row["written"];
+        summary["evidence_complete"] =
+            row["written"] == count && row["offered"] == count &&
+            row["dropped"] == 0 && row["write_failures"] == 0 && holes == 0;
+        footer = true;
+        continue;
+      }
+      for (const char *key :
+           {"sequence", "logical_us", "control_step", "phase"})
+        if (!row.at(key).is_number_unsigned())
+          return fail("invalid simulation event identity");
+      const auto sequence = row["sequence"].get<std::uint64_t>();
+      const auto step = row["control_step"].get<std::uint64_t>();
+      if (row.value("record_type", std::string()) != "event" ||
+          sequence <= last || row["phase"].get<std::uint64_t>() > 4 ||
+          step > (UINT64_MAX - expected.logical_origin_us) /
+                     expected.control_dt_us ||
+          row["logical_us"] !=
+              expected.logical_origin_us + step * expected.control_dt_us)
+        return fail("invalid simulation event identity");
+      if (row.value("kind", std::string()) == "event_feedback") {
+        if (row.value("feedback_validated", false)) {
+          if (step != measured_count) measured_complete = false;
+          ++measured_count;
+          const auto &v = row.at("feedback");
+          if (!v.is_object()) return fail("missing measured feedback");
+          const auto n = v.at("q").size();
+          if (n == 0 || n > 64) return fail("invalid measured joints");
+          for (const char *key :
+               {"q", "dq", "tau", "imu_quaternion", "imu_angular_velocity",
+                "imu_specific_force", "base_position", "base_velocity",
+                "base_quaternion"}) {
+            const auto &values = v.at(key);
+            const std::string k = key;
+            const std::size_t size =
+                (k == "q" || k == "dq" || k == "tau")               ? n
+                : (k == "imu_quaternion" || k == "base_quaternion") ? 4
+                : k == "base_velocity"                              ? 6
+                                                                    : 3;
+            if (k == "base_quaternion" && values.is_array() && values.empty()) {
+              measured_complete = false;
+              continue;
+            }
+            if (!values.is_array() || values.size() != size)
+              return fail("invalid measured feedback shape");
+            for (const auto &value : values)
+              if (!value.is_number() || !std::isfinite(value.get<double>()))
+                return fail("invalid measured feedback value");
+          }
+          if (!v.at("physics_step").is_number_unsigned() ||
+              step > UINT64_MAX /
+                         (expected.control_dt_us / expected.physics_dt_us) ||
+              v["physics_step"] !=
+                  step * (expected.control_dt_us / expected.physics_dt_us))
+            return fail("invalid measured step identity");
+        } else
+          measured_complete = false;
+      }
+      if (row.value("kind", std::string()) == "runner_final")
+        summary["final"] = {{"coordinator_state",
+                             row.value("coordinator_state", std::string())},
+                            {"stop_proven", row.value("stop_proven", false)},
+                            {"failure", row.value("failure", std::string())}};
+      holes += sequence - last - 1;
+      last = sequence;
+      ++count;
+      if (visitor) visitor(line);
+    }
+    if (!header) return fail("missing simulation evidence header");
+    summary["measured_feedback_complete"] =
+        measured_complete && measured_count > 0 &&
+        summary["evidence_complete"].get<bool>();
+    summary["footer_present"] = footer;
+    summary["rows"] = count;
+    summary["sequence_gaps"] = holes;
+    *summary_json = summary.dump();
+    error->clear();
+    return true;
+  } catch (const Json::exception &) {
+    return fail("invalid simulation evidence JSON");
+  }
+}
+
 bool RecordReader::Open(const std::filesystem::path &run_directory,
                         RecordReader *reader, std::string *error) {
   if (reader == nullptr) {
@@ -514,6 +661,14 @@ bool RecordReader::Open(const std::filesystem::path &run_directory,
     return false;
   }
   opened.metadata_.schema_version = kRecordSchemaVersion;
+  if (metadata.contains("clock")) {
+    if (!DecodeRecordClock(metadata["clock"].dump(), &opened.metadata_.clock)) {
+      *error = "invalid record clock identity";
+      return false;
+    }
+  }
+  if (metadata.contains("simulation"))
+    opened.metadata_.simulation_json = metadata["simulation"].dump();
   opened.metadata_.config_id = metadata.value("config_id", std::string());
   opened.metadata_.layout_id = metadata.value("layout_id", std::string());
   opened.metadata_.backend = metadata.value("backend", std::string());

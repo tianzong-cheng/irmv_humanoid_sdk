@@ -167,7 +167,8 @@ class MujocoWarpEngine:
                         tuple(float(h.qvel[b]) for _, b, _ in layout["mapping"]),
                         tuple(float(h.qfrc_actuator[b]) for _, b, _ in layout["mapping"]),
                         *sensors, tuple(float(x) for x in h.qpos[q:q+3]),
-                        tuple(float(x) for x in h.qvel[v:v+6]))
+                        tuple(float(x) for x in h.qvel[v:v+6]),
+                        tuple(float(x) for x in h.qpos[q+3:q+7]))
 
     def apply_torque(self, torque: Sequence[float]) -> None:
         self._require_ready()

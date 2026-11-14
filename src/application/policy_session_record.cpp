@@ -124,6 +124,7 @@ struct PolicySessionRecorder::Impl {
     PolicySessionEvent event;
     std::uint64_t host_us{0};
     std::uint64_t monotonic_us{0};
+    std::uint64_t logical_us{0};
   };
 
   void Run();
@@ -194,6 +195,7 @@ void PolicySessionRecorder::Impl::WriteLine(const Queued &queued) {
   entry["version"] = kPolicySessionSchemaVersion;
   entry["host_us"] = queued.host_us;
   entry["monotonic_us"] = queued.monotonic_us;
+  if (queued.logical_us) entry["logical_us"] = queued.logical_us;
   entry["runtime_id"] = IdHex(event.runtime_id);
   entry["session_id"] = IdHex(event.session_id);
   entry["producer_process_id"] = ProducerIdHex(event.producer_process_id);
@@ -296,8 +298,8 @@ PolicySessionRecorder::PolicySessionRecorder(std::string directory)
 
 PolicySessionRecorder::~PolicySessionRecorder() { Stop(); }
 
-bool PolicySessionRecorder::TryRecord(
-    const PolicySessionEvent &event) noexcept {
+bool PolicySessionRecorder::TryRecord(const PolicySessionEvent &event,
+                                      std::uint64_t logical_us) noexcept {
   Impl &impl = *impl_;
   // Announce before reading started_, so Stop() can tell a push that is already
   // under way from one that has not begun. The announcement is two lock-free
@@ -311,6 +313,7 @@ bool PolicySessionRecorder::TryRecord(
       queued.event = event;
       queued.host_us = HostMicros();
       queued.monotonic_us = MonotonicMicros();
+      queued.logical_us = logical_us;
       accepted = impl.queue.TryPush(queued);
     } catch (...) {
       // The copy is the only allocation on this path; a failure to make it

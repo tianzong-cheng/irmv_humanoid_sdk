@@ -525,6 +525,87 @@ int main(int argc, char **argv) {
   CHECK(range.samples.back().measured_q[0] == 987.654);
   CHECK(!range.samples.back().joint_valid[0]);
 
+  // Simulation clock proof augments, never replaces runtime/session proof.
+  Id simulation_run{};
+  simulation_run.fill(0x12);
+  const Json sim_clock = Json::parse(irmv::telemetry::EncodeRecordClock(
+      irmv::telemetry::SimulationRecordClock(simulation_run, 1000, 2000)));
+  auto set_clock = [](const std::filesystem::path &dir, const Json &clock) {
+    Json meta;
+    {
+      std::ifstream input(dir / "meta.json");
+      input >> meta;
+    }
+    meta["clock"] = clock;
+    std::ofstream output(dir / "meta.json");
+    output << meta.dump();
+  };
+  set_clock(runtime_a, sim_clock);
+  set_clock(application_a, sim_clock);
+  auto sim_association = [&]() {
+    RecordQuery fresh(root);
+    return Call(&fresh,
+                {{"op", "context"},
+                 {"run_id", runtime_a_id},
+                 {"app_run_id", application_a_id}})["context"]["association"];
+  };
+  CHECK(sim_association()["ok"] == true);
+  for (const char *key : {"clock_run_id", "logical_origin_us", "physics_dt_us",
+                          "control_dt_us", "clock_domain"}) {
+    Json foreign = sim_clock;
+    if (std::string(key) == "clock_run_id")
+      foreign[key] = std::string(32, 'b');
+    else if (std::string(key) == "clock_domain")
+      foreign[key] = "host_monotonic";
+    else
+      foreign[key] = sim_clock[key].get<std::uint64_t>() * 2;
+    set_clock(application_a, foreign);
+    CHECK(sim_association()["ok"] == false);
+  }
+  set_clock(application_a, sim_clock);
+  CHECK(sim_association()["ok"] == true);
+  // C++ metadata exposes extension, while old v4 metadata above stayed
+  // readable.
+  RecordReader simulation_reader;
+  CHECK(RecordReader::Open(runtime_a, &simulation_reader, &error));
+  CHECK(simulation_reader.metadata().clock.clock_domain == "simulation");
+  CHECK(simulation_reader.metadata().clock.logical_origin_us == 1);
+
+  {
+    // A metadata reference must not bypass the web records-root boundary.
+    const auto path = outside / "simulation.jsonl";
+    std::ofstream sidecar(path);
+    sidecar << Json{{"schema", "irmv.simulation_evidence"},
+                    {"version", 1},
+                    {"record_type", "header"},
+                    {"clock", sim_clock}}
+                   .dump()
+            << '\n';
+    sidecar
+        << R"({"record_type":"footer","offered":0,"written":0,"dropped":0,"write_failures":0})"
+        << '\n';
+    sidecar.close();
+    Json metadata;
+    {
+      std::ifstream input(runtime_a / "meta.json");
+      input >> metadata;
+    }
+    metadata["simulation"] = {
+        {"sidecar",
+         std::filesystem::relative(path, runtime_a).generic_string()}};
+    {
+      std::ofstream output(runtime_a / "meta.json");
+      output << metadata.dump();
+    }
+    RecordQuery bounded(root);
+    const auto described =
+        Call(&bounded, {{"op", "context"}, {"run_id", runtime_a_id}});
+    CHECK(described["context"]["simulation_evidence"]["evidence_complete"] ==
+          false);
+    CHECK(described["context"]["simulation_evidence"]["error"] ==
+          "invalid simulation reference");
+  }
+
   std::filesystem::remove_all(root);
   std::filesystem::remove_all(outside);
   return 0;

@@ -1842,12 +1842,13 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
     metadata["joint_count"] = config.joint_count();
     metadata["joints"] = config.joint_names;
     metadata["sdk_git_sha"] = std::string(irmv::SdkGitSha());
-    metadata["clock"] = {{"clock", record_clock.clock},
-                         {"boot_id", record_clock.boot_id},
-                         {"available", record_clock.available}};
+    metadata["clock"] = Json::parse(telemetry::EncodeRecordClock(record_clock));
     if (!record_clock.available) {
       metadata["clock"]["diagnostic"] = record_clock_error;
     }
+    if (config.simulation)
+      metadata["simulation"] =
+          nlohmann::json::parse(telemetry::SimulationRecordMetadata(config));
     metadata["units"] = {{"position", "rad"},
                          {"velocity", "rad_s"},
                          {"torque", "Nm"},
@@ -1857,21 +1858,23 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
                          {"imu_orientation_rpy", "rad"},
                          {"imu_angular_velocity", "rad_s"},
                          {"imu_linear_acceleration", "m_s2"}};
-    metadata["imu"] = {{"orientation_rpy",
-                        {{"order", "roll,pitch,yaw"},
-                         {"unit", "rad"},
-                         {"axis_frame", "unknown"},
-                         {"axis_order", "unknown"}}},
-                       {"angular_velocity",
-                        {{"unit", "rad_s"},
-                         {"axis_frame", "unknown"},
-                         {"axis_order", "unknown"}}},
-                       {"linear_acceleration",
-                        {{"unit", "m_s2"},
-                         {"axis_frame", "unknown"},
-                         {"axis_order", "unknown"},
-                         {"includes_gravity", "unknown"}}},
-                       {"rx_stamp_us", "host_monotonic_receive_time_us"}};
+    metadata["imu"] = {
+        {"orientation_rpy",
+         {{"order", "roll,pitch,yaw"},
+          {"unit", "rad"},
+          {"axis_frame", "unknown"},
+          {"axis_order", "unknown"}}},
+        {"angular_velocity",
+         {{"unit", "rad_s"},
+          {"axis_frame", "unknown"},
+          {"axis_order", "unknown"}}},
+        {"linear_acceleration",
+         {{"unit", "m_s2"},
+          {"axis_frame", "unknown"},
+          {"axis_order", "unknown"},
+          {"includes_gravity", "unknown"}}},
+        {"rx_stamp_us", config.simulation ? "simulation_feedback_logical_us"
+                                          : "host_monotonic_receive_time_us"}};
     metadata["row"] =
         "one control tick: the published state, the target in force, the "
         "feedback it used and the host send result; the joint columns follow "
@@ -1898,6 +1901,9 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
     try {
       simulation_config =
           simulation::LoadBootstrap(config, simulation::Role::Runtime);
+      record_clock = telemetry::SimulationRecordClock(
+          simulation_config->run_id, config.simulation->physics_dt_us,
+          config.control_period_us);
       identity.id = simulation_config->local_hello.runtime_id;
       identity.entropy_fallback = false;
       simulation_clock = std::make_unique<simulation::SimulationClock>(
@@ -1966,6 +1972,8 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
     return static_cast<std::uint32_t>(ratio == 0 ? 1 : ratio);
   }();
   std::uint32_t record_tick = 0;
+  telemetry::SampleSchedule simulation_record_schedule(
+      config.telemetry.recorder.sample_hz);
   // The runtime's own ordinal for fault occurrences. It advances before every
   // offer - including one the recorder refuses - so a loss span can name the
   // events that never became rows.
@@ -2165,7 +2173,9 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
     }
 
     if (recorder && record_ratio != 0) {
-      if (record_tick % record_ratio == 0) {
+      if (simulation_clock
+              ? simulation_record_schedule.Due(result.state.stamp_us)
+              : record_tick % record_ratio == 0) {
         // The feedback of this tick is usable only when it describes every
         // configured joint: a snapshot that is short or carries an invalid
         // sample is recorded as such, never smoothed over.

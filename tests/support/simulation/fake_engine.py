@@ -17,7 +17,7 @@ class FakeEngine:
         if self.closed: raise RuntimeError('closed engine')
         return Feedback(self.physics_step,self.physics_step*self.timestep_s,
                         self.q,self.dq,self.tau,(1.,0.,0.,0.),(0.,)*3,
-                        (0.,0.,9.81),(0.,)*3,(0.,)*6)
+                        (0.,0.,9.81),(0.,)*3,(0.,)*6,(1.,0.,0.,0.))
 
     def apply_torque(self, torque):
         if len(torque)!=len(self.q) or not all(math.isfinite(v) for v in torque):

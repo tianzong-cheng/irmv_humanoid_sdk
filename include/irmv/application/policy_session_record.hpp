@@ -123,7 +123,10 @@ class PolicySessionRecorder {
   // when the bounded queue was full or the recorder is not running; the event
   // is counted as dropped either way. The copy is the one allocation this call
   // can make, and a failure to allocate is a dropped event, not an exception.
-  bool TryRecord(const PolicySessionEvent &event) noexcept;
+  // logical_us=0 preserves legacy host stamps. Host timestamps retain their
+  // meaning.
+  bool TryRecord(const PolicySessionEvent &event,
+                 std::uint64_t logical_us = 0) noexcept;
 
   // Events the worker wrote to the sidecar.
   std::uint64_t recorded() const noexcept;

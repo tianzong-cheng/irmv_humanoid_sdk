@@ -289,8 +289,8 @@ bool ReadJsonFile(const std::filesystem::path &path, Json *document,
 // file is one JSON object per line, flushed after every line, so a final
 // segment without a newline is a write that did not finish and is never parsed.
 bool ReadPolicySessions(const std::filesystem::path &path, TimeUs begin_us,
-                        TimeUs end_us, Json *rows, bool *truncated,
-                        std::string *error) {
+                        TimeUs end_us, bool simulation, Json *rows,
+                        bool *truncated, std::string *error) {
   *rows = Json::array();
   *truncated = false;
   // An empty or inverted range reads nothing, exactly like the sample and
@@ -343,10 +343,11 @@ bool ReadPolicySessions(const std::filesystem::path &path, TimeUs begin_us,
                ": unknown schema/version";
       return false;
     }
-    const auto monotonic = row.find("monotonic_us");
+    const auto monotonic = row.find(simulation ? "logical_us" : "monotonic_us");
     if (monotonic == row.end() || !monotonic->is_number_unsigned()) {
       *error = path.string() + ":" + std::to_string(line_number) +
-               ": monotonic_us is missing or not a number";
+               (simulation ? ": logical_us is missing or not a number"
+                           : ": monotonic_us is missing or not a number");
       return false;
     }
     const TimeUs stamp = monotonic->get<TimeUs>();
@@ -383,6 +384,42 @@ void AddFaultIndexCounts(const std::filesystem::path &run_directory,
       (*faults)[key] = *value;
     }
   }
+}
+
+void PrintJsonLine(const Json &line);
+
+void AddSimulationEvidence(Json *summary, const Json &meta,
+                           const std::string &directory, TimeUs begin,
+                           TimeUs end, bool summary_only) {
+  if (!meta.contains("simulation")) return;
+  (*summary)["simulation"] = meta["simulation"];
+  irmv::telemetry::RecordClockIdentity clock;
+  std::string evidence, error;
+  if (!irmv::telemetry::DecodeRecordClock(
+          meta.value("clock", Json::object()).dump(), &clock)) {
+    (*summary)["simulation_evidence"] = {{"evidence_complete", false},
+                                         {"error", "invalid clock"}};
+    return;
+  }
+  const auto relative = meta["simulation"].value("sidecar", std::string());
+  if (relative.empty() || std::filesystem::path(relative).is_absolute()) {
+    (*summary)["simulation_evidence"] = {
+        {"evidence_complete", false},
+        {"error", "invalid relative sidecar path"}};
+    return;
+  }
+  irmv::telemetry::ReadSimulationEvidence(
+      std::filesystem::path(directory) / relative, clock,
+      [&](const std::string &line) {
+        Json row = Json::parse(line);
+        const auto stamp = row["logical_us"].get<TimeUs>();
+        if (!summary_only && stamp >= begin && stamp < end) {
+          row["record_type"] = "simulation_event";
+          PrintJsonLine(row);
+        }
+      },
+      &evidence, &error);
+  (*summary)["simulation_evidence"] = Json::parse(evidence);
 }
 
 void AddMetaExtras(Json *summary, const Json &meta) {
@@ -609,6 +646,8 @@ int RunRuntime(const std::string &run_directory, TimeUs begin_us, TimeUs end_us,
   fault_summary["missing_occurrences"] = lost;
   AddFaultIndexCounts(run_directory, &fault_summary);
   summary["faults"] = std::move(fault_summary);
+  AddSimulationEvidence(&summary, meta, run_directory, begin_us, end_us,
+                        summary_only);
   PrintJsonLine(summary);
   return 0;
 }
@@ -627,7 +666,11 @@ int RunApplication(const std::string &run_directory, TimeUs begin_us,
   if (!ReadPolicySessions(
           std::filesystem::path(run_directory) /
               std::string(irmv::application::kPolicySessionFile),
-          begin_us, end_us, &policy_rows, &policy_truncated, &error)) {
+          begin_us, end_us,
+          meta.value("clock", Json::object())
+                  .value("clock_domain", std::string("host_monotonic")) ==
+              "simulation",
+          &policy_rows, &policy_truncated, &error)) {
     std::fprintf(stderr, "read_record: %s\n", error.c_str());
     return 1;
   }
@@ -687,6 +730,8 @@ int RunApplication(const std::string &run_directory, TimeUs begin_us,
   AddLossArray(&summary, losses);
   summary["policy_sessions"] = policy_rows.size();
   summary["policy_session_truncated"] = policy_truncated;
+  AddSimulationEvidence(&summary, meta, run_directory, begin_us, end_us,
+                        summary_only);
   PrintJsonLine(summary);
   return 0;
 }

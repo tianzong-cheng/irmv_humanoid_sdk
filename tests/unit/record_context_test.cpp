@@ -64,6 +64,18 @@ class TemporaryFileGuard {
 }  // namespace
 
 int main() {
+  irmv::telemetry::RecordClockIdentity sim;
+  CHECK(irmv::telemetry::DecodeRecordClock(
+      R"({"clock":"simulation","clock_domain":"simulation","clock_run_id":"12121212121212121212121212121212","logical_origin_us":1,"physics_dt_us":1000,"control_dt_us":2000,"available":true})",
+      &sim));
+  CHECK(sim.clock_domain == "simulation");
+  auto foreign = sim;
+  CHECK(irmv::telemetry::SameRecordClock(sim, foreign));
+  foreign.clock_run_id = "34343434343434343434343434343434";
+  CHECK(!irmv::telemetry::SameRecordClock(sim, foreign));
+  CHECK(!irmv::telemetry::DecodeRecordClock(
+      R"({"clock_domain":"simulation","available":true})", &foreign));
+
   // A 100 Hz plan with its origin at 3000 us emits on the integer grid
   // 3000/13000/23000 and nowhere in between.
   {

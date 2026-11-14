@@ -2149,3 +2149,12 @@ if(TARGET application)
     set_tests_properties(simulation_mujoco_warp_test PROPERTIES LABELS integration RUN_SERIAL TRUE TIMEOUT 600)
   endif()
 endif()
+
+add_test(NAME simulation_record_unit_test COMMAND "${Python3_EXECUTABLE}"
+  "${PROJECT_SOURCE_DIR}/tests/unit/simulation_record_test.py")
+set_tests_properties(simulation_record_unit_test PROPERTIES LABELS core TIMEOUT 15)
+if(IRMV_BUILD_APPLICATION)
+  add_test(NAME simulation_record_test COMMAND "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/integration/simulation_record_test.py" "${CMAKE_CURRENT_BINARY_DIR}")
+  set_tests_properties(simulation_record_test PROPERTIES LABELS integration RUN_SERIAL TRUE TIMEOUT 90 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+endif()

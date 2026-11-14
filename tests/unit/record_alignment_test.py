@@ -517,6 +517,31 @@ check(
     "a value was held at the planned deadline",
 )
 
+# Explicit simulation identity must dominate the host boot identity.
+import copy
+sim_runtime = runtime_summary()
+sim_app = application_summary()
+sim_clock = dict(clock="simulation", clock_domain="simulation", available=True,
+                 boot_id=BOOT_ID, clock_run_id="12"*16, logical_origin_us=1,
+                 physics_dt_us=1000, control_dt_us=2000)
+sim_runtime["clock"] = copy.deepcopy(sim_clock)
+sim_app["clock"] = copy.deepcopy(sim_clock)
+check(record_to_npz.associate(sim_runtime, sim_app, [velocity_row(1, 1)])["ok"],
+      "same simulation identity did not associate")
+for key, value in (("clock_run_id", "34"*16), ("logical_origin_us", 2),
+                   ("physics_dt_us", 500), ("control_dt_us", 4000),
+                   ("clock_domain", "host_monotonic")):
+    foreign = copy.deepcopy(sim_app)
+    foreign["clock"][key] = value
+    check(not record_to_npz.associate(sim_runtime, foreign, [velocity_row(1, 1)])["ok"],
+          "simulation association ignored " + key)
+    if key == "clock_run_id":
+        check("simulation clock" in record_to_npz.associate(sim_runtime, foreign,
+              [velocity_row(1, 1)])["reason"], "different simulation runs mislabeled as host boots")
+check(not record_to_npz.associate(sim_runtime, sim_app,
+                                 [velocity_row(1, 1, runtime_id=RUNTIME_ID_B)])["ok"],
+      "simulation association bypassed actual runtime/session identity")
+
 if failures:
     print(
         f"record_alignment_test: {len(failures)} failure(s)",
