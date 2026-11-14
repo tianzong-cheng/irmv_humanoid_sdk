@@ -698,3 +698,66 @@ actual Fault leave and a hung engine close during StopEngine. These are lifecycl
 host-path acceptance tests, not GPU dynamics or physical motor execution evidence.
 Task9 supplies the normalizer, assets/policy selection and launcher UI, using the
 library shutdown API and independently checking process exit codes.
+
+## Independent single-robot launch and explicit assets
+
+Task9 ships `sim_launch.py` beside `simulation_normalize`. The launcher reexecutes
+through the required `--python` interpreter, validates engine versions/adapter
+bytes, the prepared MJCF mesh/include closure and the ONNX byte digest, then
+creates a **new** private0700 run directory. It never reuses an existing run.
+`simulation_normalize` invokes the authoritative C++ configuration loaders; Python
+does not duplicate SDK canonical hashing. Fresh independent run/runtime IDs and a
+private0600 bootstrap are created before either SDK process starts. Engine
+initialization/coherent feedback precede SDK startup. The launcher owns only its
+children and independently checks Runner and both process exit codes.
+
+Prepare assets explicitly (paths below are user-supplied; no neighboring repository
+is assumed). Run the preparer with the pinned simulation environment, and select
+an ONNX-reader interpreter separately if needed:
+
+```sh
+SIM_PY tools/prepare_simulation_asset.py \
+  --urdf USER_ROBOT.urdf --policy USER_POLICY.onnx --output build/my-robot \
+  --template config/simulation.example.json \
+  --profile config/simulation-physical-profile.json --metadata-python ONNX_PY
+python3 tools/sim_launch.py --config build/my-robot/sdk.json \
+  --runtime build/robot_runtime --application build/application --python SIM_PY
+```
+
+The explicit v3 conversion profile preserves URDF inertias and fixed upper links,
+adds a free pelvis, releasable weld, flat ground, base-origin IMU and one direct
+unit-gear unrestricted torque motor per movable joint. It preserves mesh triangle
+coordinates by converting STL to OBJ (avoids the STL200000-face import limit),
+records source mesh hashes independently, and hashes the resolved prepared closure.
+Saved-training nominal leg/foot armature and sliding friction are explicit; zero
+joint damping/frictionloss, MuJoCo convex contacts, no self collision, rolling and
+torsional friction and weld settings are conversion choices, **not** evidence of
+PhysX equivalence. `source.asset_revision` matches URDF bytes only; historical
+training mesh bytes remain unattested. Initial height is computed from compiled
+collision vertices at the configured joint pose plus the explicit ground clearance.
+Prepared assets and ONNX blobs are never committed. Generated absolute user paths
+must be updated when moving those assets; installed launcher/package paths do not
+refer back to the source checkout.
+
+The adapter compiles the configured initial base pose into the weld reference,
+sets initial joints before GPU upload/forward, and never resets/teleports during a
+run. All non-base DOFs must be mapped. Unsupported motors, scaling, clipping or
+PD and IMU sites with different axes/origin are refused. `tau_est` is mapped
+`qfrc_actuator`, excluding constraint reactions. Quaternion is wxyz world
+orientation; gyro is body rad/s; accelerometer is body specific force (upward
+~9.81 at rest, ~0 in free fall). Existing SDK quaternion-to-RPY convention remains.
+
+Application `x` confirms Damping/LeaveCommitted and leaves runtime plus engine
+advancing. Ctrl-C/SIGTERM to **the launcher** requests independent experiment
+shutdown: accepted runtime ZeroTorque followed by actual engine close. Signal
+handlers only set a flag. Abort cleanup is never reported as proven shutdown.
+The private run directory retains runtime/application logs and `evidence.json`
+(binding, identities, readiness, release events/drop count, final state, independent
+exit codes and stop proof). This bounded lifecycle manifest does not implement
+Task10 physics/clock recording or Task11 long-run policy acceptance.
+
+GPU integration requires explicit `IRMV_SIMULATION_TEST_CONFIG` at CMake configure,
+pointing to a freshly prepared config whose unused socket directory fits the
+existing80-byte budget. Domain225 is reserved; real-DDS tests run serially.
+Unavailable CUDA or missing assets fail the test; no skipped GPU test counts as a
+pass. Fixture capability results are separate from real policy rollout metrics.

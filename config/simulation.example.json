@@ -1,0 +1,194 @@
+{
+  "schema_version": 1,
+  "deployment": "simulation",
+  "backend": "sim",
+  "robot": {
+    "units": {
+      "position": "rad",
+      "velocity": "rad_s",
+      "torque": "Nm"
+    },
+    "joints": [
+      {
+        "name": "test_left",
+        "position_min": -2,
+        "position_max": 2
+      },
+      {
+        "name": "test_right",
+        "position_min": -2,
+        "position_max": 2
+      }
+    ]
+  },
+  "runtime": {
+    "control_hz": 500,
+    "damping": {
+      "kd": {
+        "test_left": 2,
+        "test_right": 2
+      }
+    },
+    "safety": {
+      "joint_velocity_limits": {
+        "test_left": 10,
+        "test_right": 10
+      },
+      "torque_limits": {
+        "test_left": 20,
+        "test_right": 20
+      },
+      "target_velocity_limits": {
+        "test_left": 10,
+        "test_right": 10
+      },
+      "timeouts": {
+        "command_us": 100000,
+        "source_state_us": 150000,
+        "feedback_us": 20000,
+        "imu_us": 20000,
+        "supervisor_us": 300000
+      }
+    },
+    "boot": {
+      "frequency_grace_us": 1000000,
+      "healthy_window_us": 100000,
+      "deadline_us": 2000000,
+      "minimum_frequency_hz": 400
+    },
+    "recovery": {
+      "healthy_window_us": 100000,
+      "minimum_frequency_hz": 400
+    },
+    "imu_required": false,
+    "continuity": {
+      "position_delta": {
+        "test_left": 0.1,
+        "test_right": 0.1
+      },
+      "velocity_delta": {
+        "test_left": 0.5,
+        "test_right": 0.5
+      },
+      "torque_delta": {
+        "test_left": 5,
+        "test_right": 5
+      }
+    },
+    "state_window_capacity": 1024
+  },
+  "application": {
+    "initialization": {
+      "target_position": {
+        "test_left": 0.0,
+        "test_right": 0.0
+      },
+      "gains": {
+        "test_left": {
+          "kp": 10.0,
+          "kd": 1.0
+        },
+        "test_right": {
+          "kp": 10.0,
+          "kd": 1.0
+        }
+      },
+      "trajectory": {
+        "duration_us": 500000,
+        "position_tolerance": 0.02,
+        "velocity_tolerance": 0.05,
+        "stable_window_us": 100000,
+        "deadline_us": 2000000
+      }
+    },
+    "supervision": {
+      "target_period_us": 20000,
+      "heartbeat_period_us": 50000,
+      "request_retry_us": 50000,
+      "request_deadline_us": 1000000,
+      "state_timeout_us": 150000
+    },
+    "policy": {
+      "model_path": "USER_POLICY/policy.onnx",
+      "inference_timeout_us": 100000
+    },
+    "external_producer": {
+      "prepare_timeout_us": 1000000,
+      "registration_timeout_us": 1000000
+    }
+  },
+  "input": {
+    "intent_timeout_us": 500000,
+    "repeat_guard_us": 250000,
+    "bindings": {
+      "emergency_stop": " ",
+      "damping": "d",
+      "initialize": "i",
+      "start_locomotion": "l",
+      "zero_torque": "z",
+      "reset": "r",
+      "exit": "x",
+      "velocity_forward": "w",
+      "velocity_backward": "s",
+      "velocity_left": "a",
+      "velocity_right": "f",
+      "velocity_yaw_left": "q",
+      "velocity_yaw_right": "e"
+    }
+  },
+  "telemetry": {
+    "level": "INFO",
+    "directory": "logs",
+    "rotate_bytes": 1048576,
+    "retained_files": 3,
+    "queue_capacity": 1024,
+    "recorder": {
+      "enabled": false,
+      "sample_hz": 100,
+      "queue_capacity": 256,
+      "directory": null
+    }
+  },
+  "dds": {
+    "domain": 1,
+    "interface": "lo"
+  },
+  "simulation": {
+    "socket_directory": "/tmp/irmv-simulation-CHOOSE-NEW-RUN",
+    "engine": "mujoco_warp",
+    "engine_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "model_path": "USER_PREPARED/robot.xml",
+    "asset_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "physics_dt_us": 1000,
+    "host_startup_timeout_us": 120000000,
+    "host_phase_timeout_us": 30000000,
+    "base_body": "pelvis",
+    "imu_site": "imu",
+    "weld_name": "support",
+    "initial_base_position": [
+      0,
+      0,
+      0.8
+    ],
+    "initial_base_quaternion": [
+      1,
+      0,
+      0,
+      0
+    ],
+    "initial_joint_position": {
+      "test_left": 0,
+      "test_right": 0
+    },
+    "joint_mapping": {
+      "test_left": {
+        "joint": "left",
+        "actuator": "left"
+      },
+      "test_right": {
+        "joint": "right",
+        "actuator": "right"
+      }
+    }
+  }
+}

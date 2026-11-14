@@ -193,8 +193,16 @@ class RunnerTest(unittest.TestCase):
             sockets=[]
             try:
                 deadline=time.monotonic()+1
-                while not pathlib.Path(path).exists() and time.monotonic()<deadline:
+                # bind creates the pathname BEFORE listen; existence is not readiness.
+                listening=False
+                while time.monotonic()<deadline:
+                    try:
+                        listening=bool(runner.listener and runner.listener.getsockopt(
+                            socket.SOL_SOCKET,socket.SO_ACCEPTCONN))
+                    except OSError:pass
+                    if listening:break
                     time.sleep(.001)
+                self.assertTrue(listening,(runner.coordinator.state,runner.coordinator.failure))
                 for role in (2,3):
                     s=socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET);s.settimeout(1)
                     s.connect(path);sockets.append(s)

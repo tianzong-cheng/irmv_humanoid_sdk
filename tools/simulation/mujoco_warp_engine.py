@@ -40,8 +40,10 @@ def validate_model(model, config: dict) -> dict:
             or not model.eq_active0[weld]):
         raise ValueError("require one initially active base-to-world weld")
     site = find(mj.mjtObj.mjOBJ_SITE, config.get("imu_site"))
-    if model.site_bodyid[site] != base:
-        raise ValueError("IMU must be rigidly attached to base")
+    if (model.site_bodyid[site] != base
+            or not np.array_equal(model.site_quat[site], [1, 0, 0, 0])
+            or not np.array_equal(model.site_pos[site], [0, 0, 0])):
+        raise ValueError("IMU must use base axes and origin")
     mapping = []
     for joint_name, actuator_name in zip(joints, actuators):
         j = find(mj.mjtObj.mjOBJ_JOINT, joint_name)
@@ -59,6 +61,9 @@ def validate_model(model, config: dict) -> dict:
                 or model.actuator_ctrllimited[a] or model.actuator_forcelimited[a]):
             raise ValueError("require direct unit-gear unlimited torque motors without PD")
         mapping.append((int(model.jnt_qposadr[j]), int(model.jnt_dofadr[j]), a))
+    controlled = {b for _, b, _ in mapping}
+    if controlled != set(range(model.nv)) - set(range(int(model.jnt_dofadr[root]), int(model.jnt_dofadr[root])+6)):
+        raise ValueError("joint mapping must cover every non-base DOF")
     sensors = []
     for kind, size in [(mj.mjtSensor.mjSENS_FRAMEQUAT, 4),
                        (mj.mjtSensor.mjSENS_GYRO, 3),
@@ -92,7 +97,15 @@ class MujocoWarpEngine:
         import mujoco_warp as mjw
         import warp as wp
         self._mjw, self._wp = mjw, wp
-        self._model = mj.MjModel.from_xml_path(str(config["model_path"]))
+        spec = mj.MjSpec.from_file(str(config["model_path"]))
+        # Compile the support reference at the configured pose, before GPU upload.
+        base = spec.body(config["base_body"])
+        if base is None:
+            raise ValueError("missing base body")
+        if "initial_base_position" in config:
+            base.pos = config["initial_base_position"]
+            base.quat = config["initial_base_quaternion"]
+        self._model = spec.compile()
         self._layout = validate_model(self._model, config)
         self.timestep_s = self._layout["timestep"]
         wp.init()
@@ -101,6 +114,18 @@ class MujocoWarpEngine:
             raise RuntimeError("CUDA unavailable: GPU acceptance remains open")
         self._device = devices[0]
         self._host = mj.MjData(self._model)
+        if "initial_joint_position" in config:
+            q = config["initial_joint_position"]
+            if len(q) != len(self._layout["mapping"]) or any(not math.isfinite(x) for x in q):
+                raise ValueError("initial joints must be finite and match mapping")
+            for value, (address, _, _) in zip(q, self._layout["mapping"]):
+                self._host.qpos[address] = value
+        if "initial_base_velocity" in config:
+            velocity = config["initial_base_velocity"]
+            if len(velocity) != 6 or any(not math.isfinite(x) for x in velocity):
+                raise ValueError("initial velocity must contain six finite values")
+            address = self._layout["root_v"]
+            self._host.qvel[address:address+6] = velocity
         self._physics_step = 0
         self._time_diagnostic = EngineTimeDiagnostic(round(self.timestep_s * 1000000))
         try:

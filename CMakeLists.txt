@@ -2093,7 +2093,7 @@ add_test(NAME simulation_dds_barrier_test COMMAND "${Python3_EXECUTABLE}" "${PRO
 set_tests_properties(simulation_dds_barrier_test PROPERTIES LABELS integration TIMEOUT 30 RUN_SERIAL TRUE WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
 
 # Engine-independent coordinator/runner contracts: standard library only.
-foreach(contract coordinator runner cli time)
+foreach(contract coordinator runner cli asset time)
   add_test(NAME simulation_${contract}_test COMMAND "${Python3_EXECUTABLE}"
     "${PROJECT_SOURCE_DIR}/tests/unit/simulation_${contract}_test.py")
   set_tests_properties(simulation_${contract}_test PROPERTIES LABELS core TIMEOUT 15)
@@ -2127,4 +2127,25 @@ if(IRMV_BUILD_APPLICATION)
   add_test(NAME simulation_lifecycle_test COMMAND "${Python3_EXECUTABLE}"
     "${PROJECT_SOURCE_DIR}/tests/integration/simulation_lifecycle_test.py" "${CMAKE_CURRENT_BINARY_DIR}")
   set_tests_properties(simulation_lifecycle_test PROPERTIES LABELS integration RUN_SERIAL TRUE TIMEOUT 180 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+endif()
+
+# Startup normalization deliberately links configuration only, never policy.
+if(TARGET application)
+  add_executable(simulation_normalize tools/simulation/normalize_main.cpp)
+  target_link_libraries(simulation_normalize PRIVATE irmv_configuration nlohmann_json::nlohmann_json)
+  install(TARGETS simulation_normalize RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+  install(PROGRAMS tools/sim_launch.py tools/prepare_simulation_asset.py
+    DESTINATION "${CMAKE_INSTALL_BINDIR}")
+  install(DIRECTORY tools/simulation DESTINATION "${CMAKE_INSTALL_BINDIR}"
+    FILES_MATCHING PATTERN "*.py")
+  install(FILES config/simulation.example.json config/simulation-physical-profile.json DESTINATION "${CMAKE_INSTALL_SYSCONFDIR}/irmv")
+  add_test(NAME simulation_launcher_test COMMAND "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/integration/simulation_launcher_test.py" "${CMAKE_CURRENT_BINARY_DIR}")
+  set_tests_properties(simulation_launcher_test PROPERTIES LABELS integration RUN_SERIAL TRUE TIMEOUT 120)
+  if(IRMV_SIMULATION_PYTHON)
+    set(IRMV_SIMULATION_TEST_CONFIG "" CACHE FILEPATH "Explicit prepared real policy GPU config")
+    add_test(NAME simulation_mujoco_warp_test COMMAND "${IRMV_SIMULATION_PYTHON}"
+      "${PROJECT_SOURCE_DIR}/tests/integration/simulation_mujoco_warp_test.py" "${CMAKE_CURRENT_BINARY_DIR}" --config "${IRMV_SIMULATION_TEST_CONFIG}")
+    set_tests_properties(simulation_mujoco_warp_test PROPERTIES LABELS integration RUN_SERIAL TRUE TIMEOUT 600)
+  endif()
 endif()

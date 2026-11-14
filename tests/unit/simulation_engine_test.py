@@ -72,6 +72,7 @@ class ValidationTest(unittest.TestCase):
                          ('timestep="0.001"', 'timestep="0.0010005"'),
                          ('timestep="0.001"', 'timestep="0.0001"'),
                          ('damping="0"', 'damping="1"'),
+                         ('<site name="imu"/>', '<site name="imu" quat=".70710678 .70710678 0 0"/>'),
                          ('ctrllimited="false"', 'ctrllimited="true" ctrlrange="-1 1"'), ('<motor ', '<position '),
                          ('<freejoint name="root"/>', ''),
                          ('body1="base"', 'body1="rotor"'),

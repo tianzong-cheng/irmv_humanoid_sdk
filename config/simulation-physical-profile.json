@@ -1,0 +1,12 @@
+{
+  "name": "irmv-v3-saved-training-nominal-v1",
+  "physics_dt_us": 1000,
+  "leg_armature": 0.125579552,
+  "foot_armature": 0.0716121192,
+  "joint_damping": 0.0,
+  "joint_frictionloss": 0.0,
+  "contact_friction": [1.0, 0.005, 0.0001],
+  "ground_clearance_m": 0.002,
+  "self_collision": false,
+  "note": "Saved-training armature and nominal sliding friction only. MuJoCo convex mesh contacts, torsional/rolling friction and weld solver are explicit conversion choices; historical training mesh bytes are not attested. No claim of PhysX equivalence."
+}
