@@ -60,6 +60,18 @@ class ValidationTest(unittest.TestCase):
         finally:
             engine.close()
 
+    def test_locomotion_rejection_fails_early_without_gpu(self):
+        import runpy
+        guard=runpy.run_path(str(ROOT/'tests/integration/simulation_mujoco_warp_test.py'))['check_locomotion_rejection']
+        ready='[application] behavior=Ready runtime=Tracking reject=- stop=-'
+        rejected=ready+'\n[application] behavior=Ready runtime=Tracking reject=Discontinuity stop=-'
+        timeout=ready+'\n[application] behavior=Damping runtime=Damping reject=- stop=CommandTimeout'
+        guard(ready,attempted=True,released=False)
+        guard(rejected,attempted=False,released=False)
+        for output in (rejected,timeout):
+            with self.assertRaisesRegex(AssertionError,'Locomotion protection'):
+                guard(output,attempted=True,released=False)
+
     def test_model_contract(self):
         import mujoco
         from tools.simulation.mujoco_warp_engine import validate_model

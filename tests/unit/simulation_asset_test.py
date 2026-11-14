@@ -51,4 +51,73 @@ class AssetTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'policy digest'):verify_binding(n)
                 policy.write_bytes(b'policy bytes');model.write_text('<mujoco model="changed"/>')
                 with self.assertRaisesRegex(ValueError,'asset closure'):verify_binding(n)
+    def test_assetdir_decoy_never_attested_even_after_loaded_mesh_mutation(self):
+        import hashlib,json
+        from unittest.mock import patch
+        from simulation.assets import closure,sha256,verify_binding
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d);(p/'assets').mkdir()
+            model=p/'robot.xml';policy=p/'policy.onnx'
+            model.write_text('<mujoco><compiler assetdir="assets"/><asset><mesh file="shape.obj"/></asset></mujoco>')
+            (p/'shape.obj').write_bytes(b'decoy');actual=p/'assets/shape.obj'
+            actual.write_bytes(b'actual loaded mesh');policy.write_bytes(b'policy')
+            # Exact vulnerable legacy attestation; do not call fixed closure to build it.
+            files={name:sha256(p/name) for name in ('robot.xml','shape.obj')}
+            digest=hashlib.sha256(json.dumps(files,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+            model.with_suffix('.manifest.json').write_text(json.dumps(dict(
+                prepared_closure=dict(files=files,digest=digest),policy_sha256=sha256(policy))))
+            n=dict(engine_digest='e'*64,engine_config=dict(model_path=str(model)),
+                   asset_digest=digest,policy_path=str(policy))
+            for changed in (False,True):
+                if changed:actual.write_bytes(b'CHANGED actual loaded mesh')
+                with self.subTest(changed=changed,entry='closure'):
+                    with self.assertRaisesRegex(ValueError,'unsupported.*resolution'):closure(model)
+                with self.subTest(changed=changed,entry='verify_binding'):
+                    with patch('simulation.assets.engine_identity',return_value=('e'*64,{})):
+                        with self.assertRaisesRegex(ValueError,'unsupported.*resolution'):verify_binding(n)
+
+    def test_include_compiler_resolution_is_explicitly_fail_closed(self):
+        from simulation.assets import closure
+        cases=[
+            ('<compiler meshdir="assets"/>',''),
+            ('<compiler texturedir="assets"/>',''),
+            ('','<compiler meshdir="assets"/>'),
+            ('','<compiler texturedir="assets"/>'),
+            ('','<compiler assetdir="assets"/>'),
+            ('<compiler strippath="true"/>',''),
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d);(p/'assets').mkdir()
+            (p/'shape.obj').write_bytes(b'decoy');(p/'assets/shape.obj').write_bytes(b'actual')
+            for top,part in cases:
+                (p/'robot.xml').write_text('<mujoco>'+top+'<include file="part.xml"/></mujoco>')
+                (p/'part.xml').write_text('<mujoco>'+part+'<asset><mesh file="shape.obj"/></asset></mujoco>')
+                with self.subTest(top=top,part=part):
+                    with self.assertRaisesRegex(ValueError,'unsupported.*resolution'):closure(p/'robot.xml')
+            (p/'sub').mkdir();(p/'sub/part.xml').write_text('<mujoco><asset><mesh file="shape.obj"/></asset></mujoco>')
+            (p/'sub/shape.obj').write_bytes(b'another decoy')
+            (p/'robot.xml').write_text('<mujoco><include file="sub/part.xml"/></mujoco>')
+            with self.assertRaisesRegex(ValueError,'unsupported.*resolution'):closure(p/'robot.xml')
+
+    def test_other_dependency_resolution_not_silently_ignored(self):
+        from simulation.assets import closure
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)
+            (p/'child.xml').write_text('<mujoco/>');(p/'face.png').write_bytes(b'face')
+            for asset in ('<model file="child.xml"/>','<texture fileleft="face.png"/>'):
+                (p/'robot.xml').write_text('<mujoco><asset>'+asset+'</asset></mujoco>')
+                with self.subTest(asset=asset):
+                    with self.assertRaisesRegex(ValueError,'unsupported.*resolution'):closure(p/'robot.xml')
+
+    def test_single_file_meshdir_still_hashes_loaded_mesh(self):
+        from simulation.assets import closure
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d);(p/'assets').mkdir()
+            (p/'shape.obj').write_bytes(b'decoy');actual=p/'assets/shape.obj';actual.write_bytes(b'first')
+            (p/'robot.xml').write_text('<mujoco><compiler meshdir="assets"/><asset><mesh file="shape.obj"/></asset></mujoco>')
+            first=closure(p/'robot.xml')
+            self.assertEqual(set(first['files']),{'robot.xml','assets/shape.obj'})
+            actual.write_bytes(b'changed')
+            self.assertNotEqual(first['digest'],closure(p/'robot.xml')['digest'])
+
 if __name__=='__main__':unittest.main()

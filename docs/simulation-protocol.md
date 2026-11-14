@@ -761,3 +761,16 @@ pointing to a freshly prepared config whose unused socket directory fits the
 existing80-byte budget. Domain225 is reserved; real-DDS tests run serially.
 Unavailable CUDA or missing assets fail the test; no skipped GPU test counts as a
 pass. Fixture capability results are separate from real policy rollout metrics.
+
+
+### Supported asset file resolution
+
+Closure attestation is deliberately conservative. A single MJCF supports a root
+compiler's `meshdir`/`texturedir` and contained mesh/texture `file` dependencies.
+Same-directory XML includes are supported only when no compiler path settings
+need inheritance. `assetdir`, `strippath`, compiler elements in included XML,
+multiple/nested compiler elements, subdirectory includes, nested model assets and
+alternate file attributes (such as cube-texture face files) are rejected before
+attestation. This is an explicit unsupported-resolution error, even if MuJoCo can
+load that model; the launcher never guesses a different file to hash. Flatten or
+prepare the model into the supported single-file form before launching.

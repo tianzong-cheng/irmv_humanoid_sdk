@@ -11,27 +11,58 @@ def sha256(path):
 
 
 def closure(model):
+    """Attest a deliberately restricted, unambiguous MJCF file-resolution subset.
+
+    Single-file models support root meshdir/texturedir. Includes support only
+    same-directory XML with no compiler path settings anywhere. Global compiler
+    inheritance, assetdir/strippath, nested models and alternate file attributes
+    are rejected, never approximated with a different dependency's bytes.
+    """
     model=Path(model).resolve()
     root=model.parent
-    files={}
-    def visit(path, xml=False):
+    xmls={}
+    references=[]
+    compiler=None
+    def contained(path):
         path=path.resolve()
         if not path.is_relative_to(root):
             raise ValueError('asset dependency escapes model directory')
-        key=path.relative_to(root).as_posix()
-        if key in files:return
-        files[key]=sha256(path)
-        if xml:
-            tree=ET.parse(path)
-            compiler=tree.getroot().find('compiler')
-            meshdir=compiler.get('meshdir','') if compiler is not None else ''
-            texturedir=compiler.get('texturedir','') if compiler is not None else ''
-            for node in tree.iter():
-                if 'file' in node.attrib:
-                    directory=meshdir if node.tag=='mesh' else texturedir if node.tag=='texture' else ''
-                    visit(path.parent/directory/node.get('file'),node.tag=='include')
-    visit(model,True)
-    files=dict(sorted(files.items()))
+        return path
+    def unsupported(reason):
+        raise ValueError('unsupported asset resolution: '+reason)
+    def inspect(path):
+        nonlocal compiler
+        path=contained(path)
+        if path in xmls:return
+        if path.parent!=root:unsupported('includes must share main XML directory')
+        tree=ET.parse(path)
+        xmls[path]=tree
+        for node in tree.iter():
+            if node.tag=='compiler':
+                if path!=model or node not in list(tree.getroot()):
+                    unsupported('included or nested compiler settings')
+                if compiler is not None:unsupported('multiple compiler elements')
+                compiler=node
+                if 'assetdir' in node.attrib or 'strippath' in node.attrib:
+                    unsupported('compiler assetdir/strippath')
+            file_attributes=[key for key in node.attrib if key.startswith('file')]
+            if not file_attributes:continue
+            if file_attributes!=['file'] or node.tag not in ('include','mesh','texture'):
+                unsupported('file attributes on '+node.tag)
+            if node.tag=='include':
+                inspect(root/node.get('file'))
+            else:
+                references.append((node.tag,node.get('file')))
+    inspect(model)
+    if len(xmls)>1 and compiler is not None and any(
+            key in compiler.attrib for key in ('meshdir','texturedir')):
+        unsupported('compiler directory inheritance across includes')
+    meshdir=compiler.get('meshdir','') if compiler is not None else ''
+    texturedir=compiler.get('texturedir','') if compiler is not None else ''
+    paths=set(xmls)
+    for kind,name in references:
+        paths.add(contained(root/(meshdir if kind=='mesh' else texturedir)/name))
+    files=dict(sorted((path.relative_to(root).as_posix(),sha256(path)) for path in paths))
     digest=hashlib.sha256(json.dumps(files,sort_keys=True,separators=(',',':')).encode()).hexdigest()
     return dict(digest=digest,files=files)
 

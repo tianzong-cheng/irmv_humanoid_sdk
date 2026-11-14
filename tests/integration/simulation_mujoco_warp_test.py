@@ -54,6 +54,14 @@ def semantics():
     finally:engine.close()
 
 
+def check_locomotion_rejection(output, *, attempted, released):
+    """Fail on observed admission/command protection, not after the host deadline."""
+    if attempted and not released:
+        for line in output.splitlines():
+            if 'reject=Discontinuity' in line or 'stop=CommandTimeout' in line:
+                raise AssertionError('Locomotion protection: '+line)
+
+
 def lifecycle(build,config):
     import json,subprocess,time
     from sim_launch import Experiment
@@ -117,6 +125,8 @@ def lifecycle(build,config):
                             position_limits=cfg['robot']['joints'])
                         print('initialization admission',json.dumps(admission),flush=True)
                     owner.children[1].stdin.write(key);owner.children[1].stdin.flush();sent.add(key)
+            check_locomotion_rejection(output,attempted=b'l' in sent,
+                released=c.release_state=='Released')
             if 'behavior=Fault' in output:
                 raise AssertionError(('actual application Fault',c.step,c.state,c.phase,
                     engines[0].tracking_diagnostic[-1] if engines[0].tracking_diagnostic else None,output))
