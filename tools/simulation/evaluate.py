@@ -78,13 +78,15 @@ def wire_frame(row,b):
         b.run_id,row['control_step'],row['phase'],row['logical_us'],b.physics_dt_us,b.control_dt_us)))
 
 
-def stream_json(path):
+def stream_json(path,*,validate_values=True):
     with Path(path).open('rb') as stream:
         while True:
             raw=stream.readline(MAX_LINE+2)
             if not raw:break
             if len(raw)>MAX_LINE or not raw.endswith(b'\n'):raise ValueError('invalid SDK export line')
-            row=json.loads(raw);finite(row);yield row
+            row=json.loads(raw)
+            if validate_values:finite(row)
+            yield row
 
 
 def require_complete_sdk_summary(summary,role):
@@ -401,6 +403,7 @@ def audit_sdk_exports(paths,cfg,b,m,report,context):
     next_sample=1+((start-1+sample_dt-1)//sample_dt)*sample_dt
     joint_sum=0.;joint_n=0;saturated=0;torque_n=0;runtime_summary=None;numeric_seen=False
     try:
+        require_export_identity(paths.get('runtime_export'),'runtime',b,rate)
         for row in stream_json(paths.get('runtime_export')):
             numeric_seen=True
             kind=row.get('record_type')
@@ -463,6 +466,7 @@ def audit_sdk_exports(paths,cfg,b,m,report,context):
         if velocities==0:metrics['intent_first_stamp_us']=stamp
         velocities+=1;index+=1;last_stamp=stamp;metrics['intent_last_stamp_us']=stamp
     try:
+        require_export_identity(paths.get('application_export'),'application',b,rate)
         replay_context={}
         try:
             audit_evidence(paths['sidecar'],b,m['duration_us'],m['fall'],m['intent'],
@@ -487,8 +491,32 @@ def audit_sdk_exports(paths,cfg,b,m,report,context):
         metrics['baseline_command_application_control_cycles']=1
 
 
+def require_export_identity(path,role,b,rate):
+    """Bind an export before attributing any metric or fault to this run.
+
+    The SDK export puts its identity summary last. Scan it in bounded memory
+    first, without requiring complete data or finite numeric rows. The normal
+    data pass still validates every row and can retain a same-run valid prefix.
+    No readable identity summary means unavailable SDK observations, regardless
+    of the file's manifest SHA or separately bound engine evidence.
+    """
+    summary=None
+    for row in stream_json(path,validate_values=False):
+        if row.get('record_kind') in ('runtime','application'):
+            if row['record_kind']!=role or summary is not None:
+                raise ValueError('ambiguous SDK export identity summary')
+            summary=row
+    if summary is None:raise ValueError('missing SDK '+role+' identity summary')
+    finite(summary)
+    check_export_identity(summary,role,b,rate)
+
+
 def check_export_summary(summary,role,b,rate):
     require_complete_sdk_summary(summary,role)
+    check_export_identity(summary,role,b,rate)
+
+
+def check_export_identity(summary,role,b,rate):
     clock=summary['clock']
     if (clock.get('clock_run_id')!=b.run_id.hex() or clock.get('clock_domain')!='simulation' or
             clock.get('available') is not True or clock.get('logical_origin_us')!=1 or

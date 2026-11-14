@@ -323,6 +323,126 @@ class FullEvaluationTest(unittest.TestCase):
                 self.save_exports();report=evaluate(self.manifest)
                 self.assertEqual(report['status'],'fail',report)
 
+    def rewrite_export(self,role,rows):
+        from simulation.evaluate import sha256
+        key=role+'_export';path=self.paths[key]
+        path.write_text(''.join(json.dumps(row)+'\n' for row in rows))
+        # The foreign bytes are correctly bound: a SHA is not a run identity.
+        self.manifest['files'][key]['sha256']=sha256(path)
+
+    def test_foreign_runtime_export_cannot_attribute_numeric_metrics(self):
+        original=[json.loads(line) for line in self.paths['runtime_export'].read_text().splitlines()]
+        for field,value in [('clock_run_id','ff'*16),('config_id','ff'*32),
+                            ('control_dt_us',500000),('physics_dt_us',1000),
+                            ('clock_domain','host_monotonic')]:
+            with self.subTest(field=field):
+                rows=copy.deepcopy(original)
+                for row in rows[:-1]:row.update(q=[2.],measured_q=[0.],output_torque=[20.])
+                if field=='config_id':rows[-1][field]=value
+                else:rows[-1]['clock'][field]=value
+                self.rewrite_export('runtime',rows);report=evaluate(self.manifest);metrics=report['metrics']
+                self.assertEqual(report['status'],'fail',report)
+                for key in ('joint_rmse_rad','joint_metric_values','torque_saturation_fraction'):
+                    self.assertIsNone(metrics[key],(field,key,report))
+                self.assertFalse(metrics['joint_metric_coverage_complete'])
+                self.assertEqual(metrics['release_logical_us'],1000001)
+                self.assertEqual(metrics['completed_applied_intervals'],61)
+                self.assertEqual(metrics['max_abs_measured_torque_Nm'],0.)
+                self.assertIs(metrics['runtime_fault_observed'],False)
+
+    def test_foreign_application_export_cannot_attribute_intent_metrics(self):
+        original=[json.loads(line) for line in self.paths['application_export'].read_text().splitlines()]
+        for field,value in [('clock_run_id','ff'*16),('config_id','ff'*32),
+                            ('application_config_id','ff'*32),('control_dt_us',500000)]:
+            with self.subTest(field=field):
+                rows=copy.deepcopy(original)
+                if field in ('config_id','application_config_id'):rows[-1][field]=value
+                else:rows[-1]['clock'][field]=value
+                self.rewrite_export('application',rows);report=evaluate(self.manifest);metrics=report['metrics']
+                self.assertEqual(report['status'],'fail',report)
+                for key in ('intent_samples','intent_first_stamp_us','intent_last_stamp_us','intent_max_gap_us',
+                            'velocity_rmse_yaw_xy_world_yaw_rad_s'):
+                    self.assertIsNone(metrics[key],(field,key,report))
+                self.assertFalse(metrics['intent_coverage_complete'])
+                self.assertEqual(metrics['release_logical_us'],1000001)
+                self.assertEqual(metrics['completed_applied_intervals'],61)
+                self.assertEqual(metrics['joint_metric_values'],60)
+
+    def test_foreign_sdk_fault_cannot_overwrite_engine_fault_accounting(self):
+        original=[json.loads(line) for line in self.paths['runtime_export'].read_text().splitlines()]
+        for field in ('clock_run_id','config_id'):
+            with self.subTest(field=field):
+                rows=copy.deepcopy(original)
+                rows.insert(-1,dict(record_type='fault',fault_id=77))
+                if field=='config_id':rows[-1][field]='ff'*32
+                else:rows[-1]['clock'][field]='ff'*16
+                self.rewrite_export('runtime',rows);report=evaluate(self.manifest);metrics=report['metrics']
+                self.assertEqual(report['status'],'fail',report)
+                self.assertIs(metrics['runtime_fault_observed'],False)
+                self.assertEqual(metrics['unexpected_runtime_faults'],0)
+                self.assertEqual(metrics['recorded_runtime_fault_count'],0)
+                self.assertEqual(metrics['completed_applied_intervals'],61)
+                self.assertIsNone(metrics['joint_metric_values'])
+                self.assertTrue(any('SDK' in reason for reason in report['reasons']),report)
+
+    def test_same_run_incomplete_export_retains_observed_numeric_prefix(self):
+        rows=[json.loads(line) for line in self.paths['runtime_export'].read_text().splitlines()]
+        prefix=rows[:20]
+        for row in prefix:row.update(q=[2.],measured_q=[0.],output_torque=[20.])
+        summary=rows[-1];summary.update(complete=False,truncated=True,rows_in_range=20,
+            last_stamp_us=prefix[-1]['stamp_us'])
+        self.rewrite_export('runtime',[*prefix,summary]);report=evaluate(self.manifest);metrics=report['metrics']
+        self.assertEqual(report['status'],'fail',report)
+        self.assertEqual(metrics['joint_metric_values'],20)
+        self.assertEqual(metrics['joint_rmse_rad'],2.)
+        self.assertEqual(metrics['torque_saturation_fraction'],1.)
+        self.assertFalse(metrics['joint_metric_coverage_complete'])
+        self.assertEqual(metrics['completed_applied_intervals'],61)
+
+    def test_same_run_bad_late_numeric_row_preserves_valid_prefix(self):
+        rows=[json.loads(line) for line in self.paths['runtime_export'].read_text().splitlines()]
+        for row in rows[:10]:row.update(q=[2.],measured_q=[0.])
+        rows[10]['q']=[float('nan')]
+        rows[-1].update(complete=False,truncated=True)
+        self.rewrite_export('runtime',rows);report=evaluate(self.manifest);metrics=report['metrics']
+        self.assertEqual(report['status'],'fail',report)
+        self.assertEqual(metrics['joint_metric_values'],10)
+        self.assertEqual(metrics['joint_rmse_rad'],2.)
+        self.assertFalse(metrics['joint_metric_coverage_complete'])
+        self.assertEqual(metrics['completed_applied_intervals'],61)
+        json.dumps(report,allow_nan=False)
+
+    def test_same_run_incomplete_intent_preserves_attributable_prefix(self):
+        rows=[json.loads(line) for line in self.paths['application_export'].read_text().splitlines()]
+        summary=rows[-1];summary.update(complete=False,truncated=True,rows_in_range=5,
+            last_stamp_us=rows[4]['stamp_us'],last_sample_seq=rows[4]['sample_seq'])
+        self.rewrite_export('application',[*rows[:5],summary])
+        report=evaluate(self.manifest);metrics=report['metrics']
+        self.assertEqual(report['status'],'fail',report)
+        self.assertEqual(metrics['intent_samples'],5)
+        self.assertEqual(metrics['intent_first_stamp_us'],1000001)
+        self.assertEqual(metrics['intent_last_stamp_us'],5000001)
+        self.assertFalse(metrics['intent_coverage_complete'])
+        self.assertIsNone(metrics['velocity_rmse_yaw_xy_world_yaw_rad_s'])
+        self.assertEqual(metrics['completed_applied_intervals'],61)
+
+    def test_same_run_sdk_fault_remains_observed_after_identity_gate(self):
+        rows=[json.loads(line) for line in self.paths['runtime_export'].read_text().splitlines()]
+        rows.insert(-1,dict(record_type='fault',fault_id=77))
+        self.rewrite_export('runtime',rows);report=evaluate(self.manifest)
+        self.assertEqual(report['status'],'fail',report)
+        self.assertIs(report['metrics']['runtime_fault_observed'],True)
+        self.assertGreater(report['metrics']['unexpected_runtime_faults'],0)
+        self.assertEqual(report['metrics']['completed_applied_intervals'],61)
+
+    def test_sdk_prefix_without_identity_summary_is_unavailable(self):
+        rows=[json.loads(line) for line in self.paths['runtime_export'].read_text().splitlines()]
+        self.rewrite_export('runtime',rows[:-1]);report=evaluate(self.manifest)
+        self.assertEqual(report['status'],'fail',report)
+        self.assertIsNone(report['metrics']['joint_metric_values'])
+        self.assertIsNone(report['metrics']['joint_rmse_rad'])
+        self.assertEqual(report['metrics']['completed_applied_intervals'],61)
+
     def test_failed_owner_retains_observed_release_and_torque(self):
         self.owner['final_child_codes']=[0,3]
         self.paths['evidence'].write_text(json.dumps(self.owner));self.save_exports()

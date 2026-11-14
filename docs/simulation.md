@@ -129,7 +129,17 @@ a known zero there does not establish zero events over an unrecorded 60-second
 horizon. Maximum measured torque covers all validated feedback,
 including startup; minimum base height covers observed released intervals.
 Joint errors and saturation use available SDK numeric rows with a separate
-coverage flag. Failed-owner outcomes keep these facts and still fail acceptance.
+coverage flag. Before attributing any SDK metric or fault, a bounded streaming
+scan validates that export's own summary run/configuration/clock identity and
+sampling rate (including the application configuration identity for intent).
+A manifest SHA identifies the bytes, not their run. Foreign or unidentified SDK
+exports contribute no measurements or fault flags; independently validated
+engine facts remain available. Identity validation does not require a complete
+file: same-run exports with readable identity retain valid numeric/intent
+prefixes despite incompleteness or later bad rows. Without a readable identity
+summary, SDK quantities remain unavailable rather than being attributed to the
+sidecar's run by assumption. Failed-owner outcomes keep these facts and still
+fail acceptance.
 An application initialization fault is distinguished from a runtime fault.
 
 Host operation metrics are never labeled logical control latency. See
