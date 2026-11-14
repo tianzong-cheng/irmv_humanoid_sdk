@@ -22,6 +22,17 @@ when moving it. Copying only one SDK directory can leave a missing sidecar;
 readers explicitly report incomplete evidence. Source and installed tools use
 the same references, without embedding their install/source locations.
 
+The launcher lets SDK children inherit its working directory; it does not
+colocate artifacts automatically. An inherited recorder directory under `logs`
+may be separate from a coordinator socket directory under `/tmp`. That default
+separated layout does **not** provide full sidecar support to a web service
+rooted only at `logs`. Configure both recording directories and coordinator
+under one common experiment root before normalization/startup, then use that
+root for the web service and preserve its relative layout when moving it. CLI
+and NPZ exports can consume a separated layout while the relative sidecar is
+reachable; copying only SDK directories does not preserve that guarantee.
+Exported NPZ embeds the event/measurement/metadata snapshot for offline analysis.
+
 The sidecar schema is `irmv.simulation_evidence`, version 1:
 
 - Header: simulation clock/run/origin/dt, runtime/config/application/engine
@@ -46,8 +57,12 @@ The sidecar schema is `irmv.simulation_evidence`, version 1:
   from rejected engine facts. No velocity or pose is reconstructed from targets
   or accelerometer values. A legacy adapter's empty base quaternion is explicitly
   unavailable and clears measured-feedback completeness. Loss, absent bootstrap,
-  or missing completed-step feedback also clears measured-feedback completeness;
-  this flag never turns missing measurements into successful evidence.
+  or missing completed-step feedback also clears measured-feedback completeness.
+  Readers require exactly one validated measurement from bootstrap through the
+  completed horizon evidenced by event control steps and AppliedToStep physics
+  endpoints, including final facts. A recorded prefix with an absent final step
+  is incomplete even when its footer counters agree. This flag never turns
+  missing measurements into successful evidence.
 - Host measurements: `host_observed_us` and `host_operation_start_us` use kernel
   boot monotonic time. `host_operation_duration_us`, `host_release_duration_us`,
   and `host_stop_duration_us` are elapsed host time for engine operations,
@@ -57,11 +72,15 @@ The sidecar schema is `irmv.simulation_evidence`, version 1:
   entry queue and 64 KiB maximum line; the worker exclusively writes the file.
   Overflow loses evidence and increments drop counts rather than delaying SDK
   control. Readers stream bounded lines and retain sequence gaps, missing tails,
-  footer status and failure facts. Streaming Python `read(path, visitor=...)`,
+  footer status and failure facts. A partial pre-footer write is incomplete;
+  any bytes after a footer (even whitespace or an unterminated fragment) are
+  rejected rather than allowed to retain completeness. Streaming Python
+  `read(path, visitor=...)`,
   C++ ReadSimulationEvidence and web summaries impose no total-file/row limit;
   the 60-second/500-Hz horizon is tested with 240,008 events. Python's convenience
   materialization mode refuses after 65,536 rows with an explicit instruction
-  to use streaming; it never returns a partial result as complete. File completeness does not assert a successful
+  to use streaming; it never returns a partial result as complete. File
+  completeness does not assert a successful
   lifecycle, GPU execution, or physical motor execution: inspect final runner
   state/stop proof/failure and measurement availability as well.
 

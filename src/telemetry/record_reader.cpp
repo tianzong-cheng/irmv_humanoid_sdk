@@ -492,15 +492,15 @@ bool ReadSimulationEvidence(
     const std::filesystem::path &path, const RecordClockIdentity &expected,
     const std::function<void(const std::string &)> &visitor,
     std::string *summary_json, std::string *error) {
-  Json summary = {{"evidence_complete", false},
-                  {"footer_present", false},
-                  {"rows", 0},
-                  {"sequence_gaps", 0},
-                  {"dropped", 0},
-                  {"write_failures", 0}};
+  Json summary = {
+      {"evidence_complete", false}, {"measured_feedback_complete", false},
+      {"footer_present", false},    {"rows", 0},
+      {"sequence_gaps", 0},         {"dropped", 0},
+      {"write_failures", 0}};
   auto fail = [&](const std::string &why) {
     *error = why;
     summary["evidence_complete"] = false;
+    summary["measured_feedback_complete"] = false;
     summary["error"] = why;
     *summary_json = summary.dump();
     return false;
@@ -508,6 +508,7 @@ bool ReadSimulationEvidence(
   std::ifstream f(path, std::ios::binary);
   if (!f) return fail("simulation evidence unavailable");
   std::uint64_t last = 0, count = 0, holes = 0, measured_count = 0;
+  std::uint64_t required_completed_step = 0;
   bool header = false, footer = false, measured_complete = true;
   try {
     while (true) {
@@ -523,7 +524,14 @@ bool ReadSimulationEvidence(
           return fail("oversized simulation evidence line");
         line += ch;
       }
-      if (!newline) break;  // Interrupted final line never supplies a footer.
+      if (!newline) {
+        if (footer && !line.empty())
+          return fail("data after simulation footer");
+        if (f.bad()) return fail("cannot read simulation evidence");
+        break;  // Clean EOF, or incomplete pre-footer tail (no complete
+                // footer).
+      }
+      if (footer) return fail("data after simulation footer");
       const auto row = Json::parse(line);
       if (!row.is_object()) return fail("simulation evidence object required");
       if (!header) {
@@ -542,7 +550,6 @@ bool ReadSimulationEvidence(
         header = true;
         continue;
       }
-      if (footer) return fail("data after simulation footer");
       if (row.value("record_type", std::string()) == "footer") {
         for (const char *key :
              {"offered", "written", "dropped", "write_failures"})
@@ -571,6 +578,21 @@ bool ReadSimulationEvidence(
           row["logical_us"] !=
               expected.logical_origin_us + step * expected.control_dt_us)
         return fail("invalid simulation event identity");
+      // State sequence is independent: only completed step identities set
+      // the required measurement horizon. AppliedToStep carries its originating
+      // control step and the actual completed physics end separately.
+      required_completed_step = std::max(required_completed_step, step);
+      if (row.value("kind", std::string()) == "AppliedToStep" ||
+          (row.contains("frame") && row["frame"].is_object() &&
+           row["frame"].value("name", std::string()) == "AppliedToStep")) {
+        const auto &end = row.at("frame").at("payload").at("physics_step_end");
+        const auto ratio = expected.control_dt_us / expected.physics_dt_us;
+        if (!end.is_number_unsigned() || end.get<std::uint64_t>() == 0 ||
+            end.get<std::uint64_t>() % ratio != 0)
+          return fail("invalid completed physics horizon");
+        required_completed_step =
+            std::max(required_completed_step, end.get<std::uint64_t>() / ratio);
+      }
       if (row.value("kind", std::string()) == "event_feedback") {
         if (row.value("feedback_validated", false)) {
           if (step != measured_count) measured_complete = false;
@@ -622,6 +644,7 @@ bool ReadSimulationEvidence(
     if (!header) return fail("missing simulation evidence header");
     summary["measured_feedback_complete"] =
         measured_complete && measured_count > 0 &&
+        measured_count - 1 == required_completed_step &&
         summary["evidence_complete"].get<bool>();
     summary["footer_present"] = footer;
     summary["rows"] = count;

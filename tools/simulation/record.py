@@ -86,13 +86,15 @@ def read(path, visitor=None):
     count=0
     measured_complete=True
     measured_count=0
+    required_completed_step=0
     final={}
     with Path(path).open('rb') as f:
         while True:
             raw=f.readline(MAX_LINE+2)
             if not raw:break
+            if footer is not None:raise ValueError('data after simulation footer')
             if len(raw)>MAX_LINE+1:raise ValueError('oversized simulation evidence line')
-            if not raw.endswith(b'\n'):break  # Interrupted tail: footer remains absent.
+            if not raw.endswith(b'\n'):break  # Partial pre-footer tail: incomplete.
             try:row=json.loads(raw)
             except (ValueError,UnicodeError) as e:raise ValueError('invalid simulation evidence JSON') from e
             if not isinstance(row,dict):raise ValueError('simulation evidence object required')
@@ -111,7 +113,6 @@ def read(path, visitor=None):
                     raise ValueError('invalid simulation evidence clock')
                 header=row
                 continue
-            if footer is not None:raise ValueError('data after simulation footer')
             if row.get('record_type')=='footer':
                 for key in ('offered','written','dropped','write_failures'):
                     if type(row.get(key)) is not int or row[key]<0:raise ValueError('invalid footer count')
@@ -124,6 +125,18 @@ def read(path, visitor=None):
                     or row['control_step']<0 or row.get('phase') not in range(5)
                     or row['logical_us']!=1+row['control_step']*header['clock']['control_dt_us']):
                 raise ValueError('invalid simulation event identity')
+            # At control step N, feedback for N has already completed. An
+            # AppliedToStep retains the *originating* step; its physics end
+            # supplies the completed horizon even if all later rows are absent.
+            required_completed_step=max(required_completed_step,row['control_step'])
+            frame=row.get('frame',{})
+            if row.get('kind')=='AppliedToStep' or (isinstance(frame,dict) and frame.get('name')=='AppliedToStep'):
+                payload=frame.get('payload') if isinstance(frame,dict) else None
+                end=payload.get('physics_step_end') if isinstance(payload,dict) else None
+                ratio=header['clock']['control_dt_us']//header['clock']['physics_dt_us']
+                if type(end) is not int or not 0<end<2**64 or end%ratio:
+                    raise ValueError('invalid completed physics horizon')
+                required_completed_step=max(required_completed_step,end//ratio)
             if row.get('kind')=='event_feedback':
                 feedback=row.get('feedback')
                 if row.get('feedback_validated'):
@@ -164,5 +177,5 @@ def read(path, visitor=None):
     summary['feedback_units']=header.get('feedback_units',{})
     summary['evidence_complete']=bool(footer and footer['written']==count and
         footer['offered']==count and not footer['dropped'] and not footer['write_failures'] and not holes)
-    summary['measured_feedback_complete']=bool(measured_count and measured_complete and summary['evidence_complete'])
+    summary['measured_feedback_complete']=bool(measured_count and measured_count-1==required_completed_step and measured_complete and summary['evidence_complete'])
     return rows,summary

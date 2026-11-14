@@ -1160,10 +1160,132 @@ int SimulationEvidence() {
   return 0;
 }
 
+nlohmann::json SimulationMeasurementRow(std::uint64_t step) {
+  return {{"record_type", "event"},
+          {"sequence", step + 1},
+          {"kind", "event_feedback"},
+          {"control_step", step},
+          {"phase", 1},
+          {"logical_us", 1 + step * 2000},
+          {"feedback_validated", true},
+          {"feedback",
+           {{"physics_step", step * 2},
+            {"q", {0.}},
+            {"dq", {0.}},
+            {"tau", {0.}},
+            {"imu_quaternion", {1., 0., 0., 0.}},
+            {"imu_angular_velocity", {0., 0., 0.}},
+            {"imu_specific_force", {0., 0., 9.81}},
+            {"base_position", {0., 0., 0.}},
+            {"base_velocity", {0., 0., 0., 0., 0., 0.}},
+            {"base_quaternion", {1., 0., 0., 0.}}}}};
+}
+
+int SimulationMeasurementHorizon() {
+  using namespace irmv::telemetry;
+  using Json = nlohmann::json;
+  const auto directory = MakeDirectory();
+  const auto path = directory / "simulation.jsonl";
+  irmv::protocol::Id run{};
+  run.fill(0x12);
+  const auto clock = SimulationRecordClock(run, 1000, 2000);
+  const Json header = {{"schema", "irmv.simulation_evidence"},
+                       {"version", 1},
+                       {"record_type", "header"},
+                       {"clock", Json::parse(EncodeRecordClock(clock))}};
+  for (bool applied : {false, true}) {
+    for (std::uint64_t last : {0, 2, 3}) {
+      std::ofstream file(path);
+      file << header.dump() << '\n';
+      for (std::uint64_t step = 0; step <= last; ++step)
+        file << SimulationMeasurementRow(step).dump() << '\n';
+      Json marker = {{"record_type", "event"},
+                     {"sequence", last + 2},
+                     {"kind", applied ? "AppliedToStep" : "runner_final"},
+                     {"control_step", applied ? 2 : 3},
+                     {"phase", applied ? 3 : 4},
+                     {"logical_us", applied ? 4001 : 6001},
+                     {"coordinator_state", "Failed"},
+                     {"stop_proven", false},
+                     {"failure", "fixture failure"}};
+      if (applied)
+        marker["frame"] = {{"name", "AppliedToStep"},
+                           {"payload",
+                            {{"write_id", 17},
+                             {"physics_step_begin", 4},
+                             {"physics_step_end", 6}}}};
+      file << marker.dump() << '\n'
+           << Json{{"record_type", "footer"},
+                   {"offered", last + 2},
+                   {"written", last + 2},
+                   {"dropped", 0},
+                   {"write_failures", 0}}
+                  .dump()
+           << '\n';
+      file.close();
+      std::string summary, error;
+      CHECK(ReadSimulationEvidence(path, clock, {}, &summary, &error));
+      const auto result = Json::parse(summary);
+      CHECK(result["evidence_complete"] == true);
+      CHECK(result["measured_feedback_complete"] == (last == 3));
+      if (!applied) CHECK(result["final"]["stop_proven"] == false);
+    }
+  }
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
+int SimulationInterruptedTail() {
+  using namespace irmv::telemetry;
+  using Json = nlohmann::json;
+  const auto directory = MakeDirectory();
+  const auto path = directory / "simulation.jsonl";
+  irmv::protocol::Id run{};
+  run.fill(0x12);
+  const auto clock = SimulationRecordClock(run, 1000, 2000);
+  const Json header = {{"schema", "irmv.simulation_evidence"},
+                       {"version", 1},
+                       {"record_type", "header"},
+                       {"clock", Json::parse(EncodeRecordClock(clock))}};
+  const std::string prefix =
+      header.dump() + "\n" + SimulationMeasurementRow(0).dump() + "\n";
+  const std::string clean =
+      prefix +
+      R"({"record_type":"footer","offered":1,"written":1,"dropped":0,"write_failures":0})" +
+      "\n";
+  {
+    std::ofstream file(path);
+    file << clean;
+  }
+  std::string summary, error;
+  CHECK(ReadSimulationEvidence(path, clock, {}, &summary, &error));
+  CHECK(Json::parse(summary)["measured_feedback_complete"] == true);
+  for (const std::string suffix : {"{", " ", "{}\n"}) {
+    {
+      std::ofstream file(path);
+      file << clean << suffix;
+    }
+    CHECK(!ReadSimulationEvidence(path, clock, {}, &summary, &error));
+    CHECK(Json::parse(summary)["evidence_complete"] == false);
+    CHECK(error.find("after simulation footer") != std::string::npos);
+  }
+  {
+    std::ofstream file(path);
+    file << prefix << R"({"record_type":"footer")";
+  }
+  CHECK(ReadSimulationEvidence(path, clock, {}, &summary, &error));
+  CHECK(Json::parse(summary)["evidence_complete"] == false);
+  CHECK(Json::parse(summary)["measured_feedback_complete"] == false);
+  std::filesystem::remove_all(directory);
+  return 0;
+}
+
 int main() {
   int failures = 0;
   failures += FullRead();
   failures += SimulationEvidence();
+  failures += SimulationMeasurementHorizon();
+  failures += SimulationInterruptedTail();
   failures += RangeRead();
   failures += TruncatedChunk();
   failures += JointTruncatedChunk();
