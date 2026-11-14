@@ -162,11 +162,37 @@ class Runner:
         self.selector.modify(conn,selectors.EVENT_READ | (
             selectors.EVENT_WRITE if self.connections[conn]['out'] else 0))
 
+    def _retired_application(self,conn):
+        return (self.coordinator.runtime_only and
+                self.connections[conn]['peer']==3)
+
+    def _receive_packet(self,conn):
+        try:
+            packet,_,flags,_=conn.recvmsg(p.MAX_PACKET_BYTES)
+            return packet,flags
+        except ConnectionResetError:
+            if not self._retired_application(conn):raise
+            # Membership was already revoked by a validated LeaveReady. Linux
+            # reports reset rather than EOF when a killed peer had unread data.
+            return b'',0
+
+    def _disconnect(self,conn):
+        peer=self.connections[conn]['peer']
+        self.selector.unregister(conn)
+        del self.connections[conn]
+        self.peers.pop(peer,None)
+        conn.close()
+        self._advance(Event('disconnect',peer,reason='peer disconnected'))
+
     def _flush(self,conn):
         outgoing=self.connections[conn]['out']
         while outgoing:
             try:n=conn.send(outgoing[0])
             except BlockingIOError:break
+            except (BrokenPipeError,ConnectionResetError):
+                if not self._retired_application(conn):raise
+                self._disconnect(conn)
+                return
             if n!=len(outgoing[0]):raise ValueError('partial seqpacket send')
             outgoing.popleft()
         self._interest(conn)
@@ -270,15 +296,11 @@ class Runner:
                         self.selector.register(client,selectors.EVENT_READ)
                     else:
                         if mask & selectors.EVENT_WRITE:self._flush(conn)
+                        if conn not in self.connections:continue
                         if mask & selectors.EVENT_READ:
-                            packet,_,flags,_=conn.recvmsg(p.MAX_PACKET_BYTES)
+                            packet,flags=self._receive_packet(conn)
                             if not packet:
-                                peer=self.connections[conn]['peer']
-                                self.selector.unregister(conn)
-                                del self.connections[conn]
-                                self.peers.pop(peer,None)
-                                conn.close()
-                                self._advance(Event('disconnect',peer,reason='peer disconnected'))
+                                self._disconnect(conn)
                                 continue
                             if flags & socket.MSG_TRUNC:raise ValueError('oversized packet')
                             f=p.decode(packet)
@@ -302,8 +324,9 @@ class Runner:
                         conn=key.fileobj
                         if conn is self.listener: continue
                         if mask & selectors.EVENT_WRITE: self._flush(conn)
+                        if conn not in self.connections:continue
                         if mask & selectors.EVENT_READ:
-                            packet=conn.recv(p.MAX_PACKET_BYTES)
+                            packet,_=self._receive_packet(conn)
                             if packet: raise ValueError('unexpected output after shutdown commit')
                             peer=self.connections[conn]['peer']
                             self.selector.unregister(conn)

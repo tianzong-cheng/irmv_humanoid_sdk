@@ -8,4 +8,7 @@ namespace irmv::telemetry {
 
 void SetProducerAfterDecrementHookForTest(void (*hook)()) noexcept;
 
+// Worker-only callback; before and after one complete consumer drain.
+void SetWorkerDrainHookForTest(void (*hook)(bool after)) noexcept;
+
 }  // namespace irmv::telemetry

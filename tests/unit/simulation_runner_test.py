@@ -25,6 +25,47 @@ def boot(**kw):
 
 
 class RunnerTest(unittest.TestCase):
+    def test_socket_reset_after_committed_leave_is_eof_before_leave_fails(self):
+        for committed in (False,True):
+            with self.subTest(committed=committed), tempfile.TemporaryDirectory() as directory:
+                runner=Runner(boot(),str(pathlib.Path(directory)/'bridge.sock'),FakeEngine)
+                self.addCleanup(runner.selector.close)
+                local,remote=socket.socketpair(socket.AF_UNIX,socket.SOCK_SEQPACKET)
+                self.addCleanup(local.close)
+                runner.connections[local]={'peer':3,'out':__import__('collections').deque()}
+                runner.coordinator.runtime_only=committed
+                # Unread outbound data makes peer close a real ECONNRESET on Linux.
+                local.send(b'unconsumed LeaveCommitted')
+                remote.close()
+                receive=runner._receive_packet
+                if committed:
+                    packet,flags=receive(local)
+                    self.assertEqual((packet,flags),(b'',0))
+                else:
+                    with self.assertRaises(ConnectionResetError):receive(local)
+
+    def test_pending_write_to_reset_retired_app_does_not_abort_runtime(self):
+        from collections import deque
+        for committed in (False,True):
+            with self.subTest(committed=committed), tempfile.TemporaryDirectory() as directory:
+                runner=Runner(boot(),str(pathlib.Path(directory)/'bridge.sock'),FakeEngine)
+                self.addCleanup(runner.selector.close)
+                local,remote=socket.socketpair(socket.AF_UNIX,socket.SOCK_SEQPACKET)
+                self.addCleanup(local.close)
+                runner.connections[local]={'peer':3,'out':deque([b'pending commit'])}
+                runner.selector.register(local,1)
+                runner.peers[3]=local
+                runner.coordinator.runtime_only=committed
+                runner.coordinator.started=True;runner.coordinator.peers={2,3}
+                local.send(b'unconsumed data');remote.close()
+                if committed:
+                    runner._flush(local)
+                    self.assertNotIn(local,runner.connections)
+                    self.assertEqual(runner.coordinator.peers,{2})
+                    self.assertEqual(runner.coordinator.failure,'')
+                else:
+                    with self.assertRaises((ConnectionResetError,BrokenPipeError)):runner._flush(local)
+
     def test_stop_completion_waits_for_actual_engine_close(self):
         entered=threading.Event()
         unblock=threading.Event()

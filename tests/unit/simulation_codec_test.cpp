@@ -19,38 +19,41 @@ using namespace irmv::simulation;
 MessageIdentity GoldenMessageIdentity() {
   MessageIdentity v;
   v.kind = static_cast<MessageKind>(1);
-  for (std::size_t i = 0; i < v.runtime_id.size(); ++i) v.runtime_id[i] = i + 1;
+  for (std::size_t i = 0; i < v.runtime_id.size(); ++i)
+    v.runtime_id[i] = (i + 1 + 17) % 256;
   for (std::size_t i = 0; i < v.supervisor_id.size(); ++i)
-    v.supervisor_id[i] = i + 1;
-  for (std::size_t i = 0; i < v.session_id.size(); ++i) v.session_id[i] = i + 1;
+    v.supervisor_id[i] = (i + 1 + 34) % 256;
+  for (std::size_t i = 0; i < v.session_id.size(); ++i)
+    v.session_id[i] = (i + 1 + 51) % 256;
   for (std::size_t i = 0; i < v.producer_id.size(); ++i)
-    v.producer_id[i] = i + 1;
-  v.request_id = 0x0102030405060708ULL;
-  v.epoch = 0x0102030405060708ULL;
-  v.proposed_epoch = 0x0102030405060708ULL;
-  v.sequence = 0x0102030405060708ULL;
-  v.source_state_seq = 0x0102030405060708ULL;
-  v.fault_id = 0x0102030405060708ULL;
-  v.stamp_us = 0x0102030405060708ULL;
-  v.operation = 0x01020304U;
-  v.status = 0x01020304U;
-  v.reason = 0x01020304U;
-  v.execution_state = 0x01020304U;
-  v.output_action = 0x01020304U;
+    v.producer_id[i] = (i + 1 + 68) % 256;
+  v.request_id = 0x0102030405060708ULL + 5;
+  v.epoch = 0x0102030405060708ULL + 6;
+  v.proposed_epoch = 0x0102030405060708ULL + 7;
+  v.sequence = 0x0102030405060708ULL + 8;
+  v.source_state_seq = 0x0102030405060708ULL + 9;
+  v.fault_id = 0x0102030405060708ULL + 10;
+  v.stamp_us = 0x0102030405060708ULL + 11;
+  v.operation = 0x01020304U + 12;
+  v.status = 0x01020304U + 13;
+  v.reason = 0x01020304U + 14;
+  v.execution_state = 0x01020304U + 15;
+  v.output_action = 0x01020304U + 16;
   for (std::size_t i = 0; i < v.content_digest.size(); ++i)
-    v.content_digest[i] = i + 1;
+    v.content_digest[i] = (i + 1 + 289) % 256;
   return v;
 }
 Hello GoldenHello() {
   Hello v;
   v.role = static_cast<Role>(1);
   for (std::size_t i = 0; i < v.config_digest.size(); ++i)
-    v.config_digest[i] = i + 1;
+    v.config_digest[i] = (i + 1 + 17) % 256;
   for (std::size_t i = 0; i < v.application_digest.size(); ++i)
-    v.application_digest[i] = i + 1;
+    v.application_digest[i] = (i + 1 + 34) % 256;
   for (std::size_t i = 0; i < v.engine_digest.size(); ++i)
-    v.engine_digest[i] = i + 1;
-  for (std::size_t i = 0; i < v.runtime_id.size(); ++i) v.runtime_id[i] = i + 1;
+    v.engine_digest[i] = (i + 1 + 51) % 256;
+  for (std::size_t i = 0; i < v.runtime_id.size(); ++i)
+    v.runtime_id[i] = (i + 1 + 68) % 256;
   v.physics_dt_us = 0x0102030405060708ULL;
   v.control_dt_us = 0x0102030405060708ULL;
   v.physics_dt_us = 1000;

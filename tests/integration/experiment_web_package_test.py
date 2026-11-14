@@ -143,7 +143,7 @@ def main() -> int:
                 urllib.request.HTTPCookieProcessor(CookieJar()))
             with opener.open(url + "/", timeout=10) as response:
                 html = response.read().decode("utf-8")
-            if "IRMV experiment workbench" not in html:
+            if "<title>IRMV Studio</title>" not in html or 'aria-label="IRMV Studio home"' not in html:
                 print("the installed page is not the workbench", file=sys.stderr)
                 return 1
             with opener.open(url + "/api/runs", timeout=10) as response:

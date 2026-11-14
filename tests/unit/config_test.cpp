@@ -526,6 +526,18 @@ int main() {
     const TemporaryConfig changed_file(changed.dump());
     CHECK(LoadConfig(changed_file.path()).config_id != simulation.config_id);
   }
+  // Independent unit-quaternion leaves: only the coordinate under test changes.
+  auto quaternion_document = simulation_document;
+  quaternion_document["simulation"]["initial_base_quaternion"] = {.5, .5, .5,
+                                                                  .5};
+  const TemporaryConfig quaternion_file(quaternion_document.dump());
+  const auto quaternion_id = LoadConfig(quaternion_file.path()).config_id;
+  for (int coordinate = 0; coordinate < 4; ++coordinate) {
+    auto changed = quaternion_document;
+    changed["simulation"]["initial_base_quaternion"][coordinate] = -.5;
+    const TemporaryConfig changed_file(changed.dump());
+    CHECK(LoadConfig(changed_file.path()).config_id != quaternion_id);
+  }
   const std::pair<const char *, nlohmann::json> invalid_simulation[] = {
       {"/physics_dt_us", 1000.5},
       {"/physics_dt_us", 3000},

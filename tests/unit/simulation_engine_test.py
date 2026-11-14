@@ -72,6 +72,14 @@ class ValidationTest(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError,'Locomotion protection'):
                 guard(output,attempted=True,released=False)
 
+    def test_historical_rejection_before_attempt_is_not_current_failure(self):
+        import runpy
+        guard=runpy.run_path(str(ROOT/'tests/integration/simulation_mujoco_warp_test.py'))['check_locomotion_rejection']
+        historical='reject=Discontinuity\nbehavior=Ready reject=-\n'
+        guard(historical,attempted=True,released=False,attempt_offset=len(historical))
+        with self.assertRaisesRegex(AssertionError,'Locomotion protection'):
+            guard(historical+'stop=CommandTimeout',attempted=True,released=False,attempt_offset=len(historical))
+
     def test_model_contract(self):
         import mujoco
         from tools.simulation.mujoco_warp_engine import validate_model

@@ -2044,7 +2044,7 @@ endif()
 if(IRMV_TEST_SIMULATION_GPU)
   add_test(NAME mujoco_warp_capability_test
     COMMAND "${IRMV_SIMULATION_PYTHON}" "${PROJECT_SOURCE_DIR}/tests/integration/mujoco_warp_capability_test.py")
-  set_tests_properties(mujoco_warp_capability_test PROPERTIES LABELS integration TIMEOUT 180)
+  set_tests_properties(mujoco_warp_capability_test PROPERTIES LABELS "integration;gpu" TIMEOUT 180)
 endif()
 
 # Engine-neutral local simulation protocol. No runtime/policy link dependency.
@@ -2142,11 +2142,14 @@ if(TARGET application)
   add_test(NAME simulation_launcher_test COMMAND "${Python3_EXECUTABLE}"
     "${PROJECT_SOURCE_DIR}/tests/integration/simulation_launcher_test.py" "${CMAKE_CURRENT_BINARY_DIR}")
   set_tests_properties(simulation_launcher_test PROPERTIES LABELS integration RUN_SERIAL TRUE TIMEOUT 120)
-  if(IRMV_SIMULATION_PYTHON)
+  if(IRMV_TEST_SIMULATION_GPU)
     set(IRMV_SIMULATION_TEST_CONFIG "" CACHE FILEPATH "Explicit prepared real policy GPU config")
+    if(NOT IRMV_SIMULATION_TEST_CONFIG OR NOT EXISTS "${IRMV_SIMULATION_TEST_CONFIG}")
+      message(FATAL_ERROR "IRMV_TEST_SIMULATION_GPU requires an explicit existing IRMV_SIMULATION_TEST_CONFIG")
+    endif()
     add_test(NAME simulation_mujoco_warp_test COMMAND "${IRMV_SIMULATION_PYTHON}"
       "${PROJECT_SOURCE_DIR}/tests/integration/simulation_mujoco_warp_test.py" "${CMAKE_CURRENT_BINARY_DIR}" --config "${IRMV_SIMULATION_TEST_CONFIG}")
-    set_tests_properties(simulation_mujoco_warp_test PROPERTIES LABELS integration RUN_SERIAL TRUE TIMEOUT 600)
+    set_tests_properties(simulation_mujoco_warp_test PROPERTIES LABELS "integration;gpu" RUN_SERIAL TRUE TIMEOUT 900)
   endif()
 endif()
 
@@ -2158,3 +2161,27 @@ if(IRMV_BUILD_APPLICATION)
     "${PROJECT_SOURCE_DIR}/tests/integration/simulation_record_test.py" "${CMAKE_CURRENT_BINARY_DIR}")
   set_tests_properties(simulation_record_test PROPERTIES LABELS integration RUN_SERIAL TRUE TIMEOUT 90 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
 endif()
+
+# Optional GPU acceptance is a separate gate, never an implicit Fake dependency.
+option(IRMV_TEST_SIMULATION_POLICY_ACCEPTANCE "Run four real policy scenarios" OFF)
+set(IRMV_SIMULATION_ACCEPTANCE_MANIFEST "" CACHE FILEPATH "Explicit acceptance experiment specification")
+if(IRMV_TEST_SIMULATION_POLICY_ACCEPTANCE)
+  if(NOT IRMV_TEST_SIMULATION_GPU OR NOT TARGET application OR
+     NOT IRMV_SIMULATION_ACCEPTANCE_MANIFEST OR NOT EXISTS "${IRMV_SIMULATION_ACCEPTANCE_MANIFEST}")
+    message(FATAL_ERROR "Policy acceptance requires GPU opt-in, application and explicit existing IRMV_SIMULATION_ACCEPTANCE_MANIFEST")
+  endif()
+  add_test(NAME simulation_policy_acceptance_test COMMAND "${IRMV_SIMULATION_PYTHON}"
+    "${PROJECT_SOURCE_DIR}/tests/integration/simulation_policy_acceptance_test.py"
+    "${CMAKE_BINARY_DIR}" --spec "${IRMV_SIMULATION_ACCEPTANCE_MANIFEST}")
+  set_tests_properties(simulation_policy_acceptance_test PROPERTIES LABELS "integration;gpu"
+    RUN_SERIAL TRUE TIMEOUT 900 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
+endif()
+add_test(NAME simulation_evaluate_test COMMAND "${Python3_EXECUTABLE}"
+  "${PROJECT_SOURCE_DIR}/tests/unit/simulation_evaluate_test.py")
+set_tests_properties(simulation_evaluate_test PROPERTIES LABELS core TIMEOUT 120)
+# These exercise real UDS/subprocesses and host watchdogs, not supplied clocks.
+set_tests_properties(simulation_runner_test simulation_cli_test PROPERTIES LABELS integration)
+
+add_test(NAME integration_harness_test COMMAND "${Python3_EXECUTABLE}"
+  "${PROJECT_SOURCE_DIR}/tests/unit/integration_harness_test.py")
+set_tests_properties(integration_harness_test PROPERTIES LABELS core TIMEOUT 15)

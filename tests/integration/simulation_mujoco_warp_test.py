@@ -54,20 +54,22 @@ def semantics():
     finally:engine.close()
 
 
-def check_locomotion_rejection(output, *, attempted, released):
+def check_locomotion_rejection(output, *, attempted, released, attempt_offset=0):
     """Fail on observed admission/command protection, not after the host deadline."""
     if attempted and not released:
-        for line in output.splitlines():
+        for line in output[attempt_offset:].splitlines():
             if 'reject=Discontinuity' in line or 'stop=CommandTimeout' in line:
                 raise AssertionError('Locomotion protection: '+line)
 
 
-def lifecycle(build,config):
+def lifecycle(build,config,scope="trained_policy"):
     import json,subprocess,time
     from sim_launch import Experiment
     from simulation.mujoco_warp_engine import MujocoWarpEngine
     config=Path(config).resolve()
     cfg=json.loads(config.read_text())
+    asset=json.loads(Path(cfg['simulation']['model_path']).with_suffix('.manifest.json').read_text())
+    assert asset.get('policy_scope','trained_policy')==scope,'fixture cannot upgrade trained policy evidence'
     assert cfg['dds']['domain']==225,'GPU test requires reserved serial domain225'
     engines=[]
     class ObservedEngine(MujocoWarpEngine):
@@ -93,6 +95,7 @@ def lifecycle(build,config):
     owner=Experiment(config,build/'robot_runtime',build/'application',
         engine_factory=ObservedEngine,application_stdin=subprocess.PIPE)
     seen=set();sent=set();released_step=None;runtime_only_step=None;admission=None;admissible_since=None
+    attempt_offset=0
     try:
         owner.start()
         deadline=time.monotonic()+420
@@ -124,9 +127,10 @@ def lifecycle(build,config):
                             continuity_velocity_limit=cfg['runtime']['continuity']['velocity_delta'],
                             position_limits=cfg['robot']['joints'])
                         print('initialization admission',json.dumps(admission),flush=True)
+                    if key==b'l':attempt_offset=len(output)
                     owner.children[1].stdin.write(key);owner.children[1].stdin.flush();sent.add(key)
             check_locomotion_rejection(output,attempted=b'l' in sent,
-                released=c.release_state=='Released')
+                released=c.release_state=='Released',attempt_offset=attempt_offset)
             if 'behavior=Fault' in output:
                 raise AssertionError(('actual application Fault',c.step,c.state,c.phase,
                     engines[0].tracking_diagnostic[-1] if engines[0].tracking_diagnostic else None,output))
@@ -161,9 +165,9 @@ def lifecycle(build,config):
             completed_physics_steps=samples[-1].physics_step,
             released_control_step=released_step,policy_rollout_us=100*c.b.control_dt_us,
             numerical_tracking_acceptance='reported metrics only; Task11 owns reliability')
-        owner.evidence.update(real_policy_lifecycle=True,metrics=metrics,runtime_states_seen=sorted(seen),
+        owner.evidence.update(scope=scope,real_policy_lifecycle=scope=="trained_policy",metrics=metrics,runtime_states_seen=sorted(seen),
             behavior_ready_observed=True,real_robot_release_continuity=True)
-        print('PASS real policy lifecycle',json.dumps(metrics))
+        print('PASS '+scope+' short lifecycle (not reliability)',json.dumps(metrics))
     finally:
         owner.evidence.update(initialization_admission=admission,runtime_states_seen=sorted(seen),
             final_control_step=owner.runner.coordinator.step if owner.runner else None,
@@ -182,8 +186,9 @@ if __name__=='__main__':
     parser.add_argument('--config',required=True)
     parser.add_argument('--semantics-only',action='store_true')
     parser.add_argument('--lifecycle-only',action='store_true')
+    parser.add_argument('--scope',choices=('trained_policy','backend_integration_fixture'),default='trained_policy')
     args=parser.parse_args()
     if not args.lifecycle_only:print('PASS GPU semantics',semantics())
     if not args.semantics_only:
         if not args.config:raise ValueError('explicit prepared real-policy config required')
-        lifecycle(args.build.resolve(),args.config)
+        lifecycle(args.build.resolve(),args.config,args.scope)

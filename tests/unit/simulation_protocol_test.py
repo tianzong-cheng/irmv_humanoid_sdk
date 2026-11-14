@@ -171,3 +171,10 @@ for kind in (17,18,20):
     wire=p.encode(p.golden_frames()[kind-1])
     for role in (0,4): rejected(changed(wire,60,'I',role))
 print('lifecycle capability roles validated')
+
+# Different identities must detect swapped field serialization, not only roundtrip.
+message=p.golden_frames()[2].payload['command']
+assert len({message[k] for k in ('runtime_id','supervisor_id','session_id','producer_id')})==4
+assert len({message[k] for k in ('request_id','epoch','proposed_epoch','sequence','source_state_seq','fault_id','stamp_us')})==7
+hello=p.golden_frames()[0].payload
+assert len({hello[k] for k in ('config_digest','application_digest','engine_digest')})==3

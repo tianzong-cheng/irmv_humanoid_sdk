@@ -377,10 +377,11 @@ class Application:
                           % keys)
         if isinstance(keys, str):
             keys = keys.encode("utf-8")
-        os.write(self.stream.fileno(), keys)
-        # Everything printed before this instant is the state the keys are about
-        # to change, not the reaction to them.
+        # Snapshot before writing: the application and drainer may publish the
+        # reaction before os.write returns to this thread. A post-write snapshot
+        # would discard exactly the fast response this step is waiting for.
         self.watermark = len(self.lines)
+        os.write(self.stream.fileno(), keys)
 
     def termios_attrs(self):
         """The attributes of the terminal the application was given, or None.

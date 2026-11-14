@@ -120,3 +120,28 @@ with tempfile.TemporaryDirectory(prefix="irmv-ipc-") as directory:
     os.chmod(directory,0o755)
     assert check()=="rejected"
 print("path safety, stale socket, absent peer and bounded Stop passed")
+
+# Keep inbound traffic alive while deliberately never draining outbound packets.
+# This distinguishes a pending-send deadline from idle timeout/queue overflow.
+with tempfile.TemporaryDirectory(prefix="irmv-blocked-") as directory:
+    path=pathlib.Path(directory)/'bridge.sock'
+    with socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET) as listener:
+        listener.bind(str(path));listener.listen(1);listener.settimeout(2)
+        proc=subprocess.Popen([peer,str(path),'blocked'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        try:
+            with listener.accept()[0] as conn:
+                conn.setsockopt(socket.SOL_SOCKET,socket.SO_RCVBUF,4096)
+                assert p.decode(conn.recv(p.MAX_PACKET_BYTES)).kind==1
+                conn.send(p.encode(hello));conn.settimeout(.1)
+                while proc.poll() is None:
+                    try:conn.send(p.encode(abort))
+                    except (BrokenPipeError,ConnectionResetError):break
+                    time.sleep(.005)
+            out,err=proc.communicate(timeout=2)
+            assert proc.returncode==0,(out,err)
+            ready,failed,rejected,received,elapsed=map(int,out.split())
+            assert ready==failed==1 and rejected==0,(out,err)
+            assert received>=10 and 100<=elapsed<1800,(out,err)
+            print('blocked send under active inbound',out.strip())
+        finally:
+            if proc.poll() is None:proc.kill();proc.wait()

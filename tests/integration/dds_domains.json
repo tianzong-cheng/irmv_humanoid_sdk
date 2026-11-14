@@ -3,6 +3,8 @@
     "222": "simulation_dds_barrier_test (RUN_SERIAL)",
     "223": "simulation_lockstep_test (RUN_SERIAL)",
     "224": "simulation_lifecycle_test (RUN_SERIAL)",
-    "226": "simulation_record_test (RUN_SERIAL)"
+    "226": "simulation_record_test (RUN_SERIAL)",
+    "225": "simulation_mujoco_warp_test (RUN_SERIAL; trained policy or explicitly scoped backend fixture)",
+    "227": "simulation_policy_acceptance_test (RUN_SERIAL; sequential fresh cases)"
   }
 }

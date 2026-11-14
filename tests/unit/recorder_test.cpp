@@ -486,13 +486,69 @@ int FullQueueIsCounted() {
   return 0;
 }
 
+// Worker drain gates replace scheduler sleeps without changing queue capacity.
+class DrainGate {
+ public:
+  explicit DrainGate(Recorder &recorder) : recorder_(recorder) {
+    active_ = this;
+    irmv::telemetry::SetWorkerDrainHookForTest(Hook);
+  }
+  ~DrainGate() {
+    irmv::telemetry::SetWorkerDrainHookForTest(nullptr);
+    Release();
+    // Even an early CHECK failure must join before the gate is destroyed.
+    static_cast<void>(recorder_.Stop());
+  }
+  bool WaitBefore(int count) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return cv_.wait_for(lock, std::chrono::seconds(2),
+                        [&] { return entered_ >= count; });
+  }
+  bool Drain() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    const int count = ++permits_;
+    cv_.notify_all();
+    return cv_.wait_for(lock, std::chrono::seconds(2),
+                        [&] { return completed_ >= count; });
+  }
+  void Release() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    released_ = true;
+    cv_.notify_all();
+  }
+
+ private:
+  static void Hook(bool after) {
+    auto &gate = *active_;
+    std::unique_lock<std::mutex> lock(gate.mutex_);
+    if (after) {
+      ++gate.completed_;
+      gate.cv_.notify_all();
+    } else {
+      const int count = ++gate.entered_;
+      gate.cv_.notify_all();
+      gate.cv_.wait(lock,
+                    [&] { return gate.released_ || gate.permits_ >= count; });
+    }
+  }
+  Recorder &recorder_;
+  static DrainGate *active_;
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  int entered_ = 0, completed_ = 0, permits_ = 0;
+  bool released_ = false;
+};
+DrainGate *DrainGate::active_ = nullptr;
+
 // Two stretches of refusals with a closed chunk in between are two losses, each
 // with its own sequence and stamp range: one gap spanning everything between
 // them would report the samples that were written fine as missing.
 int RefusalStretches() {
   const std::filesystem::path directory = MakeDirectory();
   Recorder recorder;
+  DrainGate gate(recorder);
   CHECK(StartRecorder(&recorder, directory));
+  CHECK(gate.WaitBefore(1));
   std::vector<OfferRecord> offers;
   // The worker waits before its first drain, so the tail of this burst is
   // refused: the first stretch of loss.
@@ -501,18 +557,19 @@ int RefusalStretches() {
     Offer(&recorder, &offers, seq);
     ++seq;
   }
-  // Wait for the handoff to be drained, then record a chunk's worth of samples
-  // the way a control loop paced by the writer's own clock would offer them:
-  // small batches with room to spare, so every one of them is recorded. The
+  // Explicitly drain the handoff, then offer a chunk's worth in bounded
+  // batches, with a completed worker drain between each batch. The
   // chunk that closes and is renamed into place here is what separates the two
   // losses.
-  std::this_thread::sleep_for(std::chrono::milliseconds(70));
+  CHECK(gate.Drain());
+  CHECK(gate.WaitBefore(2));
   for (int batch = 0; batch < 10; ++batch) {
     for (int index = 0; index < 100; ++index) {
       CHECK(Offer(&recorder, &offers, seq));
       ++seq;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(70));
+    CHECK(gate.Drain());
+    CHECK(gate.WaitBefore(batch + 3));
   }
   CHECK(CountChunks(recorder.run_directory()) == 1);
   // A second burst after the chunk was written: these refusals start again.
@@ -520,6 +577,7 @@ int RefusalStretches() {
     Offer(&recorder, &offers, seq);
     ++seq;
   }
+  gate.Release();
   CHECK(recorder.Stop());
 
   const std::vector<RecordGap> expected = ExpectedQueueGaps(offers, 1);

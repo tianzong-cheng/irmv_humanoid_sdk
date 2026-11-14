@@ -38,7 +38,7 @@ jobs:
       # failed dependency build or a missing DDS install is a configuration
       # error of this project and fails this step.
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DIRMV_TEST_SIMULATION_GPU=OFF -DIRMV_TEST_SIMULATION_API=OFF -DIRMV_TEST_SIMULATION_POLICY_ACCEPTANCE=OFF
 
       - name: Build
         run: cmake --build build -j2
@@ -66,8 +66,18 @@ jobs:
             grep -Eq "Test +#[0-9]+: ${test}$" registered-tests.txt
           done
 
-      - name: Test
-        run: ctest --test-dir build --output-on-failure
+      - name: Assert ordinary Fake CI excludes optional GPU dependencies
+        run: |
+          ctest --test-dir build -N > registered-tests.txt
+          if grep -Eq 'simulation_mujoco_warp_test|simulation_policy_acceptance_test|mujoco_warp_capability_test|simulation_engine_test' registered-tests.txt; then
+            echo "Optional simulation dependency leaked into default CI"; exit 1
+          fi
+
+      - name: Deterministic non-GPU core
+        run: ctest --test-dir build -L core --output-on-failure
+
+      - name: Fake and process integration (serial)
+        run: ctest --test-dir build -L integration --output-on-failure
 
       - name: Format check
         run: cmake --build build --target format-check
@@ -205,3 +215,25 @@ jobs:
         run: |
           cmake --build build-real -j2
           ctest --test-dir build-real -L core --output-on-failure
+
+  simulation-gpu:
+    name: Explicit MuJoCo Warp GPU and policy acceptance
+    if: vars.IRMV_SIMULATION_GPU_CI == 'on'
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure explicit prepared assets and isolated pinned Python
+        env:
+          SIM_PYTHON: ${{ vars.IRMV_SIMULATION_PYTHON }}
+          SIM_CONFIG: ${{ vars.IRMV_SIMULATION_TEST_CONFIG }}
+          SIM_SPEC: ${{ vars.IRMV_SIMULATION_ACCEPTANCE_MANIFEST }}
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug \
+            -DIRMV_TEST_SIMULATION_GPU=ON -DIRMV_TEST_SIMULATION_POLICY_ACCEPTANCE=ON \
+            -DIRMV_SIMULATION_PYTHON="$SIM_PYTHON" \
+            -DIRMV_SIMULATION_TEST_CONFIG="$SIM_CONFIG" \
+            -DIRMV_SIMULATION_ACCEPTANCE_MANIFEST="$SIM_SPEC"
+          cmake --build build -j2
+      - name: GPU checks (no skipped-success or parallel DDS)
+        run: WARP_CACHE_PATH="$PWD/build/warp-cache" ctest --test-dir build -L gpu --output-on-failure

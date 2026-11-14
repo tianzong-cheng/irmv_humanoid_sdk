@@ -112,7 +112,8 @@ def prepare(urdf,policy,output,template,profile,metadata_python):
         conversion='MuJoCo URDF inertias/fixed links preserved; free pelvis/weld/direct motors/body IMU/flat plane added; STL converted to OBJ preserving binary32 triangle coordinates (no decimation); convex mesh collision; self collision disabled; no implicit PD/clipping',
         tau_est='qfrc_actuator at mapped joint DOF; excludes constraint reactions',
         imu='site wxyz world orientation; gyro body rad/s; acceleration body specific force including upward gravity at rest',
-        initial_height_m=height,prepared_closure=closure(path))
+        initial_height_m=height,initial_geometry=dict(initial_base_position=[0,0,height],
+            initial_base_quaternion=[1,0,0,0],initial_joint_position=q),prepared_closure=closure(path))
     path.with_suffix('.manifest.json').write_text(json.dumps(manifest,indent=2))
     (output/'sdk.json').write_text(json.dumps(cfg,indent=2))
     return output/'sdk.json'

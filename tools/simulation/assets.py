@@ -75,12 +75,26 @@ def engine_identity():
     return hashlib.sha256(json.dumps(binding,sort_keys=True).encode()).hexdigest(),binding
 
 
+def admit_initial_geometry(config,manifest):
+    """Only the converter's admitted flat-floor stance is supported initially.
+
+    A finite arbitrary base override is not geometric admission. A different
+    stance needs explicit preparation/kinematic admission, never a hidden lift.
+    """
+    expected=manifest.get('initial_geometry')
+    keys=('initial_base_position','initial_base_quaternion','initial_joint_position')
+    if not expected or any(config.get(k)!=expected.get(k) for k in keys):
+        raise ValueError('initial geometry differs from admitted prepared stance; re-prepare explicitly')
+
+
 def verify_binding(normalized):
     engine_digest,engine=engine_identity()
     if normalized['engine_digest']!=engine_digest:raise ValueError('engine digest mismatch')
     model=Path(normalized['engine_config']['model_path'])
     manifest=json.loads(model.with_suffix('.manifest.json').read_text())
     actual=closure(model)
+    if 'initial_base_position' in normalized['engine_config']:
+        admit_initial_geometry(normalized['engine_config'],manifest)
     if actual!=manifest['prepared_closure'] or actual['digest']!=normalized['asset_digest']:
         raise ValueError('asset closure digest mismatch')
     if sha256(normalized['policy_path'])!=manifest['policy_sha256']:

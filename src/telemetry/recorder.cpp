@@ -151,6 +151,12 @@ bool WriteJsonAtomic(const std::filesystem::path &path, const Json &document) {
 // count is decremented and touches no recorder state; a test can pause there
 // while the worker finalizes and the wrapper is destroyed.
 std::atomic<void (*)()> g_after_decrement_hook{nullptr};
+std::atomic<void (*)(bool)> g_worker_drain_hook{nullptr};
+
+void WorkerDrainHook(bool after) noexcept {
+  if (auto hook = g_worker_drain_hook.load(std::memory_order_acquire))
+    hook(after);
+}
 
 void RunAfterDecrementHook() noexcept {
   void (*const hook)() = g_after_decrement_hook.load(std::memory_order_relaxed);
@@ -163,6 +169,10 @@ void RunAfterDecrementHook() noexcept {
 
 void SetProducerAfterDecrementHookForTest(void (*hook)()) noexcept {
   g_after_decrement_hook.store(hook, std::memory_order_relaxed);
+}
+
+void SetWorkerDrainHookForTest(void (*hook)(bool)) noexcept {
+  g_worker_drain_hook.store(hook, std::memory_order_release);
 }
 
 struct Recorder::Impl {
@@ -770,12 +780,14 @@ void Recorder::Impl::Run() {
     if (stop_requested.load(std::memory_order_relaxed)) {
       break;
     }
+    WorkerDrainHook(false);
     static_cast<void>(DrainInto());
     DrainSessionsInto();
     DrainFaults();
     if (sessions_dirty) {
       static_cast<void>(WriteSessions());
     }
+    WorkerDrainHook(true);
     if (live && std::chrono::steady_clock::now() - last_live_status >=
                     std::chrono::milliseconds(100)) {
       SendLiveStatus(false);

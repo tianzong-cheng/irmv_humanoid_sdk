@@ -19,6 +19,20 @@ class AssetTest(unittest.TestCase):
             self.assertNotEqual(first['digest'],closure(p/'model.xml')['digest'])
             (p/'part.xml').write_text('<mujoco><include file="../outside.xml"/></mujoco>')
             with self.assertRaises(ValueError):closure(p/'model.xml')
+    def test_prepared_geometry_admission_refuses_manual_pose_override(self):
+        from simulation.assets import admit_initial_geometry
+        expected=dict(initial_base_position=[0,0,.8],initial_base_quaternion=[1,0,0,0],
+                      initial_joint_position=[-.3,.6,-.3])
+        manifest=dict(initial_geometry=expected)
+        admit_initial_geometry(expected,manifest)
+        for key in expected:
+            changed={k:list(v) for k,v in expected.items()}
+            changed[key][0]+=.1
+            with self.assertRaisesRegex(ValueError,'initial geometry'):
+                admit_initial_geometry(changed,manifest)
+        with self.assertRaisesRegex(ValueError,'initial geometry'):
+            admit_initial_geometry(expected,{})
+
     def test_ascii_mesh_conversion_preserves_vertices(self):
         from simulation.assets import binary_stl
         import struct

@@ -1158,3 +1158,18 @@ deviation any more.
      asserts `behavior=Standby runtime=ZeroTorque` plus the runtime's own
      `ResetApplied`, then exercises the emergency stop on the healthy link and a
      second Reset.
+
+## Simulation regression and acceptance
+
+The authoritative registrations are `ctest -N`. Ordinary Fake CI explicitly
+turns `IRMV_TEST_SIMULATION_GPU`, `IRMV_TEST_SIMULATION_API` and
+`IRMV_TEST_SIMULATION_POLICY_ACCEPTANCE` off, runs `-L core` and then
+`-L integration` serially, and needs no optional simulation Python packages.
+Pure coordinator/protocol/evidence evaluation tests belong to core. Real UDS,
+subprocess and host-watchdog runner/CLI tests belong to integration even when
+their Python source lives in `tests/unit`. Never use `ctest -j` for DDS suites.
+Opt-in GPU lifecycle/acceptance needs explicit prepared config/manifests and is
+not registered merely because a Python interpreter exists. GPU tests cannot
+skip into success. See [simulation](simulation.md) for four-scenario reports,
+source-derived intent/fall conventions, inherited configured limits, missing
+actual-policy acceptance and interpretation of backend fixture evidence.

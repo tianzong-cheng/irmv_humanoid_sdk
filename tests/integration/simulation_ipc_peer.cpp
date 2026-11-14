@@ -25,11 +25,29 @@ int main(int argc, char** argv) {
     std::cout << "stopped\n";
     return 0;
   }
-  auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(350);
+  const bool blocked = std::string(argv[2]) == "blocked";
+  const auto begin = std::chrono::steady_clock::now();
+  auto next_send = begin;
+  int received = 0;
+  auto end = begin + std::chrono::milliseconds(blocked ? 2000 : 350);
   bool ready = false;
   bool exchanged = false;
   while (std::chrono::steady_clock::now() < end && !e.Failed()) {
     ready = ready || e.Ready();
+    if (blocked && e.Ready()) {
+      irmv::simulation::Frame incoming;
+      while (e.TryTake(&incoming)) ++received;
+      if (std::chrono::steady_clock::now() >= next_send) {
+        irmv::simulation::Frame outgoing;
+        outgoing.identity.run_id = c.run_id;
+        irmv::simulation::Feedback feedback;
+        feedback.q.count = feedback.dq.count = feedback.tau.count = 64;
+        outgoing.payload = feedback;
+        e.TrySend(outgoing);
+        next_send =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(5);
+      }
+    }
     if (std::string(argv[2]) == "echo") {
       irmv::simulation::Frame f;
       if (e.TryTake(&f)) {
@@ -51,5 +69,12 @@ int main(int argc, char** argv) {
     std::cout << exchanged << " exchanged\n";
     return 0;
   }
-  std::cout << ready << " " << failed << " " << e.Rejected() << "\n";
+  std::cout << ready << " " << failed << " " << e.Rejected();
+  if (blocked) {
+    std::cout << " " << received << " "
+              << std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now() - begin)
+                     .count();
+  }
+  std::cout << "\n";
 }
