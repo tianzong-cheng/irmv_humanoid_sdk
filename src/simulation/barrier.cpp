@@ -474,6 +474,8 @@ bool PhaseManifest::Valid() const noexcept {
       if (Projection(messages[i], messages[j])) return false;
     Frame f;
     f.identity = identity;
+    f.physics_dt_us = physics_dt_us;
+    f.control_dt_us = control_dt_us;
     f.payload = Manifest{sender, messages[i]};
     ByteBuffer b;
     if (!Encode(f, &b)) return false;

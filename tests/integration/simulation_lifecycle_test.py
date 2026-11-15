@@ -163,7 +163,7 @@ def run(build, mode="leave"):
                 assert runner.coordinator.state=='Closed',(runner.coordinator.failure,output)
                 assert runner.coordinator.stop_proven
                 assert processes[0].wait(timeout=3)==0,output
-                assert processes[1].wait(timeout=3)!=0,output
+                assert processes[1].wait(timeout=3)==0,output
                 assert not runner.arms,output
                 assert all(step<=120 for step,_ in runner.commands),runner.commands
                 print('PASS independent shutdown during actual inference wait')

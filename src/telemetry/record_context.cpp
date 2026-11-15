@@ -74,7 +74,7 @@ std::string SimulationRecordMetadata(const configuration::RuntimeConfig& c) {
   return nlohmann::json{
       {"sidecar", relative.generic_string()},
       {"sidecar_schema", "irmv.simulation_evidence"},
-      {"sidecar_version", 1},
+      {"sidecar_version", 2},
       {"engine", s.engine},
       {"engine_sha256", s.engine_sha256},
       {"asset_sha256", s.asset_sha256},

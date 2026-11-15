@@ -33,7 +33,7 @@ and NPZ exports can consume a separated layout while the relative sidecar is
 reachable; copying only SDK directories does not preserve that guarantee.
 Exported NPZ embeds the event/measurement/metadata snapshot for offline analysis.
 
-The sidecar schema is `irmv.simulation_evidence`, version 1:
+The sidecar schema is `irmv.simulation_evidence`, version 2 (version 1 remains readable):
 
 - Header: simulation clock/run/origin/dt, runtime/config/application/engine
   identities, actual engine factory, dependency/Python versions, initial engine
@@ -104,3 +104,9 @@ The adapter now copies measured base orientation from the same completed host
 snapshot. Its bytes participate in `engine_identity`; old generated configs and
 manifests must be rebound and remain rejected by the unchanged binding checks.
 FakeEngine recording tests provide no MuJoCo Warp/GPU acceptance evidence.
+
+
+Evidence v2 records owner shutdown completion for both active SDK peers. Offline
+v1 replay retains the original runtime-only completion and never upgrades an
+historical application failure. Live local-wire v1 is refused; DDS and binary
+record v4 remain unchanged. Reader completeness is not application success.

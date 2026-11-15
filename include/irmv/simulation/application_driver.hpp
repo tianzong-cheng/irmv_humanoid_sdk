@@ -48,6 +48,10 @@ class ApplicationDriver final : public application::ClientSink {
   }
   bool CancelRelease() noexcept;
   bool Poll() noexcept { return session_.Poll(); }
+  bool OwnerShutdown() const noexcept { return session_.ShutdownAuthorized(); }
+  bool OwnerStopCommitted() const noexcept {
+    return !Failed() && session_.OwnerStopCommitted();
+  }
   bool PrepareLifecycle(bool locomotion, protocol::Sequence first_seq,
                         bool exiting) noexcept;
   bool LeaveComplete() noexcept {

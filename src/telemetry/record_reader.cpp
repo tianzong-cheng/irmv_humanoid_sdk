@@ -536,7 +536,7 @@ bool ReadSimulationEvidence(
       if (!row.is_object()) return fail("simulation evidence object required");
       if (!header) {
         if (row.value("schema", std::string()) != "irmv.simulation_evidence" ||
-            row.value("version", 0) != 1 ||
+            (row.value("version", 0) != 1 && row.value("version", 0) != 2) ||
             row.value("record_type", std::string()) != "header")
           return fail("unknown simulation evidence schema/version");
         RecordClockIdentity clock;
@@ -544,6 +544,7 @@ bool ReadSimulationEvidence(
             clock.clock_domain != "simulation" ||
             !SameRecordClock(expected, clock))
           return fail("simulation evidence clock mismatch");
+        summary["evidence_version"] = row["version"];
         summary["clock"] = row["clock"];
         summary["provenance"] = row.value("provenance", Json::object());
         summary["feedback_units"] = row.value("feedback_units", Json::object());

@@ -52,6 +52,70 @@ class OwnershipTest(unittest.TestCase):
             engine_factory=engine_factory or FakeEngine,binding=lambda n:{})
         return owner,patch('sim_launch.subprocess.check_output',return_value=json.dumps(normalized))
 
+    def test_cancel_before_readiness_starts_no_children(self):
+        from unittest.mock import patch
+        import threading
+        entered=threading.Event();release=threading.Event()
+        class WaitingEngine:
+            def initialize(self,c):
+                entered.set()
+                release.wait(3)
+                raise ValueError('cancelled initialization')
+            def close(self):pass
+        with tempfile.TemporaryDirectory() as d:
+            owner,normalize=self.fixture(d,WaitingEngine)
+            def cancel():
+                self.assertTrue(entered.wait(2))
+                owner.notify_shutdown()
+            notifier=threading.Thread(target=cancel)
+            with normalize,patch('sim_launch.subprocess.Popen') as spawn:
+                notifier.start()
+                try:
+                    self.assertIs(owner.start(),owner)
+                    self.assertTrue(owner.evidence['startup_cancelled'])
+                    self.assertFalse(owner.runner.coordinator.stop_proven)
+                    self.assertFalse(owner.evidence['runtime_spawned'])
+                    self.assertFalse(owner.thread.is_alive())
+                    spawn.assert_not_called()
+                finally:
+                    release.set();notifier.join(2);owner.close()
+                    if owner.runner.worker:owner.runner.worker.join(2)
+
+    def test_cancel_between_spawns_never_starts_application(self):
+        from unittest.mock import patch,Mock
+        with tempfile.TemporaryDirectory() as d:
+            owner,normalize=self.fixture(d)
+            child=Mock();child.poll.return_value=0;child.returncode=0
+            def spawn(*a,**kw):
+                owner.notify_shutdown()
+                return child
+            with normalize,patch('sim_launch.subprocess.Popen',side_effect=spawn) as launch:
+                try:
+                    owner.start()
+                    self.assertEqual(launch.call_count,1)
+                    self.assertEqual(len(owner.children),1)
+                    self.assertTrue(owner.evidence['runtime_spawned'])
+                    self.assertTrue(owner.evidence['startup_cancelled'])
+                    self.assertFalse(owner.thread.is_alive())
+                    self.assertFalse(owner.runner.coordinator.stop_proven)
+                finally:owner.close()
+
+    def test_cancel_during_log_open_is_checked_at_spawn(self):
+        from unittest.mock import patch
+        import builtins
+        with tempfile.TemporaryDirectory() as d:
+            owner,normalize=self.fixture(d)
+            def opened(path,*args,**kwargs):
+                value=builtins.open(path,*args,**kwargs)
+                if str(path).endswith('runtime.log'):owner.notify_shutdown()
+                return value
+            with normalize,patch('sim_launch.open',side_effect=opened),patch('sim_launch.subprocess.Popen') as spawn:
+                try:
+                    owner.start()
+                    spawn.assert_not_called()
+                    self.assertTrue(owner.evidence['startup_cancelled'])
+                finally:owner.close()
+
     def test_engine_failure_starts_no_children(self):
         from unittest.mock import patch
         class BadEngine:
@@ -130,6 +194,125 @@ class OwnershipTest(unittest.TestCase):
             self.assertEqual(owner.wait(),0 if runner_code==0 and codes==[0,0] and proven else 1)
 
 class ActualSdkTest(unittest.TestCase):
+    def test_owner_closes_active_application(self):
+        self.active_close('healthy')
+
+    def test_owner_cancels_pending_inference(self):
+        self.active_close('pending')
+
+    def test_owner_preserves_preexisting_application_fault(self):
+        self.active_close('fault')
+
+    def test_alternate_grid_production_handoff(self):
+        self.active_close('alternate')
+
+    def test_owner_missing_application_proof_fails(self):
+        self.active_close('missing')
+
+    def test_owner_wrong_application_proof_fails(self):
+        self.active_close('wrong')
+
+    def test_owner_unsolicited_application_proof_fails(self):
+        self.active_close('unsolicited')
+
+    def test_owner_wrong_run_application_proof_fails(self):
+        self.active_close('wrong_run')
+
+    def test_owner_application_disconnect_fails(self):
+        self.active_close('disconnect')
+
+    def active_close(self,mode):
+        import json,subprocess,time
+        from sim_launch import Experiment
+        from simulation.main import Runner
+        sys.path.insert(0,str(ROOT/'tests/support/simulation'))
+        from fake_engine import FakeEngine
+        from launch_fixture import prepare
+        engines=[]
+        class Engine(FakeEngine):
+            def initialize(self,c):
+                super().initialize(dict(q=[0,0]));self.closes=0;engines.append(self)
+            def close(self):self.closes+=1;super().close()
+        class Keys(Runner):
+            def _actions(self,actions):
+                for action in actions:
+                    if action.kind=='send' and action.peer==3 and action.frame.kind==15:
+                        key={60:b'd',70:b'i',120:b'l'}.get(action.frame.control_step)
+                        if key and mode!='fault':
+                            owner.children[1].stdin.write(key);owner.children[1].stdin.flush()
+                        elif mode=='fault' and action.frame.control_step in (60,70):
+                            owner.children[1].stdin.write({60:b'd',70:b'i'}[action.frame.control_step]);owner.children[1].stdin.flush()
+                from dataclasses import replace
+                filtered=[]
+                for action in actions:
+                    if mode=='unsolicited' and action.kind=='send' and action.peer==3 and action.frame.kind==17:
+                        filtered.append(replace(action,frame=replace(action.frame,kind=19,
+                            payload=dict(write_id=1,state_seq=1))))
+                        continue
+                    if action.kind=='send' and action.peer==3 and action.frame.kind==19:
+                        if mode=='missing':continue
+                        if mode=='wrong':action=replace(action,frame=replace(action.frame,phase=3))
+                        if mode=='wrong_run':action=replace(action,frame=replace(action.frame,run_id=b'X'*16))
+                    filtered.append(action)
+                return super()._actions(filtered)
+        with tempfile.TemporaryDirectory(prefix='fixwave active SDK ') as directory:
+            d=Path(directory);config=prepare(ROOT,BUILD,d)
+            cfg=json.loads(config.read_text())
+            cfg['simulation']['host_phase_timeout_us']=1000000
+            if mode=='alternate':cfg['runtime']['control_hz']=1000
+            if mode=='fault':
+                cfg['application']['initialization']['target_position']['test_left']=0.04
+                cfg['application']['initialization']['trajectory']['duration_us']=20000
+                cfg['application']['initialization']['trajectory']['deadline_us']=100000
+            if mode=='pending':
+                import importlib.util
+                spec=importlib.util.spec_from_file_location('generator',ROOT/'tools/make_test_model.py')
+                generator=importlib.util.module_from_spec(spec);spec.loader.exec_module(generator)
+                fixture=json.loads((d/'deployment.json').read_text())
+                generator.save(d/'models','delayed.onnx',generator.make_model(generator.long_running_graph(
+                    fixture['model']['input']['dimension'],2,iterations=200000),fixture))
+                cfg['application']['policy']['model_path']=str(d/'models/delayed.onnx')
+            config.write_text(json.dumps(cfg))
+            owner=Experiment(config,BUILD/'robot_runtime',BUILD/'application',engine_factory=Engine,
+                binding=lambda n:{'fixture_only':True},runner_type=Keys,application_stdin=subprocess.PIPE)
+            try:
+                owner.start()
+                end=time.monotonic()+30
+                while time.monotonic()<end:
+                    output=(d/'run/application.log').read_text()
+                    if mode=='pending':ready='simulation inference pending' in output
+                    elif mode=='fault':ready='cause=InitializationFailed' in output
+                    else:ready=owner.runner.coordinator.step>=150
+                    if ready:
+                        if mode=='pending':
+                            self.assertEqual(owner.runner.coordinator.step,120)
+                            self.assertEqual(owner.runner.coordinator.state,'ApplicationPhase')
+                        break
+                    self.assertIsNone(owner.result,(owner.runner.coordinator.failure,output))
+                    time.sleep(.002)
+                self.assertTrue(ready,(mode,output))
+                self.assertFalse(owner.runner.coordinator.runtime_only)
+                self.assertIsNone(owner.children[1].poll())
+                if mode=='disconnect':owner.children[1].kill()
+                owner.notify_shutdown()
+                outcome=owner.wait()
+                print('owner-close',mode,'result',outcome,'children',owner.evidence['child_codes'],
+                    'state',owner.runner.coordinator.state,'stop_proven',owner.runner.coordinator.stop_proven,
+                    'engine_closes',engines[0].closes)
+                self.assertEqual(outcome,1 if mode in ('fault','missing','wrong','wrong_run','unsolicited','disconnect') else 0,
+                    (owner.runner.coordinator.failure,(d/'run/application.log').read_text()))
+                if mode in ('missing','wrong','wrong_run','unsolicited','disconnect'):
+                    self.assertNotEqual(owner.evidence['child_codes'][1],0)
+                    return
+                self.assertTrue(owner.runner.coordinator.stop_proven)
+                self.assertEqual(owner.evidence['child_codes'],[0,3] if mode=='fault' else [0,0])
+                self.assertEqual(engines[0].closes,1)
+                self.assertTrue(engines[0].closed)
+                self.assertEqual(engines[0].tau,(0.,0.))
+                self.assertTrue(owner.runner.coordinator.torque['accepted'])
+                self.assertEqual(owner.runner.coordinator.states[-1]['execution_state'],1)
+            finally:owner.close()
+
     def test_application_quit_retains_runtime_then_owner_closes(self):
         import json,subprocess,time
         from sim_launch import Experiment

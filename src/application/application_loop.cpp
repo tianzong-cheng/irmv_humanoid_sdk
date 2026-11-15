@@ -857,6 +857,7 @@ int RunApplication(const ApplicationOptions &options,
   bool armed_previously = false;
   bool result_outstanding = false;
   bool submitted_once = false;
+  bool simulation_inference_wait_reported = false;
   protocol::TimeUs last_submit_us = 0;
   std::array<float, protocol::kMaxJoints> last_action{};
 
@@ -904,12 +905,36 @@ int RunApplication(const ApplicationOptions &options,
   protocol::TimeUs worst_rx_us = 0;
   protocol::TimeUs worst_tx_us = 0;
 
+  auto owner_shutdown = [&]() -> std::optional<int> {
+    if (!simulation_driver) return std::nullopt;
+    simulation_driver->Poll();
+    if (!simulation_driver->OwnerShutdown()) return std::nullopt;
+    ++generation;
+    inference_phase.Cancel();
+    result_outstanding = submitted_once = false;
+    const auto end = simulation::DriverHostUs() +
+                     config.runtime.simulation->host_phase_timeout_us;
+    while (!simulation_driver->OwnerStopCommitted()) {
+      if (simulation_driver->Failed() || simulation::DriverHostUs() >= end)
+        return kExitStopUnknown;
+      simulation_driver->Poll();
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    // The authenticated owner attests accepted ZeroTorque AND engine close.
+    // This completion never clears an existing upper fault.
+    const bool healthy = fsm.fault_cause() == FaultCause::None;
+    std::fprintf(stderr, "application: owner stop=confirmed fault=%s\n",
+                 FaultCauseName(fsm.fault_cause()));
+    return healthy ? kExitOk : kExitStopUnknown;
+  };
+
   while (true) {
     if (simulation_driver) {
       simulation::StepPermit permit;
       if (stop_requested.load() && !simulation_driver->CancelRelease())
         return kExitStopUnknown;
       while (!simulation_driver->TakePermit(&permit)) {
+        if (auto code = owner_shutdown()) return *code;
         if (stop_requested.load() && !simulation_driver->CancelRelease())
           return kExitStopUnknown;
         if (simulation_driver->Failed()) {
@@ -1129,7 +1154,12 @@ int RunApplication(const ApplicationOptions &options,
       if (simulation_driver && result_outstanding && !have_response) {
         const auto end = simulation::DriverHostUs() +
                          config.runtime.simulation->host_phase_timeout_us;
+        if (!simulation_inference_wait_reported) {
+          std::fprintf(stderr, "application: simulation inference pending\n");
+          simulation_inference_wait_reported = true;
+        }
         while (!have_response) {
+          if (auto code = owner_shutdown()) return *code;
           if (!simulation_driver->Poll() || simulation_driver->Failed() ||
               simulation::DriverHostUs() >= end) {
             std::fprintf(
@@ -1509,6 +1539,8 @@ int RunApplication(const ApplicationOptions &options,
         simulation::MessageIdentity id;
         if (!simulation::Identify(sample, &id)) return false;
         while (!simulation_driver->Processed(id)) {
+          simulation_driver->Poll();
+          if (simulation_driver->OwnerShutdown()) return false;
           if (simulation_driver->Failed() || simulation::DriverHostUs() >= end)
             return false;
           std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1516,9 +1548,16 @@ int RunApplication(const ApplicationOptions &options,
         return true;
       };
       for (std::size_t i = 0; i < events.result_count; ++i)
-        if (!report(events.results[i].value)) return kExitStopUnknown;
-      if (events.has_state && !report(events.state)) return kExitStopUnknown;
+        if (!report(events.results[i].value)) {
+          if (auto code = owner_shutdown()) return *code;
+          return kExitStopUnknown;
+        }
+      if (events.has_state && !report(events.state)) {
+        if (auto code = owner_shutdown()) return *code;
+        return kExitStopUnknown;
+      }
       while (!simulation_driver->CompletePhase(simulation_driver->Outputs())) {
+        if (auto code = owner_shutdown()) return *code;
         if (simulation_driver->Failed() || simulation::DriverHostUs() >= end)
           return kExitStopUnknown;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1529,6 +1568,7 @@ int RunApplication(const ApplicationOptions &options,
       const auto end = simulation::DriverHostUs() +
                        config.runtime.simulation->host_phase_timeout_us;
       while (!simulation_driver->LeaveComplete()) {
+        if (auto code = owner_shutdown()) return *code;
         if (simulation_driver->Failed() || simulation::DriverHostUs() >= end) {
           std::fprintf(stderr,
                        "application: LeaveCommitted stopped-unproven\n");

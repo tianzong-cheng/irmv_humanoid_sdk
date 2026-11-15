@@ -102,7 +102,7 @@ bool DriverSession::Poll() noexcept {
   Frame f;
   while (endpoint_.TryTake(&f)) {
     if (auto permit = std::get_if<ShutdownPermit>(&f.payload)) {
-      if (!lower_ || shutdown_authorized_ || permit->role != Role::Runtime ||
+      if (shutdown_authorized_ || permit->role != config_.local_hello.role ||
           f.identity.phase != 4 || f.identity.control_step + 1 < next_step_ ||
           f.identity.control_step > next_step_ || !clock_.Commit(f.identity)) {
         failed_ = true;
@@ -128,14 +128,22 @@ bool DriverSession::Poll() noexcept {
       continue;
     }
     if (auto committed = std::get_if<ShutdownCommitted>(&f.payload)) {
-      if (!lower_ || !shutdown_authorized_ ||
-          !SamePhase(f.identity, shutdown_identity_) || !committed->write_id ||
-          !committed->state_seq) {
+      if (!shutdown_authorized_ || !SamePhase(f.identity, shutdown_identity_) ||
+          !committed->write_id || !committed->state_seq) {
         failed_ = true;
         return false;
       }
       stop_committed_ = *committed;
       continue;
+    }
+    if (shutdown_authorized_) {
+      if (f.identity.control_step <= shutdown_identity_.control_step &&
+          f.identity.phase < 4)
+        continue;
+      if (upper_) {
+        failed_ = true;
+        return false;
+      }
     }
     if (auto committed = std::get_if<LeaveCommitted>(&f.payload)) {
       if (lower_ || !leaving_ || f.identity.phase != 2 ||

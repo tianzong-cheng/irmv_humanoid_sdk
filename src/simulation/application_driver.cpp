@@ -161,7 +161,9 @@ bool ApplicationDriver::CompletePhase(const PhaseManifest& p) noexcept {
     return false;
   session_.BusinessComplete();
   // ACK must be queued on this same endpoint before phase-2 inventory.
-  if (!session_.Poll() || !session_.AckQueued()) return false;
+  if (!session_.Poll() || session_.ShutdownAuthorized() ||
+      !session_.AckQueued())
+    return false;
   // Processed reports may still await the worker receipt: caller retries under
   // its host deadline. Poll emits ACK only once the transport can prove all
   // actual consumption. The caller reports every dequeued identity before

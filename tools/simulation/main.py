@@ -314,30 +314,36 @@ class Runner:
                             self._advance(Event('frame',entry['peer'],f))
                     if self.coordinator.state in ('Failed','Closed'):break
             if self.coordinator.state=='Closed':
-                # The engine has acknowledged zero output. Keep the socket alive
-                # until runtime consumes ShutdownCommitted and closes its own
-                # driver; a fixed sleep could race endpoint delivery under load.
+                # Keep both authenticated endpoints alive until their owners
+                # consume the proof and close. Never use a fixed delay as proof.
                 end=host_us()+self.coordinator.b.phase_timeout_us
-                runtime_closed=False
-                while not runtime_closed and host_us()<end:
+                required={2} if self.coordinator.runtime_only else {2,3}
+                while required and host_us()<end:
                     for key,mask in self.selector.select(.01):
                         conn=key.fileobj
-                        if conn is self.listener: continue
-                        if mask & selectors.EVENT_WRITE: self._flush(conn)
+                        if conn is self.listener:continue
+                        if mask & selectors.EVENT_WRITE:self._flush(conn)
                         if conn not in self.connections:continue
                         if mask & selectors.EVENT_READ:
                             packet,_=self._receive_packet(conn)
-                            if packet: raise ValueError('unexpected output after shutdown commit')
+                            if packet:
+                                f=p.decode(packet)
+                                # Normal-phase output already in flight when
+                                # cancellation arrived is never a stop proof.
+                                if (f.run_id!=self.coordinator.b.run_id or
+                                    f.control_step>self.coordinator.step or f.phase>=4):
+                                    raise ValueError('unexpected output after shutdown commit')
+                                continue
                             peer=self.connections[conn]['peer']
+                            if self.connections[conn]['out']:
+                                raise ValueError('peer disconnected before proof delivery')
                             self.selector.unregister(conn)
                             del self.connections[conn]
                             self.peers.pop(peer,None)
                             conn.close()
-                            if peer==2: runtime_closed=True
-                            elif not self.coordinator.runtime_only:
-                                raise ValueError('required application died before leave commit')
-                if not runtime_closed:
-                    self.coordinator.fail('stopped-unproven: runtime close deadline')
+                            required.discard(peer)
+                if required:
+                    self.coordinator.fail('stopped-unproven: SDK close deadline')
             return 0 if self.coordinator.state=='Closed' else 1
         except (OSError,ValueError,queue.Full) as exc:
             actions=self.coordinator.fail(str(exc))

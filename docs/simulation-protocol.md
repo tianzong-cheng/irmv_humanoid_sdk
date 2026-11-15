@@ -1,9 +1,9 @@
-# Local simulation bridge protocol v1
+# Local simulation bridge protocol v2
 
 This engine-neutral contract is separate from frozen DDS protocol v2. It adds
 no DDS topics or fields. A local socket endpoint, coordinator and independent
 engine runner, SDK logical-phase drivers and lifecycle are implemented.
-Production bootstrap normalization and launcher UI belong to Task9.
+Production C++ bootstrap normalization and the independent launcher are implemented.
 All participant queues must be bounded to 32 frames;
 this codec does not own a queue. A packet is at most 65,536 bytes, including its
 header. A phase inventory has at most 64 manifests, independently of the
@@ -21,7 +21,7 @@ not hexadecimal ASCII. No codec rule treats a zero ID as a missing identity.
 | Offset | Type | Meaning |
 | --- | --- | --- |
 | 0 | u32 | Complete packet byte count, including this field |
-| 4 | u16 | Local protocol version, exactly 1 |
+| 4 | u16 | Local protocol version, exactly 2 |
 | 6 | u16 | Payload type, 1 through 20 |
 | 8 | byte[16] | Run ID |
 | 24 | u64 | Control step index |
@@ -34,7 +34,7 @@ not hexadecimal ASCII. No codec rule treats a zero ID as a missing identity.
 The header reuses `StepIdentity`: run_id, control_step, phase, logical_us.
 Both dt values are positive; physics dt divides control dt. Logical time is
 exactly `1 + control_step * control_dt_us`, with checked overflow. This is the
-Task 2 clock origin contract. Phase numbers are opaque u32 identities here;
+integer clock origin contract. Phase numbers are opaque u32 identities here;
 assigning their state-machine meanings belongs to the endpoint/coordinator
 work. Receivers bind DDS business stamps to this immutable phase; host arrival
 time is diagnostic only. Codecs do not infer ordering, freshness, authorization,
@@ -73,7 +73,7 @@ are not implicitly UTF-8 decoded.
 | ShutdownCommitted | 19 | u64 write_id, u64 state_seq; engine completed guarded zero output and close |
 | ReleaseCancel | 20 | Role (Application); cancel pending release, original phase2 header |
 
-Feedback mirrors Task 1 `engine.Feedback` without converting its coordinate
+Feedback mirrors `engine.Feedback` without converting its coordinate
 conventions: q/dq/tau are output-side rad, rad/s, N m; tau is actuator generalized
 force, quaternion is wxyz in world, angular velocity and specific force are in
 the IMU site frame, base position is world metres, base velocity is world linear
@@ -139,7 +139,7 @@ feedback, faults, layout/config, and state last_applied_command_seq. A request
 ID alone cannot identify a result: status, reason and resulting execution state
 are included, and the digest distinguishes any other changed content.
 
-Content digest recipe for future DDS barrier workers: SHA-256 of a canonical
+Content digest recipe used by DDS barrier workers: SHA-256 of a canonical
 unpadded traversal of the frozen `protocol/execution.idl` sample, in IDL field
 order, recursively. Scalars use the LE encodings above, DDS enums use u32,
 IDs use their 16 bytes. Count-bounded text/joint/feedback/fault arrays encode the
@@ -158,7 +158,7 @@ an empty inventory (`manifest_count=0`). `kMaxPhaseManifestEntries=64` in C++ an
 one runtime tick may emit 32 results plus its state. Counts over 64 are rejected
 on encode and decode. A seal has exactly 40 payload bytes; a PhaseAck has 48.
 Types 1..10 keep their existing wire representation; these append types 11/12
-within the new local v1. Frozen DDS is unchanged.
+within the local simulation protocol. Frozen DDS is unchanged.
 
 The ordered inventory digest is precisely
 `SHA256(C(M[0]) || C(M[1]) || ... || C(M[count-1]))`. Each `C(M)` is the
@@ -181,7 +181,8 @@ time), echoes all three PhaseSeal fields in `seal`, and adds the actual
 Thus it attests one exact sealed inventory, not a count alone. Count 0 also
 requires a consumer PhaseAck; silence does not close an empty phase.
 
-Task 5 owns cryptographic generation and exact inventory validation, including
+The barrier implementation owns cryptographic generation and exact inventory
+validation, including
 entry ordering, duplication/conflicts, actual consumer provenance, matching the
 required disposition and complete seal identity, and whether all expected
 business messages have reached their required stage. The stateless codec
@@ -207,7 +208,7 @@ and checks malformed inputs in both languages. No simulator, DDS peer, or GPU
 is needed. Run `ctest --test-dir build -R '^simulation_(codec|protocol)_test$'
 --output-on-failure`.
 
-## Consumer barrier API (Task 5)
+## Consumer barrier API
 
 `simulation/barrier.hpp` defines control-thread-owned `PhaseManifest`,
 `PhaseReceipt`, and `Barrier`. Inventories contain at most 64 distinct sample
@@ -290,18 +291,17 @@ and host deadlines remain driver responsibilities. Simulation FIFO refusal or
 receipt overflow latches failure. Ingress ACK proves bounded admission; a
 BusinessConsumed ACK additionally requires explicit processing reports.
 
-Task 7 must wire those reports after actual handling in production loops, using
-identities of the samples actually taken, not latest sequence counters. Runtime
-publication inventory must enumerate only the returned tick's state and
+Production drivers report these identities after actual handling in the SDK
+loops, using the samples actually taken rather than latest sequence counters.
+Runtime inventories enumerate the returned tick's state and
 `results[0:result_count]`, including emitted rejections/duplicate-request replies;
-a pending future Applied result is not part of that tick. Per-topic arrival
-order and DDS write success cannot close any consumer barrier. Coordinator
-scheduling, resend deadlines, endpoint frame relay and authenticated role routing
-remain future driver/coordinator obligations. Current production loops are
-unchanged. The real-DDS test runs serially on reserved domain 222; the scenario
-allocator excludes it (`tests/integration/dds_domains.json`).
+a pending future Applied result is excluded. Per-topic arrival order and DDS
+write success cannot close a consumer barrier. The coordinator and drivers
+implement scheduling, resend deadlines, endpoint relay and authenticated role
+routing. The consumer-barrier real-DDS test runs serially on reserved domain
+222; the scenario allocator excludes it (`tests/integration/dds_domains.json`).
 
-## Coordinator scheduling and driver contract (Task 6)
+## Coordinator scheduling and driver contract
 
 `python3 -m tools.simulation.main --bootstrap NORMALIZED.json --socket PATH`
 starts only the independent coordinator/engine runner. It does not start or
@@ -320,7 +320,7 @@ integer microsecond keys: `startup_timeout_us` (120000000), `phase_timeout_us`
 The independent launcher must generate fresh, independent run and simulation
 runtime IDs before starting either SDK process, and pass these SAME identities
 and normalized digests to all three processes. It must obtain canonical digests
-from the C++ loader normalization interface (Task 9); Python never reimplements
+from the C++ loader normalization interface; Python never reimplements
 canonical configuration JSON. A new run requires new processes/endpoints.
 Runtime must use this supplied runtime ID from its first DDS output. Hello does
 not wait for or discover a runtime ID from a DDS state.
@@ -332,7 +332,7 @@ with role=Coordinator(1), matching every digest, ID and dt. Engine initializatio
 and valid initial completed feedback at physics_step=0 are additionally required
 before any tick permit. Initial engine time is 0, SDK time starts at 1 us.
 
-New **local v1 only** types (old type numbers/layouts and all DDS remain unchanged):
+**Local simulation only** types (old type numbers/layouts and all DDS remain unchanged):
 
 | Type | Number | Ordered payload fields |
 |---|---:|---|
@@ -360,7 +360,7 @@ For each control step, drivers MUST follow this order:
    Runtime computes final torque and all state/results without publishing DDS.
 2. Runtime sends Torque, then one Manifest per actual state/result, then
    PhaseSeal, all phase 1. Torque write_id increases; accepted must be true.
-   Task 7 enriches the Task 4 backend TorqueFrame with actual state_seq and
+   The runtime driver enriches the backend TorqueFrame with actual state_seq and
    command identity (including the bootstrap runtime_id, even when no command
    is active). The sole state identity must match torque.state_seq and time t;
    initialization/stop/Fault states are still normal states, not release proofs.
@@ -402,7 +402,7 @@ For each control step, drivers MUST follow this order:
 A sender must retain exact output payloads/identities until the corresponding
 consumer completion. BestEffort retry after PublishPermit must reuse identity,
 payload and original logical timestamps; drivers supply bounded retries for
-DDS loss (Task 7). A coordinator control frame is reliable local transport and
+DDS loss. A coordinator control frame is reliable local transport and
 is not evidence that DDS was consumed. Per-message Ack is not a substitute for
 PhaseAck. Manifest maximum is 64; recent completed phase caches are 32; bounded
 socket queues remain 32 independently of inventory size. Exact duplicates are
@@ -472,7 +472,7 @@ Applied. Candidate evidence is bounded to32 completed application phases, up to
 the runtime's maximum source window. No freshness/time-limit decisions are made
 from these caches.
 
-Runtime Task7 MUST set `Torque.command` from its independently observed actual
+Runtime sets `Torque.command` from its independently observed actual
 FSM/CommandGate.current_target(), never from the coordinator's last ACK or the
 latest application declaration. At phase1 completion a Tracking output requires
 execution_state=Tracking(3), output_action=Tracking(2), exact completed-ingress
@@ -514,7 +514,7 @@ missing clock updates fail before host physics count advancement. These probes
 are not an hour-long rollout, malicious-peer authentication, motor execution,
 or a substitute for all numerical/physical validation.
 
-## SDK loop drivers (Task 7)
+## SDK loop drivers
 
 The real robot_runtime and application executables select simulation drivers only
 for backend=sim. Fake/Real retain host pacing, backend construction and random
@@ -536,8 +536,8 @@ config_id, engine_sha256 and both dt values. Application additionally verifies
 its normalized application_config_id. engine_config and coordinator timeout/duration
 fields remain owned by the independent runner. SDK host deadlines come from the
 validated SimulationConfig; Endpoint rounds these up to milliseconds. Both peers
-connect only bridge.sock in that directory. Task9 owns the production normalizer
-and launcher artifact creation; the integration test's C++ loader mode emits
+connect only bridge.sock in that directory. The production normalizer and launcher
+create this artifact; the integration test's C++ loader mode emits
 actual loader digests, never a Python reproduction of canonical hashing.
 
 RuntimeDriver::TakePermit(StepPermit*) and CompleteTick(TickCompletion) surround
@@ -584,11 +584,11 @@ the actual robot_runtime/application binaries and test-only FakeEngine. It check
 50/500Hz, exact next-tick fresh-source adoption, identical adoption steps under
 engine/socket/actual ONNX worker delays, and terminal exit while inference is
 pending. Pure tests inject completions/epochs/cancellation without DDS or waits.
-Task8 adds confirmed leave and RuntimeOnly continuation below. This is not
+Confirmed leave and RuntimeOnly continuation are described below. This is not
 GPU/HIL or dynamics evidence.
 
 
-## Release and bounded lifecycle (Task8)
+## Release and bounded lifecycle
 
 Only the executable's actual local BehaviorState::Locomotion, armed and not
 exiting, may prepare ReleaseArm. ApplicationDriver caches actual request payloads
@@ -659,7 +659,7 @@ state_seq can advance without physics/control_step; never assume state_seq=step+
 Late cancelled normal phase frames cannot satisfy a stop proof.
 
 DriverSession validates bootstrap run/dt at its authenticated endpoint and
-ShutdownPermit runtime role, phase4, allowed step and logical-clock order. Only
+ShutdownPermit recipient role, phase4, allowed step and logical-clock order. Only
 this capability enables `ShutdownPlanner::PlanStop(..., coordinator_shutdown)`;
 its last argument defaults FALSE. Fake/Real and raw runtime SIGINT/SIGTERM keep
 sessionless Damping refusal. The explicit simulation capability permits this
@@ -672,8 +672,18 @@ requires increasing state_seq, actual ZeroTorque/output0, exact no-active target
 and zero torque, then asks the worker to apply that stop output WITHOUT advancing
 physics. The worker applies zero output and completes engine.close(); only then
 does it produce ShutdownCommitted19 with matching write_id/state_seq. Runtime's FinishStop waits for this exact commitment before
-clean-stop cleanup. Runner keeps the socket alive until runtime closes its own
-driver under a host deadline. Engine close remains on the sole worker and shares
+clean-stop cleanup. For active application membership, the owner also sends a
+role-Application ShutdownPermit under the same phase4 identity. The application
+cancels pending inference/generation and normal-phase output, and waits under its
+host bound for ShutdownCommitted with nonzero write_id/state_seq and that exact
+identity. It exits cleanly only if no upper fault was already latched. This does
+not issue a runtime request or signal from application. Missing, unsolicited,
+wrong-phase or wrong-run proof and disconnect remain failures. Runner keeps both
+authenticated sockets alive until the SDK owners consume completion and close
+under the host deadline; the launcher still requires both child codes zero and
+actual coordinator stop proof. An application fault (including exit 3) remains
+a failed aggregate even if lower stop and engine close succeed. Engine close
+remains on the sole worker and shares
 the stop-phase host deadline; a hung close cannot produce Closed. Failure of
 engine, required peer, state/write proof or deadline gives nonzero/stopped-unproven;
 a local accepted write or stop request alone is insufficient. A stuck daemon can
@@ -696,12 +706,12 @@ reserved; the scenario allocator consumes the same registry. It covers release
 continuity/order, leave and expiry, app death, in-flight inference/physics signals,
 actual Fault leave and a hung engine close during StopEngine. These are lifecycle and
 host-path acceptance tests, not GPU dynamics or physical motor execution evidence.
-Task9 supplies the normalizer, assets/policy selection and launcher UI, using the
+The normalizer, assets/policy selection and launcher use the
 library shutdown API and independently checking process exit codes.
 
 ## Independent single-robot launch and explicit assets
 
-Task9 ships `sim_launch.py` beside `simulation_normalize`. The launcher reexecutes
+The installed SDK ships `sim_launch.py` beside `simulation_normalize`. The launcher reexecutes
 through the required `--python` interpreter, validates engine versions/adapter
 bytes, the prepared MJCF mesh/include closure and the ONNX byte digest, then
 creates a **new** private0700 run directory. It never reuses an existing run.
@@ -754,7 +764,7 @@ handlers only set a flag. Abort cleanup is never reported as proven shutdown.
 The private run directory retains runtime/application logs and `evidence.json`
 (binding, identities, readiness, release events/drop count, final state, independent
 exit codes and stop proof). This bounded lifecycle manifest does not implement
-Task10 physics/clock recording or Task11 long-run policy acceptance.
+physics/clock recording or long-run trained-policy acceptance.
 
 GPU integration requires explicit `IRMV_SIMULATION_TEST_CONFIG` at CMake configure,
 pointing to a freshly prepared config whose unused socket directory fits the
@@ -774,3 +784,26 @@ alternate file attributes (such as cube-texture face files) are rejected before
 attestation. This is an explicit unsupported-resolution error, even if MuJoCo can
 load that model; the launcher never guesses a different file to hash. Flatten or
 prepare the model into the supported single-file form before launching.
+
+
+## Lifecycle compatibility and startup cancellation
+
+Wire v2 retains the payload layouts/type numbers and changes owner-close
+semantics: active applications receive the phase4 permit and completion as well
+as runtime. Live v1 packets are refused by both codecs. Frozen execution and
+producer DDS and binary record v4 are unchanged. New sidecars declare evidence
+version 2. Offline readers accept v1 and v2; replay explicitly uses the original
+runtime-only owner completion for v1 and the two-peer completion for v2. Historical
+files are never rewritten or interpreted as newly successful application exits.
+
+The launcher consumes assignment-only signal notification during readiness and
+immediately before each spawn. Observed startup cancellation prevents subsequent
+SDK spawns, stops/joins the owned runner and cleans up only its existing children
+under host bounds. Evidence identifies startup cancellation and whether runtime
+was spawned. This path returns failure without claiming runtime stop proof;
+cancellation before a runtime exists is distinct from accepted ZeroTorque plus
+engine close. An unreachable engine worker may outlive the bounded owner return.
+
+Trained-policy 4x60s acceptance remains OPEN: the original .02 startup failed,
+forward/yaw remain blocked and lateral is unsupported. The 200ms constant fixture
+is backend integration evidence only, not trained-model reliability.

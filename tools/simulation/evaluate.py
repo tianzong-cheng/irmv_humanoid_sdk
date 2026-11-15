@@ -236,6 +236,8 @@ def audit_evidence(path,b,duration_us,fall,intent,*,metrics=None,context=None,ph
             raw=stream.readline(MAX_LINE+2)
         if len(raw)>MAX_LINE+1 or not raw.endswith(b'\n'):raise ValueError('invalid evidence header')
         header=json.loads(raw)
+        if header.get('version') not in (1,2):raise ValueError('unknown lifecycle evidence version')
+        c.legacy_shutdown=header['version']==1
         if header['clock']['clock_run_id']!=b.run_id.hex():raise ValueError('record run mismatch')
         for key in ('runtime_id','config_digest','application_digest','engine_digest'):
             if header['provenance'][key]!=getattr(b,key).hex():raise ValueError('record identity/digest mismatch: '+key)

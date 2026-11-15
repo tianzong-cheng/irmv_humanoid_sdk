@@ -1,4 +1,4 @@
-"""Version 1 simulation evidence. Host monotonic durations are never logical time.
+"""Version 2 simulation evidence (version 1 remains readable). Host monotonic durations are never logical time.
 
 Single coordinator producer, single file worker; bounded offers may lose facts.
 Missing footer, sequence holes or any loss cannot prove a complete lifecycle.
@@ -16,7 +16,7 @@ SCHEMA='irmv.simulation_evidence'
 class Writer:
     def __init__(self,path,clock,capacity=256,provenance=None):
         self.path=Path(path)
-        self.header=dict(schema=SCHEMA,version=1,record_type='header',clock=clock,
+        self.header=dict(schema=SCHEMA,version=2,record_type='header',clock=clock,
             provenance=provenance or {},host_clock='linux_clock_monotonic',
             host_origin='kernel boot; host_*_duration_us are elapsed host time',
             logical_origin='logical_us = 1 + control_step * control_dt_us; phase4 freezes time',
@@ -99,7 +99,7 @@ def read(path, visitor=None):
             except (ValueError,UnicodeError) as e:raise ValueError('invalid simulation evidence JSON') from e
             if not isinstance(row,dict):raise ValueError('simulation evidence object required')
             if header is None:
-                if row.get('schema')!=SCHEMA or row.get('version')!=1 or row.get('record_type')!='header':
+                if row.get('schema')!=SCHEMA or row.get('version') not in (1,2) or row.get('record_type')!='header':
                     raise ValueError('unknown simulation evidence schema/version')
                 c=row.get('clock',{})
                 run=c.get('clock_run_id','')
@@ -169,7 +169,7 @@ def read(path, visitor=None):
                 if len(rows)>=65536:raise ValueError('use streaming visitor for large simulation evidence')
                 rows.append(row)
     if header is None:raise ValueError('missing simulation evidence header')
-    summary=dict(clock=header['clock'],provenance=header.get('provenance',{}),
+    summary=dict(evidence_version=header['version'],clock=header['clock'],provenance=header.get('provenance',{}),
                  sequence_gaps=holes,rows=count,footer_present=footer is not None,
                  dropped=(footer or {}).get('dropped',0),
                  write_failures=(footer or {}).get('write_failures',0))

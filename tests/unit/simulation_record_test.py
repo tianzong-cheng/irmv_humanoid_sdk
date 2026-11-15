@@ -22,6 +22,7 @@ class RecordTest(unittest.TestCase):
             w.start();self.assertTrue(w.close())
             rows,summary=read(path)
             self.assertEqual([r['kind'] for r in rows],['write_accepted'])
+            self.assertEqual(summary['evidence_version'],2)
             self.assertEqual(summary['dropped'],1)
             self.assertFalse(summary['evidence_complete'])
             self.assertFalse(summary['measured_feedback_complete'])

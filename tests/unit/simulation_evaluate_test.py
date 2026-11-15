@@ -205,6 +205,26 @@ class EvidenceTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'incomplete'):self.audit()
 
 
+class LifecycleCompatibilityTest(unittest.TestCase):
+    def test_legacy_runtime_only_close_replays_without_upgrading_app_outcome(self):
+        fixture=EvidenceTest();fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        rows=copy.deepcopy(fixture.rows)
+        # v1 records have no application ShutdownCommitted action, while all
+        # actual runtime proof and measured data remain required.
+        commits=[i for i,row in enumerate(rows) if row['kind']=='ShutdownCommitted']
+        self.assertEqual(len(commits),2)
+        del rows[commits[-1]]
+        for i,row in enumerate(rows,1):row['sequence']=i
+        fixture.header['version']=1
+        fixture.rows=rows;fixture.save()
+        fixture.audit()
+        # Relabeling the old trace as v2 must fail; no silent success upgrade.
+        fixture.header['version']=2;fixture.save()
+        with self.assertRaisesRegex(ValueError,'incomplete final lifecycle'):
+            fixture.audit()
+
+
 class FullEvaluationTest(unittest.TestCase):
     """Full public evaluator; real coherent synthetic protocol + SDK exports.
 

@@ -358,7 +358,7 @@ class CoordinatorTest(unittest.TestCase):
         self.assertEqual(self.c.phase,4)
         self.assertEqual(self.c.step,0)
         self.assertEqual([p.KINDS[a.frame.kind-1] for a in actions],
-                         ['ShutdownPermit','Feedback'])
+                         ['ShutdownPermit','ShutdownPermit','Feedback'])
         torque=self.torque(0.);torque['state_seq']=2
         self.send(2,'Torque',torque,4)
         state=state_identity(0,sequence=2,execution_state=1,output_action=0)
@@ -371,7 +371,8 @@ class CoordinatorTest(unittest.TestCase):
         self.assertNotEqual(self.c.state,'Closed')
         actions=self.c.advance(Event('stopped'),5)
         self.assertEqual(self.c.state,'Closed')
-        self.assertEqual(p.KINDS[actions[0].frame.kind-1],'ShutdownCommitted')
+        self.assertEqual([(a.peer,p.KINDS[a.frame.kind-1]) for a in actions],
+                         [(2,'ShutdownCommitted'),(3,'ShutdownCommitted')])
 
     def test_shutdown_fault_never_bypasses_guard(self):
         self.ready();self.c.advance(Event('stop'),4)

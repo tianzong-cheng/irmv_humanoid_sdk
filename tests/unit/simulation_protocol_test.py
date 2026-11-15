@@ -22,7 +22,7 @@ for f in p.golden_frames():
         assert result.stdout.strip() == wire.hex(), f.kind
         result = subprocess.run([sys.argv[1], 'fixture', str(f.kind)], capture_output=True, text=True, check=True)
         assert bytes.fromhex(result.stdout) == wire, f.kind
-for offset, value in [(0, 0), (4, 2), (6, 255)]:
+for offset, value in [(0, 0), (4, 1), (6, 255)]:
     bad = bytearray(p.encode(p.golden_frames()[0]))
     bad[offset] = value
     try:
@@ -51,7 +51,7 @@ def changed(wire, offset, fmt, value):
     return bytes(b)
 hello = p.golden_frames()[0]
 wire = p.encode(hello)
-for offset, fmt, value in [(4, 'H', 2), (6, 'H', 0), (24, 'Q', 2 ** 64 - 1), (40, 'Q', 0), (48, 'Q', 3), (60, 'I', 0)]:
+for offset, fmt, value in [(4, 'H', 1), (6, 'H', 0), (24, 'Q', 2 ** 64 - 1), (40, 'Q', 0), (48, 'Q', 3), (60, 'I', 0)]:
     rejected(changed(wire, offset, fmt, value))
 rejected(wire + b'x')
 rejected(bytes(65537))

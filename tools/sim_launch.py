@@ -49,7 +49,18 @@ class Experiment:
     def notify_shutdown(self,signum=None,frame=None):
         self.shutdown_notified=True
 
+    def _cancel_startup(self):
+        # Normal flow only: signal handlers merely assign shutdown_notified.
+        if not self.shutdown_notified:return False
+        self.evidence['startup_cancelled']=True
+        self.evidence['runtime_spawned']=bool(self.children)
+        self.close()
+        if self.thread and self.thread.is_alive():
+            raise RuntimeError('startup cancellation owner deadline')
+        return True
+
     def start(self):
+        if self._cancel_startup():return self
         n=json.loads(subprocess.check_output([str(self.normalizer),str(self.config)],text=True,timeout=30))
         self.directory=Path(n.pop('socket_directory'))
         self.evidence=self.binding(n)
@@ -70,25 +81,30 @@ class Experiment:
         self.thread=threading.Thread(target=run,name='simulation-owner')
         self.thread.start()
         deadline=time.monotonic()+n['startup_timeout_us']/1e6
-        while not ready.wait(.01):
+        while True:
+            if self._cancel_startup():return self
+            if ready.wait(.01):break
             if self.result is not None or time.monotonic()>deadline:
                 raise RuntimeError('engine startup failed: '+self.runner.coordinator.failure)
         # Engine coherent initial feedback and listening socket precede both SDK peers.
         self.evidence.update(run_id=n['run_id'],runtime_id=n['runtime_id'],engine_ready_before_sdk=True)
         for name,binary in [('runtime',self.runtime),('application',self.application)]:
+            if self._cancel_startup():return self
             log=open(self.directory/(name+'.log'),'w')
             self.logs.append(log)
+            if self._cancel_startup():return self
             self.children.append(subprocess.Popen([str(binary),'--config',str(self.config)],
                 stdin=self.application_stdin if name=='application' else subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True))
         return self
 
     def wait(self):
+        if self.evidence.get('startup_cancelled'):return 1
         while self.thread.is_alive():
             if self.shutdown_notified:
                 self.runner.request_shutdown()
-            if self.children[0].poll() is not None and self.result is None:
+            if self.children[0].poll() is not None and self.result is None and self.runner.coordinator.state!='Closed':
                 self.runner.request_stop()
-            if self.children[1].poll() is not None and not self.runner.coordinator.runtime_only:
+            if self.children[1].poll() is not None and not self.runner.coordinator.runtime_only and self.runner.coordinator.state!='Closed':
                 self.runner.request_stop()
             self.thread.join(.01)
         codes=[p.wait(timeout=5) for p in self.children]
@@ -108,6 +124,8 @@ class Experiment:
                 p.terminate()
                 try:p.wait(timeout=3)
                 except subprocess.TimeoutExpired:p.kill();p.wait()
+        for p in self.children:
+            if p.stdin and not p.stdin.closed:p.stdin.close()
         for log in self.logs:log.close()
         if self.directory_owned and self.directory.exists():
             if self.runner:
@@ -134,6 +152,7 @@ def main():
     for sig in (signal.SIGINT,signal.SIGTERM):signal.signal(sig,experiment.notify_shutdown)
     try:
         experiment.start()
+        if experiment.evidence.get('startup_cancelled'):return experiment.wait()
         print('Simulation engine ready; SDK peers started. App exit retains runtime; Ctrl-C shuts down.',flush=True)
         return experiment.wait()
     except (OSError,ValueError,RuntimeError,subprocess.SubprocessError) as exc:

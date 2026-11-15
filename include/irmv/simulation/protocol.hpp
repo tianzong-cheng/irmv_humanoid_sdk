@@ -4,7 +4,7 @@
 
 #include "irmv/simulation/clock.hpp"
 namespace irmv::simulation {
-inline constexpr std::uint16_t kLocalProtocolVersion = 1;
+inline constexpr std::uint16_t kLocalProtocolVersion = 2;
 inline constexpr std::size_t kMaxPacketBytes = 65536;
 inline constexpr std::size_t kFrameQueueCapacity = 32;
 inline constexpr std::size_t kMaxJoints = 64;

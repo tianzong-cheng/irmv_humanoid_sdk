@@ -332,5 +332,14 @@ int main() {
   CHECK(allocation_check->MakeAck(bounded, &ack));
   CHECK(allocation_check->Complete(bounded));
   forbid_allocation = false;
+  // Nonempty inventory at step one must validate on its configured 1 kHz grid.
+  auto alternate = n;
+  alternate.control_dt_us = 1000;
+  alternate.identity.logical_us = 1001;
+  alternate.closed = false;
+  CHECK(alternate.Close());
+  CHECK(alternate.Valid());
+  auto alternate_receiver = std::make_unique<Barrier>(Role::Application);
+  CHECK(alternate_receiver->Begin(alternate));
   return 0;
 }

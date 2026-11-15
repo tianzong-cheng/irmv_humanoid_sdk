@@ -71,6 +71,7 @@ class SimulationCoordinator:
             'runtime_id','config_digest','application_digest','engine_digest',
             'physics_dt_us','control_dt_us')}
         self.hello['role']=1
+        self.legacy_shutdown=False  # Offline v1 replay only; live peers require wire v2.
         self.state='Handshake'
         self.step=0
         self.phase=0
@@ -253,7 +254,8 @@ class SimulationCoordinator:
         payload=asdict(self.feedback)
         payload.pop("base_quaternion",None)
         payload.update(valid=True,imu_valid=True)
-        return (self.send(2,'ShutdownPermit',dict(role=2)),
+        upper=() if self.runtime_only or self.legacy_shutdown else (self.send(3,'ShutdownPermit',dict(role=3)),)
+        return upper+(self.send(2,'ShutdownPermit',dict(role=2)),
                 self.send(2,'Feedback',payload))
 
     def start_physics(self):
@@ -375,8 +377,9 @@ class SimulationCoordinator:
             if self.state!='StopEngine': raise ValueError('unsolicited engine stop completion')
             self.stop_proven=True
             self.state='Closed'
-            return (self.send(2,'ShutdownCommitted',dict(write_id=self.torque['write_id'],
-                         state_seq=self.torque['state_seq'])),)
+            proof=dict(write_id=self.torque['write_id'],state_seq=self.torque['state_seq'])
+            peers=(2,) if self.runtime_only or self.legacy_shutdown else (2,3)
+            return tuple(self.send(peer,'ShutdownCommitted',proof) for peer in peers)
 
         if e.kind=='feedback':
             if self.state=='Handshake':

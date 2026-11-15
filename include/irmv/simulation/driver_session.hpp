@@ -31,6 +31,10 @@ class DriverSession {
   const PhaseManifest& Inbound() const noexcept { return inbound_; }
   bool AckQueued() const noexcept { return ack_sent_; }
   bool ShutdownAuthorized() const noexcept { return shutdown_authorized_; }
+  bool OwnerStopCommitted() const noexcept {
+    return shutdown_authorized_ && stop_committed_.write_id != 0 &&
+           stop_committed_.state_seq != 0;
+  }
   bool RuntimeOnly() const noexcept { return runtime_only_; }
   bool StopCommitted(std::uint64_t write, std::uint64_t state) const noexcept {
     return stop_committed_.write_id == write &&
