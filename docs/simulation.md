@@ -241,6 +241,25 @@ the .02rad baseline description followed by the explicit .03rad override;
 the bound per-run SDK configuration and `outcome.json` unambiguously name the
 actual .03rad experiment. The original .02rad failure remains unchanged.
 
+The user subsequently authorized disabling Discontinuity for an isolated
+diagnostic. `build/nov16-no-continuity/sdk.json` sets all three continuity maps
+to finite nonbinding 1e100, retains .03rad completion and leaves guard code,
+default/real configuration, gains, physics, torque/speed limits and watchdogs
+unchanged. This also removes initialization takeover continuity gating, not
+just the policy takeover gate; initialization was admitted earlier, so this
+is not a single-policy-handoff-only comparison.
+
+The actual trained-policy CUDA short lifecycle passed: Ready, Locomotion,
+one continuous base release at observed control step357, 200ms of policy
+rollout, application Damping leave with runtime retained, then independent
+ZeroTorque/engine closure. Maximum observed torque was 18.0766869Nm and
+minimum base height over the whole short experiment was 0.720734835m.
+Configuration/authorization/logs are under `build/nov16-no-continuity/`;
+owner evidence is `/tmp/irmv-n16-no-cont-run/evidence.json`.
+This proves short startup/motion feasibility with continuity gates bypassed,
+not balance, walking reliability, original-configuration acceptance or 60s
+trained-policy acceptance. No broader protection bypass was applied.
+
 
 Continuation diagnosis separates a rejected policy takeover from the subsequent
 SDK defect: a rejected Locomotion request now disarms that attempt and retains
@@ -279,3 +298,56 @@ the located library and verifying the moved prefix with relative executable
 rpath; unresolved dependencies fail installation. No dependency pin change is
 needed. Use `ldd` on the moved runtime to verify resolution and absence of ONNX,
 Python, MuJoCo and Warp.
+
+## Native real-time viewer
+
+Native visualization is explicit and optional:
+
+```sh
+python3 tools/sim_launch.py --config /path/to/fresh/prepared/sdk.json \
+  --runtime "$PWD/build/robot_runtime" --application "$PWD/build/application" \
+  --python "$PWD/build/simulation-venv/bin/python" --viewer
+```
+
+Use `--viewer-follow` instead for an initially base-following camera (it also
+enables the viewer). Native left-drag rotates, right-drag pans and the mouse
+wheel zooms. Send SDK behavior keys from the launching terminal, not the viewer
+window. Closing the window closes visualization only; application `x` still
+leaves through Damping, and Ctrl-C in the launcher requests whole-experiment
+shutdown through runtime ZeroTorque and engine close.
+
+The viewer process owns a separate CPU model/data, uses CPU forward kinematics
+only, and displays immutable completed GPU qpos snapshots. It cannot command or
+perturb authoritative physics. Logical time and BASE HELD/RELEASED are displayed;
+the initial view explicitly says it is waiting for a coherent GPU pose.
+Display publication is capped near30Hz of host time, nonblocking and bounded.
+A slow display drops visual samples; it cannot add a control barrier or age
+logical commands. Display time must not be used as the authoritative evidence
+stream. Native UI edits affect only its disposable display copy.
+
+Explicit native startup failure is reported before SDK peers start. Later
+window closure/failure retires visualization without cancelling the experiment;
+the launcher records separate viewer status and owns bounded child cleanup.
+Without either flag, no renderer process or optional rendering import is used.
+No pause, single-step, reset, force injection or graphical replay is provided.
+This adapter revision changes the engine binding: explicitly re-prepare assets
+before launching; never patch or bypass an old digest. Visualization does not
+select calibration or continuity-bypass configurations automatically.
+
+Native validation used an actual local desktop and CUDA engine: the robot was
+rendered from completed GPU snapshots, the diagnostic policy released the base,
+and closing its native window left both SDK processes running. Application
+Damping leave and independent ZeroTorque/engine closure then completed with
+both children exiting0. Separate native desktop checks exercised rotate/pan/zoom
+against a stationary display pose and proved that abrupt owner exit closes the
+orphan renderer through socket EOF. Artifacts/screenshots:
+`build/viewer-smoke/{visual-proof,camera-proof,orphan-proof}.json` and PNGs.
+The motion smoke explicitly used the previously authorized .03rad/continuity-
+bypass diagnostic configuration, not product defaults or long-run acceptance.
+
+The display keeps one newest pending pose and sends independently of physics,
+so a saturated viewer eventually receives the final completed pose even if
+physics subsequently waits. Owner lifetime uses EOF-capable local packets;
+unexpected nonzero renderer exit remains an error, not normal window closure.
+Standard-library regression coverage includes stalled rendering without further
+physics, owner EOF, reordered/foreign/nonfinite poses and delayed child failure.

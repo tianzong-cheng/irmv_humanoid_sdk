@@ -28,7 +28,8 @@ def reserve_directory(path):
 
 class Experiment:
     def __init__(self, config, runtime, application, normalizer=None,
-                 engine_factory=warp_engine, binding=verify_binding, runner_type=Runner, application_stdin=None):
+                 engine_factory=warp_engine, binding=verify_binding, runner_type=Runner, application_stdin=None,
+                 viewer=False, viewer_follow=False, viewer_factory=None):
         self.config=Path(config).resolve()
         self.runtime=Path(runtime).resolve()
         self.application=Path(application).resolve()
@@ -45,6 +46,10 @@ class Experiment:
         self.runner=None
         self.shutdown_notified=False
         self.evidence={}
+        self.viewer_enabled=viewer or viewer_follow
+        self.viewer_follow=viewer_follow
+        self.viewer_factory=viewer_factory
+        self.viewer=None
 
     def notify_shutdown(self,signum=None,frame=None):
         self.shutdown_notified=True
@@ -64,6 +69,7 @@ class Experiment:
         n=json.loads(subprocess.check_output([str(self.normalizer),str(self.config)],text=True,timeout=30))
         self.directory=Path(n.pop('socket_directory'))
         self.evidence=self.binding(n)
+        asset_digest=n['asset_digest']
         n.pop('asset_digest');n.pop('policy_path')
         n.update(identities())
         reserve_directory(self.directory)
@@ -77,6 +83,17 @@ class Experiment:
                 super()._advance(event)
                 if event.kind=='feedback' and inner.coordinator.feedback is not None:ready.set()
         self.runner=ReadyRunner(load_bootstrap(bootstrap),self.directory/'bridge.sock',self.engine_factory)
+        if self.viewer_enabled:
+            factory=self.viewer_factory
+            if factory is None:
+                from simulation.viewer import ViewerPublisher
+                factory=ViewerPublisher
+            self.viewer=factory(n['engine_config'],n['run_id'],asset_digest,
+                                n['physics_dt_us'],follow=self.viewer_follow)
+            self.viewer.cancelled=lambda:self.shutdown_notified
+            self.viewer.start(min(30,n['startup_timeout_us']/1e6))
+            if self._cancel_startup():return self
+            self.runner.viewer=self.viewer
         def run():self.result=self.runner.run()
         self.thread=threading.Thread(target=run,name='simulation-owner')
         self.thread.start()
@@ -107,6 +124,14 @@ class Experiment:
             if self.children[1].poll() is not None and not self.runner.coordinator.runtime_only and self.runner.coordinator.state!='Closed':
                 self.runner.request_stop()
             self.thread.join(.01)
+            if self.viewer is not None:
+                status=self.viewer.status()
+                previous=self.evidence.get('viewer',{}).get('state')
+                self.evidence['viewer']=status
+                if status['state']!=previous:
+                    print('simulation viewer: '+status['state']+
+                          (': '+status['error'] if status.get('error') else ''),
+                          file=sys.stderr,flush=True)
         codes=[p.wait(timeout=5) for p in self.children]
         c=self.runner.coordinator
         self.evidence.update(coordinator_result=self.result,child_codes=codes,
@@ -127,6 +152,9 @@ class Experiment:
         for p in self.children:
             if p.stdin and not p.stdin.closed:p.stdin.close()
         for log in self.logs:log.close()
+        if self.viewer is not None:
+            self.viewer.close()
+            self.evidence['viewer']=self.viewer.status()
         if self.directory_owned and self.directory.exists():
             if self.runner:
                 c=self.runner.coordinator
@@ -144,11 +172,14 @@ def main():
     parser.add_argument('--application',required=True)
     parser.add_argument('--python',required=True,help='separate pinned simulation interpreter')
     parser.add_argument('--normalizer')
+    parser.add_argument('--viewer',action='store_true',help='open read-only native MuJoCo window')
+    parser.add_argument('--viewer-follow',action='store_true',help='open viewer with base-follow camera')
     parser.add_argument('--simulation-worker',action='store_true',help=argparse.SUPPRESS)
     args=parser.parse_args()
     if not args.simulation_worker:
         os.execvp(args.python,[args.python,str(Path(__file__).resolve()),*sys.argv[1:],'--simulation-worker'])
-    experiment=Experiment(args.config,args.runtime,args.application,args.normalizer)
+    experiment=Experiment(args.config,args.runtime,args.application,args.normalizer,
+                          viewer=args.viewer,viewer_follow=args.viewer_follow)
     for sig in (signal.SIGINT,signal.SIGTERM):signal.signal(sig,experiment.notify_shutdown)
     try:
         experiment.start()

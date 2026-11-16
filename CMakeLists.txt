@@ -2163,6 +2163,10 @@ if(TARGET application)
   endif()
 endif()
 
+add_test(NAME simulation_viewer_test COMMAND "${Python3_EXECUTABLE}"
+  "${PROJECT_SOURCE_DIR}/tests/unit/simulation_viewer_test.py")
+set_tests_properties(simulation_viewer_test PROPERTIES LABELS core TIMEOUT 15)
+
 add_test(NAME simulation_record_unit_test COMMAND "${Python3_EXECUTABLE}"
   "${PROJECT_SOURCE_DIR}/tests/unit/simulation_record_test.py")
 set_tests_properties(simulation_record_unit_test PROPERTIES LABELS core TIMEOUT 15)

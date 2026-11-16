@@ -59,6 +59,7 @@ class Runner:
         self.jobs=queue.Queue(maxsize=32)
         self.results=queue.Queue(maxsize=32)
         self.worker=None
+        self.viewer=None
         self.selector=selectors.DefaultSelector()
         self.connections={}
         self.peers={}
@@ -93,6 +94,7 @@ class Runner:
 
     def _engine_worker(self):
         engine=None
+        visual_released=False
         try:
             while not self.stop.is_set():
                 try: action=self.jobs.get(timeout=.01)
@@ -132,6 +134,15 @@ class Runner:
                     self.results.put_nowait(Event('stopped',host_operation_start_us=operation_start,host_operation_duration_us=host_us()-operation_start))
                     continue
                 else: raise ValueError('invalid engine action')
+                visual_released=visual_released or released
+                if self.viewer is not None:
+                    # One latest display slot; the independent sender paces UI.
+                    try:
+                        self.viewer.publish(engine.visual_qpos(),feedback.physics_step,visual_released)
+                    except Exception as exc:
+                        # A display failure cannot become a physics failure.
+                        self.viewer.state='error'
+                        self.viewer.error=str(exc)
                 if not self.stop.is_set():
                     self.results.put_nowait(Event('feedback',feedback=feedback,released=released,host_operation_start_us=operation_start,host_operation_duration_us=host_us()-operation_start,host_release_duration_us=release_duration))
         except Exception as exc:

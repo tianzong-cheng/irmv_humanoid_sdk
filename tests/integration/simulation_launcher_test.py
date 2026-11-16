@@ -193,6 +193,47 @@ class OwnershipTest(unittest.TestCase):
             for child,code in zip(owner.children,codes):child.wait.return_value=code
             self.assertEqual(owner.wait(),0 if runner_code==0 and codes==[0,0] and proven else 1)
 
+    def test_viewer_start_failure_never_spawns_sdk(self):
+        from unittest.mock import patch
+        class FailedViewer:
+            def __init__(self,*args,**kwargs):self.closed=False
+            def start(self,timeout):raise RuntimeError('native window unavailable')
+            def close(self):self.closed=True
+            def status(self):return dict(state='error',error='native window unavailable')
+        with tempfile.TemporaryDirectory() as d:
+            owner,normalize=self.fixture(d)
+            owner.viewer_enabled=True;owner.viewer_factory=FailedViewer
+            with normalize,patch('sim_launch.subprocess.Popen') as spawn:
+                try:
+                    with self.assertRaisesRegex(RuntimeError,'native window unavailable'):
+                        owner.start()
+                    spawn.assert_not_called()
+                finally:owner.close()
+            self.assertTrue(owner.viewer.closed)
+            self.assertFalse(owner.runner.coordinator.stop_proven)
+
+    def test_closed_viewer_does_not_cancel_ready_experiment(self):
+        from unittest.mock import patch,Mock
+        class ClosedViewer:
+            def __init__(self,*args,**kwargs):self.closed=False
+            def start(self,timeout):pass
+            def publish(self,*args):pass
+            def close(self):self.closed=True
+            def status(self):return dict(state='closed')
+        with tempfile.TemporaryDirectory() as d:
+            owner,normalize=self.fixture(d)
+            owner.viewer_enabled=True;owner.viewer_factory=ClosedViewer
+            child=Mock();child.poll.return_value=0;child.returncode=0
+            with normalize,patch('sim_launch.subprocess.Popen',return_value=child):
+                try:
+                    owner.start()
+                    self.assertEqual(len(owner.children),2)
+                    self.assertFalse(owner.runner.stop.is_set())
+                    self.assertIsNotNone(owner.runner.coordinator.feedback)
+                    self.assertEqual(owner.viewer.status()['state'],'closed')
+                finally:owner.close()
+            self.assertTrue(owner.viewer.closed)
+
 class ActualSdkTest(unittest.TestCase):
     def test_owner_closes_active_application(self):
         self.active_close('healthy')

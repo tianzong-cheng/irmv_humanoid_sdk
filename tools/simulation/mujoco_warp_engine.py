@@ -86,6 +86,19 @@ def validate_model(model, config: dict) -> dict:
                 root_v=int(model.jnt_dofadr[root]), weld=weld, sensors=sensors, timestep=dt)
 
 
+def LoadConfiguredModel(config):
+    """Compile a private model at the declared pose; no CUDA initialization."""
+    import mujoco as mj
+    spec = mj.MjSpec.from_file(str(config["model_path"]))
+    base = spec.body(config["base_body"])
+    if base is None:
+        raise ValueError("missing base body")
+    if "initial_base_position" in config:
+        base.pos = config["initial_base_position"]
+        base.quat = config["initial_base_quaternion"]
+    return spec.compile()
+
+
 class MujocoWarpEngine:
     def __init__(self):
         self._ready = False
@@ -97,15 +110,7 @@ class MujocoWarpEngine:
         import mujoco_warp as mjw
         import warp as wp
         self._mjw, self._wp = mjw, wp
-        spec = mj.MjSpec.from_file(str(config["model_path"]))
-        # Compile the support reference at the configured pose, before GPU upload.
-        base = spec.body(config["base_body"])
-        if base is None:
-            raise ValueError("missing base body")
-        if "initial_base_position" in config:
-            base.pos = config["initial_base_position"]
-            base.quat = config["initial_base_quaternion"]
-        self._model = spec.compile()
+        self._model = LoadConfiguredModel(config)
         self._layout = validate_model(self._model, config)
         self.timestep_s = self._layout["timestep"]
         wp.init()
@@ -169,6 +174,11 @@ class MujocoWarpEngine:
                         *sensors, tuple(float(x) for x in h.qpos[q:q+3]),
                         tuple(float(x) for x in h.qvel[v:v+6]),
                         tuple(float(x) for x in h.qpos[q+3:q+7]))
+
+    def visual_qpos(self):
+        """Worker-only immutable pose from the last coherent feedback read."""
+        self._require_ready()
+        return tuple(float(x) for x in self._host.qpos)
 
     def apply_torque(self, torque: Sequence[float]) -> None:
         self._require_ready()
