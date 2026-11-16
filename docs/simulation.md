@@ -212,6 +212,35 @@ byte-bound failed prerequisite without another identical startup, and lateral
 is unsupported. No 60-second trained rollout ran. Evidence is retained in
 `build/nov16-policy-evidence/` (original group `/tmp/irmv-n16-policy/`).
 
+After explicit user authorization, a separate corrected-geometry experiment
+changed only the upper initialization completion tolerance to .03rad. It
+reached Ready, then the first actual policy takeover was rejected Discontinuity
+at control step 369 (738001 logical us). The first-command proof names source
+state 369 (736001us); an offline reconstruction from that exact feedback and
+initial last_action gives the following checks against the next runtime state:
+
+| Check | Reconstructed value | Unchanged configured limit |
+|---|---:|---:|
+| Left ankle pitch position gap | 0.120951rad | 0.1rad |
+| Left ankle pitch torque jump | 6.914758Nm | 5Nm |
+| Left knee torque jump | 6.479910Nm | 5Nm |
+
+`verify_policy_sample` matched the reconstructed observation within 2.22e-16 and
+the action/target exactly. These are reconstructed first-action quantities,
+not raw-action recording or physical motor measurements. No blend, gain,
+timing, physics or continuity-limit change was made. The base never released;
+the owner completed proven ZeroTorque/engine shutdown and both children exited
+0. Standing failed at handoff, forward/yaw were blocked by that same byte-bound
+prerequisite, and lateral remained unsupported. No 60-second rollout ran.
+
+`build/nov16-completion-003/authorization.json` binds the user authorization and
+the original/candidate config hashes; `outcome.json` records the .03rad
+disposition and evidence hashes. Raw evidence is copied under its `evidence/`
+directory (original group `/tmp/irmv-n16-c003/`). Raw provenance prose inherits
+the .02rad baseline description followed by the explicit .03rad override;
+the bound per-run SDK configuration and `outcome.json` unambiguously name the
+actual .03rad experiment. The original .02rad failure remains unchanged.
+
 
 Continuation diagnosis separates a rejected policy takeover from the subsequent
 SDK defect: a rejected Locomotion request now disarms that attempt and retains
