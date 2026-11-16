@@ -19,6 +19,10 @@ initial configuration must equal the converter's admitted flat-floor stance;
 an arbitrary finite base-pose override is not admission. Re-prepare old assets
 explicitly to obtain an initial-geometry declaration. No automatic pose lift,
 blend, reset, warmup support or post-release refixing is provided.
+Live launch requires asset-manifest `collision_support_version=1`; older
+declarations must be regenerated with `prepare_simulation_asset.py`, not patched
+or grandfathered. Historical records remain available for offline analysis.
+
 
 ```sh
 # All paths are explicit; consult --help for required preparation arguments.
@@ -188,12 +192,56 @@ The generated configuration partly inherits 20Nm/10rad/s limits and continuity
 settings from the two-joint example; these are not verified motor limits.
 No additional startup calibration, gain/physics/timing/limit tuning is justified
 merely to obtain a passing report. Preserve both original negative artifacts.
+
+The continuation found a separate conversion defect in the old stance: primitive
+collision geoms have `geom_dataid=-1`, which the converter had incorrectly used
+as the final mesh index. For the actual robot, the box feet were about 84.66mm
+too high. Collision support now uses oriented box half-extents, cylinder
+radius/half-length, sphere radius or compiled mesh vertices as appropriate;
+unknown geometry fails preparation. Corrected default-stance base height is
+0.744224409m rather than 0.828880589m, preserving the explicit 2mm clearance.
+The old startup figures above describe the old geometry, not the corrected run.
+A freshly prepared corrected-geometry CUDA/SDK run still failed initialization
+at control step 1077 (2154001 logical us): maximum goal error 0.0218897462rad,
+with joint speeds below 0.00035rad/s. The application reported
+InitializationFailed; the base remained fixed. Evidence replay and measured
+feedback were complete for the observed startup, and independent shutdown
+proved runtime ZeroTorque plus engine closure. This is not a successful policy
+lifecycle. Standing failed before release; forward/yaw reference that same
+byte-bound failed prerequisite without another identical startup, and lateral
+is unsupported. No 60-second trained rollout ran. Evidence is retained in
+`build/nov16-policy-evidence/` (original group `/tmp/irmv-n16-policy/`).
+
+
+Continuation diagnosis separates a rejected policy takeover from the subsequent
+SDK defect: a rejected Locomotion request now disarms that attempt and retains
+the existing Ready generator and its authorized producer/epoch. It does not
+retry without another operator request, release the base, or manufacture a
+command timeout by abandoning that hold. Unit coverage includes both
+local and external candidates; the real-SDK/Fake-engine lockstep case verifies
+that the old target stream continues beyond that watchdog interval. No runtime
+continuity limit, initialization completion criterion or trained model changed.
+
+An offline first-action replay from the preserved trained initialization sample
+(state 1224, logical 2446001us, initial last_action) gives a left ankle pitch
+position gap of 0.12999667rad against 0.1rad, and torque jumps of 7.3068246Nm at
+that ankle and 7.1011379Nm at the left knee against 5Nm. The SDK
+`verify_policy_sample` reproduced the independent observation to 2.22e-16 and
+the model action/target exactly. This is a saved-state deployment compatibility
+diagnostic, not the original calibrated handoff state or a new policy rollout.
+Fixing refusal handling does not make that first action admissible.
 Task10 changed adapter bytes: old engine hashes are stale and cannot be bypassed.
 Reference-vector agreement proves component numerics, not GPU/DDS reliability.
 A contract/toy fixture on the actual robot can prove backend integration only;
-it cannot upgrade trained-policy acceptance. The joined all-axis GPU feedback-to-policy-observation path is not fully
-established by the constant model, which ignores its inputs. There is no HIL or physical motor
-execution evidence and no overall trained-policy acceptance claim.
+it cannot upgrade trained-policy acceptance. The separate opt-in
+`simulation_observation_test` now exercises the joined GPU-to-observation path
+through production IPC/drivers, SimBackend, DDS, RobotClient and
+BuildObservation. Two CUDA runs with distinct joints and gyro XYZ cover
+roll/pitch/yaw, reversed observation joint ordering, torque-excited velocities
+and SDK yaw-invariant projected gravity. Dedicated test business loops replace
+the runtime/application loops; this is feedback-chain proof, not actual
+trained-policy inference/lifecycle or long-horizon reliability. There is no HIL
+or physical motor execution evidence and no overall trained-policy acceptance.
 
 Installation scans pinned private shared-library directories explicitly. CMake
 may warn that transitive `libddsc` was found in the supplied search directory:

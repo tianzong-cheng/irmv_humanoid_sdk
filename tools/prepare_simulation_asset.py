@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
-from simulation.assets import closure,engine_identity,sha256,binary_stl,stl_obj
+from simulation.assets import closure,engine_identity,sha256,binary_stl,stl_obj,collision_support_z
 
 
 def prepare(urdf,policy,output,template,profile,metadata_python):
@@ -84,13 +84,27 @@ def prepare(urdf,policy,output,template,profile,metadata_python):
     q=contract['action']['default_q']
     for name,value in zip(names,q):data.qpos[model.jnt_qposadr[mj.mj_name2id(model,mj.mjtObj.mjOBJ_JOINT,name)]]=value
     mj.mj_forward(model,data) # CPU kinematics only, no CPU stepping.
-    # Mesh support uses compiled convex vertex hull, not a visual bounding sphere.
-    lowest=0.
+    # Support is the lowest compiled collision point, not a visual bounding
+    # sphere. URDF collision boxes/cylinders/spheres have no mesh data id, so
+    # their support must come from the primitive's own size and orientation.
+    kinds={mj.mjtGeom.mjGEOM_BOX:'box',mj.mjtGeom.mjGEOM_CYLINDER:'cylinder',
+           mj.mjtGeom.mjGEOM_SPHERE:'sphere',mj.mjtGeom.mjGEOM_MESH:'mesh'}
+    lowest=None
     for i in range(model.ngeom):
         if model.geom_contype[i]!=1:continue
-        mesh=int(model.geom_dataid[i]);start=model.mesh_vertadr[mesh];count=model.mesh_vertnum[mesh]
-        vertices=model.mesh_vert[start:start+count]@data.geom_xmat[i].reshape(3,3).T+data.geom_xpos[i]
-        lowest=min(lowest,float(vertices[:,2].min()))
+        kind=kinds.get(int(model.geom_type[i]))
+        if kind is None:raise ValueError('unsupported collision geometry type')
+        vertices=()
+        if kind=='mesh':
+            mesh=int(model.geom_dataid[i])
+            if mesh<0:raise ValueError('mesh collision geom has no mesh data')
+            start=model.mesh_vertadr[mesh];count=model.mesh_vertnum[mesh]
+            vertices=model.mesh_vert[start:start+count]
+        zmin=collision_support_z(kind,[float(x) for x in model.geom_size[i]],
+            data.geom_xmat[i].reshape(3,3).tolist(),[float(x) for x in data.geom_xpos[i]],
+            vertices)
+        lowest=zmin if lowest is None else min(lowest,zmin)
+    if lowest is None:raise ValueError('no collision geometry for initial support')
     height=-lowest+physical['ground_clearance_m']
     cfg['robot']['joints']=[dict(name=name,position_min=float(movable[name].find('limit').get('lower')),position_max=float(movable[name].find('limit').get('upper'))) for name in names]
     def align(mapping):
@@ -112,7 +126,7 @@ def prepare(urdf,policy,output,template,profile,metadata_python):
         conversion='MuJoCo URDF inertias/fixed links preserved; free pelvis/weld/direct motors/body IMU/flat plane added; STL converted to OBJ preserving binary32 triangle coordinates (no decimation); convex mesh collision; self collision disabled; no implicit PD/clipping',
         tau_est='qfrc_actuator at mapped joint DOF; excludes constraint reactions',
         imu='site wxyz world orientation; gyro body rad/s; acceleration body specific force including upward gravity at rest',
-        initial_height_m=height,initial_geometry=dict(initial_base_position=[0,0,height],
+        collision_support_version=1,initial_height_m=height,initial_geometry=dict(initial_base_position=[0,0,height],
             initial_base_quaternion=[1,0,0,0],initial_joint_position=q),prepared_closure=closure(path))
     path.with_suffix('.manifest.json').write_text(json.dumps(manifest,indent=2))
     (output/'sdk.json').write_text(json.dumps(cfg,indent=2))

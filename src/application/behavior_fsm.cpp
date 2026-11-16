@@ -524,8 +524,18 @@ void BehaviorFsm::ConsumeOutcome(protocol::TimeUs now_us,
       // behaviour is kept and only the reason is recorded for the display.
       last_reject_reason_ = view.reject_reason;
       if (pending_ == Pending::Tracking) {
-        // Nothing was authorized, so no frame of that move may keep moving.
-        CancelInitialization();
+        if (pending_locomotion_) {
+          // A refused takeover leaves the Ready hold authorized in runtime.
+          // Restore that context before cancelling the proposal; its generator
+          // must keep feeding the old epoch, not manufacture a command timeout.
+          tracking_active_ = have_previous_tracking_;
+          tracking_producer_ = previous_tracking_producer_;
+          tracking_epoch_ = previous_tracking_epoch_;
+          CancelLocomotion();
+        } else {
+          // The initialization itself was refused; no trajectory was granted.
+          CancelInitialization();
+        }
       }
       pending_ = Pending::None;
       return;

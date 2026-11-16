@@ -94,6 +94,8 @@ def verify_binding(normalized):
     manifest=json.loads(model.with_suffix('.manifest.json').read_text())
     actual=closure(model)
     if 'initial_base_position' in normalized['engine_config']:
+        if manifest.get('collision_support_version')!=1:
+            raise ValueError('obsolete collision support declaration; re-prepare explicitly')
         admit_initial_geometry(normalized['engine_config'],manifest)
     if actual!=manifest['prepared_closure'] or actual['digest']!=normalized['asset_digest']:
         raise ValueError('asset closure digest mismatch')
@@ -136,3 +138,28 @@ def stl_obj(data):
     lines=['v '+' '.join(format(x,'.9g') for x in v) for v in vertices]
     lines.extend('f '+' '.join(map(str,f)) for f in faces)
     return '\n'.join(lines)+'\n'
+
+
+def collision_support_z(kind,size,rotation,position,vertices=()):
+    """Lowest world-z point of one compiled collision geom at a given pose.
+
+    Primitive geoms have no mesh data id, so measuring their support from a
+    mesh array binds them to whichever mesh happens to be last. `size` follows
+    MuJoCo: box half-extents, cylinder radius/half-length, sphere radius.
+    `rotation` is the row-major 3x3 world orientation; mesh `vertices` are in
+    the geom frame.
+    """
+    import math
+    row=rotation[2]
+    z=position[2]
+    if kind=='mesh':
+        if len(vertices)==0:raise ValueError('mesh collision geom has no vertices')
+        return float(min(z+sum(row[k]*v[k] for k in range(3)) for v in vertices))
+    if kind=='box':
+        return float(z-sum(abs(row[k])*size[k] for k in range(3)))
+    if kind=='cylinder':
+        axis_z=row[2]
+        return float(z-abs(axis_z)*size[1]-size[0]*math.sqrt(max(0.0,1.0-axis_z*axis_z)))
+    if kind=='sphere':
+        return float(z-size[0])
+    raise ValueError('unsupported collision support geometry: '+str(kind))

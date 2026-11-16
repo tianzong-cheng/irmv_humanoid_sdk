@@ -1173,3 +1173,13 @@ not registered merely because a Python interpreter exists. GPU tests cannot
 skip into success. See [simulation](simulation.md) for four-scenario reports,
 source-derived intent/fall conventions, inherited configured limits, missing
 actual-policy acceptance and interpretation of backend fixture evidence.
+
+`simulation_observation_test` is an opt-in GPU/domain225 numerical integration
+witness, registered with `IRMV_TEST_SIMULATION_GPU=ON`. Run it serially:
+`ctest --test-dir build -R '^simulation_observation_test$' --output-on-failure`.
+It carries actual CUDA feedback through the production drivers, SimBackend,
+DDS and RobotClient into BuildObservation, comparing against independent
+quaternion/joint math. Its dedicated business loops do not establish trained
+policy lifecycle acceptance. `simulation_lockstep_test` additionally covers a
+rejected policy takeover: the old Ready hold keeps its epoch and target stream
+beyond the command watchdog, without automatic retry or base release.

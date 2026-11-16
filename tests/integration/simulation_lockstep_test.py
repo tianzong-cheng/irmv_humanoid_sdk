@@ -17,7 +17,7 @@ from simulation.main import Runner,load_bootstrap
 from fake_engine import FakeEngine
 
 
-def run(build,delay=0,worker_delay=False,stop_pending=False):
+def run(build,delay=0,worker_delay=False,stop_pending=False,rejected_handoff=False):
     with tempfile.TemporaryDirectory(prefix='irmv-t7-') as directory:
         d=Path(directory)
         cfg=json.loads((ROOT/'config/sdk.json').read_text())
@@ -32,7 +32,7 @@ def run(build,delay=0,worker_delay=False,stop_pending=False):
             joint_mapping=dict(test_left=dict(joint='left',actuator='left'),test_right=dict(joint='right',actuator='right')))
         fixture=json.loads((ROOT/'tests/support/deployment/valid_two_axis.json').read_text().replace('"left"','"test_left"').replace('"right"','"test_right"'))
         fixture['action']['default_q']=[0.,0.]
-        fixture['action']['offset']=[0.,0.]
+        fixture['action']['offset']=[.25,.25] if rejected_handoff else [0.,0.]
         fixture['action']['scale']=[0.,0.]
         fixture['action']['kp']=[1.,1.]
         fixture['action']['kd']=[1.,1.]
@@ -113,6 +113,20 @@ def run(build,delay=0,worker_delay=False,stop_pending=False):
                 return None
             assert runner.coordinator.step>=180,(runner.coordinator.failure,runner.coordinator.state,output)
             assert not runner.coordinator.failure,runner.coordinator.failure
+            if rejected_handoff:
+                assert 'reject=Discontinuity' in output,output
+                assert 'stop=CommandTimeout' not in output,output
+                assert 'behavior=Fault' not in output,output
+                assert runner.coordinator.release_state=='Fixed',output
+                assert runner.coordinator.states[-1]['execution_state']==3,output
+                proposals=[c for s,c in runner.commands if s>=120 and c['sequence']==1]
+                assert len(proposals)==1,('rejected takeover was retried',proposals,output)
+                held=[(s,t['command']) for s,t in runner.facts if s>=130]
+                before=next(t['command'] for s,t in runner.facts if s==110)
+                assert held and all(c['epoch']==before['epoch'] and c['producer_id']==before['producer_id'] for _,c in held),held
+                assert held[-1][1]['sequence']>held[0][1]['sequence'],held
+                print('PASS actual SDK rejected policy handoff preserves Ready hold without retry/release/watchdog expiry')
+                return None
             adoptions=[]
             last=None
             for step,torque in runner.facts:
@@ -144,3 +158,4 @@ if __name__=='__main__':
     delayed=run(build,.001,worker_delay=True)
     assert baseline==delayed,(baseline,delayed)
     run(build,stop_pending=True)
+    run(build,rejected_handoff=True)

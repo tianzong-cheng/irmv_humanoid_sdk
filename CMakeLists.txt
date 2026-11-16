@@ -2150,6 +2150,16 @@ if(TARGET application)
     add_test(NAME simulation_mujoco_warp_test COMMAND "${IRMV_SIMULATION_PYTHON}"
       "${PROJECT_SOURCE_DIR}/tests/integration/simulation_mujoco_warp_test.py" "${CMAKE_CURRENT_BINARY_DIR}" --config "${IRMV_SIMULATION_TEST_CONFIG}")
     set_tests_properties(simulation_mujoco_warp_test PROPERTIES LABELS "integration;gpu" RUN_SERIAL TRUE TIMEOUT 900)
+    add_executable(simulation_observation_peer
+      tests/integration/simulation_observation_peer.cpp)
+    target_link_libraries(simulation_observation_peer PRIVATE
+      irmv_simulation_drivers irmv_application irmv_policy nlohmann_json::nlohmann_json)
+    add_test(NAME simulation_observation_test COMMAND "${IRMV_SIMULATION_PYTHON}"
+      "${PROJECT_SOURCE_DIR}/tests/integration/simulation_observation_test.py"
+      "${CMAKE_CURRENT_BINARY_DIR}" "$<TARGET_FILE:simulation_observation_peer>")
+    set_tests_properties(simulation_observation_test PROPERTIES
+      LABELS "integration;gpu" RUN_SERIAL TRUE TIMEOUT 180
+      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
   endif()
 endif()
 

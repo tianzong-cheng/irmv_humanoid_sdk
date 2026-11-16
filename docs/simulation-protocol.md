@@ -744,7 +744,11 @@ joint damping/frictionloss, MuJoCo convex contacts, no self collision, rolling a
 torsional friction and weld settings are conversion choices, **not** evidence of
 PhysX equivalence. `source.asset_revision` matches URDF bytes only; historical
 training mesh bytes remain unattested. Initial height is computed from compiled
-collision vertices at the configured joint pose plus the explicit ground clearance.
+collision support (oriented primitives or mesh vertices) at the configured joint
+pose plus explicit ground clearance. A primitive's absent mesh id is never a
+mesh index. Live asset admission requires `collision_support_version=1`;
+re-prepare older declarations explicitly. This changes neither the physics
+profile nor the initialization/continuity acceptance criteria.
 Prepared assets and ONNX blobs are never committed. Generated absolute user paths
 must be updated when moving those assets; installed launcher/package paths do not
 refer back to the source checkout.

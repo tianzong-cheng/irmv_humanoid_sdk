@@ -33,6 +33,28 @@ class AssetTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'initial geometry'):
             admit_initial_geometry(expected,{})
 
+    def test_live_binding_requires_corrected_collision_support_attestation(self):
+        import json
+        from unittest.mock import patch
+        from simulation.assets import closure,sha256,verify_binding
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d);model=p/'robot.xml';policy=p/'policy.onnx'
+            model.write_text('<mujoco/>');policy.write_bytes(b'policy bytes')
+            geometry=dict(initial_base_position=[0,0,.8],
+                initial_base_quaternion=[1,0,0,0],initial_joint_position=[0])
+            manifest=dict(prepared_closure=closure(model),
+                policy_sha256=sha256(policy),initial_geometry=geometry)
+            path=model.with_suffix('.manifest.json')
+            path.write_text(json.dumps(manifest))
+            normalized=dict(engine_digest='e'*64,asset_digest=manifest['prepared_closure']['digest'],
+                policy_path=str(policy),engine_config=dict(model_path=str(model),**geometry))
+            with patch('simulation.assets.engine_identity',return_value=('e'*64,{})):
+                with self.assertRaisesRegex(ValueError,'collision support.*re-prepare'):
+                    verify_binding(normalized)
+                manifest['collision_support_version']=1
+                path.write_text(json.dumps(manifest))
+                verify_binding(normalized)
+
     def test_ascii_mesh_conversion_preserves_vertices(self):
         from simulation.assets import binary_stl
         import struct
@@ -133,5 +155,27 @@ class AssetTest(unittest.TestCase):
             self.assertEqual(set(first['files']),{'robot.xml','assets/shape.obj'})
             actual.write_bytes(b'changed')
             self.assertNotEqual(first['digest'],closure(p/'robot.xml')['digest'])
+
+    def test_collision_support_uses_primitive_geometry_not_last_mesh(self):
+        from simulation.assets import collision_support_z
+        identity=((1,0,0),(0,1,0),(0,0,1))
+        # The v3 foot is a box, not a mesh: its lowest face is the half-extent
+        # below the geom centre, never another geom's mesh vertices.
+        self.assertAlmostEqual(collision_support_z('box',(0.11,0.04,0.01),identity,(0.038,0,0.10349)),0.09349)
+        # A primitive must never consume the last mesh's vertices as a fallback.
+        self.assertAlmostEqual(collision_support_z('box',(0.11,0.04,0.01),identity,(0.038,0,0.10349),((-1,-1,-5),)),0.09349)
+        self.assertAlmostEqual(collision_support_z('cylinder',(0.06,0.09),identity,(0,0,0)),-0.09)
+        self.assertAlmostEqual(collision_support_z('sphere',(0.05,),identity,(0,0,1)),0.95)
+        self.assertAlmostEqual(collision_support_z('mesh',(0,0,0),identity,(0,0,1),((0,0,-0.2),)),0.8)
+        root=2**-0.5
+        rotation=((1,0,0),(0,root,-root),(0,root,root))
+        self.assertAlmostEqual(collision_support_z('box',(1,2,3),rotation,(0,0,0)),-5*root)
+        self.assertAlmostEqual(collision_support_z('cylinder',(0.06,0.09),rotation,(0,0,1)),1-0.15*root)
+        self.assertAlmostEqual(collision_support_z('mesh',(0,0,0),rotation,(0,0,1),
+            ((0,1,3),(0,-2,-1),(.4,.3,.8))),1-3*root)
+        with self.assertRaisesRegex(ValueError,'support geometry'):
+            collision_support_z('plane',(1,),identity,(0,0,0))
+        with self.assertRaisesRegex(ValueError,'no vertices'):
+            collision_support_z('mesh',(0,0,0),identity,(0,0,0),())
 
 if __name__=='__main__':unittest.main()

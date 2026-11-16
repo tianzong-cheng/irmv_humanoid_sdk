@@ -2398,6 +2398,57 @@ int HeldConfirmationIsDropped() {
   return 0;
 }
 
+int RejectedLocomotionPreservesReadyHold() {
+  for (const auto source :
+       {LocomotionSource::Local, LocomotionSource::External}) {
+    Harness h(source);
+    CHECK(ToStandby(h) == 0);
+    CHECK(ToReady(h) == 0);
+    const Id hold_producer = h.lower.producer;
+    const Sequence hold_epoch = h.lower.epoch;
+    const Id candidate_producer =
+        source == LocomotionSource::External ? MakeId(0x70) : kNoId;
+    h.fsm().OfferLocomotionCandidate(
+        LocomotionFrame(h, 0.25, 0, candidate_producer), h.now_us());
+    CHECK(h.Step(InputEvent::StartLocomotion).locomotion_armed);
+    CHECK(h.client().request_pending());
+    CHECK(h.Reject(RejectReason::Discontinuity));
+    BehaviorStep step = h.Step();
+    CHECK(step.state == BehaviorState::Ready);
+    CHECK(step.last_reject_reason == RejectReason::Discontinuity);
+    CHECK(!step.locomotion_armed);
+    CHECK(h.fsm().locomotion_epoch() == 0);
+    const std::size_t requests = h.sink().requests.size();
+
+    // A refused takeover leaves the runtime holding its old authorization.
+    // Keep feeding that exact hold beyond the command watchdog, without
+    // automatically proposing another policy frame.
+    for (int tick = 0; tick < 20; ++tick) {
+      h.fsm().OfferLocomotionCandidate(
+          LocomotionFrame(h, 0.5, 0, candidate_producer), h.now_us());
+      step = h.Step(InputEvent::None, h.config().supervision.target_period_us);
+      CHECK(step.state == BehaviorState::Ready);
+      CHECK(step.fault_cause == FaultCause::None);
+      CHECK(!step.locomotion_armed);
+      CHECK(step.send_command);
+      CHECK(step.command.producer_id == hold_producer);
+      CHECK(step.command.epoch == hold_epoch);
+      CHECK(step.command.joints.q[0] == h.config().initialization.target_q[0]);
+      CHECK(h.sink().requests.size() == requests);
+    }
+
+    // A new operator request may try a new candidate; rejection is not a
+    // fault latch and does not require repeating initialization.
+    step = h.Step(InputEvent::StartLocomotion);
+    CHECK(step.locomotion_armed);
+    CHECK(h.client().request_pending());
+    h.EnterTracking();
+    CHECK(h.Answer());
+    CHECK(h.Step().state == BehaviorState::Locomotion);
+  }
+  return 0;
+}
+
 }  // namespace
 
 int main() {
@@ -2431,6 +2482,7 @@ int main() {
   failures += LocomotionRequest();
   failures += ExternalLocomotion();
   failures += LocomotionRequestToleratesTheReplacedContext();
+  failures += RejectedLocomotionPreservesReadyHold();
   if (failures == 0) {
     return 0;
   }
