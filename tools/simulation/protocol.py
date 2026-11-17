@@ -81,6 +81,52 @@ SCHEMA.update(ShutdownPermit=[('Role','role')], RuntimeOnlyPermit=[('Role','role
               ShutdownCommitted=[('u64','write_id'),('u64','state_seq')], ReleaseCancel=[('Role','role')])
 KINDS = ['Hello', 'Feedback', 'Torque', 'Manifest', 'Ack', 'ReleaseArm', 'LeaveReady', 'LeaveCommitted', 'Abort', 'AppliedToStep', 'PhaseSeal', 'PhaseAck', 'InventoryReady', 'PublishPermit', 'TickPermit', 'FirstCommandProof', 'ShutdownPermit', 'RuntimeOnlyPermit', 'ShutdownCommitted', 'ReleaseCancel']
 
+# Internal, precompiled views of SCHEMA. They only remove repeated layout work:
+# the packed bytes, field order, validation and rejection behaviour are those
+# the schema-derived implementation already produced.
+_LAYOUT = {name: tuple(fields) for name, fields in SCHEMA.items()}
+_FIELDS = {name: frozenset(field for _, field in fields)
+           for name, fields in SCHEMA.items()}
+_SCALARS = {'u64': struct.Struct('<Q'), 'u32': struct.Struct('<I'),
+            'f64': struct.Struct('<d'), 'bool': struct.Struct('<B')}
+_ARRAYS = {}
+_JOINTS = {}
+_U32 = struct.Struct('<I')
+_HEADER = struct.Struct('<IHH')
+_FRAME_HEAD = struct.Struct('<QIQQQ')
+_ENUM_LIMITS = {'Role': 3, 'MessageKind': 5, 'Disposition': 2}
+
+
+def _enum_paths(name, prefix=()):
+    paths = []
+    for field, key in _LAYOUT[name]:
+        path = prefix + (key,)
+        if field in _LAYOUT:
+            paths.extend(_enum_paths(field, path))
+        elif field in _ENUM_LIMITS:
+            paths.append((path, field))
+    return paths
+
+
+_ENUM_PATHS = {name: _enum_paths(name) for name in _LAYOUT}
+
+
+def _float_paths(name, prefix=()):
+    paths = []
+    for field, key in _LAYOUT[name]:
+        path = prefix + (key,)
+        if field in _LAYOUT:
+            paths.extend(_float_paths(field, path))
+        elif field == 'f64':
+            paths.append((path, True))
+        elif field == 'Joints' or field.startswith('A'):
+            paths.append((path, False))
+    return paths
+
+
+_FLOAT_PATHS = {name: _float_paths(name) for name in _LAYOUT}
+
+
 @dataclass(frozen=True)
 class Frame:
     kind: int
@@ -115,10 +161,11 @@ def _default(t):
     return {'u64': 72623859790382856, 'u32': 16909060, 'f64': 1.25, 'bool': 1}[t]
 
 def _pack(t, v):
-    if t in SCHEMA:
-        if set(v) != {n for _, n in SCHEMA[t]}:
+    spec = _LAYOUT.get(t)
+    if spec is not None:
+        if set(v) != _FIELDS[t]:
             raise ValueError('payload fields')
-        return b''.join((_pack(t2, v[n]) for t2, n in SCHEMA[t]))
+        return b''.join([_pack(t2, v[n]) for t2, n in spec])
     if t in ('Id', 'Digest'):
         if not isinstance(v, bytes) or len(v) != (16 if t == 'Id' else 32):
             raise ValueError('identity size')
@@ -126,16 +173,30 @@ def _pack(t, v):
     if t in ('Joints', 'Text256'):
         if len(v) > (64 if t == 'Joints' else 256):
             raise ValueError('capacity')
-        return struct.pack('<I', len(v)) + (b''.join((_pack('f64', x) for x in v)) if t == 'Joints' else bytes(v))
+        if t == 'Text256':
+            return _U32.pack(len(v)) + bytes(v)
+        n = len(v)
+        if not all(map(math.isfinite, v)):
+            raise ValueError('nonfinite')
+        packed = _JOINTS.get(n)
+        if packed is None:
+            packed = _JOINTS[n] = struct.Struct('<%dd' % n)
+        return _U32.pack(n) + packed.pack(*v)
     if t.startswith('A'):
-        if len(v) != int(t[1:]):
+        n = int(t[1:])
+        if len(v) != n:
             raise ValueError('shape')
-        return b''.join((_pack('f64', x) for x in v))
+        if not all(map(math.isfinite, v)):
+            raise ValueError('nonfinite')
+        packed = _ARRAYS.get(t)
+        if packed is None:
+            packed = _ARRAYS[t] = struct.Struct('<%dd' % n)
+        return packed.pack(*v)
     if t == 'f64' and (not math.isfinite(v)):
         raise ValueError('nonfinite')
     if t == 'bool' and v not in (0, 1):
         raise ValueError('boolean')
-    return struct.pack('<' + {'u64': 'Q', 'u32': 'I', 'f64': 'd', 'bool': 'B'}.get(t, 'I'), v)
+    return _SCALARS.get(t, _U32).pack(v)
 
 def _valid(f):
     if not 1 <= f.kind <= len(KINDS):
@@ -160,63 +221,111 @@ def _valid(f):
     if f.kind == 10 and v['physics_step_end'] < v['physics_step_begin']:
         raise ValueError('physics order')
 
-    def enums(t, v):
-        if t in SCHEMA:
-            for t2, n in SCHEMA[t]:
-                enums(t2, v[n])
-        elif t in ('Role', 'MessageKind', 'Disposition') and (not 1 <= v <= {'Role': 3, 'MessageKind': 5, 'Disposition': 2}[t]):
+    for path, field in _ENUM_PATHS[KINDS[f.kind - 1]]:
+        value = v
+        for key in path:
+            value = value[key]
+        if not 1 <= value <= _ENUM_LIMITS[field]:
             raise ValueError('enum')
-    enums(KINDS[f.kind - 1], v)
+    # Value validation owns finiteness for every f64 position, including whole
+    # joint and IMU/base vectors. The codec also rejects these while packing or
+    # unpacking; this keeps any Frame with non-finite measured data invalid no
+    # matter how it was built.
+    for path, scalar in _FLOAT_PATHS[KINDS[f.kind - 1]]:
+        value = v
+        for key in path:
+            value = value[key]
+        if not all(map(math.isfinite, (value,) if scalar else value)):
+            raise ValueError('nonfinite')
 
 def encode(frame: Frame) -> bytes:
     try:
         _valid(frame)
-        body = _pack('Id', frame.run_id) + struct.pack('<QIQQQ', frame.control_step, frame.phase, frame.logical_us, frame.physics_dt_us, frame.control_dt_us)
+        body = _pack('Id', frame.run_id) + _FRAME_HEAD.pack(
+            frame.control_step, frame.phase, frame.logical_us,
+            frame.physics_dt_us, frame.control_dt_us)
         body += _pack(KINDS[frame.kind - 1], frame.payload)
         if len(body) + 8 > MAX_PACKET_BYTES:
             raise ValueError('packet capacity')
-        return struct.pack('<IHH', len(body) + 8, VERSION, frame.kind) + body
+        return _HEADER.pack(len(body) + 8, VERSION, frame.kind) + body
     except (struct.error, OverflowError, TypeError, KeyError) as e:
         raise ValueError('invalid frame') from e
 
-def decode(payload: bytes) -> Frame:
-    pos = 0
-
-    def take(n):
-        nonlocal pos
-        if n > len(payload) - pos:
+def _unpack(t, payload, pos):
+    spec = _LAYOUT.get(t)
+    if spec is not None:
+        value = {}
+        for field, key in spec:
+            value[key], pos = _unpack(field, payload, pos)
+        return value, pos
+    if t in ('Id', 'Digest'):
+        size = 16 if t == 'Id' else 32
+        if size > len(payload) - pos:
             raise ValueError('truncated')
-        v = payload[pos:pos + n]
-        pos += n
-        return v
-
-    def unpack(t):
-        if t in SCHEMA:
-            return {n: unpack(t2) for t2, n in SCHEMA[t]}
-        if t in ('Id', 'Digest'):
-            return take(16 if t == 'Id' else 32)
-        if t in ('Joints', 'Text256'):
-            n = struct.unpack('<I', take(4))[0]
-            if n > (64 if t == 'Joints' else 256):
-                raise ValueError('capacity')
-            return tuple((unpack('f64') for _ in range(n))) if t == 'Joints' else take(n)
-        if t.startswith('A'):
-            return tuple((unpack('f64') for _ in range(int(t[1:]))))
-        fmt = {'u64': 'Q', 'u32': 'I', 'f64': 'd', 'bool': 'B'}.get(t, 'I')
-        v = struct.unpack('<' + fmt, take(struct.calcsize(fmt)))[0]
-        if t == 'f64' and (not math.isfinite(v)):
+        return payload[pos:pos + size], pos + size
+    if t in ('Joints', 'Text256'):
+        if 4 > len(payload) - pos:
+            raise ValueError('truncated')
+        n = _U32.unpack_from(payload, pos)[0]
+        pos += 4
+        if n > (64 if t == 'Joints' else 256):
+            raise ValueError('capacity')
+        size = 8 * n if t == 'Joints' else n
+        if size > len(payload) - pos:
+            raise ValueError('truncated')
+        end = pos + size
+        if t == 'Text256':
+            return payload[pos:end], end
+        if not n:
+            return (), pos
+        packed = _JOINTS.get(n)
+        if packed is None:
+            packed = _JOINTS[n] = struct.Struct('<%dd' % n)
+        values = packed.unpack_from(payload, pos)
+        # Bulk unpacking must not weaken the per-element f64 rule: a joint
+        # value is rejected exactly like a scalar f64 if it is not finite.
+        if not all(map(math.isfinite, values)):
             raise ValueError('nonfinite')
-        if t == 'bool' and v > 1:
-            raise ValueError('boolean')
-        return v
+        return values, end
+    if t.startswith('A'):
+        n = int(t[1:])
+        size = 8 * n
+        if size > len(payload) - pos:
+            raise ValueError('truncated')
+        packed = _ARRAYS.get(t)
+        if packed is None:
+            packed = _ARRAYS[t] = struct.Struct('<%dd' % n)
+        values = packed.unpack_from(payload, pos)
+        if not all(map(math.isfinite, values)):
+            raise ValueError('nonfinite')
+        return values, pos + size
+    packed = _SCALARS.get(t, _U32)
+    if packed.size > len(payload) - pos:
+        raise ValueError('truncated')
+    value = packed.unpack_from(payload, pos)[0]
+    if t == 'f64' and (not math.isfinite(value)):
+        raise ValueError('nonfinite')
+    if t == 'bool' and value > 1:
+        raise ValueError('boolean')
+    return value, pos + packed.size
+
+def decode(payload: bytes) -> Frame:
     if len(payload) > MAX_PACKET_BYTES:
         raise ValueError('packet capacity')
-    length, version, kind = struct.unpack('<IHH', take(8))
+    if 8 > len(payload):
+        raise ValueError('truncated')
+    length, version, kind = _HEADER.unpack_from(payload, 0)
     if length != len(payload) or version != VERSION or (not 1 <= kind <= len(KINDS)):
         raise ValueError('header')
-    run = take(16)
-    step, phase, logical, physics, control = struct.unpack('<QIQQQ', take(36))
-    f = Frame(kind, unpack(KINDS[kind - 1]), run, step, phase, logical, physics, control)
+    pos = 8
+    if 16 + _FRAME_HEAD.size > len(payload) - pos:
+        raise ValueError('truncated')
+    run = payload[pos:pos + 16]
+    pos += 16
+    step, phase, logical, physics, control = _FRAME_HEAD.unpack_from(payload, pos)
+    pos += _FRAME_HEAD.size
+    body, pos = _unpack(KINDS[kind - 1], payload, pos)
+    f = Frame(kind, body, run, step, phase, logical, physics, control)
     if pos != len(payload):
         raise ValueError('trailing bytes')
     _valid(f)

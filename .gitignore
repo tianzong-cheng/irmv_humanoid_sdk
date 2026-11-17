@@ -14,3 +14,8 @@ __pycache__/
 /web/playwright-report/
 /build-bench/
 /build-web-runtime-only/
+# Private CycloneDDS 11.0.1 source acquisition and prefix build, plus the
+# Debug/Release verification trees that consume it.
+/build-dds1101-private/
+/build-dds1101-debug/
+/build-simulation-release/

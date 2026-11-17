@@ -3,6 +3,8 @@
 #include <chrono>
 #include <utility>
 
+#include "irmv/transport/event_signal.hpp"
+
 namespace irmv::policy {
 
 PolicyVerdict JudgePolicyResult(const PolicyResponse &response,
@@ -56,8 +58,11 @@ constexpr std::uint32_t kInferenceStopTimeoutMs = 2000;
 }  // namespace
 
 struct InferenceWorker::Shared {
-  explicit Shared(std::shared_ptr<const OnnxModel> worker_model)
-      : model(std::move(worker_model)) {}
+  Shared(std::shared_ptr<const OnnxModel> worker_model, bool response_wake)
+      : model(std::move(worker_model)), response_wake_enabled(response_wake) {
+    if (response_wake_enabled && !response_signal.Open())
+      wake_failed.store(true);
+  }
 
   std::shared_ptr<const OnnxModel> model;
   // Owned by this worker and handed to every Run it starts, so Stop() can
@@ -79,10 +84,18 @@ struct InferenceWorker::Shared {
   std::atomic<std::uint64_t> completed{0};
   std::atomic<std::uint64_t> failed{0};
   std::atomic<std::uint64_t> uncollected{0};
+  // Simulation opt-in: only an explicit request opens the response eventfd and
+  // pays a notification per response.
+  bool response_wake_enabled{false};
+  // Latches a failed response wake so the simulation loop can report it
+  // instead of silently degrading to its host-deadline slice.
+  std::atomic<bool> wake_failed{false};
+  transport::EventSignal response_signal;
 };
 
-InferenceWorker::InferenceWorker(std::shared_ptr<const OnnxModel> model)
-    : shared_(std::make_shared<Shared>(std::move(model))) {
+InferenceWorker::InferenceWorker(std::shared_ptr<const OnnxModel> model,
+                                 bool response_wake)
+    : shared_(std::make_shared<Shared>(std::move(model), response_wake)) {
   const std::shared_ptr<Shared> shared = shared_;
   shared_->worker = std::thread([shared] { InferenceWorker::Run(shared); });
 }
@@ -118,6 +131,18 @@ bool InferenceWorker::TryTake(PolicyResponse *response) {
     return false;
   }
   return shared_->responses.TryTake(*response);
+}
+
+int InferenceWorker::ResponseFd() const {
+  return shared_->response_signal.fd();
+}
+
+void InferenceWorker::DrainResponseSignal() {
+  shared_->response_signal.Drain();
+}
+
+bool InferenceWorker::ResponseWakeFailed() const {
+  return shared_->wake_failed.load(std::memory_order_relaxed);
 }
 
 bool InferenceWorker::Stop() {
@@ -228,6 +253,11 @@ void InferenceWorker::Run(std::shared_ptr<Shared> shared) {
     // the same loss the request side counts: the newer step is the one that
     // matters.
     if (shared->responses.Publish(response, &evicted)) {
+      // Published first, then wake: a waiter that drains the notice and checks
+      // the channel can never miss this response. Disabled for non-simulation
+      // workers, which keep their previous no-descriptor behaviour.
+      if (shared->response_wake_enabled && !shared->response_signal.Notify())
+        shared->wake_failed.store(true, std::memory_order_relaxed);
       if (response.ok) {
         shared->completed.fetch_add(1);
       } else {

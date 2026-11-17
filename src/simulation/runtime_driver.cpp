@@ -35,6 +35,9 @@ bool RuntimeDriver::CompleteTick(const TickCompletion& c) noexcept {
     stop_write_ = torque.torque.write_id;
     stop_state_ = torque.torque.state_seq;
   }
+  // Torque is complete; put it on the endpoint now, before the manifest build
+  // and hash. FIFO keeps it ahead of the manifests and seal.
+  if (!session_.Flush()) return false;
   buffered_ = c.result;
   PhaseManifest p;
   p.identity = permit_.identity;

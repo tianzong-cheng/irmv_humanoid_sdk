@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 #include "irmv/configuration/application_config.hpp"
@@ -93,6 +94,12 @@ class ClientTransport {
   bool ReportSimulationProcessed(const simulation::MessageIdentity &) noexcept;
   bool TrySimulationAck(simulation::Frame *) noexcept;
   bool SimulationFailed() const noexcept;
+  // Level-triggered simulation progress descriptor, or -1 when no simulation
+  // is configured. The control thread polls it while it waits for receipts or
+  // installation instead of retrying on a fixed delay; the channels remain the
+  // authority. DrainSimulationWait clears only the notice.
+  int SimulationWaitFd() const noexcept;
+  void DrainSimulationWait() noexcept;
 
   void Start();
 
@@ -200,6 +207,13 @@ class ClientTransport {
  private:
   struct Impl;
 
+  // Signals the transport thread's simulation wake eventfd after the control
+  // thread queued work the thread owns (simulation installation, outbound
+  // requests/commands). The control thread performs no DDS call and takes no
+  // DDS lock here; the callback is a nonblocking eventfd write. Only a
+  // configured simulation installs it, so non-simulation timing is unchanged.
+  void WakeWorker() noexcept;
+
   // The request lanes, the result lane and the heartbeat lane are FIFO, so
   // their order survives and a full queue refuses the newest entry instead of
   // displacing an older one; the state and command lanes keep only the newest
@@ -237,6 +251,8 @@ class ClientTransport {
       sim_states_;
   std::unique_ptr<BoundedChannel<protocol::JointCommand, 64>> sim_commands_out_;
   std::unique_ptr<Impl> impl_;
+  std::function<void()> worker_wake_;
+  std::atomic<bool> worker_wake_failed_{false};
   std::atomic<bool> started_{false};
   std::atomic<std::uint64_t> stop_lane_published_{0};
   std::atomic<std::uint64_t> dropped_results_{0};

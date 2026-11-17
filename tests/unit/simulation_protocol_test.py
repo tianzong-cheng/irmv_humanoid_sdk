@@ -59,6 +59,66 @@ feedback = p.encode(p.golden_frames()[1])
 rejected(changed(feedback, 68, 'd', float('nan')))
 rejected(changed(feedback, 76, 'I', 65))
 rejected(changed(feedback, 76, 'I', 2 ** 32 - 1))
+
+# Every f64 slot of an otherwise well-formed wire must reject NaN and both
+# infinities. These wires keep the original length/version/kind header (only
+# the double payload bytes change), so this is not an encode-time echo: the
+# source frame is finite and the rejection has to happen while decoding.
+def double_slots(kind):
+    frame = p.golden_frames()[p.KINDS.index(kind)]
+    wire = p.encode(frame)
+    slots = []
+
+    def walk(t, v, path, pos):
+        if t in p.SCHEMA:
+            for member, key in p.SCHEMA[t]:
+                pos = walk(member, v[key], (path + '.' + key if path else key), pos)
+            return pos
+        if t in ('Id', 'Digest'):
+            return pos + (16 if t == 'Id' else 32)
+        if t in ('Joints', 'Text256'):
+            n = len(v)
+            pos += 4
+            if t == 'Joints':
+                for index in range(n):
+                    slots.append(('%s[%d]' % (path, index), pos))
+                    pos += 8
+            else:
+                pos += n
+            return pos
+        if t.startswith('A'):
+            for index in range(int(t[1:])):
+                slots.append(('%s[%d]' % (path, index), pos))
+                pos += 8
+            return pos
+        if t == 'f64':
+            slots.append((path, pos))
+            return pos + 8
+        return pos + {'u64': 8, 'u32': 4, 'bool': 1}.get(t, 4)
+
+    # The walk must account for the complete wire, or the offsets are wrong.
+    assert walk(kind, frame.payload, '', 60) == len(wire), kind
+    return slots
+
+feedback_slots = double_slots('Feedback')
+feedback_names = {name for name, _ in feedback_slots}
+assert {'engine_time_s', 'q[0]', 'q[1]', 'dq[1]', 'tau[1]', 'imu_quaternion[3]',
+        'imu_angular_velocity[2]', 'imu_specific_force[2]', 'base_position[2]',
+        'base_velocity[5]'} <= feedback_names, feedback_names
+torque_slots = double_slots('Torque')
+assert {'tau[0]', 'tau[1]'} <= {name for name, _ in torque_slots}, torque_slots
+for kind, slots in (('Feedback', feedback_slots), ('Torque', torque_slots)):
+    wire = p.encode(p.golden_frames()[p.KINDS.index(kind)])
+    for name, offset in slots:
+        for value in (float('nan'), float('inf'), float('-inf')):
+            try:
+                p.decode(changed(wire, offset, 'd', value))
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(('accepted non-finite', kind, name, value))
+            rejected(changed(wire, offset, 'd', value))
+
 manifest = p.encode(p.golden_frames()[3])
 rejected(changed(manifest, 64, 'I', 0))
 ack = p.encode(p.golden_frames()[4])

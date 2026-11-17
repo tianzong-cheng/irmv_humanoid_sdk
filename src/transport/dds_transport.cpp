@@ -1,7 +1,10 @@
 #include "irmv/transport/dds_transport.hpp"
 
+#include <poll.h>
+
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -9,6 +12,7 @@
 #include <exception>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -16,11 +20,40 @@
 #include "dds_loop.hpp"
 #include "irmv/protocol/types.hpp"
 #include "irmv/transport/codec.hpp"
+#include "irmv/transport/event_signal.hpp"
 
 namespace irmv::transport {
 namespace {
 
 namespace wire = irmv::protocol::wire;
+
+// Batches read per simulation wake before yielding to outbound writes; a full
+// batch means the lane may have more, so the worker self-wakes to continue.
+constexpr int kSimulationDrainRounds = 8;
+
+// Shutdown-safety bound for the simulation worker's blocking wait. Wakes are
+// published after the data they announce, so this never delays ready work; it
+// only lets a worker leave if a wake notification itself failed. Stop() also
+// writes the same eventfd.
+constexpr int kSimulationWakePollMs = 100;
+
+// Wake-only DDS listener. Middleware callbacks may not take samples or call
+// any other DDS operation here: they only make the worker's eventfd readable.
+// The sole transport thread performs every read, write and entity operation.
+template <typename T>
+class DataAvailableWake final : public dds::sub::NoOpDataReaderListener<T> {
+ public:
+  DataAvailableWake(EventSignal &wake, std::atomic<bool> &failed) noexcept
+      : wake_(wake), failed_(failed) {}
+
+  void on_data_available(dds::sub::DataReader<T> &) noexcept override {
+    if (!wake_.Notify()) failed_.store(true, std::memory_order_relaxed);
+  }
+
+ private:
+  EventSignal &wake_;
+  std::atomic<bool> &failed_;
+};
 
 // Reads the effective policies back from a live endpoint. Diagnostic only: the
 // control path never calls it, and a failing query is reported instead of being
@@ -104,17 +137,57 @@ struct DdsTransport::Impl {
     waitset += request_condition;
     waitset += command_condition;
     waitset += heartbeat_condition;
+    if (owner.simulation_) {
+      // The wake path is an eventfd only: control and middleware callbacks make
+      // no DDS call, and this transport thread performs every DDS operation.
+      if (!simulation_wake.Open())
+        throw std::runtime_error("simulation wake eventfd");
+      request_wake =
+          std::make_unique<DataAvailableWake<wire::ExecutionRequest>>(
+              simulation_wake, owner.worker_wake_failed_);
+      command_wake = std::make_unique<DataAvailableWake<wire::JointCommand>>(
+          simulation_wake, owner.worker_wake_failed_);
+      heartbeat_wake =
+          std::make_unique<DataAvailableWake<wire::SupervisorHeartbeat>>(
+              simulation_wake, owner.worker_wake_failed_);
+      try {
+        request_reader.listener(
+            request_wake.get(),
+            dds::core::status::StatusMask::data_available());
+        command_reader.listener(
+            command_wake.get(),
+            dds::core::status::StatusMask::data_available());
+        heartbeat_reader.listener(
+            heartbeat_wake.get(),
+            dds::core::status::StatusMask::data_available());
+      } catch (...) {
+        // dds_set_listener can throw after an earlier reader was attached.
+        // Quiesce every simulation reader while the listeners and eventfd are
+        // still alive before member unwinding destroys them.
+        QuiesceReaders();
+        throw;
+      }
+    }
   }
+  ~Impl() { QuiesceReaders(); }
 
-  void Start() { thread = std::thread(&Impl::Run, this); }
+  void Start() {
+    thread = std::thread(&Impl::Run, this);
+    // Registration can precede the thread start; one initial wake makes the
+    // worker drain anything that was already available.
+    if (simulation_wake.valid()) simulation_wake.Notify();
+  }
 
   void Run();
   bool ReadInbound();
+  bool ReadInboundDrain();
   void ReadRequests();
   void ReadCommands();
   void ReadHeartbeats();
   void WriteOutbound();
   void Stop();
+  void WakeControl() noexcept;
+  void QuiesceReaders() noexcept;
 
   DdsTransport &owner;
   dds::domain::DomainParticipant participant;
@@ -125,6 +198,13 @@ struct DdsTransport::Impl {
   dds::topic::Topic<wire::SupervisorHeartbeat> heartbeat_topic;
   dds::topic::Topic<wire::ExecutionResult> result_topic;
   dds::topic::Topic<wire::RobotState> state_topic;
+  // Declared before the readers and the listeners it feeds: the eventfd must
+  // outlive every middleware callback that can write it. Opened only when a
+  // simulation is configured.
+  EventSignal simulation_wake;
+  std::unique_ptr<DataAvailableWake<wire::ExecutionRequest>> request_wake;
+  std::unique_ptr<DataAvailableWake<wire::JointCommand>> command_wake;
+  std::unique_ptr<DataAvailableWake<wire::SupervisorHeartbeat>> heartbeat_wake;
   dds::sub::DataReader<wire::ExecutionRequest> request_reader;
   dds::sub::DataReader<wire::JointCommand> command_reader;
   dds::sub::DataReader<wire::SupervisorHeartbeat> heartbeat_reader;
@@ -134,6 +214,10 @@ struct DdsTransport::Impl {
   dds::sub::cond::ReadCondition command_condition;
   dds::sub::cond::ReadCondition heartbeat_condition;
   dds::core::cond::WaitSet waitset;
+  // Samples taken by the most recent read of each lane, so the simulation
+  // drain can tell whether a listener wake still has a backlog behind it.
+  std::size_t request_taken_{0}, command_taken_{0}, heartbeat_taken_{0};
+  bool simulation_readers_closed_{false};
   std::thread thread;
   std::atomic<bool> stop_requested{false};
   std::mutex done_mutex;
@@ -144,22 +228,38 @@ struct DdsTransport::Impl {
 void DdsTransport::Impl::Run() {
   while (!stop_requested.load(std::memory_order_relaxed)) {
     bool data_available = false;
-    try {
-      data_available =
-          !waitset.wait(dds::core::Duration::from_millisecs(kWaitTimeoutMs))
-               .empty();
-    } catch (const dds::core::TimeoutError &) {
-      // The pinned WaitSet reports a timeout by throwing; that is the normal
-      // "nothing to read within the wait window" path.
-      data_available = false;
-    } catch (const std::exception &) {
-      // A failing wait means the entities this thread owns are unusable. Leave
-      // the loop instead of spinning on the error: the channels keep working
-      // and started() turns false.
-      break;
+    if (simulation_wake.valid()) {
+      // Simulation: block on the wake eventfd until control, a DDS listener,
+      // or Stop writes it. This thread does every read and write after waking,
+      // so there is no polling floor on ready work.
+      pollfd descriptor{simulation_wake.fd(), POLLIN, 0};
+      const int ready = ::poll(&descriptor, 1, kSimulationWakePollMs);
+      if (ready < 0 && errno == EINTR)
+        continue;  // outer loop rechecks stop and recomputes the wait
+      if (ready < 0 || (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)))
+        break;
+      simulation_wake.Drain();
+      if (stop_requested.load(std::memory_order_relaxed)) break;
+    } else {
+      try {
+        data_available =
+            !waitset.wait(dds::core::Duration::from_millisecs(kWaitTimeoutMs))
+                 .empty();
+      } catch (const dds::core::TimeoutError &) {
+        // The pinned WaitSet reports a timeout by throwing; that is the normal
+        // "nothing to read within the wait window" path.
+        data_available = false;
+      } catch (const std::exception &) {
+        // A failing wait means the entities this thread owns are unusable.
+        // Leave the loop instead of spinning on the error: the channels keep
+        // working and started() turns false.
+        break;
+      }
     }
     if (owner.simulation_) owner.simulation_->WorkerUpdate();
-    if (data_available && !ReadInbound()) {
+    if (simulation_wake.valid()) {
+      if (!ReadInboundDrain()) break;
+    } else if (data_available && !ReadInbound()) {
       break;
     }
     WriteOutbound();
@@ -185,6 +285,23 @@ bool DdsTransport::Impl::ReadInbound() {
                      [this]() { ReadHeartbeats(); });
 }
 
+bool DdsTransport::Impl::ReadInboundDrain() {
+  // Middleware notifications coalesce. A listener wake therefore does not
+  // promise that one batch empties a lane: read while any lane returned a full
+  // batch, then self-wake so a remaining backlog continues on the next
+  // iteration instead of waiting for the shutdown-safety timeout.
+  for (int round = 0; round < kSimulationDrainRounds; ++round) {
+    if (!ReadInbound()) return false;
+    const auto batch = static_cast<std::size_t>(kReadBatch);
+    if (request_taken_ < batch && command_taken_ < batch &&
+        heartbeat_taken_ < batch)
+      return true;
+    if (stop_requested.load(std::memory_order_relaxed)) return true;
+  }
+  simulation_wake.Notify();
+  return true;
+}
+
 void DdsTransport::Impl::ReadRequests() {
   // All samples of one read share the host receive time of that read.
   {
@@ -193,6 +310,7 @@ void DdsTransport::Impl::ReadRequests() {
                        .max_samples(kReadBatch)
                        .state(dds::sub::status::DataState::any())
                        .take();
+    request_taken_ = samples.length();
     for (const auto &sample : samples) {
       if (!sample.info().valid()) {
         continue;
@@ -237,6 +355,7 @@ void DdsTransport::Impl::ReadCommands() {
                        .max_samples(kReadBatch)
                        .state(dds::sub::status::DataState::any())
                        .take();
+    command_taken_ = samples.length();
     for (const auto &sample : samples) {
       if (!sample.info().valid()) {
         continue;
@@ -284,6 +403,7 @@ void DdsTransport::Impl::ReadHeartbeats() {
                        .max_samples(kReadBatch)
                        .state(dds::sub::status::DataState::any())
                        .take();
+    heartbeat_taken_ = samples.length();
     for (const auto &sample : samples) {
       if (!sample.info().valid()) {
         continue;
@@ -349,8 +469,36 @@ void DdsTransport::Impl::WriteOutbound() {
   }
 }
 
+void DdsTransport::Impl::WakeControl() noexcept {
+  if (!simulation_wake.Notify())
+    owner.worker_wake_failed_.store(true, std::memory_order_relaxed);
+}
+
+void DdsTransport::Impl::QuiesceReaders() noexcept {
+  // Reader::close() calls prevent_callbacks() before it clears the listener,
+  // so it waits out every C++ callback while listener objects and the eventfd
+  // are still alive. Plain listener(nullptr) mutates the raw listener pointer
+  // before that wait, which can race an already-entered callback. Idempotent
+  // and simulation-only; non-simulation readers keep their normal teardown.
+  if (simulation_readers_closed_ || !owner.simulation_) return;
+  simulation_readers_closed_ = true;
+  try {
+    request_reader.close();
+  } catch (...) {
+  }
+  try {
+    command_reader.close();
+  } catch (...) {
+  }
+  try {
+    heartbeat_reader.close();
+  } catch (...) {
+  }
+}
+
 void DdsTransport::Impl::Stop() {
   stop_requested.store(true, std::memory_order_relaxed);
+  simulation_wake.Notify();
   {
     // Bounded wait for the thread to leave its loop; every blocking operation
     // in that loop is bounded as well, so the join below is immediate.
@@ -361,6 +509,9 @@ void DdsTransport::Impl::Stop() {
   if (thread.joinable()) {
     thread.join();
   }
+  // Join first, then quiesce the middleware callbacks: no worker remains and
+  // Reader::close waits out any callback already running.
+  QuiesceReaders();
 }
 
 DdsTransport::DdsTransport(const configuration::RuntimeConfig &config)
@@ -380,7 +531,9 @@ bool DdsTransport::ConfigureSimulation(const simulation::LogicalClock &clock) {
 }
 bool DdsTransport::BeginSimulationPhase(
     const simulation::PhaseManifest &m) noexcept {
-  return simulation_ && simulation_->ControlBegin(m);
+  const bool begun = simulation_ && simulation_->ControlBegin(m);
+  if (begun) WakeWorker();
+  return begun;
 }
 bool DdsTransport::SimulationPhaseInstalled(
     const simulation::PhaseManifest &m) noexcept {
@@ -397,7 +550,25 @@ bool DdsTransport::TrySimulationAck(simulation::Frame *f) noexcept {
   return simulation_ && simulation_->ControlAck(f);
 }
 bool DdsTransport::SimulationFailed() const noexcept {
-  return simulation_ && simulation_->Failed();
+  return simulation_ && (simulation_->Failed() ||
+                         worker_wake_failed_.load(std::memory_order_relaxed));
+}
+int DdsTransport::SimulationWaitFd() const noexcept {
+  return simulation_ ? simulation_->ControlWaitFd() : -1;
+}
+void DdsTransport::DrainSimulationWait() noexcept {
+  if (simulation_) simulation_->ControlDrainSignal();
+}
+void DdsTransport::WakeWorker() noexcept {
+  if (!simulation_ || !worker_wake_) return;
+  try {
+    worker_wake_();
+  } catch (...) {
+    // The callback is an eventfd write; an exception means the wake path is
+    // unusable. Fail the simulation instead of silently falling back to the
+    // bounded safety wait.
+    worker_wake_failed_.store(true, std::memory_order_relaxed);
+  }
 }
 
 void DdsTransport::Start() {
@@ -411,13 +582,36 @@ void DdsTransport::Start() {
   // just because the store had not happened yet, and a launch that throws
   // restores both. The transport thread clears the flag on its way out
   // (Impl::Run), which is what turns started() false when the loop ends.
-  std::unique_ptr<Impl> impl = std::make_unique<Impl>(config_, *this);
+  std::unique_ptr<Impl> impl;
+  try {
+    impl = std::make_unique<Impl>(config_, *this);
+  } catch (...) {
+    // No callback was installed before construction completed; keep the owner
+    // free of any pointer into a failed implementation regardless.
+    worker_wake_ = nullptr;
+    throw;
+  }
   impl_ = std::move(impl);
   started_.store(true, std::memory_order_release);
+  if (simulation_) {
+    // Install the control wake callback only after the implementation is fully
+    // constructed and owned, so a constructor unwind cannot leave the owner
+    // holding a callback into a destroyed object.
+    try {
+      Impl *worker = impl_.get();
+      worker_wake_ = [worker] { worker->WakeControl(); };
+    } catch (...) {
+      started_.store(false, std::memory_order_release);
+      worker_wake_ = nullptr;
+      impl_.reset();
+      throw;
+    }
+  }
   try {
     impl_->Start();
   } catch (...) {
     started_.store(false, std::memory_order_release);
+    worker_wake_ = nullptr;
     impl_.reset();
     throw;
   }
@@ -428,6 +622,8 @@ void DdsTransport::Stop() {
     return;
   }
   impl_->Stop();
+  // The callback captures the implementation; the thread is joined by now.
+  worker_wake_ = nullptr;
   impl_.reset();
   started_.store(false, std::memory_order_release);
 }
@@ -510,6 +706,9 @@ void DdsTransport::Publish(const runtime::TickResult &result) {
     dropped_results_.fetch_add(result.result_count - count,
                                std::memory_order_relaxed);
   }
+  // The state and result writes belong to the transport thread. Without this
+  // the control thread's output would wait for the WaitSet timeout.
+  WakeWorker();
 }
 
 std::uint64_t DdsTransport::dropped_result_count() const {

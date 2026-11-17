@@ -9,6 +9,108 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Optional
+
+
+# The exact pair this SDK requires. If cmake/Dependencies.cmake drifts from
+# these values, the positive prefix check below stops accepting the manifest
+# this test writes.
+PINNED_CYCLONEDDS = {
+    "version": "11.0.1",
+    "c": "e54e991f75a3e67f8e628da3171122e36ea5b872",
+    "cxx": "20ccaa519ca09a7b1776b8630389aa19ce8da61a",
+}
+OLD_CYCLONEDDS = {
+    "version": "0.10.5",
+    "c": "2cdd114cbd18340c606573b4cc8dc20cc161ec5a",
+    "cxx": "50984cfc9a92d1ae1903d7b1479a110c77fba240",
+}
+
+
+def write_cyclonedds_prefix(prefix: Path, manifest: Optional[str]) -> None:
+    """Creates the layout irmv_require_cyclonedds_prefix inspects."""
+    (prefix / "lib/cmake/CycloneDDS").mkdir(parents=True)
+    (prefix / "lib/cmake/CycloneDDS-CXX").mkdir(parents=True)
+    (prefix / "lib/cmake/CycloneDDS/CycloneDDSConfig.cmake").write_text("")
+    (prefix / "lib/cmake/CycloneDDS-CXX/CycloneDDS-CXXConfig.cmake").write_text(
+        "")
+    (prefix / "lib/libddsc.so.11").write_bytes(b"")
+    (prefix / "lib/libddscxx.so.11").write_bytes(b"")
+    if manifest is not None:
+        (prefix / "irmv-cyclonedds-manifest.txt").write_text(manifest)
+
+
+def check_cyclonedds_prefix_contract(source: Path,
+                                     directory: Path) -> Optional[str]:
+    """Returns a failure description, or None when the contract holds.
+
+    The check drives irmv_require_cyclonedds_prefix directly, so it proves the
+    manifest identity pins without configuring or fetching any dependency.
+    """
+    script = directory / "require-cyclonedds-prefix.cmake"
+    dependencies = (source / "cmake/Dependencies.cmake").as_posix()
+    script.write_text(
+        f'include("{dependencies}")\n'
+        'irmv_require_cyclonedds_prefix("${PREFIX}")\n')
+
+    def run(prefix: Path):
+        return subprocess.run(
+            ["cmake", f"-DPREFIX={prefix}", "-P", str(script)],
+            text=True, capture_output=True)
+
+    pinned = directory / "cyclonedds-pinned"
+    write_cyclonedds_prefix(
+        pinned,
+        "irmv-cyclonedds-manifest 2\n"
+        f"cyclonedds-version={PINNED_CYCLONEDDS['version']}\n"
+        f"cyclonedds={PINNED_CYCLONEDDS['c']}\n"
+        f"cyclonedds-cxx={PINNED_CYCLONEDDS['cxx']}\n")
+    result = run(pinned)
+    if result.returncode != 0:
+        return ("a prefix with the pinned 11.0.1 manifest is refused\n" +
+                result.stderr)
+
+    old = directory / "cyclonedds-old"
+    write_cyclonedds_prefix(
+        old,
+        "irmv-cyclonedds-manifest 1\n"
+        f"cyclonedds={OLD_CYCLONEDDS['c']}\n"
+        f"cyclonedds-cxx={OLD_CYCLONEDDS['cxx']}\n")
+    wrong_version = directory / "cyclonedds-wrong-version"
+    write_cyclonedds_prefix(
+        wrong_version,
+        "irmv-cyclonedds-manifest 2\n"
+        "cyclonedds-version=11.0.0\n"
+        f"cyclonedds={PINNED_CYCLONEDDS['c']}\n"
+        f"cyclonedds-cxx={PINNED_CYCLONEDDS['cxx']}\n")
+    wrong_commit = directory / "cyclonedds-wrong-commit"
+    write_cyclonedds_prefix(
+        wrong_commit,
+        "irmv-cyclonedds-manifest 2\n"
+        f"cyclonedds-version={PINNED_CYCLONEDDS['version']}\n"
+        f"cyclonedds={PINNED_CYCLONEDDS['c']}\n"
+        "cyclonedds-cxx=" + "0" * 40 + "\n")
+    for prefix_path, label in (
+            (old, "a prefix built from the previous 0.10.5 pins"),
+            (wrong_version, "a prefix pinned to the wrong release"),
+            (wrong_commit, "a prefix pinned to a wrong C++ commit")):
+        result = run(prefix_path)
+        if result.returncode == 0:
+            return label + " configured successfully"
+        message = " ".join(result.stderr.split())
+        if "manifest does not pin CycloneDDS 11.0.1" not in message:
+            return (label + " is not refused as a non-pinned prefix\n" +
+                    result.stderr)
+
+    unmanifested = directory / "cyclonedds-unmanifested"
+    write_cyclonedds_prefix(unmanifested, None)
+    result = run(unmanifested)
+    if result.returncode == 0:
+        return "a prefix without provenance was accepted"
+    message = " ".join(result.stderr.split())
+    if "no irmv-cyclonedds-manifest.txt" not in message:
+        return ("the missing-manifest refusal is not named\n" + result.stderr)
+    return None
 
 
 def main() -> int:
@@ -23,6 +125,11 @@ def main() -> int:
         return 1
 
     with tempfile.TemporaryDirectory(prefix="irmv-package-") as directory:
+        failure = check_cyclonedds_prefix_contract(source, Path(directory))
+        if failure is not None:
+            print("FAIL: CycloneDDS prefix contract\n" + failure)
+            return 1
+
         build = Path(directory) / "runtime-only"
         configure = ["cmake", "-S", str(source), "-B", str(build),
                      "-DIRMV_BUILD_APPLICATION=OFF",

@@ -40,6 +40,12 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+// Bounded host slice for waits whose wake source is not a descriptor: a raw
+// SIGINT/SIGTERM flag must stay observable. Ready work wakes the simulation
+// drivers' descriptors immediately, so this bounds cancellation latency only
+// and never delays a handoff that is already ready.
+constexpr protocol::TimeUs kHostWakeSliceUs = 10000;
+
 // Every diagnostic of the control thread, of the trace worker and of the exit
 // path goes through the bounded writer. stderr may be a pipe nobody drains -
 // the logger can even be left detached inside a sink parked on it - and neither
@@ -2078,7 +2084,7 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
           backend->Close();
           return kExitStartupError;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        simulation_driver->WaitForProgress(kHostWakeSliceUs);
       }
     }
     // The read starts at this instant, but the tick is evaluated at a later
@@ -2116,10 +2122,12 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
         simulation::MessageIdentity id;
         if (!simulation::Identify(sample, &id)) return false;
         while (!simulation_driver->Processed(id)) {
-          if (simulation_driver->Failed() ||
-              simulation::DriverHostUs() >= end || g_stop_requested.load())
+          const auto now = simulation::DriverHostUs();
+          if (simulation_driver->Failed() || now >= end ||
+              g_stop_requested.load())
             return false;
-          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          simulation_driver->WaitForProgress(
+              std::min(end - now, kHostWakeSliceUs));
         }
         return true;
       };
@@ -2228,14 +2236,15 @@ int RunStandaloneRuntime(const RuntimeOptions &options) {
         const auto end = simulation::DriverHostUs() +
                          config.simulation->host_phase_timeout_us;
         while (!simulation_driver->FinishStop()) {
-          if (simulation_driver->Failed() ||
-              simulation::DriverHostUs() >= end) {
+          const auto now = simulation::DriverHostUs();
+          if (simulation_driver->Failed() || now >= end) {
             StderrLine(
                 "robot_runtime: simulation ZeroTorque engine handoff "
                 "stopped-unproven\n");
             return kExitStartupError;
           }
-          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          simulation_driver->WaitForProgress(
+              std::min(end - now, kHostWakeSliceUs));
         }
         // Acknowledge consumption by closing the phase endpoint now. DDS and
         // telemetry teardown have separate lifetimes and must not hold the

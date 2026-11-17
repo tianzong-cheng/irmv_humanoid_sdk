@@ -23,6 +23,20 @@ Live launch requires asset-manifest `collision_support_version=1`; older
 declarations must be regenerated with `prepare_simulation_asset.py`, not patched
 or grandfathered. Historical records remain available for offline analysis.
 
+The DDS dependency is the matched CycloneDDS 11.0.1 pair (C runtime and C++
+binding, commits recorded in `cmake/Dependencies.cmake`). It carries the upstream
+fix for the listener-argument use-after-free that could crash a process during
+endpoint construction while discovery matched a live peer: 200 measured
+startups on the old 0.10.5 pin crashed 4 times, 20 fresh startups plus 1000
+create/destroy churn rounds on 11.0.1 crashed none. `0.10.x` has no release
+containing that fix, so it cannot be pinned safely.
+
+11.0.1 is not wire-compatible with an `0.10.5`-built peer: the two IDL
+generators publish different XTypes type information, and the `lo` discovery
+assumption differs, so mixed pairs never match. Build `robot_runtime`,
+`application` and `external_producer` from the same tree; an old prefix or
+manifest is refused by configure rather than silently accepted.
+
 
 ```sh
 # All paths are explicit; consult --help for required preparation arguments.
@@ -310,7 +324,12 @@ python3 tools/sim_launch.py --config /path/to/fresh/prepared/sdk.json \
 ```
 
 Use `--viewer-follow` instead for an initially base-following camera (it also
-enables the viewer). Native left-drag rotates, right-drag pans and the mouse
+enables the viewer). `--viewer-no-shadow` opens the viewer without the cast
+ground shadow; lighting, sky gradient and the checker ground stay. That pass
+costs about 0.24 ms per control interval on the same GPU the physics engine
+uses, which is the difference between roughly 0.9x and 1.0x real time on the
+laptop GPU measured here, so it is an explicit opt-in rather than the default.
+Native left-drag rotates, right-drag pans and the mouse
 wheel zooms. Send SDK behavior keys from the launching terminal, not the viewer
 window. Closing the window closes visualization only; application `x` still
 leaves through Damping, and Ctrl-C in the launcher requests whole-experiment
@@ -396,42 +415,50 @@ interpreter teardown. The actual native probe then closed with exit0.
 
 ### Simulation time versus wall time
 
-The overlay shows completed **logical simulation time**, not wall time. A30Hz
-display cap does not imply real-time physics. Warm local RTX3070 measurements
-with MuJoCo/MuJoCo Warp3.9.0 and Warp1.15.0 found:
+The overlay shows completed **logical simulation time**, not wall time. Current
+warm local RTX3070 measurements with MuJoCo/MuJoCo Warp3.9.0, Warp1.15.0 and the
+matched CycloneDDS 11.0.1 pair, held base, Standby and zero torque:
 
-|Mode|Mean host milliseconds per2ms control interval|Simulation/wall time|
+|Mode|Mean host milliseconds per 2 ms control interval|Simulation/wall time|
 |---|---:|---:|
-|Full SDK, headless|59.24|0.03376|
-|Full SDK, native daylight viewer|59.74|0.03348|
-|Engine only, no SDK/viewer|15.46|0.12937|
+|Full SDK, headless|1.74|1.15|
+|Full SDK, viewer with shadow|2.20|0.91|
+|Full SDK, viewer `--viewer-no-shadow`|1.95|1.02|
 
-The paired SDK runs used the same prepared physics/configuration, held base,
-Standby and zero torque. Each excludes the first100 control intervals and
-measures200 intervals (0.4 simulation seconds); both obtained independent stop
-proof, SDK exits[0,0], and the native child also exited0. This is a short timing
-diagnostic, not locomotion or60s acceptance, nor a throughput guarantee.
-The engine-only measurement excludes40 warmup intervals and measures120.
+Each row is a 10 s steady window after 100 warm intervals; all runs ended
+`Closed` with independent stop proof, SDK exits[0,0] and a clean viewer exit.
+This is a throughput measurement of the SDK pipeline, not locomotion or 60 s
+policy acceptance. Viewer cost scales with the retained render passes, not with
+the control period: the shadow pass alone is ≈0.24 ms per interval, and no
+lossless scene flag (haze, reflection, idle-skip, smaller window) moved the
+cycle outside its ±0.04 ms noise band. The host is also thermally throttled
+(≈86 °C, 1.75 GHz late in a session) and carries desktop IO pressure, so the same
+tree measured 0.98x earlier when cooler.
 
-Headless handoff barriers averaged27.01ms runtime-to-application and11.56ms
-application-to-runtime; completed GPU feedback then waited about5.02ms for
-coordinator observation, on top of15.51ms of engine operation. Important costs:
+Getting here from 60.6 ms/cycle took three independent changes, each measured
+and regression-covered rather than guessed:
 
-- `src/simulation/endpoint.cpp`: outbound SPSC writes do not wake the IPC
-  thread, which polls at5ms intervals; multiple handoffs accumulate this cost.
-- `tools/simulation/main.py`: worker results enter a queue without waking the
-  coordinator's selector, whose wait is capped at10ms.
-- MuJoCo Warp single-world stepping: the CPU profiler observed roughly400
-  kernel launches per control interval, plus full host feedback extraction and
-  small device-to-host reads. Profiled absolute times include profiler overhead;
-  the table uses unprofiled timing.
+- **Wakeups instead of polling** (`src/simulation/endpoint.cpp`,
+  `tools/simulation/main.py`, DDS transports, simulation loop drivers): an
+  eventfd now carries control→worker work, a wake-only DDS listener reports
+  inbound data to the sole transport thread, worker results wake the
+  coordinator selector, and driven waits replace fixed 5/10 ms sleeps. Ready
+  work is never parked behind a timeout.
+- **CUDA graphs and compact readback** (`tools/simulation/mujoco_warp_engine.py`):
+  each control interval replays one captured physics-step graph per substep plus
+  a tail graph (endpoint forward, compact gather) with four small copies, and a
+  single pinned control upload. Per-substep clock/overflow checks still run
+  before the next substep. The engine operation fell from 14.6–16.4 ms to
+  1.20 ms standalone while staying bit-identical to the eager path over 300
+  cycles including release.
+- **Physics/application overlap** (`tools/simulation/coordinator.py`): the
+  interval `[t, t+dt)` is issued once the runtime's torque is accepted and its
+  phase-1 inventory is proven, and the application phase handshake of the same
+  step runs concurrently. The next tick still requires both phase
+  completions and the completed feedback; see the protocol document for the
+  release offset and the `physics_in_flight` failure semantics this implies.
 
-Thus the approximately30x slowdown is in actual stepping and host-side
-coordination, not a viewer playback-speed setting. This display change does
-not claim a speedup. Keep coherent feedback, logical deadlines and consumption
-barriers intact when optimizing wakeups or GPU submission.
-
-Raw evidence: `build/simulation-timing/{report,sdk-comparison,lighting-proof}.json`,
+Raw evidence: `build/simulation-timing/{report,sdk-comparison,final2-headless,final2-viewer,noshadow-viewer,render-opt-sweep-final}.json`,
 `engine-profile.txt`, hardware/version metadata and native screenshots.
-Older user recordings with missing shutdown proof remain failures; the new
+Older recordings with missing shutdown proof remain failures; the new
 successful timing runs do not retrospectively certify them.

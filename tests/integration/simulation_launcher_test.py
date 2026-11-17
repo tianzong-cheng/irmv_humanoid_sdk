@@ -234,7 +234,31 @@ class OwnershipTest(unittest.TestCase):
                 finally:owner.close()
             self.assertTrue(owner.viewer.closed)
 
-class ActualSdkTest(unittest.TestCase):
+    def test_shadowless_flag_opens_viewer_with_the_mode_set(self):
+        from unittest.mock import patch,Mock
+        seen={}
+        class RecordingViewer:
+            def __init__(self,*args,**kwargs):seen.update(kwargs);self.closed=False
+            def start(self,timeout):pass
+            def publish(self,*args):pass
+            def close(self):self.closed=True
+            def status(self):return dict(state='closed')
+        with tempfile.TemporaryDirectory() as d:
+            owner,normalize=self.fixture(d)
+            # Only the shadow option is given: it must still open a viewer, and
+            # it must tell the publisher to clear the shadow pass.
+            owner.viewer_enabled=True
+            owner.viewer_no_shadow=True
+            owner.viewer_factory=RecordingViewer
+            child=Mock();child.poll.return_value=0;child.returncode=0
+            with normalize,patch('sim_launch.subprocess.Popen',return_value=child):
+                try:
+                    owner.start()
+                    self.assertIs(seen.get('no_shadow'),True)
+                    self.assertIs(seen.get('follow'),False)
+                finally:owner.close()
+            self.assertTrue(owner.viewer.closed)
+
     def test_owner_closes_active_application(self):
         self.active_close('healthy')
 

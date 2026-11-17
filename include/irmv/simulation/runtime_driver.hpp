@@ -19,6 +19,9 @@ class RuntimeDriver {
     return session_.ShutdownAuthorized();
   }
   bool FinishStop() noexcept;
+  bool WaitForProgress(protocol::TimeUs timeout_us) noexcept {
+    return session_.WaitForProgress(timeout_us);
+  }
   bool Failed() const noexcept { return session_.Failed(); }
 
  private:

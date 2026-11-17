@@ -13,6 +13,7 @@
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <optional>
@@ -292,6 +293,47 @@ bool ReadTerminal(InputRouter *router, std::array<char, kReadChunk> *buffer,
     return true;
   }
   return false;
+}
+
+// Bounded host slice for waits whose wake source is not a descriptor (a host
+// stop request, or a phase that fails without a signal). Ready work always
+// wakes a descriptor, so this only bounds cancellation latency and never adds a
+// retry delay to a handoff.
+constexpr protocol::TimeUs kHostWakeSliceUs = 10000;
+
+int PollTimeoutMs(protocol::TimeUs timeout_us) {
+  if (timeout_us == 0) return 0;
+  const protocol::TimeUs ms = (timeout_us + 999) / 1000;
+  return ms > static_cast<protocol::TimeUs>(std::numeric_limits<int>::max())
+             ? std::numeric_limits<int>::max()
+             : static_cast<int>(ms);
+}
+
+// Waits up to `timeout_us` for the next simulation-space progress: endpoint
+// traffic, DDS simulation receipts, the policy response signal, or terminal
+// input. Only the level-triggered notices are drained; the queues that carry
+// the data are read by the caller's own condition checks. Every wait site
+// checks its condition before calling this and after it returns.
+void WaitSimulationProgress(simulation::ApplicationDriver *driver,
+                            policy::InferenceWorker *worker, bool input_lost,
+                            protocol::TimeUs timeout_us) {
+  struct pollfd descriptors[4] = {};
+  nfds_t count = 0;
+  const auto add = [&](int fd) {
+    if (fd >= 0) descriptors[count++] = {fd, POLLIN, 0};
+  };
+  add(driver->WaitFd());
+  add(driver->TransportWaitFd());
+  add(worker->ResponseFd());
+  if (!input_lost) add(STDIN_FILENO);
+  const int ready = ::poll(descriptors, count, PollTimeoutMs(timeout_us));
+  if (ready < 0 && errno == EINTR) {
+    // Let the caller recheck its absolute host deadline and stop flags with a
+    // recomputed budget instead of restarting the whole timeout here.
+    return;
+  }
+  driver->DrainWait();
+  worker->DrainResponseSignal();
 }
 
 // ---------------------------------------------------------------------------
@@ -673,7 +715,8 @@ int RunApplication(const ApplicationOptions &options,
       transport.Stop();
       return kExitStartupError;
     }
-    worker = std::make_unique<policy::InferenceWorker>(model);
+    worker = std::make_unique<policy::InferenceWorker>(
+        model, simulation_driver != nullptr);
     std::printf(
         "[application] policy=%s sha256=%s joints=%zu period_us=%llu "
         "timeout_us=%llu overrides=%u\n",
@@ -700,6 +743,9 @@ int RunApplication(const ApplicationOptions &options,
       configuration::ValidateSimulationPolicy(
           config, source == LocomotionSource::Local ? "local" : "none",
           model ? model->contract().policy_period_us : 0);
+      if (worker->ResponseFd() < 0)
+        throw std::runtime_error(
+            "simulation policy response signal unavailable");
       // Warm the actual session under the startup host deadline before Hello.
       policy::PolicyRequest warmup;
       warmup.observation.count = model->contract().observation.dimension;
@@ -708,10 +754,14 @@ int RunApplication(const ApplicationOptions &options,
       const auto end = simulation::DriverHostUs() +
                        config.runtime.simulation->host_startup_timeout_us;
       while (!worker->TryTake(&warmed)) {
-        if (stop_requested.load() || simulation::DriverHostUs() >= end)
+        if (worker->ResponseWakeFailed())
+          throw std::runtime_error("simulation policy response wake failed");
+        const auto now = simulation::DriverHostUs();
+        if (stop_requested.load() || now >= end)
           throw std::runtime_error(
               "simulation model warmup cancelled or timed out");
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        WaitSimulationProgress(simulation_driver.get(), worker.get(), true,
+                               std::min(end - now, kHostWakeSliceUs));
       }
       if (!warmed.ok)
         throw std::runtime_error("simulation model warmup failed");
@@ -915,10 +965,11 @@ int RunApplication(const ApplicationOptions &options,
     const auto end = simulation::DriverHostUs() +
                      config.runtime.simulation->host_phase_timeout_us;
     while (!simulation_driver->OwnerStopCommitted()) {
-      if (simulation_driver->Failed() || simulation::DriverHostUs() >= end)
-        return kExitStopUnknown;
+      const auto now = simulation::DriverHostUs();
+      if (simulation_driver->Failed() || now >= end) return kExitStopUnknown;
       simulation_driver->Poll();
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      if (simulation_driver->OwnerStopCommitted()) break;
+      simulation_driver->WaitForProgress(std::min(end - now, kHostWakeSliceUs));
     }
     // The authenticated owner attests accepted ZeroTorque AND engine close.
     // This completion never clears an existing upper fault.
@@ -930,6 +981,10 @@ int RunApplication(const ApplicationOptions &options,
 
   while (true) {
     if (simulation_driver) {
+      if (worker->ResponseWakeFailed()) {
+        std::fprintf(stderr, "application: simulation policy wake failed\n");
+        return kExitStopUnknown;
+      }
       simulation::StepPermit permit;
       if (stop_requested.load() && !simulation_driver->CancelRelease())
         return kExitStopUnknown;
@@ -943,7 +998,7 @@ int RunApplication(const ApplicationOptions &options,
                        "unavailable\n");
           return kExitStopUnknown;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        simulation_driver->WaitForProgress(kHostWakeSliceUs);
       }
     }
     // Business instants use committed logical time in simulation and host
@@ -1185,7 +1240,15 @@ int RunApplication(const ApplicationOptions &options,
               break;
             }
           }
-          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          const auto wait_now = simulation::DriverHostUs();
+          if (worker->ResponseWakeFailed()) {
+            std::fprintf(stderr,
+                         "application: simulation inference wake failed\n");
+            return kExitStopUnknown;
+          }
+          WaitSimulationProgress(
+              simulation_driver.get(), worker.get(), input_lost,
+              std::min(end > wait_now ? end - wait_now : 0, kHostWakeSliceUs));
           have_response = take_response();
         }
       }
@@ -1541,9 +1604,10 @@ int RunApplication(const ApplicationOptions &options,
         while (!simulation_driver->Processed(id)) {
           simulation_driver->Poll();
           if (simulation_driver->OwnerShutdown()) return false;
-          if (simulation_driver->Failed() || simulation::DriverHostUs() >= end)
-            return false;
-          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          const auto now = simulation::DriverHostUs();
+          if (simulation_driver->Failed() || now >= end) return false;
+          simulation_driver->WaitForProgress(
+              std::min(end - now, kHostWakeSliceUs));
         }
         return true;
       };
@@ -1558,9 +1622,10 @@ int RunApplication(const ApplicationOptions &options,
       }
       while (!simulation_driver->CompletePhase(simulation_driver->Outputs())) {
         if (auto code = owner_shutdown()) return *code;
-        if (simulation_driver->Failed() || simulation::DriverHostUs() >= end)
-          return kExitStopUnknown;
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        const auto now = simulation::DriverHostUs();
+        if (simulation_driver->Failed() || now >= end) return kExitStopUnknown;
+        simulation_driver->WaitForProgress(
+            std::min(end - now, kHostWakeSliceUs));
       }
       if (!behavior.exit_ready) continue;
     }
@@ -1569,12 +1634,14 @@ int RunApplication(const ApplicationOptions &options,
                        config.runtime.simulation->host_phase_timeout_us;
       while (!simulation_driver->LeaveComplete()) {
         if (auto code = owner_shutdown()) return *code;
-        if (simulation_driver->Failed() || simulation::DriverHostUs() >= end) {
+        const auto now = simulation::DriverHostUs();
+        if (simulation_driver->Failed() || now >= end) {
           std::fprintf(stderr,
                        "application: LeaveCommitted stopped-unproven\n");
           return kExitStopUnknown;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        simulation_driver->WaitForProgress(
+            std::min(end - now, kHostWakeSliceUs));
       }
     }
     if (behavior.exit_ready) {

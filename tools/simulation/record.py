@@ -13,6 +13,13 @@ MAX_LINE=65536
 SCHEMA='irmv.simulation_evidence'
 
 
+def _hex(value):
+    # Protocol-native bytes become the same lowercase hex text the JSON
+    # normalisation used to produce with a dumps/loads round trip.
+    if isinstance(value,bytes):return value.hex()
+    raise TypeError('unsupported evidence value')
+
+
 class Writer:
     def __init__(self,path,clock,capacity=256,provenance=None):
         self.path=Path(path)
@@ -31,22 +38,59 @@ class Writer:
         self.done=threading.Event()
         self.worker=None
         self.sequence=0
-        self.dropped=0
+        # One writer per counter: the producer owns its rejections and the
+        # file worker owns serialisation rejections, so no read-modify-write is
+        # shared across threads. The merged view is the `dropped` property.
+        self.producer_dropped=0
+        self.worker_dropped=0
         self.write_failures=0
         self.written=0
         self.finished=False
 
+    @property
+    def dropped(self):
+        # Snapshot of both single-writer counters; the footer uses the same sum.
+        return self.producer_dropped+self.worker_dropped
+
+    @staticmethod
+    def _line(row):
+        line=json.dumps(row,separators=(',',':'),allow_nan=False,default=_hex)
+        if len(line)>MAX_LINE:raise ValueError('oversized evidence')
+        return line
+
     def offer(self,row):
+        # One serialisation, synchronously, before the bounded queue: the
+        # queued immutable line is the detached snapshot, so no producer-owned
+        # object can change after offer returns. Protocol bytes become lower
+        # case hex exactly as the previous dumps/loads normalisation did.
+        # json.dumps is ASCII (ensure_ascii), so character length is byte length.
         self.sequence+=1
         row=dict(row,record_type='event',sequence=self.sequence)
         try:
-            line=json.dumps(row,separators=(',',':'),allow_nan=False)
-            if len(line.encode())>MAX_LINE:raise ValueError('oversized evidence')
+            line=self._line(row)
             if self.done.is_set():raise ValueError('closed writer')
             self.queue.put_nowait(line)
             return True
         except (ValueError,TypeError,queue.Full):
-            self.dropped+=1
+            self.producer_dropped+=1
+            return False
+
+    def offer_owned(self,row):
+        # Ownership handoff for a row the producer has just built: the row and
+        # every nested value must not be mutated after this call (other queued
+        # rows may share immutable protocol values). The single file worker
+        # serialises it, keeping that cost off the coordinator thread while the
+        # bounded queue, the one producer, and the footer accounting stay
+        # unchanged. A row that fails serialisation is counted as dropped on
+        # the worker, exactly like the eager path; it never reaches the file.
+        self.sequence+=1
+        row=dict(row,record_type='event',sequence=self.sequence)
+        try:
+            if self.done.is_set():raise ValueError('closed writer')
+            self.queue.put_nowait(row)
+            return True
+        except (ValueError,queue.Full):
+            self.producer_dropped+=1
             return False
 
     def start(self):
@@ -58,10 +102,15 @@ class Writer:
             with self.path.open('x') as f:
                 f.write(json.dumps(self.header,separators=(',',':'))+'\n')
                 while not self.done.is_set() or not self.queue.empty():
-                    try:line=self.queue.get(timeout=.01)
+                    try:item=self.queue.get(timeout=.01)
                     except queue.Empty:continue
+                    if not isinstance(item,str):
+                        try:item=self._line(item)
+                        except (ValueError,TypeError):
+                            self.worker_dropped+=1
+                            continue
                     try:
-                        f.write(line+'\n');f.flush()
+                        f.write(item+'\n');f.flush()
                         self.written+=1
                     except OSError:self.write_failures+=1
                 f.write(json.dumps(dict(record_type='footer',offered=self.sequence,

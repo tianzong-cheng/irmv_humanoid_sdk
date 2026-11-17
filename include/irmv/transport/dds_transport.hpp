@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -54,21 +55,24 @@ struct EndpointQos {
 // carries every conversion, so the control thread never performs a DDS call.
 // Both directions cross a set of fixed-capacity channels between exactly two
 // threads; the control thread pushes output (Publish) and pops input
-// (TakeInput), the transport thread does the opposite. The transport thread
-// waits on a WaitSet with a bounded ten millisecond timeout, which keeps Stop()
-// responsive and bounds the delay of an outbound sample to one wait period.
+// (TakeInput), the transport thread does the opposite. In the realtime modes
+// the transport thread waits on a WaitSet with a bounded ten millisecond
+// timeout, which keeps Stop() responsive and bounds the delay of an outbound
+// sample to one wait period. A simulation transport instead blocks on an
+// eventfd that the control side writes after queuing outbound work and that
+// wake-only DDS listeners signal for inbound data; the C++ side of that path
+// therefore has no fixed wait floor for ready work.
 //
-// Interface binding: the pinned CycloneDDS 0.10.5 C++ API takes a configuration
-// string on the participant constructor, which is the only per-participant
-// configuration route it has (there is no property QoS policy and no property
-// accessor in the pinned C runtime). Start() passes an inline XML snippet that
-// pins Domain/General/Interfaces to config.dds.interface, or no configuration
-// at all when the configured interface is empty. CycloneDDS caches domain
-// configurations per domain id inside the process and the first creator wins,
-// so the binding is process wide for that domain: a participant created earlier
-// with other settings keeps them. An interface that does not exist makes
-// participant creation fail, because the pinned version marks interfaces listed
-// explicitly in the configuration as required to be present.
+// Interface binding: the pinned CycloneDDS 11.0.1 C++ API takes a configuration
+// string on the participant constructor, and this transport uses that route
+// rather than the property QoS policy. Start() passes an inline XML snippet
+// that pins Domain/General/Interfaces to config.dds.interface, or no
+// configuration at all when the configured interface is empty. CycloneDDS
+// caches domain configurations per domain id inside the process and the first
+// creator wins, so the binding is process wide for that domain: a participant
+// created earlier with other settings keeps them. An interface that does not
+// exist makes participant creation fail, because the pinned version marks
+// interfaces listed explicitly in the configuration as required to be present.
 //
 // Dropping: nothing here waits for the peer, and nothing here blocks on a full
 // channel. The result queue, the two request lanes and the heartbeat lane are
@@ -109,6 +113,12 @@ class DdsTransport {
   bool ReportSimulationProcessed(const simulation::MessageIdentity &) noexcept;
   bool TrySimulationAck(simulation::Frame *) noexcept;
   bool SimulationFailed() const noexcept;
+  // Level-triggered simulation progress descriptor, or -1 when no simulation
+  // is configured. The control thread polls it while it waits for receipts or
+  // installation instead of retrying on a fixed delay; the channels remain the
+  // authority. DrainSimulationWait clears only the notice.
+  int SimulationWaitFd() const noexcept;
+  void DrainSimulationWait() noexcept;
 
   void Start();
 
@@ -176,6 +186,13 @@ class DdsTransport {
  private:
   struct Impl;
 
+  // Signals the transport thread's simulation wake eventfd after the control
+  // thread queued work the thread owns (simulation installation, outbound
+  // states/results). The control thread performs no DDS call and takes no DDS
+  // lock here; the callback is a nonblocking eventfd write. Only a configured
+  // simulation installs it, so non-simulation timing is unchanged.
+  void WakeWorker() noexcept;
+
   // The request, stop, heartbeat and result lanes are FIFO, so their order
   // survives and a full queue refuses the newest entry instead of displacing an
   // older one; the state and command lanes keep only the newest entry, so a
@@ -213,6 +230,8 @@ class DdsTransport {
       sim_commands_;
   std::unique_ptr<BoundedChannel<protocol::RobotState, 64>> sim_states_out_;
   std::unique_ptr<Impl> impl_;
+  std::function<void()> worker_wake_;
+  std::atomic<bool> worker_wake_failed_{false};
   std::atomic<bool> started_{false};
   std::atomic<std::uint64_t> dropped_results_{0};
   std::atomic<std::uint64_t> dropped_states_{0};

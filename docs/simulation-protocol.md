@@ -364,6 +364,11 @@ For each control step, drivers MUST follow this order:
    command identity (including the bootstrap runtime_id, even when no command
    is active). The sole state identity must match torque.state_seq and time t;
    initialization/stop/Fault states are still normal states, not release proofs.
+   **Once the accepted Torque and the verified phase-1 seal exist, the
+   coordinator issues the engine action for `[t, t+control_dt)` immediately**
+   (step 7 below) and runs steps 3-6 concurrently with it. Nothing about the
+   application phase may start the physical interval, and nothing may start it
+   before the runtime's accepted write: the safety gate stays where it was.
 3. Coordinator streams manifests to Application, verifies the ordered inventory
    hash/count on seal, and forwards seal. The receiving driver assembles the
    exact PhaseManifest, calls BeginSimulationPhase, then **bounded-polls
@@ -391,13 +396,29 @@ For each control step, drivers MUST follow this order:
    the declared messages are in its bounded ingress. These messages are NOT
    consumed by an extra same-time normal tick. Even an empty application output
    inventory needs seal -> installed -> ready -> permit -> empty phase ACK.
-7. Coordinator gives the engine worker the OLD tick's final torque, held across
-   `control_dt/physics_dt` substeps. It accepts only completed coherent feedback
-   at `(step+1)*substeps`. It reports AppliedToStep to Runtime using the OLD
-   step's phase-3 header/write_id and exact [begin,end) physics indices, then
-   sends next step's phase-1 Feedback/TickPermit. A target generated at t is
-   first usable by the normal runtime tick at t+control_dt, never during the
-   physics interval just authorized.
+7. The engine worker applies the old tick's final torque, held across
+   `control_dt/physics_dt` substeps, and accepts only completed coherent
+   feedback at `(step+1)*substeps`. This interval runs concurrently with steps
+   3-6; it is issued once and never re-issued. The coordinator reports
+   AppliedToStep to Runtime using the OLD step's phase-3 header/write_id and
+   exact [begin,end) physics indices, **and only then**, with both phase
+   completions above also in hand, sends the next step's phase-1
+   Feedback/TickPermit. Either condition alone is not enough to advance. A
+   target generated at t is first usable by the normal runtime tick at
+   t+control_dt, never during the physics interval just authorized.
+
+Consequences of that overlap, which are part of this contract:
+
+- A release proven by the application at step s authorizes the interval
+  `[s+1, s+2)`, because `[s, s+1)` was already in flight when the arm could be
+  carried. Engine release index is therefore `2*(s+1)`.
+- A failure or stop that arrives while the interval is committed may observe
+  physics already advanced by one step. Evidence marks
+  `physics_in_flight` and keeps the AppliedToStep horizon; the phase-4 stop
+  tick is frozen at the step whose application handshake was incomplete, with
+  the exact feedback snapshot the peers last saw, so no peer is asked to accept
+  a clock it never reached. `stop_proven` still requires the engine-close proof
+  and no stop is fabricated.
 
 A sender must retain exact output payloads/identities until the corresponding
 consumer completion. BestEffort retry after PublishPermit must reuse identity,

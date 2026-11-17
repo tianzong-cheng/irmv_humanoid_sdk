@@ -3,13 +3,19 @@
 
 #include "irmv/simulation/barrier.hpp"
 #include "irmv/transport/bounded_channel.hpp"
+#include "irmv/transport/event_signal.hpp"
 namespace irmv::simulation {
 // Two owners: Control* methods on the single control thread, Worker* on the
 // original DDS owner. The borrowed clock must outlive the transport.
 class Ingress {
  public:
   Ingress(Role consumer, const LogicalClock& clock) noexcept
-      : consumer_(consumer), clock_(clock), barrier_(consumer) {}
+      : consumer_(consumer), clock_(clock), barrier_(consumer) {
+    // The signal is wake-only; the channels remain the authority. Losing it
+    // would turn every control wait into a deadline wait, which is a run
+    // failure rather than a slower handoff.
+    if (!signal_.Open()) failed_.store(true);
+  }
   bool ControlBegin(const PhaseManifest&) noexcept;
   // True only after the DDS worker installed this exact current inventory.
   // Separate from ingress/business ACK; caller gates publication on this.
@@ -19,6 +25,11 @@ class Ingress {
   bool ControlProcessed(const MessageIdentity&) noexcept;
   bool ControlAck(Frame*) noexcept;
   bool Failed() const noexcept { return failed_.load(); }
+  // Progress signal for the control thread. WorkerStored/WorkerUpdate notify
+  // after publishing; a waiter polls this descriptor instead of retrying on a
+  // fixed delay. ControlDrainSignal clears only the notice.
+  int ControlWaitFd() const noexcept { return signal_.fd(); }
+  void ControlDrainSignal() noexcept { signal_.Drain(); }
   void WorkerUpdate() noexcept;
   // 1=new matching sample, 0=identical resend, -1=undeclared/conflict/stale.
   int WorkerCheck(const MessageIdentity&, protocol::TimeUs*) noexcept;
@@ -52,6 +63,7 @@ class Ingress {
   std::array<Cached, kPhaseCacheCapacity> cache_{};
   std::size_t next_{0}, active_{0};
   bool active_valid_{false};
+  transport::EventSignal signal_;
   std::atomic<bool> failed_{false};
 };
 }  // namespace irmv::simulation

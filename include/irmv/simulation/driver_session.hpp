@@ -24,8 +24,29 @@ class DriverSession {
   bool Queue(const Frame&) noexcept;
   Frame Make(StepIdentity) const noexcept;
   bool Declare(const PhaseManifest&) noexcept;
+  // Sends what the endpoint can take from the local queue. Non-blocking and
+  // bounded by the queue; frames the endpoint cannot take yet stay queued and
+  // are sent on a later call or its capacity/ready wake.
+  bool Flush() noexcept;
   bool Processed(const MessageIdentity&) noexcept;
   void BusinessComplete() noexcept { business_complete_ = true; }
+  // Blocking progress wait for a caller that would otherwise retry on a fixed
+  // delay. Polls the endpoint and the transport's simulation signal, which is
+  // the union of the sources Poll/Processed can make progress from. The
+  // timeout is a host bound for cancellation/deadline checks, not the expected
+  // handoff latency: published work wakes the descriptor immediately.
+  bool WaitForProgress(protocol::TimeUs timeout_us) noexcept;
+  int EndpointWaitFd() const noexcept { return endpoint_.WaitFd(); }
+  int TransportWaitFd() const noexcept {
+    return lower_ ? lower_->SimulationWaitFd() : upper_->SimulationWaitFd();
+  }
+  void DrainWait() noexcept {
+    endpoint_.DrainWait();
+    if (lower_)
+      lower_->DrainSimulationWait();
+    else
+      upper_->DrainSimulationWait();
+  }
   bool TakeTick(StepPermit*) noexcept;
   bool TakeFeedback(FeedbackFrame*) noexcept;
   const PhaseManifest& Inbound() const noexcept { return inbound_; }

@@ -48,6 +48,15 @@ class ApplicationDriver final : public application::ClientSink {
   }
   bool CancelRelease() noexcept;
   bool Poll() noexcept { return session_.Poll(); }
+  // Progress wait and the two descriptors behind it, for a caller that combines
+  // simulation progress with another source (the policy response signal or the
+  // terminal) in one poll.
+  bool WaitForProgress(protocol::TimeUs timeout_us) noexcept {
+    return session_.WaitForProgress(timeout_us);
+  }
+  int WaitFd() const noexcept { return session_.EndpointWaitFd(); }
+  int TransportWaitFd() const noexcept { return session_.TransportWaitFd(); }
+  void DrainWait() noexcept { session_.DrainWait(); }
   bool OwnerShutdown() const noexcept { return session_.ShutdownAuthorized(); }
   bool OwnerStopCommitted() const noexcept {
     return !Failed() && session_.OwnerStopCommitted();

@@ -1,9 +1,13 @@
 include(FetchContent)
 
+# The CycloneDDS C runtime and its C++ binding are a matched pair: 11.0.1
+# changed both the API revision and the C/C++ shared-library SOVERSION (0 ->
+# 11). Never pair one of them with a library built from other sources.
+set(IRMV_CYCLONEDDS_VERSION "11.0.1")
 set(IRMV_CYCLONEDDS_COMMIT
-    "2cdd114cbd18340c606573b4cc8dc20cc161ec5a")
+    "e54e991f75a3e67f8e628da3171122e36ea5b872")
 set(IRMV_CYCLONEDDS_CXX_COMMIT
-    "50984cfc9a92d1ae1903d7b1479a110c77fba240")
+    "20ccaa519ca09a7b1776b8630389aa19ce8da61a")
 set(IRMV_NLOHMANN_JSON_COMMIT
     "9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03")
 
@@ -18,11 +22,12 @@ set(IRMV_CYCLONEDDS_CXX_SOURCE_DIR
     CACHE PATH "Optional local cyclonedds-cxx source checkout at the pinned commit")
 set(IRMV_CYCLONEDDS_PREFIX
     ""
-    CACHE PATH "Optional prebuilt CycloneDDS 0.10.5 prefix")
+    CACHE PATH "Optional prebuilt CycloneDDS 11.0.1 prefix")
 
-# Provenance file carried by a prefix this file produced: the pinned commits and
-# the checkouts the two-stage build actually used. A prefix whose manifest does
-# not match the pins is refused instead of being rebuilt or used silently.
+# Provenance file carried by a prefix this file produced: the pinned release,
+# commits and the checkouts the two-stage build actually used. A prefix whose
+# manifest does not match the pins is refused instead of being rebuilt or used
+# silently.
 set(IRMV_CYCLONEDDS_MANIFEST "irmv-cyclonedds-manifest.txt")
 
 function(irmv_declare_dependencies)
@@ -85,7 +90,9 @@ function(irmv_require_pinned_checkout option directory commit)
 endfunction()
 
 # Reads the provenance manifest of <prefix>. <out_ok> is TRUE only when the
-# manifest exists and pins both dependency commits.
+# manifest exists, names this manifest format and pins the release and both
+# dependency commits. A 0.10.5 manifest therefore fails every check that
+# matters instead of being accepted as a compatible prefix.
 function(irmv_verify_cyclonedds_manifest prefix out_ok out_reason)
   set(manifest "${prefix}/${IRMV_CYCLONEDDS_MANIFEST}")
   if(NOT EXISTS "${manifest}")
@@ -99,17 +106,23 @@ function(irmv_verify_cyclonedds_manifest prefix out_ok out_reason)
   endif()
 
   file(STRINGS "${manifest}" lines)
+  set(format_ok FALSE)
+  set(version_ok FALSE)
   set(cyclonedds_ok FALSE)
   set(cyclonedds_cxx_ok FALSE)
   foreach(line IN LISTS lines)
-    if(line STREQUAL "cyclonedds=${IRMV_CYCLONEDDS_COMMIT}")
+    if(line STREQUAL "irmv-cyclonedds-manifest 2")
+      set(format_ok TRUE)
+    elseif(line STREQUAL "cyclonedds-version=${IRMV_CYCLONEDDS_VERSION}")
+      set(version_ok TRUE)
+    elseif(line STREQUAL "cyclonedds=${IRMV_CYCLONEDDS_COMMIT}")
       set(cyclonedds_ok TRUE)
     elseif(line STREQUAL "cyclonedds-cxx=${IRMV_CYCLONEDDS_CXX_COMMIT}")
       set(cyclonedds_cxx_ok TRUE)
     endif()
   endforeach()
 
-  if(cyclonedds_ok AND cyclonedds_cxx_ok)
+  if(format_ok AND version_ok AND cyclonedds_ok AND cyclonedds_cxx_ok)
     set(${out_ok}
         TRUE
         PARENT_SCOPE)
@@ -121,7 +134,7 @@ function(irmv_verify_cyclonedds_manifest prefix out_ok out_reason)
         FALSE
         PARENT_SCOPE)
     set(${out_reason}
-        "manifest does not pin ${IRMV_CYCLONEDDS_COMMIT} and ${IRMV_CYCLONEDDS_CXX_COMMIT}"
+        "manifest does not pin CycloneDDS ${IRMV_CYCLONEDDS_VERSION}, ${IRMV_CYCLONEDDS_COMMIT} and ${IRMV_CYCLONEDDS_CXX_COMMIT}"
         PARENT_SCOPE)
   endif()
 endfunction()
@@ -129,7 +142,8 @@ endfunction()
 function(irmv_write_cyclonedds_manifest prefix cyclonedds_source cyclonedds_cxx_source)
   file(
     WRITE "${prefix}/${IRMV_CYCLONEDDS_MANIFEST}"
-    "irmv-cyclonedds-manifest 1\n"
+    "irmv-cyclonedds-manifest 2\n"
+    "cyclonedds-version=${IRMV_CYCLONEDDS_VERSION}\n"
     "cyclonedds=${IRMV_CYCLONEDDS_COMMIT}\n"
     "cyclonedds-cxx=${IRMV_CYCLONEDDS_CXX_COMMIT}\n"
     "cyclonedds-source=${cyclonedds_source}\n"
@@ -137,9 +151,11 @@ function(irmv_write_cyclonedds_manifest prefix cyclonedds_source cyclonedds_cxx_
   )
 endfunction()
 
-# Fails unless <prefix> looks like an installed CycloneDDS 0.10.5 with its C++
-# binding: both CMake packages and both shared libraries. A manifest that pins
-# different commits is refused as well.
+# Fails unless <prefix> looks like an installed CycloneDDS 11.0.1 with its C++
+# binding: both CMake packages and both shared libraries, plus a manifest that
+# pins this release and the exact commits. A prefix without a manifest - for
+# example one built from the previous 0.10.5 pins - is refused rather than
+# used.
 function(irmv_require_cyclonedds_prefix prefix)
   foreach(required IN ITEMS
           "lib/cmake/CycloneDDS/CycloneDDSConfig.cmake"
@@ -160,10 +176,11 @@ function(irmv_require_cyclonedds_prefix prefix)
   endif()
 
   irmv_verify_cyclonedds_manifest("${prefix}" manifest_ok manifest_reason)
-  if(EXISTS "${prefix}/${IRMV_CYCLONEDDS_MANIFEST}" AND NOT manifest_ok)
+  if(NOT manifest_ok)
     message(
       FATAL_ERROR
-        "${prefix} was produced from other sources (${manifest_reason})")
+        "${prefix} is not a CycloneDDS ${IRMV_CYCLONEDDS_VERSION} prefix produced from the pinned sources: ${manifest_reason}"
+    )
   endif()
 endfunction()
 
@@ -216,7 +233,7 @@ function(irmv_build_cyclonedds_prefix prefix)
         -DBUILD_EXAMPLES=OFF
         -DBUILD_DDSPERF=OFF
         -DENABLE_SECURITY=OFF
-        -DENABLE_SHM=OFF)
+        -DENABLE_ICEORYX=OFF)
       set(stage_source "${cyclonedds_SOURCE_DIR}")
     else()
       set(
@@ -224,7 +241,7 @@ function(irmv_build_cyclonedds_prefix prefix)
         -DBUILD_IDLLIB=ON
         -DBUILD_TESTING=OFF
         -DBUILD_EXAMPLES=OFF
-        -DENABLE_SHM=OFF
+        -DENABLE_ICEORYX=OFF
         -DENABLE_LEGACY=OFF
         -DCMAKE_PREFIX_PATH=${prefix})
       set(stage_source "${cyclonedds_cxx_SOURCE_DIR}")
@@ -260,7 +277,7 @@ function(irmv_build_cyclonedds_prefix prefix)
                                  "${cyclonedds_cxx_SOURCE_DIR}")
 endfunction()
 
-# Makes CycloneDDS 0.10.5 and its C++ binding available: either from the
+# Makes CycloneDDS 11.0.1 and its C++ binding available: either from the
 # explicit IRMV_CYCLONEDDS_PREFIX cache, or by building the pinned sources into
 # ${CMAKE_BINARY_DIR}/cyclonedds-prefix. Never falls back to unpinned sources
 # and never silently skips the dependency: a missing or mismatched install is a
@@ -280,10 +297,21 @@ function(irmv_make_cyclonedds_available)
   irmv_require_cyclonedds_prefix("${prefix}")
   list(APPEND CMAKE_PREFIX_PATH "${prefix}")
 
-  # The pinned C++ package installs CycloneDDS-CXXVersion.cmake, which CMake
-  # does not recognise, so its version is pinned by source commit instead.
-  find_package(CycloneDDS 0.10.5 EXACT REQUIRED)
-  find_package(CycloneDDS-CXX REQUIRED)
+  # Both pinned packages install a ConfigVersion.cmake, so the version is
+  # enforced exactly on the imported targets. The manifest above additionally
+  # binds those packages to the pinned source commits.
+  find_package(CycloneDDS ${IRMV_CYCLONEDDS_VERSION} EXACT REQUIRED)
+  find_package(CycloneDDS-CXX ${IRMV_CYCLONEDDS_VERSION} EXACT REQUIRED)
+
+  # CycloneDDS 11.0.1's installed idlc/Generate.cmake uses the imported
+  # CycloneDDS::idlc target when BUILD_IDLC is set and otherwise falls back to
+  # find_program(idlc), which would require this private prefix's bin directory
+  # on PATH. Selecting the imported target keeps generation bound to the pinned
+  # install. This only affects this project's own IDL rules; the nested
+  # dependency build above already configures the C stage with BUILD_IDLC=ON.
+  set(BUILD_IDLC
+      ON
+      PARENT_SCOPE)
 endfunction()
 
 # ---------------------------------------------------------------------------

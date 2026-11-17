@@ -95,6 +95,8 @@ def run(build, mode="leave"):
             commands=[]
             stop_sent=False
             stop_at=None
+            kill_triggered=False
+            kill_exit=None
             def _advance(self,event):
                 f=event.frame
                 if f is not None:
@@ -113,7 +115,15 @@ def run(build, mode="leave"):
                     if a.kind=='send' and a.peer==3 and a.frame.kind==15 and self.application:
                         key={60:b'd',70:b'i',120:b'l'}.get(a.frame.control_step)
                         if a.frame.control_step==150 and mode in ('leave','death_after','death_before','fault_leave','engine_stop_hang'):
-                            if mode=='death_before': self.application.kill()
+                            if mode=='death_before':
+                                # The scenario under test is the SDK application dying
+                                # while release is still pending. An application that
+                                # already exited did not reach this trigger: the runner
+                                # must then prove the startup failure instead of this
+                                # branch crediting an early crash as the scenario.
+                                self.kill_exit=self.application.poll()
+                                if self.kill_exit is None:
+                                    self.application.kill();self.kill_triggered=True
                             else: key=b'q'
                         if key:self.application.stdin.write(key);self.application.stdin.flush()
                 return super()._actions(actions)
@@ -145,11 +155,23 @@ def run(build, mode="leave"):
                         triggered_at=time.monotonic()
                 if runner.coordinator.state in ('Failed','Closed'):break
                 if mode=='inference_signal' and processes[1].poll() is not None:break
+                if mode=='death_before' and not runner.kill_triggered and any(
+                        p.poll() is not None for p in processes):break
                 time.sleep(.002)
             for log in logs:log.flush();log.seek(0)
             output='\n'.join(log.read() for log in logs)
             if mode in ('death_before','physics_hang','signal_physics'):
-                assert runner.coordinator.state=='Failed',(mode,runner.coordinator.state,output)
+                if mode=='death_before':
+                    polls=[p.poll() for p in processes]
+                    assert runner.kill_triggered,(
+                        'application did not reach the scripted death-before-release kill',
+                        runner.coordinator.state,runner.coordinator.step,
+                        runner.coordinator.phase,sorted(runner.coordinator.peers),
+                        polls,runner.kill_exit,output)
+                assert runner.coordinator.state=='Failed',(mode,runner.coordinator.state,
+                    runner.coordinator.step,runner.coordinator.phase,
+                    sorted(runner.coordinator.peers),
+                    [p.poll() for p in processes],runner.kill_exit,output)
                 assert not runner.coordinator.stop_proven,output
                 assert not runner.coordinator.runtime_only,output
                 if mode!='death_before':
@@ -190,7 +212,11 @@ def run(build, mode="leave"):
             assert len(engine.releases)==1,engine.releases
             index,before,after=engine.releases[0]
             assert before==after,('release teleported state',before,after)
-            assert index==runner.arms[0].control_step*2,(index,runner.arms)
+            # Under the approved overlap the interval [s, s+1) is already in
+            # flight when the application phase at s can carry the arm, so the
+            # proven arm authorizes the following interval: engine index
+            # 2*(s+1). See docs/simulation-protocol.md.
+            assert index==(runner.arms[0].control_step+1)*2,(index,runner.arms)
             assert all(not released for step,released in engine.steps if step<index)
             assert all(released for step,released in engine.steps if step>=index)
             assert len(runner.arms)==1,('release missing/duplicate',runner.arms,output)

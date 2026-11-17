@@ -1,7 +1,9 @@
 """Bounded real sockets and an engine worker, no optional engine packages."""
 import dataclasses
 import hashlib
+import os
 import pathlib
+import signal
 import socket
 import sys
 import tempfile
@@ -11,9 +13,9 @@ import unittest
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[2]/'tools'))
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]/'support'/'simulation'))
 from simulation import protocol as p
-from simulation.coordinator import Bootstrap, Action
+from simulation.coordinator import Bootstrap, Action, Event
 try:
-    from simulation.main import Runner
+    from simulation.main import Runner, _fd_identity, _restore_wakeup_fd
     from fake_engine import FakeEngine
 except ImportError:
     raise AssertionError('Task 6 runner/fake engine missing')
@@ -25,6 +27,15 @@ def boot(**kw):
 
 
 class RunnerTest(unittest.TestCase):
+    def test_evidence_feedback_snapshot_matches_asdict(self):
+        from simulation.engine import Feedback
+        from simulation.main import feedback_snapshot
+        feedback=Feedback(physics_step=7,engine_time_s=.25,q=(.1,.2),dq=(0.,0),tau=(.3,.4),
+                          imu_quaternion=(1.,0,0,0),imu_angular_velocity=(0.,0,0),
+                          imu_specific_force=(0.,0,9.81),base_position=(0.,0,1.),
+                          base_velocity=(0.,)*6,base_quaternion=(1.,0,0,0))
+        self.assertEqual(feedback_snapshot(feedback),dataclasses.asdict(feedback))
+
     def test_socket_reset_after_committed_leave_is_eof_before_leave_fails(self):
         for committed in (False,True):
             with self.subTest(committed=committed), tempfile.TemporaryDirectory() as directory:
@@ -65,6 +76,99 @@ class RunnerTest(unittest.TestCase):
                     self.assertEqual(runner.coordinator.failure,'')
                 else:
                     with self.assertRaises((ConnectionResetError,BrokenPipeError)):runner._flush(local)
+
+    def test_overlapped_completion_is_held_until_both_handshakes(self):
+        # The real runner gate, real coordinator and real frame codec, without
+        # an engine thread: completed feedback for [t,t+dt) may not be consumed
+        # (nor recorded) before the phase-2 completion arrives.
+        from collections import deque
+        from simulation.engine import Feedback
+        with tempfile.TemporaryDirectory() as d:
+            runner=Runner(boot(),str(pathlib.Path(d)/'bridge.sock'),FakeEngine)
+            self.addCleanup(runner.selector.close)
+            local,remote={},{}
+            for role in (2,3):
+                local[role],remote[role]=socket.socketpair(socket.AF_UNIX,socket.SOCK_SEQPACKET)
+                self.addCleanup(local[role].close); self.addCleanup(remote[role].close)
+                runner.connections[local[role]]={'peer':role,'out':deque(),'mask':1}
+                runner.selector.register(local[role],1)
+                runner.peers[role]=local[role]
+                remote[role].setblocking(False)
+            c=runner.coordinator
+            def frame(kind,payload,phase=1):
+                return p.Frame(p.KINDS.index(kind)+1,payload,b'r'*16,c.step,phase,
+                               1+c.step*2000)
+            def send(role,kind,payload,phase=1):
+                runner._advance(Event('frame',role,frame(kind,payload,phase)))
+            def drain(role):
+                out=[]
+                while True:
+                    try:packet=remote[role].recv(65536)
+                    except BlockingIOError:return out
+                    if not packet:return out
+                    out.append(p.decode(packet))
+            def identity(kind=5, **values):
+                m={name:(bytes(16) if field=='Id' else bytes(32) if field=='Digest' else 0)
+                   for field,name in p.SCHEMA['MessageIdentity']}
+                m.update(kind=kind,runtime_id=b't'*16);m.update(values)
+                return m
+            def state_identity(step):
+                m=identity(3,sequence=step+1,stamp_us=1+step*2000,
+                           execution_state=2,output_action=1,content_digest=b's'*32)
+                return m
+            def feedback_at(step):
+                return Feedback(step,step*.001,(0.,),(0.,),(0.,),(1.,0.,0.,0.),
+                                (0.,)*3,(0.,0.,9.81),(0.,)*3,(0.,)*6)
+            runner._advance(Event('start'))
+            send(2,'Hello',dict(c.hello,role=2),0)
+            send(3,'Hello',dict(c.hello,role=3),0)
+            runner._advance(Event('feedback',feedback=feedback_at(0)))
+            first=drain(2)
+            self.assertEqual([(f.kind,f.control_step,f.phase) for f in first],
+                             [(1,0,0),(2,0,1),(15,0,1)])
+            self.assertEqual([f.kind for f in drain(3)],[1])
+            torque=dict(write_id=1,accepted=True,state_seq=1,command=identity(),tau=(2.,))
+            send(2,'Torque',torque)
+            state=state_identity(0)
+            manifest=dict(sender=2,message=state)
+            send(2,'Manifest',manifest)
+            seal=dict(sender=2,manifest_count=1,manifest_digest=hashlib.sha256(
+                p._pack('Manifest',manifest)).digest())
+            send(2,'PhaseSeal',seal)
+            published=drain(3)
+            self.assertIn(p.KINDS.index('PhaseSeal')+1,[f.kind for f in published])
+            self.assertEqual([runner.jobs.get_nowait().kind for _ in range(2)],
+                             ['initialize','step'])
+            send(3,'InventoryReady',dict(consumer=3,seal=seal))
+            drain(2);drain(3)
+            send(3,'PhaseAck',dict(consumer=3,disposition=2,seal=seal))
+            # Application phase inventory and seal (empty inventory is legal).
+            empty=dict(sender=3,manifest_count=0,manifest_digest=hashlib.sha256(b'').digest())
+            send(3,'PhaseSeal',empty,2)
+            self.assertEqual(c.state,'IngressWait')
+            self.assertEqual(len(drain(2)),1)
+            send(2,'InventoryReady',dict(consumer=2,seal=empty),2)
+            drain(3)
+            # Engine completion arrives during the handshake: held, not consumed.
+            runner._deliver_result(Event('feedback',feedback=feedback_at(2)))
+            self.assertIsNotNone(runner.held_feedback)
+            self.assertEqual((c.step,c.pending_feedback,c.physics_in_flight),(0,None,True))
+            self.assertEqual(drain(2),[])
+            # Phase-2 ACK closes the gate; the held completion is consumed and
+            # the next tick is emitted exactly once.
+            send(2,'PhaseAck',dict(consumer=2,disposition=1,seal=empty),2)
+            self.assertIsNone(runner.held_feedback)
+            self.assertEqual((c.step,c.pending_feedback,c.physics_in_flight),(1,None,False))
+            applied=drain(2)
+            self.assertEqual([f.kind for f in applied],
+                             [p.KINDS.index('AppliedToStep')+1,2,p.KINDS.index('TickPermit')+1])
+            self.assertEqual(applied[0].phase,3)
+            self.assertEqual(applied[0].payload,
+                             dict(write_id=1,physics_step_begin=0,physics_step_end=2))
+            self.assertTrue(runner.jobs.empty())
+            # No action is outstanding: a later completion is delivered so the
+            # coordinator rejects it instead of holding it silently.
+            self.assertTrue(runner._feedback_ready())
 
     def test_stop_completion_waits_for_actual_engine_close(self):
         entered=threading.Event()
@@ -211,6 +315,58 @@ class RunnerTest(unittest.TestCase):
             self.assertLess(time.monotonic()-start,.5)
             self.assertEqual(runner.coordinator.failure,'engine exploded')
             self.assertFalse(runner.worker.is_alive())
+
+    def test_wakeup_fd_restore_keeps_previous_identity(self):
+        previous=socket.socketpair()
+        runner=socket.socketpair()
+        try:
+            previous[1].setblocking(False)
+            runner[1].setblocking(False)
+            self.assertEqual(signal.set_wakeup_fd(previous[1].fileno()),-1)
+            fd=previous[1].fileno()
+            identity=_fd_identity(fd)
+            signal.set_wakeup_fd(runner[1].fileno())
+            _restore_wakeup_fd(fd,identity)
+            self.assertEqual(signal.set_wakeup_fd(-1),fd)
+        finally:
+            signal.set_wakeup_fd(-1)
+            for endpoint in previous+runner: endpoint.close()
+
+    def test_wakeup_fd_restore_disarms_reused_descriptor(self):
+        previous=socket.socketpair()
+        runner=socket.socketpair()
+        replacement=None
+        reused_fd=None
+        raw_fd=False
+        try:
+            previous[1].setblocking(False)
+            runner[1].setblocking(False)
+            self.assertEqual(signal.set_wakeup_fd(previous[1].fileno()),-1)
+            fd=previous[1].fileno()
+            identity=_fd_identity(fd)
+            signal.set_wakeup_fd(runner[1].fileno())
+            previous[1].close()
+            self.assertIsNone(_fd_identity(fd))
+            # Reuse the freed number for a different socket, deterministically.
+            replacement=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+            if replacement.fileno()!=fd:
+                os.dup2(replacement.fileno(),fd)
+                replacement.close()
+                replacement=None
+                reused_fd=fd
+                raw_fd=True
+            else:
+                reused_fd=fd
+            self.assertNotEqual(_fd_identity(reused_fd),identity)
+            _restore_wakeup_fd(fd,identity)
+            self.assertEqual(signal.set_wakeup_fd(-1),-1)
+        finally:
+            signal.set_wakeup_fd(-1)
+            if replacement is not None: replacement.close()
+            if raw_fd and reused_fd is not None:
+                try:os.close(reused_fd)
+                except OSError:pass
+            for endpoint in previous+runner: endpoint.close()
 
     def test_runtime_eof_after_commit_is_not_lost(self):
         self.two_socket_peers(graceful=True)

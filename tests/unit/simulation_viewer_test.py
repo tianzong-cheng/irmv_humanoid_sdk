@@ -12,6 +12,19 @@ from simulation.viewer import ViewerPublisher, encode, decode, receive_latest, M
 
 
 class ViewerTest(unittest.TestCase):
+    def test_view_mode_travels_in_the_initialize_handshake(self):
+        # The child decides the shadow pass from the handshake, so the flag must
+        # survive the wire round trip and default to "keep the shadow".
+        for no_shadow in (False, True):
+            packet = encode('initialize', 'run', 'asset', config={},
+                            physics_dt_us=1000, follow=False,
+                            no_shadow=no_shadow)
+            self.assertIs(decode(packet, 'run', 'asset')['no_shadow'], no_shadow)
+        publisher = ViewerPublisher({}, 'run', 'asset', 1000)
+        self.assertFalse(publisher.no_shadow)
+        self.assertTrue(ViewerPublisher({}, 'run', 'asset', 1000,
+                                        no_shadow=True).no_shadow)
+
     def test_foreign_and_malformed_pose_never_admitted(self):
         good = encode('pose', 'run', 'asset', qpos=[.2, -.4], physics_step=4, released=True)
         self.assertEqual(decode(good, 'run', 'asset', 2)['qpos'], [.2, -.4])
@@ -77,6 +90,26 @@ class ViewerTest(unittest.TestCase):
                                    physics_step=step,released=False))
             self.assertEqual(receive_latest(child,'run','asset',2,1)['physics_step'],7)
         finally:parent.close();child.close()
+
+    def test_publish_binds_sample_without_serialising_on_worker(self):
+        import simulation.viewer as module
+        publisher=ViewerPublisher({},'run','asset',1000)
+        publisher.state='ready'
+        calls=[]
+        original=module.encode
+        module.encode=lambda *a,**k:calls.append(a) or original(*a,**k)
+        try:
+            publisher.publish((.1,.2),3,False)
+            # Worker path: only the immutable slot is bound, no JSON work.
+            self.assertEqual(calls,[])
+            self.assertEqual(publisher.pending,(3,(.1,.2),False))
+            self.assertEqual(publisher.dropped,0)
+            publisher.publish((.3,.4),4,True)
+            self.assertEqual(calls,[])
+            self.assertEqual(publisher.pending,(4,(.3,.4),True))
+            self.assertEqual(publisher.dropped,1)
+        finally:
+            module.encode=original;publisher.close()
 
     def test_display_failure_retires_publication(self):
         publisher=ViewerPublisher({},'run','asset',1000)

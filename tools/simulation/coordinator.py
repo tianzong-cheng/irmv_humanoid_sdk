@@ -4,8 +4,7 @@ Only advance mutates state. Each event is consumed atomically; actions are order
 The runner owns host time and executes all actions outside this object.
 """
 from collections import deque
-from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, fields
 import hashlib
 import math
 
@@ -38,6 +37,11 @@ class Event:
     host_operation_start_us: int = 0
     host_operation_duration_us: int = 0
     host_release_duration_us: int = 0
+    # Exact received packet for a frame event. When present it is the framing
+    # and duplicate-detection authority and supplies the decoded payload; the
+    # frame must carry the same identity. Callers that build frames locally
+    # leave it None and the coordinator encodes the frame to validate it.
+    wire: bytes | None = None
 
 
 @dataclass(frozen=True)
@@ -104,15 +108,26 @@ class SimulationCoordinator:
         self.consumed=()
         self.highest_state_seq=0
         self.current_target=None  # Pinned (command, actual source state) pair.
+        # Overlapped step: [t,t+dt) may already be executing while the phase
+        # handshakes for step t finish. Completion and the next tick are held
+        # until both proofs and this feedback exist.
+        self.physics_in_flight=False
+        self.pending_feedback=None
+        self.pending_released=False
+        self.tick_validated=False
+        # Phase-4 stop identity may freeze below the committed engine horizon
+        # when the application handshake for that step was abandoned.
+        self.stop_step=None
 
-    def frame(self, name, payload, phase=None):
-        return p.Frame(p.KINDS.index(name)+1,payload,self.b.run_id,self.step,
+    def frame(self, name, payload, phase=None, step=None):
+        step=self.step if step is None else step
+        return p.Frame(p.KINDS.index(name)+1,payload,self.b.run_id,step,
                        self.phase if phase is None else phase,
-                       1+self.step*self.b.control_dt_us,
+                       1+step*self.b.control_dt_us,
                        self.b.physics_dt_us,self.b.control_dt_us)
 
-    def send(self, peer, name, payload, phase=None):
-        return Action('send',peer,self.frame(name,payload,phase))
+    def send(self, peer, name, payload, phase=None, step=None):
+        return Action('send',peer,self.frame(name,payload,phase,step))
 
     def fail(self, reason):
         self.state='Failed'
@@ -134,22 +149,33 @@ class SimulationCoordinator:
         self.first_commands=[]
         self.seal=None
         self.permitted=False
+        self.tick_validated=False
+        self.stop_step=None
+
+    def feedback_payload(self, feedback=None):
+        # Wire payload for the next tick/stop. It is encoded immediately and
+        # never retained, so the immutable dataclass field tuples are shared
+        # instead of copied by asdict; base_quaternion is recording-only and
+        # is not part of the IPC schema.
+        feedback=self.feedback if feedback is None else feedback
+        payload={field.name:getattr(feedback,field.name)
+                 for field in fields(feedback) if field.name!='base_quaternion'}
+        payload.update(valid=True,imu_valid=True)
+        return payload
 
     def tick(self):
         self.enter('RuntimeTick',1)
         self.torque=None
-        payload=asdict(self.feedback)
-        payload.pop("base_quaternion",None)
-        payload.update(valid=True,imu_valid=True)
+        payload=self.feedback_payload()
         return (self.send(2,'Feedback',payload),
                 self.send(2,'TickPermit',dict(role=2,stage=1)))
 
     def check_feedback(self, feedback, expected):
         if feedback.physics_step!=expected:
             raise ValueError('unexpected completed physics step')
-        values=asdict(feedback)
-        for name,value in values.items():
-            if name=='physics_step': continue
+        for field in fields(feedback):
+            if field.name=='physics_step': continue
+            value=getattr(feedback,field.name)
             if not all(math.isfinite(x) for x in (value if isinstance(value,tuple) else (value,))):
                 raise ValueError('nonfinite feedback')
         if not 0 < len(feedback.q) <= 64 or not len(feedback.q)==len(feedback.dq)==len(feedback.tau):
@@ -245,36 +271,105 @@ class SimulationCoordinator:
             self.arm=None
             self.release_state='Fixed'
 
-    def stop_tick(self):
+    def stop_tick(self, stop_step=None, feedback=None):
+        # stop_step freezes a phase-4 stop below the completed engine horizon.
+        # The feedback payload must then be the exact snapshot the peers last
+        # saw for that control step: the runtime accepts a repeated frozen
+        # sample, never a relabelled measurement.
         if self.feedback is None or 2 not in self.peers:
             return self.fail('shutdown stopped-unproven: runtime/feedback unavailable')
+        step=self.step if stop_step is None else stop_step
         self.cancel_arm()
         self.enter('StopTick',4)
+        self.stop_step=stop_step
         self.torque=None
-        payload=asdict(self.feedback)
-        payload.pop("base_quaternion",None)
-        payload.update(valid=True,imu_valid=True)
-        upper=() if self.runtime_only or self.legacy_shutdown else (self.send(3,'ShutdownPermit',dict(role=3)),)
-        return upper+(self.send(2,'ShutdownPermit',dict(role=2)),
-                self.send(2,'Feedback',payload))
+        payload=self.feedback_payload(feedback)
+        upper=() if self.runtime_only or self.legacy_shutdown else (
+            self.send(3,'ShutdownPermit',dict(role=3),step=step),)
+        return upper+(self.send(2,'ShutdownPermit',dict(role=2),step=step),
+                self.send(2,'Feedback',payload,step=step))
 
-    def start_physics(self):
+    def engine_action(self):
+        # Exactly one immutable step action per control step. The release flag
+        # is decided at issue time; an arm proven after this point can only
+        # authorize the next interval, never rewrite this already-issued one.
         next_us=(self.step+1)*self.b.control_dt_us
         if next_us>self.b.max_duration_us or next_us>=2**64-1:
             raise ValueError('logical duration or overflow')
+        if self.physics_in_flight:
+            raise ValueError('physics already in flight')
         release=self.arm is not None and self.release_state=='Armed'
         if release:
             self.release_state='Releasing'
-        self.enter('PhysicsAdvance',3)
-        return (Action('step',torque=tuple(self.torque['tau']),
-                       substeps=self.b.control_dt_us//self.b.physics_dt_us,
-                       release=release),)
+        self.physics_in_flight=True
+        self.pending_feedback=None
+        self.pending_released=False
+        return Action('step',torque=tuple(self.torque['tau']),
+                      substeps=self.b.control_dt_us//self.b.physics_dt_us,
+                      release=release)
 
-    def validate_tick(self):
+    def start_physics(self):
+        # Non-overlapped starts (runtime-only and leave transitions) already
+        # hold every proof for this step, so the engine handoff defines the
+        # waiting state directly.
+        action=self.engine_action()
+        self.enter('PhysicsAdvance',3)
+        return (action,)
+
+    def begin_overlap(self):
+        # [t,t+dt) starts as soon as the runtime torque is accepted and the
+        # runtime phase-1 inventory/seal is verified. The application phase then
+        # runs concurrently; complete_step() is the only way to emit the next
+        # tick, and it requires both phase completions plus this feedback.
+        if self.physics_in_flight or self.torque is None:
+            return ()
+        if not self.tick_validated:
+            self.validate_tick()
+        return (self.engine_action(),)
+
+    def complete_step(self, handshake_complete=True):
+        # Shared completion of an overlapped in-flight step. A shutdown that
+        # abandoned the application handshake must not move the peers' logical
+        # clock past the step they were consuming: the phase-4 stop then freezes
+        # at this step with the exact feedback snapshot they already hold.
+        if not self.physics_in_flight or self.pending_feedback is None:
+            raise ValueError('missing in-flight physics completion')
+        freeze=(self.shutdown_pending and not handshake_complete)
+        stop_step=self.step if freeze else None
+        stop_feedback=self.feedback if freeze else None
+        expected=(self.step+1)*(self.b.control_dt_us//self.b.physics_dt_us)
+        applied=self.send(2,'AppliedToStep',dict(write_id=self.torque['write_id'],
+            physics_step_begin=self.step*(self.b.control_dt_us//self.b.physics_dt_us),
+            physics_step_end=expected),phase=3)
+        self.feedback=self.pending_feedback
+        released=self.pending_released
+        self.pending_feedback=None
+        self.pending_released=False
+        self.physics_in_flight=False
+        self.step+=1
+        if released:
+            # Releasing is the overlapped-normal path: the arm was present when
+            # the action was issued. Armed means a valid arm proof arrived after
+            # that issue but the engine actually released; the completion is
+            # still bound to that proven authorization (legacy evidence replay
+            # and a worker that reported a real release). No arm means the
+            # release claim has no proof.
+            if self.release_state not in ('Releasing','Armed'):
+                raise ValueError('unsolicited release')
+            self.release_state='Released'
+            if len(self.release_events)==64: self.release_event_drops+=1
+            self.release_events.append(('Released',self.step,self.arm))
+            self.arm=None
+        elif self.release_state=='Releasing': raise ValueError('missing worker release completion')
+        return (applied,)+(self.stop_tick(stop_step,stop_feedback)
+                           if self.shutdown_pending else self.tick())
+
+    def validate_tick(self, step=None):
+        step=self.step if step is None else step
         states=[m for m in self.inventory if m['kind']==3]
         if (self.torque is None or len(states)!=1 or
                 states[0]['sequence']!=self.torque['state_seq'] or
-                states[0]['stamp_us']!=1+self.step*self.b.control_dt_us):
+                states[0]['stamp_us']!=1+step*self.b.control_dt_us):
             raise ValueError('tick state does not match torque')
         state=states[0]
         if state['sequence']<=self.highest_state_seq:
@@ -282,6 +377,7 @@ class SimulationCoordinator:
         self.highest_state_seq=state['sequence']
         self.bind_tick_target(state)
         self.states.append(state)
+        self.tick_validated=True
         return state
 
     def arm_release(self,v):
@@ -333,6 +429,13 @@ class SimulationCoordinator:
         committed=self.send(3,'LeaveCommitted',dict(proof=v,authorization_revoked=True,
             session_closed=state['session_id']==bytes(16),heartbeat_resolved=True))
         permit=self.send(2,'RuntimeOnlyPermit',dict(role=2))
+        if self.physics_in_flight:
+            # The interval for this step was already committed; never issue a
+            # second step action. Join it (or close it) without the app phase.
+            if self.pending_feedback is not None:
+                return (committed,permit)+self.complete_step()
+            self.enter('PhysicsAdvance',3)
+            return (committed,permit)
         return (committed,permit)+self.start_physics()
 
     def advance(self, event: Event, host_now_us: int) -> tuple[Action,...]:
@@ -344,8 +447,12 @@ class SimulationCoordinator:
         if self.deadline is not None and self.host>=self.deadline:
             return self.fail('host phase deadline')
         try:
-            # Actions are caller-owned, including every nested payload dictionary.
-            return deepcopy(self._advance(event))
+            # Actions are caller-owned, including every nested payload
+            # dictionary. _advance satisfies that by construction: retained
+            # protocol dictionaries are shallow-copied before a frame is
+            # echoed, and every other payload is freshly built from immutable
+            # scalars, so a per-event deep copy is unnecessary.
+            return self._advance(event)
         except (ValueError,TypeError,KeyError,AttributeError,OverflowError) as exc:
             return self.fail(str(exc))
 
@@ -366,12 +473,24 @@ class SimulationCoordinator:
             if self.shutdown_pending: return ()
             self.shutdown_pending=True
             self.cancel_arm()
-            if self.state=='PhysicsAdvance': return ()
+            if self.physics_in_flight:
+                # Never pretend a committed interval did not happen: consume a
+                # completed feedback now, otherwise wait for the outstanding
+                # engine action before starting the stop phase. The phase-4
+                # identity stays at this step unless both application phase
+                # handshakes were already complete.
+                return (self.complete_step(handshake_complete=self.state=='PhysicsAdvance')
+                        if self.pending_feedback is not None else ())
             return self.stop_tick()
         if e.kind=='cancelled':
             if self.release_state=='Releasing':
                 self.release_state='Fixed'; self.arm=None
             if not self.shutdown_pending: raise ValueError('unsolicited cancellation')
+            # The worker refused the queued interval before executing it; no
+            # physics step happened, so logical time does not advance.
+            self.physics_in_flight=False
+            self.pending_feedback=None
+            self.pending_released=False
             return self.stop_tick()
         if e.kind=='stopped':
             if self.state!='StopEngine': raise ValueError('unsolicited engine stop completion')
@@ -379,7 +498,9 @@ class SimulationCoordinator:
             self.state='Closed'
             proof=dict(write_id=self.torque['write_id'],state_seq=self.torque['state_seq'])
             peers=(2,) if self.runtime_only or self.legacy_shutdown else (2,3)
-            return tuple(self.send(peer,'ShutdownCommitted',proof) for peer in peers)
+            return tuple(self.send(peer,'ShutdownCommitted',proof,
+                                   step=self.stop_step if self.stop_step is not None else self.step)
+                         for peer in peers)
 
         if e.kind=='feedback':
             if self.state=='Handshake':
@@ -387,25 +508,41 @@ class SimulationCoordinator:
                 self.check_feedback(e.feedback,0)
                 self.feedback=e.feedback
                 return self.tick() if self.peers=={2,3} else ()
-            if self.state!='PhysicsAdvance': raise ValueError('unsolicited feedback')
+            if not self.physics_in_flight: raise ValueError('unsolicited feedback')
+            if self.pending_feedback is not None: raise ValueError('duplicate engine feedback')
             expected=(self.step+1)*(self.b.control_dt_us//self.b.physics_dt_us)
             self.check_feedback(e.feedback,expected)
-            applied=self.send(2,'AppliedToStep',dict(write_id=self.torque['write_id'],
-                physics_step_begin=self.step*(self.b.control_dt_us//self.b.physics_dt_us),
-                physics_step_end=expected))
-            self.feedback=e.feedback
-            self.step+=1
-            if e.released:
-                if self.release_state!='Releasing': raise ValueError('unsolicited release')
-                self.release_state='Released'
-                if len(self.release_events)==64: self.release_event_drops+=1
-                self.release_events.append(('Released',self.step,self.arm))
-                self.arm=None
-            elif self.release_state=='Releasing': raise ValueError('missing worker release completion')
-            return (applied,)+(self.stop_tick() if self.shutdown_pending else self.tick())
+            self.pending_feedback=e.feedback
+            self.pending_released=e.released
+            # An overlapped step may complete before the application handshake.
+            # Hold its feedback (and the next tick) until both phase handshakes
+            # are complete. A shutdown abandons the remaining handshake but
+            # still records the committed interval.
+            if self.state=='PhysicsAdvance' or self.shutdown_pending:
+                return self.complete_step(handshake_complete=self.state=='PhysicsAdvance')
+            if self.state not in ('RuntimeTick','ApplicationPhase','IngressWait'):
+                raise ValueError('unsolicited feedback')
+            return ()
         if e.kind!='frame' or e.peer not in (2,3): raise ValueError('event or role')
         f=e.frame
-        wire=p.encode(f)
+        wire=e.wire
+        if wire is None:
+            wire=p.encode(f)
+            detached=None
+        else:
+            if (f is None or type(wire) is not bytes
+                    or not 0<len(wire)<=p.MAX_PACKET_BYTES):
+                raise ValueError('frame wire')
+            # The supplied packet is authoritative. Decode and validate it
+            # before duplicate detection or any early return can discard it,
+            # then require the accompanying frame to carry the same identity.
+            detached=p.decode(wire)
+            if ((detached.kind,detached.run_id,detached.control_step,detached.phase,
+                 detached.logical_us,detached.physics_dt_us,detached.control_dt_us)!=
+                (f.kind,f.run_id,f.control_step,f.phase,f.logical_us,
+                 f.physics_dt_us,f.control_dt_us)):
+                raise ValueError('frame wire identity')
+            f=detached
         if (f.run_id!=self.b.run_id or f.physics_dt_us!=self.b.physics_dt_us
                 or f.control_dt_us!=self.b.control_dt_us): raise ValueError('run or dt')
         key=(e.peer,hashlib.sha256(wire).digest())
@@ -421,12 +558,17 @@ class SimulationCoordinator:
         if self.shutdown_pending and f.control_step<=self.step and f.phase<4:
             return ()  # Cancelled normal phase; never used as stop proof.
         if self.runtime_only and e.peer==3: raise ValueError('application membership revoked')
-        if (f.control_step!=self.step or f.logical_us!=1+self.step*self.b.control_dt_us
+        phase_step=(self.stop_step if self.phase==4 and self.stop_step is not None
+                    else self.step)
+        if (f.control_step!=phase_step
+                or f.logical_us!=1+phase_step*self.b.control_dt_us
                 or f.phase!=self.phase): raise ValueError('wrong phase')
         if len(self.seen)>=(134 if self.phase==2 else 70): raise ValueError('phase frame capacity')
         self.seen.add(key)
-        # Detach caller-owned dictionaries before retaining protocol facts.
-        f=p.decode(wire)
+        if detached is None:
+            # Detach caller-owned dictionaries before retaining protocol facts.
+            detached=p.decode(wire)
+        f=detached
         v=f.payload
         name=p.KINDS[f.kind-1]
         actions=()
@@ -434,7 +576,7 @@ class SimulationCoordinator:
             if self.state!='Handshake' or e.peer in self.peers or v['role']!=e.peer or not p.matches_hello(v,self.hello):
                 raise ValueError('hello identity')
             self.peers.add(e.peer)
-            actions=(self.send(e.peer,'Hello',self.hello),)
+            actions=(self.send(e.peer,'Hello',dict(self.hello)),)
             if self.peers=={2,3} and self.feedback is not None: actions+=self.tick()
         elif e.peer not in self.peers: raise ValueError('peer not ready')
         elif name=='Abort': raise ValueError('peer aborted')
@@ -446,6 +588,10 @@ class SimulationCoordinator:
                 raise ValueError('torque identity or shape')
             self.torque=v
             self.last_write_id=v['write_id']
+            # The runtime seal may already be verified; torque then closes the
+            # safety gate and the interval starts before the app phase.
+            if self.state=='RuntimeTick' and self.phase==1 and self.seal is not None:
+                actions=self.begin_overlap()
         elif name in ('ReleaseArm','LeaveReady'):
             if e.peer!=3 or self.phase!=2 or self.state!='ApplicationPhase':
                 raise ValueError('lifecycle proof outside consumed application phase')
@@ -472,17 +618,24 @@ class SimulationCoordinator:
                 if any({k:x for k,x in old.items() if k!='content_digest'}==projection for old in self.inventory):
                     raise ValueError('conflicting manifest')
                 if len(self.inventory)==64: raise ValueError('manifest capacity')
-                self.inventory.append(m)
+                # The retained inventory value and the echoed frame must not
+                # alias. MessageIdentity values are immutable scalars/bytes,
+                # so a shallow copy detaches while the action frame stays
+                # caller-owned.
+                self.inventory.append(dict(m))
                 actions=() if self.runtime_only or self.phase==4 else (Action('send',consumer,f),)
             elif name=='PhaseSeal':
                 digest=hashlib.sha256(b''.join(p._pack('Manifest',dict(sender=sender,message=m))
                                              for m in self.inventory)).digest()
                 if e.peer!=sender or v!=dict(sender=sender,manifest_count=len(self.inventory),manifest_digest=digest) or self.seal is not None:
                     raise ValueError('seal mismatch')
-                self.seal=v
+                # The echoed frame stays caller-owned: the retained seal is a
+                # shallow copy of immutable scalars and digest bytes.
+                self.seal=dict(v)
                 if self.phase==2: self.state='IngressWait'
                 if self.phase==4 or (self.runtime_only and self.phase==1):
-                    state=self.validate_tick()
+                    state=self.validate_tick(self.stop_step if self.phase==4
+                                             else None)
                     if self.phase==4:
                         if state['execution_state']!=1 or state['output_action']!=0 or any(self.torque['tau']):
                             raise ValueError('shutdown stopped-unproven: fresh ZeroTorque required')
@@ -491,14 +644,19 @@ class SimulationCoordinator:
                     else:
                         if state['execution_state']==3: raise ValueError('RuntimeOnly forbids Tracking')
                         actions=self.start_physics()
-                else: actions=(Action('send',consumer,f),)
+                else:
+                    actions=(Action('send',consumer,f),)
+                    if self.phase==1:
+                        # Verified runtime phase-1 inventory: the application
+                        # may now install it while [t,t+dt) already executes.
+                        actions+=self.begin_overlap()
             else:
                 if e.peer!=consumer or v['consumer']!=consumer or self.seal is None or v['seal']!=self.seal:
                     raise ValueError('consumer seal mismatch')
                 if name=='InventoryReady':
                     if self.permitted: raise ValueError('conflicting readiness')
                     self.permitted=True
-                    actions=(self.send(sender,'PublishPermit',dict(seal=self.seal)),)
+                    actions=(self.send(sender,'PublishPermit',dict(seal=dict(self.seal))),)
                     if self.phase==1:
                         self.state='ApplicationPhase'
                         actions+=(self.send(3,'TickPermit',dict(role=3,stage=2)),)
@@ -507,12 +665,23 @@ class SimulationCoordinator:
                         raise ValueError('completion before install or wrong disposition')
                     if self.phase==1:
                         if self.torque is None: raise ValueError('missing tick torque')
-                        self.validate_tick()
+                        # Normal path: begin_overlap already validated the tick
+                        # and committed [t,t+dt) at the runtime seal. This is
+                        # the defensive start if that seal/torque order was
+                        # interrupted before the engine action was issued.
+                        actions=self.begin_overlap()
                         self.consumed=tuple(self.inventory)
                         self.enter('ApplicationPhase',2)
-                        actions=()
                     else:
                         self.commit_ingress()
-                        actions=self.start_physics()
+                        if not self.physics_in_flight:
+                            actions=self.start_physics()
+                        elif self.pending_feedback is not None:
+                            # Both handshakes complete and the engine already
+                            # reported t+dt: only now may the next tick start.
+                            actions=self.complete_step()
+                        else:
+                            self.enter('PhysicsAdvance',3)
+                            actions=()
         else: raise ValueError('unsupported control frame')
         return actions

@@ -95,9 +95,14 @@ class EvidenceTest(unittest.TestCase):
         r=Runner(self.b,Path(self.temp.name)/'bridge.sock')
         self.addCleanup(r.selector.close)
         rows=[];header=r.record.header
+        from simulation.record import _hex
         class Capture:
-            def offer(inner,row):
-                rows.append(dict(row,record_type='event',sequence=len(rows)+1))
+            # Captures the same line the real worker would serialise, then
+            # parses it so the fixture can mutate a JSON-only row.
+            def offer_owned(inner,row):
+                line=json.dumps(dict(row,record_type='event',sequence=len(rows)+1),
+                                separators=(',',':'),allow_nan=False,default=_hex)
+                rows.append(json.loads(line))
         r.record=Capture();last=[]
         r._actions=lambda actions:last.extend(actions)
         # Feed Runner its real events, but never execute socket/engine actions.

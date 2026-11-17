@@ -1,6 +1,9 @@
 #include "irmv/transport/client_transport.hpp"
 
+#include <poll.h>
+
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -8,6 +11,7 @@
 #include <exception>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 
@@ -15,19 +19,49 @@
 #include "irmv/protocol/types.hpp"
 #include "irmv/transport/codec.hpp"
 #include "irmv/transport/dds_transport.hpp"
+#include "irmv/transport/event_signal.hpp"
 
 namespace irmv::transport {
 namespace {
 
 namespace wire = irmv::protocol::wire;
 
+// Batches read per simulation wake before yielding to outbound writes; a full
+// batch means the lane may have more, so the worker self-wakes to continue.
+constexpr int kSimulationDrainRounds = 8;
+
+// Shutdown-safety bound for the simulation worker's blocking wait. Wakes are
+// published after the data they announce, so this never delays ready work; it
+// only lets a worker leave if a wake notification itself failed. Stop() also
+// writes the same eventfd.
+constexpr int kSimulationWakePollMs = 100;
+
+// Wake-only DDS listener. Middleware callbacks may not take samples or call
+// any other DDS operation here: they only make the worker's eventfd readable.
+// The sole transport thread performs every read, write and entity operation.
+template <typename T>
+class DataAvailableWake final : public dds::sub::NoOpDataReaderListener<T> {
+ public:
+  DataAvailableWake(EventSignal &wake, std::atomic<bool> &failed) noexcept
+      : wake_(wake), failed_(failed) {}
+
+  void on_data_available(dds::sub::DataReader<T> &) noexcept override {
+    if (!wake_.Notify()) failed_.store(true, std::memory_order_relaxed);
+  }
+
+ private:
+  EventSignal &wake_;
+  std::atomic<bool> &failed_;
+};
+
 }  // namespace
 
 // Every DDS entity lives here and is created by the constructor, which only
 // runs from Start(). The transport thread owns all of them after that.
 struct ClientTransport::Impl {
-  Impl(const configuration::ApplicationConfig &config, ClientTransport &owner)
-      : owner(owner),
+  Impl(const configuration::ApplicationConfig &config,
+       ClientTransport &owner_transport)
+      : owner(owner_transport),
         participant(config.dds().domain,
                     dds::domain::qos::DomainParticipantQos(), nullptr,
                     dds::core::status::StatusMask::none(),
@@ -61,16 +95,47 @@ struct ClientTransport::Impl {
         state_condition(state_reader, dds::sub::status::DataState::any()) {
     waitset += result_condition;
     waitset += state_condition;
+    if (owner.simulation_) {
+      // The wake path is an eventfd only: control and middleware callbacks make
+      // no DDS call, and this transport thread performs every DDS operation.
+      if (!simulation_wake.Open())
+        throw std::runtime_error("simulation wake eventfd");
+      result_wake = std::make_unique<DataAvailableWake<wire::ExecutionResult>>(
+          simulation_wake, owner.worker_wake_failed_);
+      state_wake = std::make_unique<DataAvailableWake<wire::RobotState>>(
+          simulation_wake, owner.worker_wake_failed_);
+      try {
+        result_reader.listener(result_wake.get(),
+                               dds::core::status::StatusMask::data_available());
+        state_reader.listener(state_wake.get(),
+                              dds::core::status::StatusMask::data_available());
+      } catch (...) {
+        // dds_set_listener can throw after an earlier reader was attached.
+        // Quiesce every simulation reader while the listeners and eventfd are
+        // still alive before member unwinding destroys them.
+        QuiesceReaders();
+        throw;
+      }
+    }
   }
+  ~Impl() { QuiesceReaders(); }
 
-  void Start() { thread = std::thread(&Impl::Run, this); }
+  void Start() {
+    thread = std::thread(&Impl::Run, this);
+    // Registration can precede the thread start; one initial wake makes the
+    // worker drain anything that was already available.
+    if (simulation_wake.valid()) simulation_wake.Notify();
+  }
 
   void Run();
   bool ReadInbound();
+  bool ReadInboundDrain();
   void ReadResults();
   void ReadStates();
   void WriteOutbound();
   void Stop();
+  void WakeControl() noexcept;
+  void QuiesceReaders() noexcept;
 
   ClientTransport &owner;
   dds::domain::DomainParticipant participant;
@@ -84,11 +149,21 @@ struct ClientTransport::Impl {
   dds::pub::DataWriter<wire::ExecutionRequest> request_writer;
   dds::pub::DataWriter<wire::JointCommand> command_writer;
   dds::pub::DataWriter<wire::SupervisorHeartbeat> heartbeat_writer;
+  // Declared before the readers and the listeners it feeds: the eventfd must
+  // outlive every middleware callback that can write it. Opened only when a
+  // simulation is configured.
+  EventSignal simulation_wake;
+  std::unique_ptr<DataAvailableWake<wire::ExecutionResult>> result_wake;
+  std::unique_ptr<DataAvailableWake<wire::RobotState>> state_wake;
   dds::sub::DataReader<wire::ExecutionResult> result_reader;
   dds::sub::DataReader<wire::RobotState> state_reader;
   dds::sub::cond::ReadCondition result_condition;
   dds::sub::cond::ReadCondition state_condition;
   dds::core::cond::WaitSet waitset;
+  // Samples taken by the most recent read of each lane, so the simulation
+  // drain can tell whether a listener wake still has a backlog behind it.
+  std::size_t result_taken_{0}, state_taken_{0};
+  bool simulation_readers_closed_{false};
   std::thread thread;
   std::atomic<bool> stop_requested{false};
   std::mutex done_mutex;
@@ -99,22 +174,38 @@ struct ClientTransport::Impl {
 void ClientTransport::Impl::Run() {
   while (!stop_requested.load(std::memory_order_relaxed)) {
     bool data_available = false;
-    try {
-      data_available =
-          !waitset.wait(dds::core::Duration::from_millisecs(kWaitTimeoutMs))
-               .empty();
-    } catch (const dds::core::TimeoutError &) {
-      // The pinned WaitSet reports a timeout by throwing; that is the normal
-      // "nothing to read within the wait window" path.
-      data_available = false;
-    } catch (const std::exception &) {
-      // A failing wait means the entities this thread owns are unusable. Leave
-      // the loop instead of spinning on the error: the channels keep working
-      // and started() turns false.
-      break;
+    if (simulation_wake.valid()) {
+      // Simulation: block on the wake eventfd until control, a DDS listener,
+      // or Stop writes it. This thread does every read and write after waking,
+      // so there is no polling floor on ready work.
+      pollfd descriptor{simulation_wake.fd(), POLLIN, 0};
+      const int ready = ::poll(&descriptor, 1, kSimulationWakePollMs);
+      if (ready < 0 && errno == EINTR)
+        continue;  // outer loop rechecks stop and recomputes the wait
+      if (ready < 0 || (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)))
+        break;
+      simulation_wake.Drain();
+      if (stop_requested.load(std::memory_order_relaxed)) break;
+    } else {
+      try {
+        data_available =
+            !waitset.wait(dds::core::Duration::from_millisecs(kWaitTimeoutMs))
+                 .empty();
+      } catch (const dds::core::TimeoutError &) {
+        // The pinned WaitSet reports a timeout by throwing; that is the normal
+        // "nothing to read within the wait window" path.
+        data_available = false;
+      } catch (const std::exception &) {
+        // A failing wait means the entities this thread owns are unusable.
+        // Leave the loop instead of spinning on the error: the channels keep
+        // working and started() turns false.
+        break;
+      }
     }
     if (owner.simulation_) owner.simulation_->WorkerUpdate();
-    if (data_available && !ReadInbound()) {
+    if (simulation_wake.valid()) {
+      if (!ReadInboundDrain()) break;
+    } else if (data_available && !ReadInbound()) {
       break;
     }
     WriteOutbound();
@@ -137,6 +228,21 @@ bool ClientTransport::Impl::ReadInbound() {
          ReadGuarded(owner.inbound_read_failures_, [this]() { ReadStates(); });
 }
 
+bool ClientTransport::Impl::ReadInboundDrain() {
+  // Middleware notifications coalesce. A listener wake therefore does not
+  // promise that one batch empties a lane: read while either lane returned a
+  // full batch, then self-wake so a remaining backlog continues on the next
+  // iteration instead of waiting for the shutdown-safety timeout.
+  for (int round = 0; round < kSimulationDrainRounds; ++round) {
+    if (!ReadInbound()) return false;
+    const auto batch = static_cast<std::size_t>(kReadBatch);
+    if (result_taken_ < batch && state_taken_ < batch) return true;
+    if (stop_requested.load(std::memory_order_relaxed)) return true;
+  }
+  simulation_wake.Notify();
+  return true;
+}
+
 void ClientTransport::Impl::ReadResults() {
   // All samples of one read share the host receive time of that read.
   protocol::TimeUs rx_us = NowUs();
@@ -144,6 +250,7 @@ void ClientTransport::Impl::ReadResults() {
                      .max_samples(kReadBatch)
                      .state(dds::sub::status::DataState::any())
                      .take();
+  result_taken_ = samples.length();
   for (const auto &sample : samples) {
     if (!sample.info().valid()) {
       continue;
@@ -184,6 +291,7 @@ void ClientTransport::Impl::ReadStates() {
                      .max_samples(kReadBatch)
                      .state(dds::sub::status::DataState::any())
                      .take();
+  state_taken_ = samples.length();
   for (const auto &sample : samples) {
     if (!sample.info().valid()) {
       continue;
@@ -269,8 +377,32 @@ void ClientTransport::Impl::WriteOutbound() {
   }
 }
 
+void ClientTransport::Impl::WakeControl() noexcept {
+  if (!simulation_wake.Notify())
+    owner.worker_wake_failed_.store(true, std::memory_order_relaxed);
+}
+
+void ClientTransport::Impl::QuiesceReaders() noexcept {
+  // Reader::close() calls prevent_callbacks() before it clears the listener,
+  // so it waits out every C++ callback while listener objects and the eventfd
+  // are still alive. Plain listener(nullptr) mutates the raw listener pointer
+  // before that wait, which can race an already-entered callback. Idempotent
+  // and simulation-only; non-simulation readers keep their normal teardown.
+  if (simulation_readers_closed_ || !owner.simulation_) return;
+  simulation_readers_closed_ = true;
+  try {
+    result_reader.close();
+  } catch (...) {
+  }
+  try {
+    state_reader.close();
+  } catch (...) {
+  }
+}
+
 void ClientTransport::Impl::Stop() {
   stop_requested.store(true, std::memory_order_relaxed);
+  simulation_wake.Notify();
   {
     // Bounded wait for the thread to leave its loop; every blocking operation
     // in that loop is bounded as well, so the join below is immediate.
@@ -281,6 +413,9 @@ void ClientTransport::Impl::Stop() {
   if (thread.joinable()) {
     thread.join();
   }
+  // Join first, then quiesce the middleware callbacks: no worker remains and
+  // Reader::close waits out any callback already running.
+  QuiesceReaders();
 }
 
 ClientTransport::ClientTransport(const configuration::ApplicationConfig &config)
@@ -301,7 +436,9 @@ bool ClientTransport::ConfigureSimulation(
 }
 bool ClientTransport::BeginSimulationPhase(
     const simulation::PhaseManifest &m) noexcept {
-  return simulation_ && simulation_->ControlBegin(m);
+  const bool begun = simulation_ && simulation_->ControlBegin(m);
+  if (begun) WakeWorker();
+  return begun;
 }
 bool ClientTransport::SimulationPhaseInstalled(
     const simulation::PhaseManifest &m) noexcept {
@@ -319,7 +456,25 @@ bool ClientTransport::TrySimulationAck(simulation::Frame *f) noexcept {
   return simulation_ && simulation_->ControlAck(f);
 }
 bool ClientTransport::SimulationFailed() const noexcept {
-  return simulation_ && simulation_->Failed();
+  return simulation_ && (simulation_->Failed() ||
+                         worker_wake_failed_.load(std::memory_order_relaxed));
+}
+int ClientTransport::SimulationWaitFd() const noexcept {
+  return simulation_ ? simulation_->ControlWaitFd() : -1;
+}
+void ClientTransport::DrainSimulationWait() noexcept {
+  if (simulation_) simulation_->ControlDrainSignal();
+}
+void ClientTransport::WakeWorker() noexcept {
+  if (!simulation_ || !worker_wake_) return;
+  try {
+    worker_wake_();
+  } catch (...) {
+    // The callback is an eventfd write; an exception means the wake path is
+    // unusable. Fail the simulation instead of silently falling back to the
+    // bounded safety wait.
+    worker_wake_failed_.store(true, std::memory_order_relaxed);
+  }
 }
 
 void ClientTransport::Start() {
@@ -335,13 +490,36 @@ void ClientTransport::Start() {
   // would return early and the publish gate below would accept samples nobody
   // could write. The transport thread clears the flag on its way out
   // (Impl::Run).
-  std::unique_ptr<Impl> impl = std::make_unique<Impl>(config_, *this);
+  std::unique_ptr<Impl> impl;
+  try {
+    impl = std::make_unique<Impl>(config_, *this);
+  } catch (...) {
+    // No callback was installed before construction completed; keep the owner
+    // free of any pointer into a failed implementation regardless.
+    worker_wake_ = nullptr;
+    throw;
+  }
   impl_ = std::move(impl);
   started_.store(true, std::memory_order_release);
+  if (simulation_) {
+    // Install the control wake callback only after the implementation is fully
+    // constructed and owned, so a constructor unwind cannot leave the owner
+    // holding a callback into a destroyed object.
+    try {
+      Impl *worker = impl_.get();
+      worker_wake_ = [worker] { worker->WakeControl(); };
+    } catch (...) {
+      started_.store(false, std::memory_order_release);
+      worker_wake_ = nullptr;
+      impl_.reset();
+      throw;
+    }
+  }
   try {
     impl_->Start();
   } catch (...) {
     started_.store(false, std::memory_order_release);
+    worker_wake_ = nullptr;
     impl_.reset();
     throw;
   }
@@ -352,6 +530,8 @@ void ClientTransport::Stop() {
     return;
   }
   impl_->Stop();
+  // The callback captures the implementation; the thread is joined by now.
+  worker_wake_ = nullptr;
   impl_.reset();
   started_.store(false, std::memory_order_release);
 }
@@ -373,9 +553,11 @@ bool ClientTransport::PublishRequest(
   if (IsStopLaneOperation(request.operation)) {
     if (stop_requests_.TryPush(request)) {
       stop_lane_published_.fetch_add(1, std::memory_order_relaxed);
+      WakeWorker();
       return true;
     }
   } else if (requests_.TryPush(request)) {
+    WakeWorker();
     return true;
   }
   dropped_requests_.fetch_add(1, std::memory_order_relaxed);
@@ -398,6 +580,7 @@ bool ClientTransport::PublishCommand(const protocol::JointCommand &command) {
   if (!stored || evicted) {
     dropped_commands_.fetch_add(1, std::memory_order_relaxed);
   }
+  if (stored) WakeWorker();
   return stored;
 }
 
@@ -431,6 +614,7 @@ bool ClientTransport::PublishHeartbeat(
   heartbeats_queued_.fetch_add(1, std::memory_order_relaxed);
   last_queued_heartbeat_seq_.store(heartbeat.heartbeat_seq,
                                    std::memory_order_relaxed);
+  WakeWorker();
   return true;
 }
 

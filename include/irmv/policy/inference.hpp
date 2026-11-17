@@ -113,7 +113,11 @@ bool PolicySourceStateUsable(const PolicyResponse &response,
 class InferenceWorker {
  public:
   // Starts the worker thread. Construction does not run an inference.
-  explicit InferenceWorker(std::shared_ptr<const OnnxModel> model);
+  // `response_wake` opts into the simulation-only response eventfd. The
+  // default keeps the previous behaviour: no descriptor and no per-response
+  // notification syscall. Simulation callers must check ResponseFd().
+  explicit InferenceWorker(std::shared_ptr<const OnnxModel> model,
+                           bool response_wake = false);
   ~InferenceWorker();
 
   InferenceWorker(const InferenceWorker &) = delete;
@@ -127,6 +131,16 @@ class InferenceWorker {
 
   // Takes the newest finished response, if one is waiting. Never blocks.
   bool TryTake(PolicyResponse *response);
+
+  // Level-triggered wake for a caller that waits on several sources: the
+  // descriptor becomes readable after a response is published. It carries no
+  // payload; the response channel remains the authority. -1 if the signal could
+  // not be created, which only degrades wake latency.
+  int ResponseFd() const;
+  void DrainResponseSignal();
+  // True once a published response could not be signalled. The simulation
+  // caller reports this instead of quietly polling to its deadline.
+  bool ResponseWakeFailed() const;
 
   // Rejects later submissions, requests cooperative termination of the
   // running inference through its owned Ort::RunOptions, and waits for the

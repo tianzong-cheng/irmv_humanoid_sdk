@@ -150,10 +150,19 @@ def run(build, peer, yaw):
                 self.closed = False
                 engines.append(self)
 
-            def read_feedback(self):
-                value = super().read_feedback()
+            def _record(self, value):
+                # The runner consumes the coherent Feedback returned by the
+                # engine itself: the initial readback and each substep batch.
+                # Nothing in the join re-reads state, so probing read_feedback
+                # alone would miss every advanced step.
                 self.samples[value.physics_step] = value
                 return value
+
+            def read_feedback(self):
+                return self._record(super().read_feedback())
+
+            def step(self, substeps):
+                return self._record(super().step(substeps))
 
             def close(self):
                 super().close()

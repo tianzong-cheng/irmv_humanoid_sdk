@@ -8,7 +8,7 @@ name: CI
 # Two configurations of the same commands that are documented in README.md: the
 # Debug build with the full test suite, the format check and the install step,
 # and a sanitizer build of the deterministic core suite. Nothing is skipped
-# silently: the pinned CycloneDDS 0.10.5 and its C++ binding are built during
+# silently: the pinned matched CycloneDDS 11.0.1 pair is built during
 # configure (a failed fetch or build fails the step), and the DDS-backed tests
 # are asserted to be registered before they are run.
 

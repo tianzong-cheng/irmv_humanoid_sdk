@@ -1,7 +1,21 @@
 #include "irmv/simulation/driver_session.hpp"
 
+#include <poll.h>
+
+#include <cerrno>
 #include <chrono>
+#include <climits>
 namespace irmv::simulation {
+namespace {
+// poll(2) takes milliseconds; round a positive remainder up so a
+// sub-millisecond budget never degenerates into a zero-timeout spin.
+int PollTimeoutMs(protocol::TimeUs timeout_us) {
+  if (timeout_us == 0) return 0;
+  const auto ms = (timeout_us + 999) / 1000;
+  return ms > static_cast<protocol::TimeUs>(INT_MAX) ? INT_MAX
+                                                     : static_cast<int>(ms);
+}
+}  // namespace
 protocol::TimeUs DriverHostUs() noexcept {
   return std::chrono::duration_cast<std::chrono::microseconds>(
              std::chrono::steady_clock::now().time_since_epoch())
@@ -28,6 +42,27 @@ bool DriverSession::Failed() const noexcept {
   return failed_ || endpoint_.Failed() ||
          (lower_ ? lower_->SimulationFailed() : upper_->SimulationFailed());
 }
+bool DriverSession::WaitForProgress(protocol::TimeUs timeout_us) noexcept {
+  if (Failed()) return false;
+  pollfd descriptors[2] = {{-1, 0, 0}, {-1, 0, 0}};
+  nfds_t count = 0;
+  const int endpoint_fd = endpoint_.WaitFd();
+  if (endpoint_fd >= 0) descriptors[count++] = {endpoint_fd, POLLIN, 0};
+  const int transport_fd = TransportWaitFd();
+  if (transport_fd >= 0) descriptors[count++] = {transport_fd, POLLIN, 0};
+  int ready;
+  ready = ::poll(descriptors, count, PollTimeoutMs(timeout_us));
+  if (ready < 0 && errno == EINTR) {
+    // Do not restart the relative timeout: the caller rechecks its absolute
+    // host deadline and stop flags with a budget recomputed from now.
+    return true;
+  }
+  // The signals are level-triggered and carry no payload: clearing them only
+  // means the caller's next condition check must look at the channels, which
+  // every wait site does before it waits again.
+  DrainWait();
+  return ready >= 0;
+}
 Frame DriverSession::Make(StepIdentity id) const noexcept {
   Frame f;
   f.identity = id;
@@ -43,6 +78,16 @@ bool DriverSession::Queue(const Frame& f) noexcept {
   queued_[write_++ % queued_.size()] = f;
   return true;
 }
+bool DriverSession::Flush() noexcept {
+  while (read_ != write_ && endpoint_.SendAvailable()) {
+    if (!endpoint_.TrySend(queued_[read_ % queued_.size()])) {
+      failed_ = true;
+      return false;
+    }
+    ++read_;
+  }
+  return !Failed();
+}
 bool DriverSession::Declare(const PhaseManifest& p) noexcept {
   if (!p.Valid()) {
     failed_ = true;
@@ -57,7 +102,8 @@ bool DriverSession::Declare(const PhaseManifest& p) noexcept {
   }
   auto f = Make(p.identity);
   f.payload = p.seal;
-  return Queue(f);
+  if (!Queue(f)) return false;
+  return Flush();
 }
 bool DriverSession::Processed(const MessageIdentity& id) noexcept {
   return lower_ ? lower_->ReportSimulationProcessed(id)
@@ -83,7 +129,7 @@ bool DriverSession::Leave(const LeaveReady& proof) noexcept {
   if (!Queue(f)) return false;
   leaving_ = true;
   leave_ = proof;
-  return true;
+  return Flush();
 }
 bool DriverSession::Poll() noexcept {
   if (Failed()) return false;
@@ -92,13 +138,10 @@ bool DriverSession::Poll() noexcept {
     failed_ = true;
     return false;
   }
-  while (read_ != write_ && endpoint_.SendAvailable()) {
-    if (!endpoint_.TrySend(queued_[read_ % queued_.size()])) {
-      failed_ = true;
-      return false;
-    }
-    ++read_;
-  }
+  // A control-side frame becomes visible to the endpoint only through Flush.
+  // Every path that queues a frame calls it before returning, so the next
+  // waiter cannot park while a locally produced frame is still only queued_.
+  if (!Flush()) return false;
   Frame f;
   while (endpoint_.TryTake(&f)) {
     if (auto permit = std::get_if<ShutdownPermit>(&f.payload)) {
@@ -278,6 +321,10 @@ bool DriverSession::Poll() noexcept {
       installing_ = false;
     }
   }
+  // InventoryReady and PhaseAck were created during this call. Send what the
+  // endpoint can take now: a peer that waits for them produces no external
+  // event, so leaving them queued would park the caller until its host slice.
+  if (!Flush()) return false;
   if (publishing_ && now - last_publish_ >= 20000) {
     if (!publish_ || !publish_()) {
       failed_ = true;

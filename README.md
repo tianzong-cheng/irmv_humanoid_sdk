@@ -12,11 +12,11 @@ yet and makes no physical-execution claim.
 Requirements: a C++17 compiler, CMake ≥ 3.22, Python 3 (test harness and
 tools; `numpy` and `onnx` are needed when the application is built, the
 default, because the build generates the policy model fixtures), and network
-access on the first configure — the pinned CycloneDDS 0.10.5 and its C++ binding
-and the pinned nlohmann/json are fetched and built from their pinned commits,
-and ONNX Runtime 1.22.0 is downloaded and SHA-256 verified when the application
-is configured, unless a prebuilt prefix is given. The real-backend submodule
-requires CMake ≥ 3.26.
+access on the first configure — the pinned matched CycloneDDS 11.0.1 pair (C
+runtime and C++ binding) and the pinned nlohmann/json are fetched and built
+from their pinned commits, and ONNX Runtime 1.22.0 is downloaded and SHA-256
+verified when the application is configured, unless a prebuilt prefix is
+given. The real-backend submodule requires CMake ≥ 3.26.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug

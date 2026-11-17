@@ -1,6 +1,5 @@
 """Optional read-only native display; never a physics or control participant."""
 import argparse
-from collections import deque
 import json
 import math
 import os
@@ -65,21 +64,26 @@ def receive_latest(channel, run_id, asset_digest, nq, last_step):
 
 
 class ViewerPublisher:
-    def __init__(self, engine_config, run_id, asset_digest, physics_dt_us, follow=False):
+    def __init__(self, engine_config, run_id, asset_digest, physics_dt_us, follow=False,
+                 no_shadow=False):
         self.config = engine_config
         self.run_id = run_id.hex() if isinstance(run_id, bytes) else run_id
         self.asset = asset_digest.hex() if isinstance(asset_digest, bytes) else asset_digest
         self.dt = physics_dt_us
         self.follow = follow
+        self.no_shadow = no_shadow
         self.process = None
         self.socket = None
         self.state = 'not_started'
         self.error = ''
         self.dropped = self.superseded = self.sent = 0
         self.last_step = -1
-        # CPython deque end operations are thread-safe. One worker produces;
-        # one display sender consumes. No renderer wait occurs in publish().
-        self.pending = deque(maxlen=1)
+        # Latest-wins display slot. The engine worker only binds an immutable
+        # (physics_step, qpos tuple, released) sample under ``slot_lock``; the
+        # independent sender serialises the newest one at its own 30 Hz pace.
+        # No JSON and no renderer wait can therefore delay a completed step.
+        self.pending = None
+        self.slot_lock = threading.Lock()
         self.sender = None
         self.stopping = threading.Event()
 
@@ -91,7 +95,8 @@ class ViewerPublisher:
         parent.setblocking(False)
         try:
             parent.send(encode('initialize', self.run_id, self.asset,
-                               config=self.config, physics_dt_us=self.dt, follow=self.follow))
+                               config=self.config, physics_dt_us=self.dt,
+                               follow=self.follow, no_shadow=self.no_shadow))
             environment = dict(os.environ)
             package_root = str(Path(__file__).resolve().parent.parent)
             environment['PYTHONPATH'] = package_root + os.pathsep + environment.get('PYTHONPATH', '')
@@ -122,24 +127,34 @@ class ViewerPublisher:
 
     def _start_sender(self):
         def send():
-            packet = None
+            packet = None  # encoded pose awaiting a free display window
+            sample = None  # newest published sample, not yet encoded
             next_send = 0.0
             try:
                 while not self.stopping.is_set() and self.state == 'ready':
-                    try:
-                        latest = self.pending.popleft()
-                        if packet is not None:
+                    with self.slot_lock:
+                        newest, self.pending = self.pending, None
+                    if newest is not None:
+                        # A newer completed pose always supersedes an unsent one.
+                        if sample is not None or packet is not None:
                             self.superseded += 1
-                        packet = latest
-                    except IndexError:
-                        pass
-                    if packet is None:
+                        sample, packet = newest, None
+                    if sample is None and packet is None:
                         self.stopping.wait(.002)
                         continue
                     remaining = next_send - time.monotonic()
                     if remaining > 0:
                         self.stopping.wait(min(.002, remaining))
                         continue
+                    if packet is None:
+                        # Identity, capacity and finite/latest pose checks stay
+                        # exactly as before, now off the engine worker.
+                        packet = encode('pose', self.run_id, self.asset,
+                                        qpos=list(sample[1]),
+                                        physics_step=sample[0],
+                                        released=sample[2])
+                        decode(packet, self.run_id, self.asset)
+                        sample = None
                     try:
                         self.socket.send(packet)
                         self.sent += 1
@@ -156,16 +171,16 @@ class ViewerPublisher:
     def publish(self, qpos, physics_step, released):
         if self.state != 'ready' or physics_step <= self.last_step:
             return
-        try:
-            packet = encode('pose', self.run_id, self.asset, qpos=list(qpos),
-                            physics_step=physics_step, released=released)
-            decode(packet, self.run_id, self.asset)
-            if self.pending:
+        # Worker-side cost is one immutable sample bind. The engine hands over
+        # an owned float tuple; any other sequence is copied so a caller cannot
+        # mutate a queued display sample. Encoding/validation is the sender's.
+        with self.slot_lock:
+            if self.pending is not None:
                 self.dropped += 1
-            self.pending.append(packet)
-            self.last_step = physics_step
-        except (ValueError, TypeError) as exc:
-            self.error, self.state = str(exc), 'error'
+            self.pending = (physics_step,
+                            qpos if type(qpos) is tuple else tuple(qpos),
+                            released)
+        self.last_step = physics_step
 
     def status(self):
         if self.socket is not None and self.socket.fileno() >= 0:
@@ -297,6 +312,17 @@ def child_main(fd):
                 with window.lock():
                     window.cam.type = mj.mjtCamera.mjCAMERA_TRACKING
                     window.cam.trackbodyid = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, config['base_body'])
+            # The default daylight scene keeps its cast ground shadow. Rendering
+            # that pass costs about a quarter millisecond per control interval on
+            # the same GPU the physics engine uses, which is the difference
+            # between 0.9x and 1.0x real time on a laptop GPU, so an explicit
+            # opt-in may clear it while keeping every other visual element.
+            if message.get('no_shadow'):
+                window.user_scn.flags[mj.mjtRndFlag.mjRND_SHADOW] = 1
+                window.sync(state_only=True)
+                window.user_scn.flags[mj.mjtRndFlag.mjRND_SHADOW] = 0
+            else:
+                window.sync(state_only=True)
             channel.send(encode('ready', run_id, asset))
             channel.setblocking(False)
             last = -1

@@ -232,7 +232,6 @@ Linux, Release build), with a generated Fake record of 64 joints, 100 Hz,
 ```bash
 cmake -S . -B build-bench -DCMAKE_BUILD_TYPE=Release \
   -DIRMV_BUILD_APPLICATION=OFF \
-  -DIRMV_CYCLONEDDS_PREFIX=$PWD/build/cyclonedds-prefix \
   -DIRMV_NLOHMANN_JSON_SOURCE_DIR=$PWD/build/_deps/nlohmann_json-src
 cmake --build build-bench --target web_record_query -j2
 python3 tools/benchmark_experiment_web.py --iterations 5

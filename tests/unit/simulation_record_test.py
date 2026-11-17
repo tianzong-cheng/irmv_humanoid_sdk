@@ -95,6 +95,127 @@ class RecordTest(unittest.TestCase):
             self.assertFalse(summary['evidence_complete'])
             self.assertFalse(summary['measured_feedback_complete'])
 
+    def test_offer_single_pass_matches_legacy_normalisation(self):
+        from simulation.record import MAX_LINE, Writer, read
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/'simulation.jsonl'
+            def clock():return dict(clock='simulation',available=True,clock_domain='simulation',
+                clock_run_id='12'*16,logical_origin_us=1,physics_dt_us=1000,control_dt_us=2000)
+            w=Writer(path,clock())
+            row=dict(kind='event_frame',control_step=1,phase=1,logical_us=2001,
+                     frame=dict(name='Hello',payload=dict(runtime_id=b'\x00\xff',
+                         control_dt_us=(1000,2000))))
+            def hex_encoder(value):
+                if isinstance(value,bytes):return value.hex()
+                raise TypeError('unsupported evidence value')
+            # Identical text to the previous dumps/loads normalisation.
+            single=json.dumps(dict(row,record_type='event',sequence=1),separators=(',',':'),
+                              allow_nan=False,default=hex_encoder)
+            legacy=json.dumps(json.loads(json.dumps(dict(row,record_type='event',sequence=1),
+                              default=hex_encoder)),separators=(',',':'),allow_nan=False)
+            self.assertEqual(single,legacy)
+            self.assertTrue(w.offer(row))
+            self.assertEqual(w.queue.get_nowait(),single)
+            w.queue.put_nowait(single)  # Return the consumed slot for the file run.
+            # The bounded line limit is unchanged and uses ASCII character length.
+            def fitted(extra):
+                base=json.dumps(dict(row,record_type='event',sequence=w.sequence+1,pad=''),
+                                separators=(',',':'),allow_nan=False,default=hex_encoder)
+                return 'x'*(MAX_LINE-len(base)+extra)
+            row['pad']=fitted(0)
+            self.assertTrue(w.offer(row))
+            row['pad']=fitted(1)
+            self.assertFalse(w.offer(row))
+            del row['pad']
+            row['kind']=float('nan')
+            self.assertFalse(w.offer(row))
+            self.assertEqual(w.dropped,2)
+            w.start();self.assertTrue(w.close())
+            rows,summary=read(path)
+            self.assertEqual(len(rows),2)
+            self.assertEqual(rows[0]['frame']['payload']['runtime_id'],'00ff')
+            self.assertEqual(rows[0]['frame']['payload']['control_dt_us'],[1000,2000])
+            self.assertEqual(summary['dropped'],2)
+
+    def test_owned_offer_writes_identical_lines_and_counts_worker_drops(self):
+        from simulation.record import MAX_LINE, Writer, read
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/'simulation.jsonl'
+            clock=dict(clock='simulation',available=True,clock_domain='simulation',
+                clock_run_id='12'*16,logical_origin_us=1,physics_dt_us=1000,control_dt_us=2000)
+            def hex_encoder(value):
+                if isinstance(value,bytes):return value.hex()
+                raise TypeError('unsupported evidence value')
+            row=dict(kind='event_frame',control_step=1,phase=1,logical_us=2001,
+                     frame=dict(name='Hello',payload=dict(runtime_id=b'\x01\x02',
+                         control_dt_us=(1000,2000))))
+            w=Writer(path,clock)
+            self.assertTrue(w.offer_owned(row))
+            w.start();self.assertTrue(w.close())
+            rows,summary=read(path)
+            self.assertEqual(rows[0]['frame']['payload']['runtime_id'],'0102')
+            self.assertTrue(summary['evidence_complete'])
+            expected=json.dumps(dict(row,record_type='event',sequence=1),
+                separators=(',',':'),allow_nan=False,default=hex_encoder)
+            self.assertEqual(path.read_text().splitlines()[1],expected)
+            # Worker-side rejection counts the same drops, never writes them.
+            path=Path(d)/'late.jsonl'
+            w=Writer(path,clock)
+            base=dict(kind='event_frame',control_step=0,phase=1,logical_us=1)
+            self.assertTrue(w.offer_owned(dict(base,pad='x'*(MAX_LINE+1))))
+            self.assertTrue(w.offer_owned(dict(base,kind=float('nan'))))
+            w.start();self.assertTrue(w.close())
+            rows,summary=read(path)
+            self.assertEqual(rows,[])
+            self.assertEqual(summary['dropped'],2)
+            self.assertFalse(summary['evidence_complete'])
+            # The bounded queue and closed-writer contract are unchanged.
+            path=Path(d)/'full.jsonl'
+            w=Writer(path,clock,capacity=1)
+            self.assertTrue(w.offer_owned(dict(base)))
+            self.assertFalse(w.offer_owned(dict(base)))
+            w.start();self.assertTrue(w.close())
+            self.assertEqual(w.dropped,1)
+            self.assertFalse(w.offer_owned(dict(base)))
+
+    def test_owned_drop_counters_are_single_writer_and_summed_in_footer(self):
+        from simulation.record import Writer, read
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/'simulation.jsonl'
+            clock=dict(clock='simulation',available=True,clock_domain='simulation',
+                clock_run_id='12'*16,logical_origin_us=1,physics_dt_us=1000,control_dt_us=2000)
+            entered=threading.Event();release=threading.Event()
+            class Gated(Writer):
+                @staticmethod
+                def _line(row):
+                    if row.get('kind')=='worker-bad':
+                        entered.set()
+                        release.wait(5)
+                        raise ValueError('bad evidence')
+                    return Writer._line(row)
+            w=Gated(path,clock,capacity=1)
+            base=dict(control_step=0,phase=1,logical_us=1)
+            self.assertTrue(w.offer_owned(dict(base,kind='worker-bad')))
+            w.start()
+            try:
+                self.assertTrue(entered.wait(2),'worker never reached serialisation')
+                # The worker is parked mid-rejection; the producer fills the
+                # single slot and then hits a full-queue rejection. Both
+                # increments overlap in time but touch different counters.
+                self.assertTrue(w.offer_owned(dict(base,kind='event_frame')))
+                self.assertFalse(w.offer_owned(dict(base,kind='event_frame')))
+                self.assertEqual(w.producer_dropped,1)
+                self.assertEqual(w.worker_dropped,0)
+            finally:
+                release.set()
+            self.assertTrue(w.close())
+            self.assertEqual((w.producer_dropped,w.worker_dropped),(1,1))
+            self.assertEqual(w.dropped,2)
+            rows,summary=read(path)
+            self.assertEqual([r['kind'] for r in rows],['event_frame'])
+            self.assertEqual(summary['dropped'],2)
+            self.assertFalse(summary['evidence_complete'])
+
     def test_bounded_validation(self):
         from simulation.record import read
         with tempfile.TemporaryDirectory() as d:

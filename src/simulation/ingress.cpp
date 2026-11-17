@@ -92,8 +92,10 @@ void Ingress::WorkerUpdate() noexcept {
                                            m.control_dt_us, m.consumer,
                                            m.required, m.seal})) {
       failed_ = true;
+      signal_.Notify();
       return;
     }
+    signal_.Notify();
   }
 }
 int Ingress::WorkerCheck(const MessageIdentity& m,
@@ -110,10 +112,12 @@ int Ingress::WorkerCheck(const MessageIdentity& m,
             if (cache_[k].seen[j] &&
                 SameIdentity(cache_[k].manifest.messages[j], m)) {
               failed_ = true;
+              signal_.Notify();
               return -1;
             }
       if (clock_.NowUs() != c.manifest.identity.logical_us) {
         failed_ = true;
+        signal_.Notify();
         return -1;
       }
       *stamp = c.manifest.identity.logical_us;
@@ -125,11 +129,13 @@ int Ingress::WorkerCheck(const MessageIdentity& m,
       for (std::uint32_t i = 0; i < old.manifest.count; ++i)
         if (old.seen[i] && SameIdentity(old.manifest.messages[i], m)) return 0;
   failed_ = true;
+  signal_.Notify();
   return -1;
 }
 void Ingress::WorkerStored(const MessageIdentity& m, bool stored) noexcept {
   if (!stored || !active_valid_) {
     failed_ = true;
+    signal_.Notify();
     return;
   }
   auto& c = cache_[active_];
@@ -138,10 +144,13 @@ void Ingress::WorkerStored(const MessageIdentity& m, bool stored) noexcept {
       c.seen[i] = true;
       if (!receipts_.TryPush({c.manifest.identity, c.manifest.physics_dt_us,
                               c.manifest.control_dt_us, consumer_,
-                              Disposition::Ingress, m}))
+                              Disposition::Ingress, m})) {
         failed_ = true;
+      }
+      signal_.Notify();
       return;
     }
   failed_ = true;
+  signal_.Notify();
 }
 }  // namespace irmv::simulation
