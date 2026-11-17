@@ -316,6 +316,27 @@ window. Closing the window closes visualization only; application `x` still
 leaves through Damping, and Ctrl-C in the launcher requests whole-experiment
 shutdown through runtime ZeroTorque and engine close.
 
+Interactive launch prints the configured key map and follows application status
+in the launching terminal while retaining the full `run/application.log`.
+Keys are immediate: Enter is not required. Wait for Standby first. With the
+example bindings, press `d`, wait for `[application] behavior=Damping`, press
+`i`, then wait for the actual `[application] behavior=Ready` status before
+pressing `l`.
+Locomotion input during Initializing is deliberately ignored, not queued for
+later execution. Initialization uses logical time and can take longer in wall
+time when physics is slow. The viewer's BASE HELD label does not mean keyboard
+input was lost: it remains held through initialization and Ready.
+
+The application continues to own terminal mode and stdin; the launcher only
+mirrors the existing child-owned log, with bounded reads rather than placing a
+pipe in the SDK output path. Application `x` restores terminal attributes and
+retains the runtime; launcher Ctrl-C still requires independent stop proof.
+
+`simulation_terminal_test` exercises this sequence through a real controlling
+PTY with real SDK/DDS and fake physics, including terminal restoration after
+application exit and active-experiment Ctrl-C shutdown. It is not GPU policy
+acceptance evidence.
+
 The viewer process owns a separate CPU model/data, uses CPU forward kinematics
 only, and displays immutable completed GPU qpos snapshots. It cannot command or
 perturb authoritative physics. Logical time and BASE HELD/RELEASED are displayed;

@@ -2142,6 +2142,10 @@ if(TARGET application)
   add_test(NAME simulation_launcher_test COMMAND "${Python3_EXECUTABLE}"
     "${PROJECT_SOURCE_DIR}/tests/integration/simulation_launcher_test.py" "${CMAKE_CURRENT_BINARY_DIR}")
   set_tests_properties(simulation_launcher_test PROPERTIES LABELS integration RUN_SERIAL TRUE TIMEOUT 120)
+  add_test(NAME simulation_terminal_test COMMAND "${Python3_EXECUTABLE}"
+    "${PROJECT_SOURCE_DIR}/tests/integration/simulation_terminal_test.py" "${CMAKE_CURRENT_BINARY_DIR}")
+  set_tests_properties(simulation_terminal_test PROPERTIES
+    LABELS integration RUN_SERIAL TRUE TIMEOUT 120 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
   if(IRMV_TEST_SIMULATION_GPU)
     set(IRMV_SIMULATION_TEST_CONFIG "" CACHE FILEPATH "Explicit prepared real policy GPU config")
     if(NOT IRMV_SIMULATION_TEST_CONFIG OR NOT EXISTS "${IRMV_SIMULATION_TEST_CONFIG}")

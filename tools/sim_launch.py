@@ -50,6 +50,7 @@ class Experiment:
         self.viewer_follow=viewer_follow
         self.viewer_factory=viewer_factory
         self.viewer=None
+        self.application_output=None
 
     def notify_shutdown(self,signum=None,frame=None):
         self.shutdown_notified=True
@@ -63,6 +64,36 @@ class Experiment:
         if self.thread and self.thread.is_alive():
             raise RuntimeError('startup cancellation owner deadline')
         return True
+
+    def _open_application_console(self):
+        path=self.directory/'application.log'
+        self.application_output=path.open('r',encoding='utf-8',errors='replace')
+        print('sim_launch: application status and log: '+str(path),flush=True)
+        try:
+            bindings=json.loads(self.config.read_text())['input']['bindings']
+        except (OSError,ValueError,KeyError,TypeError):
+            bindings={}
+        keys=['{}={}'.format('space' if key==' ' else key,action)
+              for action,key in bindings.items() if isinstance(key,str) and len(key)==1]
+        if keys:print('sim_launch: keys: '+'  '.join(keys),flush=True)
+        print('sim_launch: type keys in this terminal without Enter; wait for '
+              'behavior=Ready before starting locomotion. Ctrl-C stops the whole experiment.',
+              flush=True)
+
+    def _mirror_application_output(self):
+        if self.application_output is None:return
+        # Follow the child-owned regular file, never put a logging pipe in the
+        # SDK path. Bound each host iteration; application keeps owning stdin.
+        text=self.application_output.read(8192)
+        if text:
+            try:
+                sys.stdout.write(text)
+                sys.stdout.flush()
+            except (BrokenPipeError,BlockingIOError) as exc:
+                self.evidence['console_output_error']=str(exc)
+                self.application_output.close()
+                self.application_output=None
+
 
     def start(self):
         if self._cancel_startup():return self
@@ -112,6 +143,8 @@ class Experiment:
             if self._cancel_startup():return self
             self.children.append(subprocess.Popen([str(binary),'--config',str(self.config)],
                 stdin=self.application_stdin if name=='application' else subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True))
+            if name=='application' and self.application_stdin is None:
+                self._open_application_console()
         return self
 
     def wait(self):
@@ -124,6 +157,7 @@ class Experiment:
             if self.children[1].poll() is not None and not self.runner.coordinator.runtime_only and self.runner.coordinator.state!='Closed':
                 self.runner.request_stop()
             self.thread.join(.01)
+            self._mirror_application_output()
             if self.viewer is not None:
                 status=self.viewer.status()
                 previous=self.evidence.get('viewer',{}).get('state')
@@ -133,6 +167,7 @@ class Experiment:
                           (': '+status['error'] if status.get('error') else ''),
                           file=sys.stderr,flush=True)
         codes=[p.wait(timeout=5) for p in self.children]
+        self._mirror_application_output()
         c=self.runner.coordinator
         self.evidence.update(coordinator_result=self.result,child_codes=codes,
             state=c.state,failure=c.failure,stop_proven=c.stop_proven,
@@ -151,6 +186,10 @@ class Experiment:
                 except subprocess.TimeoutExpired:p.kill();p.wait()
         for p in self.children:
             if p.stdin and not p.stdin.closed:p.stdin.close()
+        self._mirror_application_output()
+        if self.application_output is not None:
+            self.application_output.close()
+            self.application_output=None
         for log in self.logs:log.close()
         if self.viewer is not None:
             self.viewer.close()
