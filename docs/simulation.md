@@ -372,3 +372,66 @@ physics subsequently waits. Owner lifetime uses EOF-capable local packets;
 unexpected nonzero renderer exit remains an error, not normal window closure.
 Standard-library regression coverage includes stalled rendering without further
 physics, owner EOF, reordered/foreign/nonfinite poses and delayed child failure.
+
+### Display appearance
+
+The native child adds a daylight headlight/directional light, a sky gradient,
+and a light checker material on planes in its private model spec. Robot
+materials are retained. Ground friction, collision geometry, solver settings,
+joint dynamics and authoritative assets are not changed.
+The configured-pose spec loader is shared with the engine so display resources
+do not introduce a second pose convention. That refactor changes the adapter
+byte binding: explicitly re-prepare assets rather than editing an old digest.
+The current local diagnostic was freshly prepared at
+`build/viewer-daylight-assets/sdk.json`; use it as the template when generating
+a new run directory, not the older `build/viewer-smoke/sdk-final.json`.
+It retains the previously authorized diagnostic tolerances/continuity settings,
+not product-default or long-run acceptance settings.
+
+Native before/after screenshots are in `build/simulation-timing/lighting-*.png`.
+A CPU comparison found 28 physical model arrays, dimensions and timestep
+unchanged. Native closure verification exposed an existing daemon GUI-thread
+exit race; the child now joins its GUI thread with a bounded deadline before
+interpreter teardown. The actual native probe then closed with exit0.
+
+### Simulation time versus wall time
+
+The overlay shows completed **logical simulation time**, not wall time. A30Hz
+display cap does not imply real-time physics. Warm local RTX3070 measurements
+with MuJoCo/MuJoCo Warp3.9.0 and Warp1.15.0 found:
+
+|Mode|Mean host milliseconds per2ms control interval|Simulation/wall time|
+|---|---:|---:|
+|Full SDK, headless|59.24|0.03376|
+|Full SDK, native daylight viewer|59.74|0.03348|
+|Engine only, no SDK/viewer|15.46|0.12937|
+
+The paired SDK runs used the same prepared physics/configuration, held base,
+Standby and zero torque. Each excludes the first100 control intervals and
+measures200 intervals (0.4 simulation seconds); both obtained independent stop
+proof, SDK exits[0,0], and the native child also exited0. This is a short timing
+diagnostic, not locomotion or60s acceptance, nor a throughput guarantee.
+The engine-only measurement excludes40 warmup intervals and measures120.
+
+Headless handoff barriers averaged27.01ms runtime-to-application and11.56ms
+application-to-runtime; completed GPU feedback then waited about5.02ms for
+coordinator observation, on top of15.51ms of engine operation. Important costs:
+
+- `src/simulation/endpoint.cpp`: outbound SPSC writes do not wake the IPC
+  thread, which polls at5ms intervals; multiple handoffs accumulate this cost.
+- `tools/simulation/main.py`: worker results enter a queue without waking the
+  coordinator's selector, whose wait is capped at10ms.
+- MuJoCo Warp single-world stepping: the CPU profiler observed roughly400
+  kernel launches per control interval, plus full host feedback extraction and
+  small device-to-host reads. Profiled absolute times include profiler overhead;
+  the table uses unprofiled timing.
+
+Thus the approximately30x slowdown is in actual stepping and host-side
+coordination, not a viewer playback-speed setting. This display change does
+not claim a speedup. Keep coherent feedback, logical deadlines and consumption
+barriers intact when optimizing wakeups or GPU submission.
+
+Raw evidence: `build/simulation-timing/{report,sdk-comparison,lighting-proof}.json`,
+`engine-profile.txt`, hardware/version metadata and native screenshots.
+Older user recordings with missing shutdown proof remain failures; the new
+successful timing runs do not retrospectively certify them.

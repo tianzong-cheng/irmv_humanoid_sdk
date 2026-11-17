@@ -222,22 +222,60 @@ class ViewerPublisher:
             self.socket.close()
 
 
+def _load_display_model(config):
+    """Decorate only the private display spec; never edit physical assets."""
+    import mujoco as mj
+    from .mujoco_warp_engine import LoadConfiguredSpec
+
+    spec = LoadConfiguredSpec(config)
+    headlight = spec.visual.headlight
+    headlight.active = 1
+    headlight.ambient = [.3, .3, .3]
+    headlight.diffuse = [.55, .55, .55]
+    headlight.specular = [.15, .15, .15]
+    spec.worldbody.add_light(
+        name='__irmv_viewer_sun', type=mj.mjtLightType.mjLIGHT_DIRECTIONAL,
+        pos=[2, -3, 4], dir=[-.4, .6, -1], castshadow=True,
+        ambient=[.1, .1, .1], diffuse=[.65, .65, .65], specular=[.15, .15, .15])
+    if not any(texture.type == mj.mjtTexture.mjTEXTURE_SKYBOX
+               for texture in spec.textures):
+        spec.add_texture(
+            name='__irmv_viewer_sky', type=mj.mjtTexture.mjTEXTURE_SKYBOX,
+            builtin=mj.mjtBuiltin.mjBUILTIN_GRADIENT, width=256, height=256,
+            rgb1=[.55, .68, .82], rgb2=[.9, .94, .98])
+    planes = [geom for geom in spec.geoms if geom.type == mj.mjtGeom.mjGEOM_PLANE]
+    if planes:
+        texture = spec.add_texture(
+            name='__irmv_viewer_grid', type=mj.mjtTexture.mjTEXTURE_2D,
+            builtin=mj.mjtBuiltin.mjBUILTIN_CHECKER, width=256, height=256,
+            rgb1=[.65, .69, .73], rgb2=[.82, .85, .88])
+        material = spec.add_material(
+            name='__irmv_viewer_ground', texuniform=True, texrepeat=[1, 1],
+            specular=.1, shininess=.1, reflectance=0, rgba=[1, 1, 1, 1])
+        material.textures[mj.mjtTextureRole.mjTEXROLE_RGB] = texture.name
+        for geom in planes:
+            geom.material = material.name
+            geom.rgba = [1, 1, 1, 1]
+    return spec.compile()
+
+
 def child_main(fd):
     channel = socket.socket(fileno=fd)
     channel.settimeout(10)
     raw = channel.recv(MAX_PACKET + 1)
     message = json.loads(raw)
     run_id, asset = message['run_id'], message['asset_digest']
+    render_threads = ()
     try:
         decode(raw, run_id, asset)
         from .assets import closure
-        from .mujoco_warp_engine import LoadConfiguredModel
+        # Rendering resources are compiled only in this child process.
         import mujoco as mj
         import mujoco.viewer
         config = message['config']
         if closure(config['model_path'])['digest'] != asset:
             raise ValueError('viewer asset closure mismatch')
-        model = LoadConfiguredModel(config)
+        model = _load_display_model(config)
         if model.nq > MAX_QPOS:
             raise ValueError('viewer qpos capacity exceeded')
         data = mj.MjData(model)
@@ -245,7 +283,9 @@ def child_main(fd):
             index = mj.mj_name2id(model, mj.mjtObj.mjOBJ_JOINT, name)
             data.qpos[model.jnt_qposadr[index]] = q
         mj.mj_forward(model, data)  # Kinematics only; never CPU stepping.
+        threads_before = set(threading.enumerate())
         with mujoco.viewer.launch_passive(model, data) as window:
+            render_threads = tuple(set(threading.enumerate()) - threads_before)
             with window.lock():
                 base = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, config['base_body'])
                 window.cam.lookat[:] = data.xpos[base]
@@ -290,6 +330,12 @@ def child_main(fd):
         print('simulation viewer: ' + str(exc), file=sys.stderr)
         return 1
     finally:
+        # launch_passive owns a daemon GUI thread; close requests its exit but
+        # does not join it. Keep model/GL resources alive until it has unwound.
+        for thread in render_threads:
+            thread.join(timeout=2)
+            if thread.is_alive():
+                raise RuntimeError('native viewer thread close deadline')
         channel.close()
 
 

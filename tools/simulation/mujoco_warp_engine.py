@@ -86,8 +86,8 @@ def validate_model(model, config: dict) -> dict:
                 root_v=int(model.jnt_dofadr[root]), weld=weld, sensors=sensors, timestep=dt)
 
 
-def LoadConfiguredModel(config):
-    """Compile a private model at the declared pose; no CUDA initialization."""
+def LoadConfiguredSpec(config):
+    """Load the declared pose before compilation; no CUDA initialization."""
     import mujoco as mj
     spec = mj.MjSpec.from_file(str(config["model_path"]))
     base = spec.body(config["base_body"])
@@ -96,7 +96,12 @@ def LoadConfiguredModel(config):
     if "initial_base_position" in config:
         base.pos = config["initial_base_position"]
         base.quat = config["initial_base_quaternion"]
-    return spec.compile()
+    return spec
+
+
+def LoadConfiguredModel(config):
+    """Compile the authoritative model without display-only resources."""
+    return LoadConfiguredSpec(config).compile()
 
 
 class MujocoWarpEngine:
