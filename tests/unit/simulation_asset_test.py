@@ -33,6 +33,39 @@ class AssetTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'initial geometry'):
             admit_initial_geometry(expected,{})
 
+    def test_explicit_initial_pose_contract_is_validated_and_admitted(self):
+        import json
+        import xml.etree.ElementTree as ET
+        from prepare_simulation_asset import initial_stance,load_initial_pose
+        from simulation.assets import admit_initial_geometry
+        names=['test_left','test_right']
+        movable={name:ET.fromstring(f'<joint name="{name}"><limit lower="-.9" upper=".9"/></joint>')
+                 for name in names}
+        default=[.25,-.3]
+        self.assertEqual(initial_stance(names,movable,default,None),default)
+        pose=dict(test_left=.6,test_right=.5)
+        self.assertEqual(initial_stance(names,movable,default,pose),[.6,.5])
+        self.assertEqual(load_initial_pose(json.dumps(pose)),pose)
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/'pose.json';path.write_text(json.dumps(pose))
+            self.assertEqual(load_initial_pose(str(path)),pose)
+        for case in [dict(test_left=0),
+                     dict(test_left=0,test_right=0,other=0),
+                     dict(test_left=True,test_right=0),
+                     dict(test_left='0',test_right=0),
+                     dict(test_left=float('nan'),test_right=0),
+                     dict(test_left=float('inf'),test_right=0),
+                     dict(test_left=.95,test_right=0)]:
+            with self.subTest(case=case):
+                with self.assertRaises(ValueError):
+                    initial_stance(names,movable,default,case)
+        geometry=dict(initial_base_position=[0,0,.8],initial_base_quaternion=[1,0,0,0],
+                      initial_joint_position=[.6,.5])
+        manifest=dict(initial_geometry=geometry)
+        admit_initial_geometry(geometry,manifest)
+        with self.assertRaisesRegex(ValueError,'initial geometry'):
+            admit_initial_geometry(dict(geometry,initial_joint_position=default),manifest)
+
     def test_live_binding_requires_corrected_collision_support_attestation(self):
         import json
         from unittest.mock import patch

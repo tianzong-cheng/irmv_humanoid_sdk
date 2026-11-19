@@ -147,6 +147,15 @@ class ValidationTest(unittest.TestCase):
                        return_value=json.dumps(contract).encode()):
                 config=prepare(urdf,policy,p/'prepared',ROOT/'config/simulation.example.json',
                                profile,sys.executable)
+                posed=prepare(urdf,policy,p/'posed',ROOT/'config/simulation.example.json',
+                              profile,sys.executable,dict(test_left=.6,test_right=.5))
+                for index,case in enumerate([dict(test_left=True,test_right=0),
+                                             dict(test_left=1.5,test_right=0)]):
+                    target=p/f'rejected-{index}'
+                    with self.assertRaises(ValueError):
+                        prepare(urdf,policy,target,ROOT/'config/simulation.example.json',
+                                profile,sys.executable,case)
+                    self.assertFalse(target.exists())
             cfg=json.loads(config.read_text())
             model=mujoco.MjModel.from_xml_path(cfg['simulation']['model_path'])
             data=mujoco.MjData(model)
@@ -172,6 +181,19 @@ class ValidationTest(unittest.TestCase):
             self.assertAlmostEqual(cfg['simulation']['initial_base_position'][2]+min(support),.002,places=9)
             manifest=json.loads(Path(cfg['simulation']['model_path']).with_suffix('.manifest.json').read_text())
             self.assertEqual(manifest['collision_support_version'],1)
+            posed_cfg=json.loads(posed.read_text())
+            posed_manifest=json.loads(
+                Path(posed_cfg['simulation']['model_path']).with_suffix('.manifest.json').read_text())
+            pose=dict(test_left=.6,test_right=.5)
+            self.assertEqual(posed_cfg['application']['initialization']['target_position'],pose)
+            self.assertEqual(posed_cfg['simulation']['initial_joint_position'],pose)
+            self.assertEqual(posed_manifest['initial_geometry']['initial_joint_position'],[.6,.5])
+            self.assertEqual(posed_manifest['initial_geometry']['initial_base_position'],
+                             posed_cfg['simulation']['initial_base_position'])
+            self.assertAlmostEqual(posed_manifest['initial_height_m'],
+                                   posed_cfg['simulation']['initial_base_position'][2],places=12)
+            self.assertNotAlmostEqual(posed_cfg['simulation']['initial_base_position'][2],
+                                      cfg['simulation']['initial_base_position'][2],places=6)
 
 if __name__ == "__main__":
     unittest.main()

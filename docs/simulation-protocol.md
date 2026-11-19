@@ -751,6 +751,7 @@ SIM_PY tools/prepare_simulation_asset.py \
   --urdf USER_ROBOT.urdf --policy USER_POLICY.onnx --output build/my-robot \
   --template config/simulation.example.json \
   --profile config/simulation-physical-profile.json --metadata-python ONNX_PY
+# Optional non-default stance: add --initial-pose USER_INITIAL_POSE.json
 python3 tools/sim_launch.py --config build/my-robot/sdk.json \
   --runtime build/robot_runtime --application build/application --python SIM_PY
 ```
@@ -766,8 +767,12 @@ torsional friction and weld settings are conversion choices, **not** evidence of
 PhysX equivalence. `source.asset_revision` matches URDF bytes only; historical
 training mesh bytes remain unattested. Initial height is computed from compiled
 collision support (oriented primitives or mesh vertices) at the configured joint
-pose plus explicit ground clearance. A primitive's absent mesh id is never a
-mesh index. Live asset admission requires `collision_support_version=1`;
+pose plus explicit ground clearance. `--initial-pose` optionally selects that
+joint pose as a JSON object (inline or a file path) naming exactly the controlled
+joints with finite angles inside their URDF limits; it also becomes the
+application initialization target. The policy `default_q` is unchanged and
+remains its default stance. A primitive's absent mesh id is never a mesh index.
+Live asset admission requires `collision_support_version=1`;
 re-prepare older declarations explicitly. This changes neither the physics
 profile nor the initialization/continuity acceptance criteria.
 Prepared assets and ONNX blobs are never committed. Generated absolute user paths

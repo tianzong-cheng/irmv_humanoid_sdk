@@ -16,9 +16,14 @@ are MuJoCo 3.9.0, MuJoCo Warp 3.9.0 and Warp 1.15.0. Asset preparation attests
 resolved mesh/include bytes, conversion choices, source URDF, policy and initial
 stance. The binding refuses changed bytes and ambiguous file resolution. The
 initial configuration must equal the converter's admitted flat-floor stance;
-an arbitrary finite base-pose override is not admission. Re-prepare old assets
-explicitly to obtain an initial-geometry declaration. No automatic pose lift,
-blend, reset, warmup support or post-release refixing is provided.
+an arbitrary finite base-pose override is not admission. An explicit preparation
+stance may be supplied with `--initial-pose` as a JSON object (inline or a file
+path) mapping every controlled joint name to a finite angle within its URDF
+limits. It drives both the compiled support-height computation and the
+application initialization target; without it the policy `default_q` remains
+the stance. Re-prepare old assets explicitly to obtain an initial-geometry
+declaration. No automatic pose lift, blend, reset, warmup support or
+post-release refixing is provided.
 Live launch requires asset-manifest `collision_support_version=1`; older
 declarations must be regenerated with `prepare_simulation_asset.py`, not patched
 or grandfathered. Historical records remain available for offline analysis.
@@ -462,3 +467,22 @@ Raw evidence: `build/simulation-timing/{report,sdk-comparison,final2-headless,fi
 `engine-profile.txt`, hardware/version metadata and native screenshots.
 Older recordings with missing shutdown proof remain failures; the new
 successful timing runs do not retrospectively certify them.
+
+## Suspended flat-sole initialization experiment
+
+An explicitly prepared non-training stance under `build/suspended-stance/`
+compensates the oblique hip axes. Its nominal sole planes are horizontal and
+their lowest collision points are 0.03 m above the ground; the held base is at
+0.765292818 m. Training action offsets and model metadata are unchanged.
+
+The actual SDK/MuJoCo Warp run `/tmp/irmv-flat3cm-pf6ymfa1/` reached Ready.
+Over 100 subsequent control intervals, left/right sole clearance was
+0.02611–0.02738 m and maximum sole tilt was about 0.90 degrees: finite-gain
+gravity deflection means actual posture is not the exact kinematic target.
+The measured startup/initialization trajectory stayed above 0.01662 m clearance.
+Independent shutdown proved ZeroTorque and engine closure. This run did not
+enter Locomotion and makes no release, landing or policy-stability claim.
+
+This isolated configuration retains the previously authorized continuity
+bypass and initialization tolerance, and position bounds expanded 0.2 rad from
+URDF limits. It is not a change to the default Fake/Real deployment.

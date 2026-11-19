@@ -3,10 +3,13 @@
 
 Run in the pinned simulation Python, with --metadata-python pointing at an ONNX
 metadata reader environment. Output must be a new ignored build directory.
+--initial-pose optionally selects a JSON joint-name->angle stance for preparation
+and the application initialization target; it defaults to the policy default_q.
 """
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 import shutil
 import subprocess
@@ -15,7 +18,42 @@ import xml.etree.ElementTree as ET
 from simulation.assets import closure,engine_identity,sha256,binary_stl,stl_obj,collision_support_z
 
 
-def prepare(urdf,policy,output,template,profile,metadata_python):
+def initial_stance(names,movable,default_q,initial_pose):
+    """Return the prepared stance in policy-joint order.
+
+    The default remains the policy's training default_q. An explicit stance
+    must name exactly the controlled joints with finite, in-limit angles.
+    """
+    if initial_pose is None:return list(default_q)
+    if not isinstance(initial_pose,dict):
+        raise ValueError('initial pose must be a joint-name to angle object')
+    missing=set(names)-set(initial_pose);extra=set(initial_pose)-set(names)
+    if missing or extra:
+        raise ValueError(f'initial pose joints differ from controlled joints: missing={sorted(missing)}, extra={sorted(extra)}')
+    stance=[]
+    for name in names:
+        value=initial_pose[name]
+        if isinstance(value,bool) or not isinstance(value,(int,float)):
+            raise ValueError(f'initial pose {name} must be a finite number')
+        value=float(value)
+        limit=movable[name].find('limit')
+        if limit is None:raise ValueError(f'URDF joint {name} has no limit')
+        try:lower,upper=float(limit.get('lower')),float(limit.get('upper'))
+        except (TypeError,ValueError):raise ValueError(f'URDF joint {name} has invalid limits') from None
+        if not math.isfinite(value) or not lower<=value<=upper:
+            raise ValueError(f'initial pose {name}={value} is outside URDF limits [{lower}, {upper}]')
+        stance.append(value)
+    return stance
+
+
+def load_initial_pose(value):
+    """Accept an inline JSON object or a path to a JSON file."""
+    if value is None:return None
+    if value.lstrip().startswith('{'):return json.loads(value)
+    return json.loads(Path(value).read_text())
+
+
+def prepare(urdf,policy,output,template,profile,metadata_python,initial_pose=None):
     import mujoco as mj
     import numpy as np
     urdf,policy,output=Path(urdf).resolve(),Path(policy).resolve(),Path(output).resolve()
@@ -31,6 +69,7 @@ def prepare(urdf,policy,output,template,profile,metadata_python):
     movable={j.get('name'):j for j in root.findall('joint') if j.get('type')!='fixed'}
     if set(movable)!=set(names) or any(j.get('type')!='revolute' for j in movable.values()):
         raise ValueError('URDF movable joints must exactly match policy')
+    q=initial_stance(names,movable,contract['action']['default_q'],initial_pose)
     output.mkdir(parents=True,exist_ok=False)
     (output/'meshes').mkdir()
     sources={urdf.name:sha256(urdf)}
@@ -81,7 +120,6 @@ def prepare(urdf,policy,output,template,profile,metadata_python):
     ET.SubElement(sensors,'accelerometer',name='specific_force',site='imu')
     path=output/'robot.xml';xml.write(path)
     model=mj.MjModel.from_xml_path(str(path));data=mj.MjData(model)
-    q=contract['action']['default_q']
     for name,value in zip(names,q):data.qpos[model.jnt_qposadr[mj.mj_name2id(model,mj.mjtObj.mjOBJ_JOINT,name)]]=value
     mj.mj_forward(model,data) # CPU kinematics only, no CPU stepping.
     # Support is the lowest compiled collision point, not a visual bounding
@@ -137,6 +175,8 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     for name in ('urdf','policy','output','template','profile'):p.add_argument('--'+name,required=True)
     p.add_argument('--metadata-python',default='python3')
+    p.add_argument('--initial-pose',help='optional JSON object (inline or file path) of controlled joint names to initial angles')
     a=p.parse_args()
-    print(prepare(a.urdf,a.policy,a.output,a.template,a.profile,a.metadata_python))
+    print(prepare(a.urdf,a.policy,a.output,a.template,a.profile,a.metadata_python,
+                  load_initial_pose(a.initial_pose)))
 if __name__=='__main__':main()
