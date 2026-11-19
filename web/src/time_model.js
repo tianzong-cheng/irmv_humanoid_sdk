@@ -13,6 +13,14 @@ import { Us } from './api.js';
 
 export const SPEEDS = [0.25, 1, 2, 4];
 
+function LiveWindow(coverage) {
+  const beginUs = coverage.endUs - 10000000n;
+  return {
+    beginUs: beginUs < coverage.beginUs ? coverage.beginUs : beginUs,
+    endUs: coverage.endUs,
+  };
+}
+
 function WindowContaining(window, cursor, coverage) {
   if (cursor >= window.beginUs && cursor <= window.endUs) return window;
   const span = window.endUs - window.beginUs;
@@ -191,14 +199,11 @@ export class TimeModel {
         return next;
       }
       case 'followLatest': {
-        const span = state.window.endUs - state.window.beginUs;
+        next.window = LiveWindow(coverage);
         next.mode = 'live';
         next.following = true;
         next.playing = false;
         next.cursor = coverage.endUs;
-        next.window = span > 0n
-          ? { beginUs: coverage.endUs - span < 0n ? 0n : coverage.endUs - span, endUs: coverage.endUs }
-          : { beginUs: coverage.beginUs, endUs: coverage.endUs };
         next.lastAdvanceMs = monotonicNowMs;
         return next;
       }
@@ -208,16 +213,15 @@ export class TimeModel {
         if (end <= coverage.endUs && begin >= coverage.beginUs) {
           return state;
         }
-        next.coverage = { beginUs: begin, endUs: end };
+        next.coverage = {
+          beginUs: begin < coverage.beginUs ? begin : coverage.beginUs,
+          endUs: end > coverage.endUs ? end : coverage.endUs,
+        };
         next.lastReceivedMs = action.receivedAtMs ?? state.lastReceivedMs;
         next.offline = false;
         if (state.following) {
-          const span = state.window.endUs - state.window.beginUs;
-          next.window = {
-            beginUs: end - span < 0n ? 0n : end - span,
-            endUs: end,
-          };
-          next.cursor = end;
+          next.window = LiveWindow(next.coverage);
+          next.cursor = next.coverage.endUs;
         }
         return next;
       }

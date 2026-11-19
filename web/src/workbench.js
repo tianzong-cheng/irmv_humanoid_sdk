@@ -516,10 +516,6 @@ export class Workbench {
     this.BrowserMessage();
     if (!this.$('#experiment-browser').hidden) this.CloseExperiments();
     if (mode === 'live') {
-      const endUs = this.time.coverage.endUs;
-      const beginUs = endUs - this.time.coverage.beginUs > 10000000n
-        ? endUs - 10000000n : this.time.coverage.beginUs;
-      this.ApplyTimeState({ ...this.time, window: { beginUs, endUs } }, { request: false });
       this.GoLive();
     }
   }

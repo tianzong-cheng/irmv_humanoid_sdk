@@ -27,18 +27,51 @@ test('a live pause freezes the window while coverage grows', () => {
   assert.equal(after.coverage.endUs, 20000n);
 });
 
-test('following live slides the window to the new tail', () => {
-  let state = initial();
-  state = TimeModel.Step(state, { type: 'followLatest' }, 10);
-  const span = state.window.endUs - state.window.beginUs;
+test('live follow grows with startup data then keeps the latest ten seconds', () => {
+  const origin = 9007199254740993n;
+  let state = TimeModel.Step(TimeModel.Initial(), {
+    type: 'reset', runId: 'live',
+    coverage: { beginUs: origin, endUs: origin + 1000000n },
+  });
+  state = TimeModel.Step(state, { type: 'followLatest' });
+  for (const seconds of [2n, 9n, 10n, 11n, 30n]) {
+    const endUs = origin + seconds * 1000000n;
+    state = TimeModel.Step(state, {
+      type: 'liveAdvance',
+      coverage: { beginUs: origin, endUs },
+    });
+    const span = seconds < 10n ? seconds * 1000000n : 10000000n;
+    assert.deepEqual(state.window, { beginUs: endUs - span, endUs });
+    assert.equal(state.cursor, endUs);
+  }
+});
+
+test('follow latest restores ten seconds after inspecting a different window', () => {
+  let state = TimeModel.Step(TimeModel.Initial(), {
+    type: 'reset', runId: 'live',
+    coverage: { beginUs: 1000n, endUs: 30001000n },
+  });
+  for (const span of [1000000n, 20000000n]) {
+    state = TimeModel.Step(state, {
+      type: 'setWindow', window: { beginUs: 1000n, endUs: 1000n + span },
+    });
+    state = TimeModel.Step(state, { type: 'followLatest' });
+    assert.deepEqual(state.window, { beginUs: 20001000n, endUs: 30001000n });
+  }
+});
+
+test('a short live buffer does not discard the recorded experiment coverage', () => {
+  let state = TimeModel.Step(TimeModel.Initial(), {
+    type: 'reset', runId: 'live',
+    coverage: { beginUs: 1000n, endUs: 20001000n },
+  });
+  state = TimeModel.Step(state, { type: 'followLatest' });
   state = TimeModel.Step(state, {
     type: 'liveAdvance',
-    coverage: { beginUs: 1000n, endUs: 20000n },
-    receivedAtMs: 100,
-  }, 100);
-  assert.equal(state.cursor, 20000n);
-  assert.equal(state.window.endUs, 20000n);
-  assert.equal(state.window.endUs - state.window.beginUs, span);
+    coverage: { beginUs: 20001000n, endUs: 21001000n },
+  });
+  assert.equal(state.coverage.beginUs, 1000n);
+  assert.deepEqual(state.window, { beginUs: 11001000n, endUs: 21001000n });
 });
 
 test('seek to the start then follow latest jumps back to the new tail', () => {

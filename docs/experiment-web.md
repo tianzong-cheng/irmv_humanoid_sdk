@@ -86,7 +86,9 @@ Runtime. A missing reader or asset is named explicitly.
 ## Choosing an experiment
 
 One host controls one robot. **View live** opens the current runtime experiment
-immediately, initially following up to the last ten seconds. It never opens a
+immediately. While following live, the window shows the latest ten seconds;
+before ten seconds are available it grows with the experiment. **Follow latest**
+restores that ten-second window after reviewing or zooming. It never opens a
 source picker. The adjacent status describes telemetry availability, not robot
 health. Without a readable live runtime the button is disabled. Application-only
 telemetry does not count as a live experiment. Conflicting runtime streams are

@@ -311,10 +311,16 @@ test('selects a recent live experiment and pauses following without changing the
   await expect(page.locator('#experiment-browser')).toBeHidden();
   await expect(page.locator('#experiment-state')).toContainText('Live');
   await expect.poll(() => page.evaluate(() => __workbench.time.following)).toBe(true);
+  await expect.poll(() => page.evaluate(() =>
+    String(__workbench.time.window.endUs - __workbench.time.window.beginUs)
+  )).toBe('10000000');
   await page.click('#pause');
   await expect(page.locator('#experiment-state')).toContainText('Reviewing');
   await page.click('#go-live');
   await expect.poll(() => page.evaluate(() => __workbench.time.following)).toBe(true);
+  await expect.poll(() => page.evaluate(() =>
+    String(__workbench.time.window.endUs - __workbench.time.window.beginUs)
+  )).toBe('10000000');
   await page.route('**/api/live/snapshot?**', route => route.abort());
   await page.route('**/api/runs', route => route.abort());
   await expect(page.locator('#experiment-state')).toContainText('Offline');
