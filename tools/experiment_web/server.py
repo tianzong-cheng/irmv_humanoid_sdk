@@ -188,7 +188,9 @@ def _signal_ids(params: dict[str, list[str]]) -> list[str]:
 
 class _Handler(BaseHTTPRequestHandler):
     server_version = "irmv-experiment-web/1"
-    protocol_version = "HTTP/1.1"
+    # Admission is connection-scoped: close after each response so idle browser
+    # keep-alives cannot hold every request slot and prevent module/API loading.
+    protocol_version = "HTTP/1.0"
 
     @property
     def app(self) -> ExperimentWebServer:

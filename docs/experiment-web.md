@@ -59,6 +59,11 @@ reader's committed files; the live tail is a temporary, bounded view.
 4. Stop the service whenever you like. It owns no SDK process, holds no device
    lock and has no endpoint that starts, stops or signals one.
 
+The local HTTP server closes each connection after its response. Idle browser
+keep-alives must not occupy all eight admission slots and block JavaScript
+module loading or API requests. Server-code fixes require restarting the web
+service, unlike frontend-only changes; refreshing a page alone is insufficient.
+
 ## Installing
 
 The default build is unchanged. To install the workbench with the SDK:

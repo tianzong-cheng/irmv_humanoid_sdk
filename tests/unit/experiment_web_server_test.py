@@ -10,6 +10,7 @@ against the same bytes a real recorder leaves behind.
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import select
@@ -276,6 +277,23 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         status, body = call(fresh, "GET", f"{self.url}api/runs")
         self.assertEqual(status, 200)
+
+    def test_idle_browser_connections_do_not_block_new_page_resources(self) -> None:
+        connections = []
+        try:
+            for _ in range(8):
+                connection = http.client.HTTPConnection(
+                    self.url.removeprefix("http://").rstrip("/"), timeout=3)
+                connections.append(connection)
+                connection.request("GET", "/")
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                response.read()
+            status, _ = call(opener(), "GET", f"{self.url}styles.css")
+            self.assertEqual(status, 200)
+        finally:
+            for connection in connections:
+                connection.close()
 
     def test_api_without_cookie_is_unauthorized(self) -> None:
         fresh = opener()
