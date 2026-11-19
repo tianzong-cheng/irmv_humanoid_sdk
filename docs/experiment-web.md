@@ -132,6 +132,8 @@ or command the robot.
   selection band fills the unused direction, and Escape cancels either mode.
 - Drag a signal into a chart to overlay it, or onto an edge to split the view.
   Drag the legend area to move the chart. Removing the last curve closes it.
+  Live data refreshes redraw plots without replacing drag targets or legend
+  buttons, so dropping and removing curves remain available while following.
 - Legends identify each curve by joint/source, signal and unit, using the same
   color and line style as the trace. Hover a legend entry to
   emphasize its trace; use its close button to remove that signal.

@@ -59,7 +59,12 @@ export class DockView {
     this.timeWindow = timeWindow;
     this.cursor = cursor;
     if (!this.selection) {
-      this.Render();
+      // Keep interactive targets alive across live data/time refreshes.
+      if (layout === this.renderedLayout && resolved === this.renderedResolved) {
+        this.Redraw();
+      } else {
+        this.Render();
+      }
     }
   }
 
@@ -83,6 +88,8 @@ export class DockView {
     this.plotViews.clear();
     this.canvases.clear();
     this.root.replaceChildren(this.RenderNode(this.layout.dock, []));
+    this.renderedLayout = this.layout;
+    this.renderedResolved = this.resolved;
     this.DrawAll();
   }
 

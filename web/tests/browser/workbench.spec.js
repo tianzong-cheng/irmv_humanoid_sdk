@@ -1032,3 +1032,42 @@ test('draws round axis labels and a faint grid at the same tick positions', asyn
   expect(result.zoomTimes[0]).toEqual(['0.2 s', '0.4 s', '0.6 s', '0.8 s']);
   expect(result.zoomTimes[1]).toEqual(['-0.0008 s', '-0.0006 s', '-0.0004 s', '-0.0002 s']);
 });
+
+test('live updates preserve drop previews and a pressed legend remove button', async ({ page }) => {
+  const send = start => execFileSync('python3', [path.join(HERE, 'send_live.py'),
+    '--socket', LIVE_SOCKET, '--run', RUNTIME_RUN, '--start', start, '--count', '5']);
+  send('9007199280000000');
+  await page.goto('/');
+  await page.click('#live-experiments');
+  await expect(page.locator('#experiment-state')).toContainText('Live');
+  await expect(page.locator('.signal').first()).toBeVisible();
+  await drop(page, 'runtime/left_hip/q', null, 'empty');
+  const id = await chartId(page);
+  await drop(page, 'runtime/left_hip/measured_q', id, 'center');
+  const body = page.locator('.chart-body').first();
+  await body.evaluate(element => {
+    const box = element.getBoundingClientRect();
+    element.dispatchEvent(new DragEvent('dragover', {
+      bubbles: true, dataTransfer: new DataTransfer(),
+      clientX: box.left + box.width / 2, clientY: box.top + box.height / 2,
+    }));
+  });
+  const advance = async start => {
+    const before = await page.evaluate(() => String(__workbench.time.window.endUs));
+    const updated = page.waitForResponse(response => new URL(response.url()).pathname.endsWith('/range') && response.ok());
+    send(start);
+    await page.waitForFunction(old => String(__workbench.time.window.endUs) !== old, before);
+    await updated;
+  };
+  await expect(page.locator('.chart-drop-preview')).toBeVisible();
+  await advance('9007199281000000');
+  await expect(page.locator('.chart-drop-preview')).toBeVisible();
+  await body.dispatchEvent('dragleave', { relatedTarget: null });
+  const button = page.locator('.legend-remove').first();
+  const bounds = await button.boundingBox();
+  await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+  await page.mouse.down();
+  await advance('9007199282000000');
+  await page.mouse.up();
+  await expect(page.locator('.legend-item')).toHaveCount(1);
+});
