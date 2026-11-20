@@ -37,7 +37,7 @@ class LauncherTest(unittest.TestCase):
 
 
 class OwnershipTest(unittest.TestCase):
-    def fixture(self, directory, engine_factory=None):
+    def fixture(self, directory, engine_factory=None, domain=None):
         import json
         from sim_launch import Experiment
         from unittest.mock import patch
@@ -49,6 +49,7 @@ class OwnershipTest(unittest.TestCase):
             physics_dt_us=1000,control_dt_us=2000,startup_timeout_us=2000000,
             phase_timeout_us=1000000,engine_config=dict(q=[0,0]))
         owner=Experiment(d/'config with spaces.json',d/'runtime with spaces',d/'app with spaces',
+            domain=domain,
             engine_factory=engine_factory or FakeEngine,binding=lambda n:{})
         return owner,patch('sim_launch.subprocess.check_output',return_value=json.dumps(normalized))
 
@@ -166,6 +167,25 @@ class OwnershipTest(unittest.TestCase):
             self.assertEqual(collision.run(),1)
             self.assertEqual((Path(d)/'run/bridge.sock').stat().st_ino,inode)
             sock.close()
+
+    def test_domain_override_reaches_normalizer_and_both_peers(self):
+        from unittest.mock import patch,Mock
+        with tempfile.TemporaryDirectory() as d:
+            owner,normalize=self.fixture(d,domain=17)
+            spawns=[]
+            child=Mock();child.poll.return_value=0;child.returncode=0
+            def spawn(argv,**kwargs):
+                spawns.append(list(argv))
+                return child
+            with normalize as check_output,patch('sim_launch.subprocess.Popen',side_effect=spawn):
+                try:
+                    owner.start()
+                finally:owner.close()
+            normalized=check_output.call_args.args[0]
+            self.assertEqual(normalized[1],str(Path(d)/'config with spaces.json'))
+            self.assertEqual(normalized[2:],['--domain','17'])
+            expected=['--config',str(Path(d)/'config with spaces.json'),'--domain','17']
+            self.assertEqual([argv[1:] for argv in spawns],[expected,expected])
 
     def test_partial_spawn_cleanup_only_owned_children(self):
         from unittest.mock import patch,Mock

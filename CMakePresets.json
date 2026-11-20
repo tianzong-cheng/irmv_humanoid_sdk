@@ -1,0 +1,72 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 22,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "IRMV_BUILD_APPLICATION": "ON"
+      }
+    },
+    {
+      "name": "sim",
+      "displayName": "Simulation deployment: runtime, application, simulation tooling, Studio",
+      "description": "Fake/Real device drivers are excluded. The default config is etc/irmv/deployment-sdk.json, which the operator provisions; the simulation interpreter is bound at deployment with -DIRMV_SIMULATION_PYTHON=...",
+      "inherits": "base",
+      "cacheVariables": {
+        "IRMV_ENABLE_REAL_BACKEND": "OFF",
+        "IRMV_INSTALL_SIMULATION": "ON",
+        "IRMV_BUILD_EXPERIMENT_WEB": "ON",
+        "IRMV_LAUNCH_CONFIG": "../etc/irmv/deployment-sdk.json",
+        "IRMV_SIMULATION_PYTHON": ""
+      }
+    },
+    {
+      "name": "robot",
+      "displayName": "Robot deployment: runtime, application, Real backend",
+      "description": "Simulation tooling, CUDA simulation dependencies and the Studio workbench are left out of the prefix. The default config is etc/irmv/deployment-sdk.json, which the operator provisions explicitly.",
+      "inherits": "base",
+      "cacheVariables": {
+        "IRMV_ENABLE_REAL_BACKEND": "ON",
+        "IRMV_INSTALL_SIMULATION": "OFF",
+        "IRMV_BUILD_EXPERIMENT_WEB": "OFF",
+        "IRMV_LAUNCH_CONFIG": "../etc/irmv/deployment-sdk.json",
+        "IRMV_SIMULATION_PYTHON": ""
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "sim",
+      "configurePreset": "sim"
+    },
+    {
+      "name": "robot",
+      "configurePreset": "robot"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "sim",
+      "configurePreset": "sim",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "robot",
+      "configurePreset": "robot",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

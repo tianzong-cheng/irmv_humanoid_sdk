@@ -28,6 +28,7 @@ def reserve_directory(path):
 
 class Experiment:
     def __init__(self, config, runtime, application, normalizer=None,
+                 domain=None,
                  engine_factory=warp_engine, binding=verify_binding, runner_type=Runner, application_stdin=None,
                  viewer=False, viewer_follow=False, viewer_factory=None,
                  viewer_no_shadow=False):
@@ -35,6 +36,7 @@ class Experiment:
         self.runtime=Path(runtime).resolve()
         self.application=Path(application).resolve()
         self.normalizer=Path(normalizer or self.runtime.with_name('simulation_normalize')).resolve()
+        self.domain=domain
         self.engine_factory=engine_factory
         self.binding=binding
         self.runner_type=runner_type
@@ -97,11 +99,18 @@ class Experiment:
                 self.application_output=None
 
 
+    def preflight(self):
+        normalized=json.loads(subprocess.check_output(
+            [str(self.normalizer),str(self.config)]+
+            (['--domain',str(self.domain)] if self.domain is not None else []),
+            text=True,timeout=30))
+        self.directory=Path(normalized.pop('socket_directory'))
+        self.evidence=self.binding(normalized)
+        return normalized
+
     def start(self):
         if self._cancel_startup():return self
-        n=json.loads(subprocess.check_output([str(self.normalizer),str(self.config)],text=True,timeout=30))
-        self.directory=Path(n.pop('socket_directory'))
-        self.evidence=self.binding(n)
+        n=self.preflight()
         asset_digest=n['asset_digest']
         n.pop('asset_digest');n.pop('policy_path')
         n.update(identities())
@@ -144,7 +153,8 @@ class Experiment:
             log=open(self.directory/(name+'.log'),'w')
             self.logs.append(log)
             if self._cancel_startup():return self
-            self.children.append(subprocess.Popen([str(binary),'--config',str(self.config)],
+            self.children.append(subprocess.Popen([str(binary),'--config',str(self.config)]+
+                (['--domain',str(self.domain)] if self.domain is not None else []),
                 stdin=self.application_stdin if name=='application' else subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT,start_new_session=True))
             if name=='application' and self.application_stdin is None:
                 self._open_application_console()
@@ -214,19 +224,26 @@ def main():
     parser.add_argument('--application',required=True)
     parser.add_argument('--python',required=True,help='separate pinned simulation interpreter')
     parser.add_argument('--normalizer')
+    parser.add_argument('--domain',type=int,
+        help='override dds.domain for this run; the normalized digest and both SDK peers use it')
     parser.add_argument('--viewer',action='store_true',help='open read-only native MuJoCo window')
     parser.add_argument('--viewer-follow',action='store_true',help='open viewer with base-follow camera')
     parser.add_argument('--viewer-no-shadow',action='store_true',
         help='open viewer without the cast ground shadow: costs ~0.24 ms/cycle less on the same GPU (real-time on a laptop); lighting, sky and ground stay')
     parser.add_argument('--simulation-worker',action='store_true',help=argparse.SUPPRESS)
+    parser.add_argument('--check-config',action='store_true',help='validate configuration and asset binding without starting the engine')
     args=parser.parse_args()
     if not args.simulation_worker:
         os.execvp(args.python,[args.python,str(Path(__file__).resolve()),*sys.argv[1:],'--simulation-worker'])
     experiment=Experiment(args.config,args.runtime,args.application,args.normalizer,
+                          domain=args.domain,
                           viewer=args.viewer,viewer_follow=args.viewer_follow,
                           viewer_no_shadow=args.viewer_no_shadow)
     for sig in (signal.SIGINT,signal.SIGTERM):signal.signal(sig,experiment.notify_shutdown)
     try:
+        if args.check_config:
+            experiment.preflight()
+            return 0
         experiment.start()
         if experiment.evidence.get('startup_cancelled'):return experiment.wait()
         print('Simulation engine ready; SDK peers started. App exit retains runtime; Ctrl-C shuts down.',flush=True)

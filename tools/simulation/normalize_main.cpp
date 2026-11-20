@@ -1,14 +1,37 @@
 // Startup-only adapter: authoritative SDK loaders own canonical identities.
+#include <cstdint>
 #include <iostream>
 #include <nlohmann/json.hpp>
+#include <string>
 
 #include "irmv/configuration/application_config.hpp"
 
 int main(int argc, char** argv) {
   try {
-    if (argc != 2)
-      throw std::runtime_error("usage: simulation_normalize CONFIG");
-    const auto a = irmv::configuration::LoadApplicationConfig(argv[1]);
+    if (argc != 2 && argc != 4)
+      throw std::runtime_error(
+          "usage: simulation_normalize CONFIG [--domain N]");
+    irmv::configuration::ConfigOverrides overrides;
+    if (argc == 4) {
+      if (std::string(argv[2]) != "--domain")
+        throw std::runtime_error(
+            "usage: simulation_normalize CONFIG [--domain N]");
+      std::size_t consumed = 0;
+      std::uint64_t domain = 0;
+      try {
+        domain = std::stoull(argv[3], &consumed);
+      } catch (const std::exception&) {
+        throw std::runtime_error("--domain must be an integer");
+      }
+      if (consumed != std::string(argv[3]).size() ||
+          domain > irmv::configuration::kMaxDdsDomain)
+        throw std::runtime_error(
+            "--domain must be between 0 and " +
+            std::to_string(irmv::configuration::kMaxDdsDomain));
+      overrides.dds_domain = static_cast<std::uint32_t>(domain);
+    }
+    const auto a =
+        irmv::configuration::LoadApplicationConfig(argv[1], overrides);
     const auto& c = a.runtime;
     if (!c.simulation) throw std::runtime_error("simulation config required");
     const auto& s = *c.simulation;

@@ -38,6 +38,37 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug \
 `confirmation_test` and the `*_test` binaries are test-only and are never
 installed.
 
+## Launch an installed SDK
+
+Use `cmake --preset sim -DIRMV_SIMULATION_PYTHON=/path/to/sim-venv/bin/python`
+for a workstation, or `cmake --preset robot` for a robot (with the pinned
+hardware dependencies available). Build with `cmake --build --preset sim` or
+`cmake --build --preset robot`, then install
+with `cmake --install build/sim --prefix /path/to/sim-sdk` or
+`cmake --install build/robot --prefix /path/to/robot-sdk`. Use a separate,
+empty prefix for each package: CMake install does not remove files left by
+another preset. These commands use the standard `bin`, `etc`, `lib` and
+`share` layout.
+
+Provision the deployment's `etc/irmv/deployment-sdk.json` once: a
+[prepared simulation config](docs/simulation.md) for `sim`, or an explicit
+hardware config for `robot`. Use stable asset and model paths. The ordinary
+development build instead defaults to the shipped Fake `etc/irmv/sdk.json`.
+
+```sh
+/path/to/sim-sdk/bin/irmv-sdk                 # default deployment
+/path/to/sim-sdk/bin/irmv-sdk --web --viewer  # local Studio and native viewer
+/path/to/sim-sdk/bin/irmv-sdk --config /path/to/sdk.json --domain 3
+```
+
+The `sim` package includes Studio but starts it only with `--web`; the
+`robot` package excludes Studio and simulation tooling by default. Viewer
+flags and unavailable features are rejected before starting the SDK. In
+simulation, `x` leaves the application while Ctrl-C requests whole-experiment
+shutdown. Starting a robot deployment does not automatically start motion.
+For live Studio, enable `telemetry.recorder.enabled` in the deployment config.
+Studio uses the configured recorder directory and prints its local URL.
+
 ## Run the default Fake deployment
 
 The shipped configuration describes a two-joint fake robot at 500 Hz, DDS

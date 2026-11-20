@@ -11,6 +11,13 @@ include(cmake/HardwareDependencies.cmake)
 option(IRMV_ENABLE_REAL_BACKEND "Build the real CAN-FD/IMU backend" OFF)
 option(IRMV_BUILD_APPLICATION
        "Build the supervised upper process and the ONNX policy layer" ON)
+# Installation boundary of the simulation tooling, separate from building and
+# testing it: a robot bundle leaves the launcher, normalizer, engine package and
+# prepared simulation configs out of the prefix while every simulation target
+# and test stays registered in the build tree. The default preserves the
+# development install set.
+option(IRMV_INSTALL_SIMULATION
+       "Install the simulation launcher, normalizer and engine package" ON)
 if(IRMV_ENABLE_REAL_BACKEND)
   irmv_make_real_backend_available()
 endif()
@@ -1792,6 +1799,46 @@ if(TARGET external_producer)
   install(TARGETS external_producer RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 endif()
 
+# The one-line entry point. It is configured rather than copied, because the
+# default deployment file, the bound simulation interpreter and the compiled
+# Real capability are constants of this build: a moved prefix still points at
+# its own etc/irmv, and a Real build never silently starts the shipped Fake
+# deployment. The development default is the shipped sdk.json; the sim and robot
+# presets point at etc/irmv/deployment-sdk.json, which the operator provisions
+# explicitly and which is not installed as a sample. The path is relative to the
+# installed bin directory, so it survives copying the prefix.
+if(IRMV_ENABLE_REAL_BACKEND)
+  set(_irmv_default_launch_config_name "deployment-sdk.json")
+else()
+  set(_irmv_default_launch_config_name "sdk.json")
+endif()
+file(
+  RELATIVE_PATH _irmv_default_launch_config
+  "${CMAKE_INSTALL_FULL_BINDIR}"
+  "${CMAKE_INSTALL_FULL_SYSCONFDIR}/irmv/${_irmv_default_launch_config_name}"
+)
+set(
+  IRMV_LAUNCH_CONFIG "${_irmv_default_launch_config}"
+  CACHE STRING
+  "Default config of irmv-sdk, relative to the installed bin directory"
+)
+if(TARGET application)
+  configure_file(
+    "${PROJECT_SOURCE_DIR}/tools/irmv_sdk.py"
+    "${CMAKE_CURRENT_BINARY_DIR}/irmv_sdk.py"
+    @ONLY
+  )
+  install(
+    PROGRAMS "${CMAKE_CURRENT_BINARY_DIR}/irmv_sdk.py"
+    DESTINATION "${CMAKE_INSTALL_BINDIR}"
+    RENAME irmv-sdk
+  )
+  install(
+    PROGRAMS "${PROJECT_SOURCE_DIR}/tools/sdk_launch.py"
+    DESTINATION "${CMAKE_INSTALL_BINDIR}"
+  )
+endif()
+
 # The configuration of the default Fake deployment and the schema that describes
 # it: the schema is part of the configuration contract, not of a test.
 install(
@@ -2133,12 +2180,17 @@ endif()
 if(TARGET application)
   add_executable(simulation_normalize tools/simulation/normalize_main.cpp)
   target_link_libraries(simulation_normalize PRIVATE irmv_configuration nlohmann_json::nlohmann_json)
-  install(TARGETS simulation_normalize RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
-  install(PROGRAMS tools/sim_launch.py tools/prepare_simulation_asset.py
-    DESTINATION "${CMAKE_INSTALL_BINDIR}")
-  install(DIRECTORY tools/simulation DESTINATION "${CMAKE_INSTALL_BINDIR}"
-    FILES_MATCHING PATTERN "*.py")
-  install(FILES config/simulation.example.json config/simulation-physical-profile.json DESTINATION "${CMAKE_INSTALL_SYSCONFDIR}/irmv")
+  # The installed simulation package is a deployment choice, not a build-graph
+  # change: a robot prefix leaves these files out while the tests above still
+  # run against the build tree.
+  if(IRMV_INSTALL_SIMULATION)
+    install(TARGETS simulation_normalize RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    install(PROGRAMS tools/sim_launch.py tools/prepare_simulation_asset.py
+      DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    install(DIRECTORY tools/simulation DESTINATION "${CMAKE_INSTALL_BINDIR}"
+      FILES_MATCHING PATTERN "*.py")
+    install(FILES config/simulation.example.json config/simulation-physical-profile.json DESTINATION "${CMAKE_INSTALL_SYSCONFDIR}/irmv")
+  endif()
   add_test(NAME simulation_launcher_test COMMAND "${Python3_EXECUTABLE}"
     "${PROJECT_SOURCE_DIR}/tests/integration/simulation_launcher_test.py" "${CMAKE_CURRENT_BINARY_DIR}")
   set_tests_properties(simulation_launcher_test PROPERTIES LABELS integration RUN_SERIAL TRUE TIMEOUT 120)
