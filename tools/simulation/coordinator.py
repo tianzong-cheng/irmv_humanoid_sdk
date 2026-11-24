@@ -4,10 +4,10 @@ Only advance mutates state. Each event is consumed atomically; actions are order
 The runner owns host time and executes all actions outside this object.
 """
 
-from collections import deque
-from dataclasses import dataclass, fields
 import hashlib
 import math
+from collections import deque
+from dataclasses import dataclass, fields
 
 from . import protocol as p
 

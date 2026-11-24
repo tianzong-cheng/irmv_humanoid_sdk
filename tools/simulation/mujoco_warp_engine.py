@@ -16,7 +16,7 @@ staging buffers and three graphs are allocated at initialization.
 import math
 from typing import Sequence
 
-from .engine import Feedback, EngineTimeDiagnostic
+from .engine import EngineTimeDiagnostic, Feedback
 
 _KERNELS = {}
 

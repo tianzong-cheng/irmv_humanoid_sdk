@@ -2,13 +2,13 @@
 
 import json
 import os
-from pathlib import Path
 import signal
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 assert (
@@ -17,8 +17,8 @@ assert (
 )
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "tests/support/simulation"))
-from simulation.main import Runner, load_bootstrap
 from fake_engine import FakeEngine
+from simulation.main import Runner, load_bootstrap
 
 
 def run(build, delay=0, worker_delay=False, stop_pending=False, rejected_handoff=False):

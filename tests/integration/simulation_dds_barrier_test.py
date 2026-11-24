@@ -1,9 +1,9 @@
 """Real DDS participants on reserved domain 222; CTest RUN_SERIAL."""
 
 import json
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 assert (
     "222"

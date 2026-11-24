@@ -1,9 +1,9 @@
 """Actual SDK fixture, explicit domain224 and generated test-only ONNX."""
 
 import json
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 
 def prepare(root, build, d):

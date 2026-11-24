@@ -4,12 +4,12 @@ This proves recording and protocol provenance, not MuJoCo/GPU or policy safety.
 """
 
 import json
-from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_ROOT = (

@@ -3,8 +3,8 @@
 import hashlib
 import importlib.metadata
 import json
-from pathlib import Path
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 
 def sha256(path):

@@ -1,9 +1,9 @@
 """Dependency closure is byte-attested, never inferred from the URDF alone."""
 
-from pathlib import Path
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -51,6 +51,7 @@ class AssetTest(unittest.TestCase):
     def test_explicit_initial_pose_contract_is_validated_and_admitted(self):
         import json
         import xml.etree.ElementTree as ET
+
         from prepare_simulation_asset import initial_stance, load_initial_pose
         from simulation.assets import admit_initial_geometry
 
@@ -97,6 +98,7 @@ class AssetTest(unittest.TestCase):
     def test_live_binding_requires_corrected_collision_support_attestation(self):
         import json
         from unittest.mock import patch
+
         from simulation.assets import closure, sha256, verify_binding
 
         with tempfile.TemporaryDirectory() as d:
@@ -135,8 +137,9 @@ class AssetTest(unittest.TestCase):
                 verify_binding(normalized)
 
     def test_ascii_mesh_conversion_preserves_vertices(self):
-        from simulation.assets import binary_stl
         import struct
+
+        from simulation.assets import binary_stl
 
         text = b"solid test\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid test\n"
         data = binary_stl(text)
@@ -147,8 +150,9 @@ class AssetTest(unittest.TestCase):
         )
 
     def test_large_stl_to_obj_preserves_triangle(self):
-        from simulation.assets import stl_obj
         import struct
+
+        from simulation.assets import stl_obj
 
         data = (
             b"0" * 80
@@ -162,6 +166,7 @@ class AssetTest(unittest.TestCase):
     def test_binding_rejects_changed_asset_policy_and_engine(self):
         import json
         from unittest.mock import patch
+
         from simulation.assets import closure, sha256, verify_binding
 
         with tempfile.TemporaryDirectory() as d:
@@ -197,8 +202,10 @@ class AssetTest(unittest.TestCase):
                     verify_binding(n)
 
     def test_assetdir_decoy_never_attested_even_after_loaded_mesh_mutation(self):
-        import hashlib, json
+        import hashlib
+        import json
         from unittest.mock import patch
+
         from simulation.assets import closure, sha256, verify_binding
 
         with tempfile.TemporaryDirectory() as d:

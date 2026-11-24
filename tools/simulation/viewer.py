@@ -4,13 +4,13 @@ import argparse
 import json
 import math
 import os
-from pathlib import Path
+import select
 import socket
 import subprocess
 import sys
-import select
 import threading
 import time
+from pathlib import Path
 
 MAX_PACKET = 16384
 MAX_QPOS = 71
@@ -293,6 +293,7 @@ class ViewerPublisher:
 def _load_display_model(config):
     """Decorate only the private display spec; never edit physical assets."""
     import mujoco as mj
+
     from .mujoco_warp_engine import LoadConfiguredSpec
 
     spec = LoadConfiguredSpec(config)
@@ -359,11 +360,11 @@ def child_main(fd):
     render_threads = ()
     try:
         decode(raw, run_id, asset)
-        from .assets import closure
-
         # Rendering resources are compiled only in this child process.
         import mujoco as mj
         import mujoco.viewer
+
+        from .assets import closure
 
         config = message["config"]
         if closure(config["model_path"])["digest"] != asset:

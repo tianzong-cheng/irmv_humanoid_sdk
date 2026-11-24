@@ -1,8 +1,8 @@
 """Task9 real GPU semantics and real-policy lifecycle. No skip/CPU fallback."""
 
 import math
-from pathlib import Path
 import sys
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -90,7 +90,10 @@ def check_locomotion_rejection(output, *, attempted, released, attempt_offset=0)
 
 
 def lifecycle(build, config, scope="trained_policy"):
-    import json, subprocess, time
+    import json
+    import subprocess
+    import time
+
     from sim_launch import Experiment
     from simulation.mujoco_warp_engine import MujocoWarpEngine
 

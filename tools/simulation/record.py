@@ -6,9 +6,9 @@ Missing footer, sequence holes or any loss cannot prove a complete lifecycle.
 
 import json
 import math
-from pathlib import Path
 import queue
 import threading
+from pathlib import Path
 
 MAX_LINE = 65536
 SCHEMA = "irmv.simulation_evidence"

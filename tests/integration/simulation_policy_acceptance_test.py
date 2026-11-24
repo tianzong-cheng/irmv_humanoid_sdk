@@ -7,14 +7,14 @@ without fruitlessly replaying the unchanged failed startup experiment.
 
 import argparse
 import json
-from pathlib import Path
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
-from simulation.evaluate import evaluate, sha256, scenario_intent, empty_metrics
+from simulation.evaluate import empty_metrics, evaluate, scenario_intent, sha256
 
 
 def write_json(path, value):
@@ -23,8 +23,8 @@ def write_json(path, value):
 
 def run_scenario(build, spec, scenario, directory):
     from sim_launch import Experiment
-    from simulation.main import Runner
     from simulation.assets import engine_identity
+    from simulation.main import Runner
 
     intent = scenario_intent(scenario, spec["intent_bounds"])
     report = dict(

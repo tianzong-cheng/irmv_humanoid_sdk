@@ -14,6 +14,14 @@ repos:
         types: [file]
         require_serial: true
 
+      - id: ruff-imports
+        name: Ruff import sorting (Python)
+        entry: ruff check --isolated --select I --fix
+        language: python
+        additional_dependencies: [ruff==0.15.21]
+        files: '\.py$'
+        types: [file]
+
       - id: ruff-format
         name: Ruff (Python)
         entry: ruff format --isolated

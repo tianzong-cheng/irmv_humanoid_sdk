@@ -4,7 +4,6 @@ import errno
 import fcntl
 import json
 import os
-from pathlib import Path
 import pty
 import select
 import signal
@@ -12,6 +11,7 @@ import sys
 import tempfile
 import termios
 import time
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -19,8 +19,8 @@ sys.path.insert(0, str(ROOT / "tests/support/simulation"))
 
 
 def peer(build, config):
-    from sim_launch import Experiment
     from fake_engine import FakeEngine
+    from sim_launch import Experiment
 
     class Engine(FakeEngine):
         def initialize(self, cfg):

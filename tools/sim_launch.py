@@ -4,16 +4,16 @@
 import argparse
 import json
 import os
-from pathlib import Path
 import secrets
 import signal
 import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
-from simulation.main import Runner, load_bootstrap, warp_engine
 from simulation.assets import verify_binding
+from simulation.main import Runner, load_bootstrap, warp_engine
 
 
 def identities():

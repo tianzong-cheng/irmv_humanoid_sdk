@@ -11,18 +11,19 @@ import argparse
 import hashlib
 import json
 import math
-from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
+from pathlib import Path
+
 from simulation.assets import (
+    binary_stl,
     closure,
+    collision_support_z,
     engine_identity,
     sha256,
-    binary_stl,
     stl_obj,
-    collision_support_z,
 )
 
 

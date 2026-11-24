@@ -17,13 +17,13 @@ from unittest import mock
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(SOURCE_ROOT))
 
+from tools.experiment_web import layout_store  # noqa: E402
 from tools.experiment_web.catalog import (  # noqa: E402
     CatalogError,
     canonical_records_root,
     paginate,
     resolve_run_directory,
 )
-from tools.experiment_web import layout_store  # noqa: E402
 from tools.experiment_web.layout_store import (  # noqa: E402
     LayoutError,
     LayoutStore,

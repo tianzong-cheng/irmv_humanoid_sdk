@@ -1,8 +1,8 @@
 """Real CUDA acceptance gate: unavailable hardware is a failure, never a skip."""
 
 import math
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import numpy as np
 

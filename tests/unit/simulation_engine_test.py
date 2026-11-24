@@ -1,8 +1,8 @@
 """Validation tests use real compiled models, without stepping a CPU engine."""
 
-from pathlib import Path
 import sys
 import unittest
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -31,6 +31,7 @@ class ValidationTest(unittest.TestCase):
         import mujoco
         import mujoco_warp as mjw
         import warp as wp
+
         from tools.simulation.mujoco_warp_engine import MujocoWarpEngine
 
         model = mujoco.MjModel.from_xml_path(
@@ -113,6 +114,7 @@ class ValidationTest(unittest.TestCase):
 
     def test_model_contract(self):
         import mujoco
+
         from tools.simulation.mujoco_warp_engine import validate_model
 
         xml = (ROOT / "tests/support/simulation/free_base.xml").read_text()
@@ -155,8 +157,14 @@ class ValidationTest(unittest.TestCase):
                     )
 
     def test_preparation_admits_primitive_feet_not_decoy_mesh(self):
-        import hashlib, itertools, json, math, struct, tempfile
+        import hashlib
+        import itertools
+        import json
+        import math
+        import struct
+        import tempfile
         from unittest.mock import patch
+
         import mujoco
         import numpy as np
 

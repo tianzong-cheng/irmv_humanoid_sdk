@@ -6,13 +6,10 @@ hashing belongs to the C++ loader, not this module.
 """
 
 import argparse
-from dataclasses import fields
-import platform
 import importlib.metadata
-from collections import deque
 import json
 import os
-from pathlib import Path
+import platform
 import queue
 import selectors
 import signal
@@ -21,12 +18,14 @@ import stat
 import struct
 import threading
 import time
+from collections import deque
+from dataclasses import fields
+from pathlib import Path
 
 from . import protocol as p
 from .coordinator import Bootstrap, Event, SimulationCoordinator
 from .engine import Feedback
 from .record import Writer
-
 
 # Feedback schema is frozen: every field is a scalar or an immutable tuple, so a
 # field-name dict is an equivalent detached evidence snapshot. asdict() instead

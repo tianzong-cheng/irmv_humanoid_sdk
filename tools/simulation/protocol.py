@@ -1,8 +1,8 @@
 """Local bridge v1. Independent of DDS and of any simulator dependency."""
 
-from dataclasses import dataclass, field
 import math
 import struct
+from dataclasses import dataclass, field
 
 VERSION = 2
 MAX_PACKET_BYTES = 65536

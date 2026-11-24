@@ -11,7 +11,6 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-
 # The exact pair this SDK requires. If cmake/Dependencies.cmake drifts from
 # these values, the positive prefix check below stops accepting the manifest
 # this test writes.

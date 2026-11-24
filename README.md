@@ -593,7 +593,7 @@ Repository formatting is managed by pre-commit:
 | Scope | Formatter |
 | --- | --- |
 | First-party C/C++ | clang-format 18.1.8 with the root `.clang-format` |
-| First-party `.py` files | Ruff formatter (no lint or import sorting) |
+| First-party `.py` files | Ruff import sorting (`I` rules only), then Ruff formatter |
 | `web/` JavaScript, CSS and HTML (including tests) | Prettier (single quotes in JavaScript) |
 
 Generated code and vendored dependencies are excluded. With Python 3.10+

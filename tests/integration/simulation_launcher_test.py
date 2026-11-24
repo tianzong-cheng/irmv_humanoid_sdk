@@ -1,10 +1,10 @@
 """Launcher preparation contracts; no optional simulator imports or DDS peers."""
 
 import importlib.util
-from pathlib import Path
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -50,8 +50,9 @@ class LauncherTest(unittest.TestCase):
 class OwnershipTest(unittest.TestCase):
     def fixture(self, directory, engine_factory=None, domain=None):
         import json
-        from sim_launch import Experiment
         from unittest.mock import patch
+
+        from sim_launch import Experiment
 
         sys.path.insert(0, str(ROOT / "tests/support/simulation"))
         from fake_engine import FakeEngine
@@ -83,8 +84,8 @@ class OwnershipTest(unittest.TestCase):
         )
 
     def test_cancel_before_readiness_starts_no_children(self):
-        from unittest.mock import patch
         import threading
+        from unittest.mock import patch
 
         entered = threading.Event()
         release = threading.Event()
@@ -123,7 +124,7 @@ class OwnershipTest(unittest.TestCase):
                         owner.runner.worker.join(2)
 
     def test_cancel_between_spawns_never_starts_application(self):
-        from unittest.mock import patch, Mock
+        from unittest.mock import Mock, patch
 
         with tempfile.TemporaryDirectory() as d:
             owner, normalize = self.fixture(d)
@@ -151,8 +152,8 @@ class OwnershipTest(unittest.TestCase):
                     owner.close()
 
     def test_cancel_during_log_open_is_checked_at_spawn(self):
-        from unittest.mock import patch
         import builtins
+        from unittest.mock import patch
 
         with tempfile.TemporaryDirectory() as d:
             owner, normalize = self.fixture(d)
@@ -202,8 +203,8 @@ class OwnershipTest(unittest.TestCase):
             self.assertFalse(evidence["stop_proven"])
 
     def test_engine_ready_precedes_children_and_socket_collision(self):
-        from unittest.mock import patch, Mock
         import socket
+        from unittest.mock import Mock, patch
 
         with tempfile.TemporaryDirectory(prefix="launcher paths with spaces ") as d:
             owner, normalize = self.fixture(d)
@@ -248,7 +249,7 @@ class OwnershipTest(unittest.TestCase):
             sock.close()
 
     def test_domain_override_reaches_normalizer_and_both_peers(self):
-        from unittest.mock import patch, Mock
+        from unittest.mock import Mock, patch
 
         with tempfile.TemporaryDirectory() as d:
             owner, normalize = self.fixture(d, domain=17)
@@ -281,7 +282,7 @@ class OwnershipTest(unittest.TestCase):
             self.assertEqual([argv[1:] for argv in spawns], [expected, expected])
 
     def test_partial_spawn_cleanup_only_owned_children(self):
-        from unittest.mock import patch, Mock
+        from unittest.mock import Mock, patch
 
         with tempfile.TemporaryDirectory() as d:
             owner, normalize = self.fixture(d)
@@ -305,6 +306,7 @@ class OwnershipTest(unittest.TestCase):
 
     def test_runner_and_both_child_codes_are_required(self):
         from unittest.mock import Mock
+
         from sim_launch import Experiment
 
         for runner_code, codes, proven in [
@@ -369,7 +371,7 @@ class OwnershipTest(unittest.TestCase):
             self.assertFalse(owner.runner.coordinator.stop_proven)
 
     def test_closed_viewer_does_not_cancel_ready_experiment(self):
-        from unittest.mock import patch, Mock
+        from unittest.mock import Mock, patch
 
         class ClosedViewer:
             def __init__(self, *args, **kwargs):
@@ -406,7 +408,7 @@ class OwnershipTest(unittest.TestCase):
             self.assertTrue(owner.viewer.closed)
 
     def test_shadowless_flag_opens_viewer_with_the_mode_set(self):
-        from unittest.mock import patch, Mock
+        from unittest.mock import Mock, patch
 
         seen = {}
 
@@ -474,7 +476,10 @@ class OwnershipTest(unittest.TestCase):
         self.active_close("disconnect")
 
     def active_close(self, mode):
-        import json, subprocess, time
+        import json
+        import subprocess
+        import time
+
         from sim_launch import Experiment
         from simulation.main import Runner
 
@@ -686,7 +691,10 @@ class OwnershipTest(unittest.TestCase):
                 owner.close()
 
     def test_application_quit_retains_runtime_then_owner_closes(self):
-        import json, subprocess, time
+        import json
+        import subprocess
+        import time
+
         from sim_launch import Experiment
         from simulation.main import Runner
 

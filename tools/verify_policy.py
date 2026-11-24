@@ -36,7 +36,11 @@ import onnxruntime as ort
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from deployment_contract import SchemaError, load_policy_document, validate_file  # noqa: E402
+from deployment_contract import (  # noqa: E402
+    SchemaError,
+    load_policy_document,
+    validate_file,
+)
 
 METADATA_KEY = "irmv.deployment"
 DEFAULT_SCHEMA = (

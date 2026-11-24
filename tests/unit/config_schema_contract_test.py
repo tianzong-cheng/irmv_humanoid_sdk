@@ -5,7 +5,6 @@ import sys
 from decimal import Decimal
 from pathlib import Path
 
-
 FORMAT_NAME = "irmv-joint-name"
 
 

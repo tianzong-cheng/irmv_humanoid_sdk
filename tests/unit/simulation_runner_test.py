@@ -16,12 +16,13 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "tools"))
 sys.path.insert(
     0, str(pathlib.Path(__file__).resolve().parents[1] / "support" / "simulation")
 )
+from simulation.coordinator import Action, Bootstrap, Event
+
 from simulation import protocol as p
-from simulation.coordinator import Bootstrap, Action, Event
 
 try:
-    from simulation.main import Runner, _fd_identity, _restore_wakeup_fd
     from fake_engine import FakeEngine
+    from simulation.main import Runner, _fd_identity, _restore_wakeup_fd
 except ImportError:
     raise AssertionError("Task 6 runner/fake engine missing")
 
@@ -129,6 +130,7 @@ class RunnerTest(unittest.TestCase):
         # an engine thread: completed feedback for [t,t+dt) may not be consumed
         # (nor recorded) before the phase-2 completion arrives.
         from collections import deque
+
         from simulation.engine import Feedback
 
         with tempfile.TemporaryDirectory() as d:

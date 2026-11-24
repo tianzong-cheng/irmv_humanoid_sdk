@@ -1,20 +1,20 @@
 """Display transport tests: standard library only, no renderer or GPU imports."""
 
-from pathlib import Path
 import json
+import select
 import socket
 import sys
-import select
 import time
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from simulation.viewer import (
-    ViewerPublisher,
-    encode,
-    decode,
-    receive_latest,
     MAX_PACKET,
+    ViewerPublisher,
+    decode,
+    encode,
+    receive_latest,
 )
 
 
@@ -199,7 +199,8 @@ class ViewerTest(unittest.TestCase):
             child.close()
 
     def test_eof_before_failed_process_exit_is_not_clean_closure(self):
-        import os, subprocess
+        import os
+        import subprocess
 
         reader, writer = os.pipe()
         process = subprocess.Popen(

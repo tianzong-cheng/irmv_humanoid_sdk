@@ -40,8 +40,8 @@ for offset, value in [(0, 0), (4, 1), (6, 255)]:
         pass
     else:
         raise AssertionError(offset)
-from dataclasses import replace
 import struct
+from dataclasses import replace
 
 
 def rejected(wire):

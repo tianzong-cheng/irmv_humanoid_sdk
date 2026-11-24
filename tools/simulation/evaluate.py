@@ -7,11 +7,11 @@ DDS phase seals, step ordering and actual applied-write identities.
 """
 
 import argparse
-from collections import deque
 import hashlib
 import json
 import math
 import subprocess
+from collections import deque
 from pathlib import Path
 
 from . import protocol as p

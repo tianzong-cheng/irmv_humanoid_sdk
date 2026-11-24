@@ -4,12 +4,12 @@
 import argparse
 import json
 import os
-from pathlib import Path
 import selectors
 import signal
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 BIN = Path(__file__).resolve().parent
 DEFAULT_CONFIG = "@IRMV_LAUNCH_CONFIG@"

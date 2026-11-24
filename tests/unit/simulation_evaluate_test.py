@@ -3,14 +3,14 @@
 import copy
 import json
 import math
-from pathlib import Path
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 try:
-    from simulation.evaluate import evaluate, yaw_frame_velocity, scenario_intent
+    from simulation.evaluate import evaluate, scenario_intent, yaw_frame_velocity
 except ImportError:
     raise AssertionError("Task11 streaming acceptance evaluator missing")
 
@@ -60,8 +60,9 @@ class AcceptanceTest(unittest.TestCase):
 
     def test_gpu_skip_and_stale_manifest_files_fail(self):
         from dataclasses import asdict
-        from simulation_coordinator_test import bootstrap
+
         from simulation.evaluate import sha256
+        from simulation_coordinator_test import bootstrap
 
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -116,10 +117,12 @@ class AcceptanceTest(unittest.TestCase):
 class EvidenceTest(unittest.TestCase):
     def setUp(self):
         import dataclasses
-        from simulation import protocol as p
+        from unittest.mock import patch
+
         from simulation.coordinator import Event
         from simulation.main import Runner
-        from unittest.mock import patch
+
+        from simulation import protocol as p
 
         # Explicit supplied host time keeps this core evidence fixture independent
         # of scheduler pauses; no UDS or watchdog wall-clock test is hidden here.
@@ -407,10 +410,11 @@ class FullEvaluationTest(unittest.TestCase):
     """
 
     def setUp(self):
-        from dataclasses import replace, asdict
+        from dataclasses import asdict, replace
         from unittest.mock import patch
-        from simulation.evaluate import sha256
+
         from simulation.assets import closure
+        from simulation.evaluate import sha256
 
         self.fixture = EvidenceTest()
         self.fixture.control_dt_us = 1000000
@@ -905,6 +909,7 @@ class FullEvaluationTest(unittest.TestCase):
 
     def test_offline_four_report_regeneration_preserves_originals(self):
         import runpy
+
         from simulation.evaluate import sha256
 
         module = runpy.run_path(
@@ -959,7 +964,8 @@ class FullEvaluationTest(unittest.TestCase):
         (old / "reports.json").write_text(json.dumps(reports))
         before = {str(path): sha256(path) for path in old.rglob("*.json")}
         output = self.root / "derived-reports"
-        import contextlib, io
+        import contextlib
+        import io
 
         printed = io.StringIO()
         with contextlib.redirect_stdout(printed):
