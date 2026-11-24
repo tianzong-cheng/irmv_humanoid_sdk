@@ -16,8 +16,8 @@ assert (
 )
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "tests/support/simulation"))
-from fake_engine import FakeEngine
-from simulation.main import Runner, load_bootstrap
+from fake_engine import FakeEngine  # noqa: E402
+from simulation.main import Runner, load_bootstrap  # noqa: E402
 
 
 def run(build, mode="leave"):

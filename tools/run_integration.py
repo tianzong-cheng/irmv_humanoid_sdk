@@ -925,7 +925,7 @@ def step_restart_runtime(ctx, step):
         raise Failure(
             "the runtime did not exit on SIGTERM; a restart cannot reuse its domain"
         )
-    runtime = start_runtime(ctx)
+    start_runtime(ctx)
     return "restarted the runtime (previous exit %s), run %d" % (code, len(ctx.runs))
 
 
@@ -1083,7 +1083,7 @@ def step_restart_application(ctx, step):
             "the previous application exited with %s instead of %s "
             "(line %r)" % (code, expected, previous.exit_line())
         )
-    application = start_application(ctx)
+    start_application(ctx)
     return "restarted the application (previous exit %s, line %r), run %d" % (
         code,
         previous.exit_line(),

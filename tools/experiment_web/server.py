@@ -12,7 +12,6 @@ import json
 import mimetypes
 import secrets
 import threading
-import uuid
 from collections import deque
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer

@@ -1,6 +1,5 @@
 """Launcher preparation contracts; no optional simulator imports or DDS peers."""
 
-import importlib.util
 import sys
 import tempfile
 import unittest

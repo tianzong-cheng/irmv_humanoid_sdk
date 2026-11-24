@@ -7,7 +7,6 @@ HTTP behaviour is exercised by experiment_web_server_test.py.
 
 from __future__ import annotations
 
-import json
 import sys
 import tempfile
 import unittest

@@ -34,8 +34,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
-from simulation.main import Runner, load_bootstrap
-from simulation.mujoco_warp_engine import MujocoWarpEngine
+from simulation.main import Runner, load_bootstrap  # noqa: E402
+from simulation.mujoco_warp_engine import MujocoWarpEngine  # noqa: E402
 
 DOMAIN = 225
 COMMAND = [0.35, -0.2, 0.55]

@@ -1,7 +1,6 @@
 """Actual built SDK processes, real DDS, test-only deterministic engine. Serial domain223."""
 
 import json
-import os
 import signal
 import subprocess
 import sys
@@ -17,8 +16,8 @@ assert (
 )
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "tests/support/simulation"))
-from fake_engine import FakeEngine
-from simulation.main import Runner, load_bootstrap
+from fake_engine import FakeEngine  # noqa: E402
+from simulation.main import Runner, load_bootstrap  # noqa: E402
 
 
 def run(build, delay=0, worker_delay=False, stop_pending=False, rejected_handoff=False):

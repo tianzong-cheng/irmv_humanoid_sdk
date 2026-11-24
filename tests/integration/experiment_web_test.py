@@ -18,7 +18,6 @@ import os
 import pty
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import tempfile

@@ -2,7 +2,8 @@
 
 import math
 import struct
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 
 VERSION = 2
 MAX_PACKET_BYTES = 65536
@@ -191,7 +192,7 @@ _FLOAT_PATHS = {name: _float_paths(name) for name in _LAYOUT}
 @dataclass(frozen=True)
 class Frame:
     kind: int
-    payload: dict = field(default_factory=dict)
+    payload: dict = dataclass_field(default_factory=dict)
     run_id: bytes = bytes(16)
     control_step: int = 0
     phase: int = 0

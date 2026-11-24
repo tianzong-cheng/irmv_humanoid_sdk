@@ -11,14 +11,12 @@ import argparse
 import hashlib
 import json
 import math
-import shutil
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from simulation.assets import (
-    binary_stl,
     closure,
     collision_support_z,
     engine_identity,
@@ -77,7 +75,6 @@ def prepare(
     urdf, policy, output, template, profile, metadata_python, initial_pose=None
 ):
     import mujoco as mj
-    import numpy as np
 
     urdf, policy, output = (
         Path(urdf).resolve(),

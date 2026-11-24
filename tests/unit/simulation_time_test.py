@@ -34,7 +34,9 @@ class TimeTest(unittest.TestCase):
         # Arithmetic probe only: float32(1024 + float32(100us)) is one ULP.
         import struct
 
-        f32 = lambda x: struct.unpack("<f", struct.pack("<f", x))[0]
+        def f32(x):
+            return struct.unpack("<f", struct.pack("<f", x))[0]
+
         expected = f32(1024.0 + f32(0.0001))
         self.assertEqual(expected, 1024.0001220703125)
         d = engine.EngineTimeDiagnostic(1000)

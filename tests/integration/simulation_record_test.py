@@ -21,11 +21,11 @@ sys.path.insert(0, str(MODULE_ROOT))
 # Exporter is source-owned in this fixture; installed simulation imports stay first.
 sys.path.append(str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "tests/support/simulation"))
-from fake_engine import FakeEngine
-from launch_fixture import prepare
-from sim_launch import Experiment
-from simulation.main import Runner
-from simulation.record import read
+from fake_engine import FakeEngine  # noqa: E402
+from launch_fixture import prepare  # noqa: E402
+from sim_launch import Experiment  # noqa: E402
+from simulation.main import Runner  # noqa: E402
+from simulation.record import read  # noqa: E402
 
 
 def run(build):

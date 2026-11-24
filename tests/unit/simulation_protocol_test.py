@@ -1,8 +1,10 @@
 """Cross-language contract; intentionally runs without engine dependencies."""
 
 import pathlib
+import struct
 import subprocess
 import sys
+from dataclasses import replace
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "tools"))
 try:
@@ -40,8 +42,6 @@ for offset, value in [(0, 0), (4, 1), (6, 255)]:
         pass
     else:
         raise AssertionError(offset)
-import struct
-from dataclasses import replace
 
 
 def rejected(wire):

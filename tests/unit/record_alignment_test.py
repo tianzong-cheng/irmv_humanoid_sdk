@@ -21,6 +21,7 @@ What is proved here:
 
 from __future__ import annotations
 
+import copy
 import sys
 from pathlib import Path
 
@@ -537,7 +538,6 @@ check(
 )
 
 # Explicit simulation identity must dominate the host boot identity.
-import copy
 
 sim_runtime = runtime_summary()
 sim_app = application_summary()

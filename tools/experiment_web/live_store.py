@@ -18,14 +18,13 @@ import json
 import math
 import os
 import socket
-import sys
 import threading
 import time
 from collections import OrderedDict, deque
 from pathlib import Path
 from urllib.parse import unquote
 
-from .catalog import CatalogError, canonical_records_root, paginate
+from .catalog import canonical_records_root
 
 
 class LiveError(ValueError):

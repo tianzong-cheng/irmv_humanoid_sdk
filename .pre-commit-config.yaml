@@ -22,6 +22,14 @@ repos:
         files: '\.py$'
         types: [file]
 
+      - id: ruff-lint
+        name: Ruff lint (Python)
+        entry: ruff check --isolated
+        language: python
+        additional_dependencies: [ruff==0.15.21]
+        files: '\.py$'
+        types: [file]
+
       - id: ruff-format
         name: Ruff (Python)
         entry: ruff format --isolated

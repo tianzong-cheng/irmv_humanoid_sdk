@@ -480,7 +480,6 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
         # Two producers at once: the second replaces the first, the first is
         # told to stop, and the context the application authorizes belongs to
         # the process that is actually selected.
-        replaced_log = producer_log
         back_to_ready("the replacement")
         selected = selected_before(r"producer=selected id=")
         replacing_process, _ = start_producer()

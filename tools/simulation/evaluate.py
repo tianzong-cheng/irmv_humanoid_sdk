@@ -852,9 +852,14 @@ def audit_sdk_exports(paths, cfg, b, m, report, context):
     app_seen = False
     last_stamp = None
     index = first_index
-    expected = lambda i: (
-        1 + ((i * sample_dt + b.control_dt_us - 1) // b.control_dt_us) * b.control_dt_us
-    )
+
+    def expected(i):
+        return (
+            1
+            + ((i * sample_dt + b.control_dt_us - 1) // b.control_dt_us)
+            * b.control_dt_us
+        )
+
     metrics["intent_expected_samples"] = max(
         0, (end - 2) // sample_dt - first_index + 1
     )

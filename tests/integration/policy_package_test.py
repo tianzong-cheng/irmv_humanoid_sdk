@@ -75,15 +75,6 @@ def write_package(
     onnx.save(model, str(path))
 
 
-def write_model_with_newer_ir(path: Path, document: dict) -> None:
-    """The same package saved by a newer onnx, which the pinned runtime cannot load."""
-
-    model = make_model(18, 3)
-    model.ir_version = IR_VERSION + 3
-    model.metadata_props.add(key=METADATA_KEY, value=json.dumps(document))
-    onnx.save(model, str(path))
-
-
 def write_model_with_moved_weights(path: Path, document: dict) -> None:
     """The same shapes and the same contract, but different weights."""
 

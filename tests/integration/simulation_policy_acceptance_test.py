@@ -14,7 +14,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
-from simulation.evaluate import empty_metrics, evaluate, scenario_intent, sha256
+from simulation.evaluate import (  # noqa: E402
+    empty_metrics,
+    evaluate,
+    scenario_intent,
+    sha256,
+)
 
 
 def write_json(path, value):
