@@ -27,12 +27,17 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake git python3 python3-venv
 
-      - name: Install the pinned clang-format
+      - name: Set up Node.js for the Web formatter
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Check repository formatting
         run: |
           python3 -m venv .tools/format
           .tools/format/bin/pip install --disable-pip-version-check \
             -r tools/requirements-format.txt
-          .tools/format/bin/clang-format --version
+          .tools/format/bin/pre-commit run --all-files --show-diff-on-failure
 
       # The pinned dependencies are fetched and built here; a failed fetch, a
       # failed dependency build or a missing DDS install is a configuration
@@ -78,9 +83,6 @@ jobs:
 
       - name: Fake and process integration (serial)
         run: ctest --test-dir build -L integration --output-on-failure
-
-      - name: Format check
-        run: cmake --build build --target format-check
 
       - name: Install to a staging prefix
         run: cmake --install build --prefix "${RUNNER_TEMP}/irmv-sdk-stage"

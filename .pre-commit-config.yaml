@@ -1,0 +1,32 @@
+minimum_pre_commit_version: '4.3.0'
+exclude: >-
+  (^deps/|(^|/)(\.cache|\.tools|_deps|build(-[^/]*)?|cmake-build-[^/]*|external|node_modules|third-party|third_party|thirdparty|vendor)/)
+
+repos:
+  - repo: local
+    hooks:
+      - id: clang-format
+        name: clang-format (C/C++)
+        entry: python tools/format.py --write
+        language: python
+        additional_dependencies: [clang-format==18.1.8]
+        files: '^(include|src|tests|examples|tools)/.*\.(h|hh|hpp|hxx|c|cc|cpp|cxx)$'
+        types: [file]
+        require_serial: true
+
+      - id: ruff-format
+        name: Ruff (Python)
+        entry: ruff format --isolated
+        language: python
+        additional_dependencies: [ruff==0.15.21]
+        files: '\.py$'
+        types: [file]
+
+      - id: prettier
+        name: Prettier (Web)
+        entry: prettier --write --no-config --no-editorconfig --single-quote
+        language: node
+        language_version: system
+        additional_dependencies: [prettier@3.6.2]
+        files: '^web/.*\.(js|mjs|cjs|css|html)$'
+        types: [file]

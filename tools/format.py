@@ -5,12 +5,10 @@ Usage:
   tools/format.py --check [--clang-format PATH] [--jobs N]   # read-only
   tools/format.py --write [--clang-format PATH] [--jobs N]   # in place
 
-`--check` (the default) never writes: it runs the pinned clang-format on every
-first-party C/C++ header and source under include/, src/ and tests/, prints a
-unified diff for every file that is not formatted and exits non-zero. `--write`
-formats those files in place. Both modes use the single `.clang-format` of the
-repository root, so no file can be checked against one style and written with
-another.
+Without file arguments, `--check` (the default) checks the whole first-party
+C/C++ tree and `--write` formats it in place. With file arguments, only the
+named first-party sources are considered. Both modes use the root
+`.clang-format`; check mode prints a unified diff and never writes.
 
 The tool refuses to run with any clang-format version other than 18.1.8 and
 reports the version and the path it found. Third-party dependencies and
@@ -39,9 +37,7 @@ REQUIREMENTS_PATH = SOURCE_ROOT / "tools" / "requirements-format.txt"
 
 # Every first-party directory that may hold C/C++ code.
 SCAN_DIRECTORIES = ("include", "src", "tests", "examples", "tools")
-SOURCE_SUFFIXES = frozenset(
-    {".h", ".hh", ".hpp", ".hxx", ".c", ".cc", ".cpp", ".cxx"}
-)
+SOURCE_SUFFIXES = frozenset({".h", ".hh", ".hpp", ".hxx", ".c", ".cc", ".cpp", ".cxx"})
 
 # Directories that are never first-party sources: third-party dependencies,
 # generated code and tool environments. `build/` is the out-of-source build
@@ -85,12 +81,16 @@ def clang_format_candidates(explicit):
         value = os.environ.get(variable)
         if value:
             yield Path(value), "$%s" % variable, True
-    yield SOURCE_ROOT / ".tools" / "format" / "bin" / "clang-format", (
-        "the tool environment of tools/requirements-format.txt"
-    ), False
-    yield Path(sys.executable).parent / "clang-format", (
-        "the environment of the running interpreter"
-    ), False
+    yield (
+        SOURCE_ROOT / ".tools" / "format" / "bin" / "clang-format",
+        ("the tool environment of tools/requirements-format.txt"),
+        False,
+    )
+    yield (
+        Path(sys.executable).parent / "clang-format",
+        ("the environment of the running interpreter"),
+        False,
+    )
     for name in ("clang-format-18", "clang-format"):
         found = shutil.which(name)
         if found:
@@ -151,25 +151,36 @@ def is_excluded(directory):
     )
 
 
-def source_files():
-    """Every first-party C/C++ file, sorted, with no generated or vendored one."""
-    files = []
-    for root in SCAN_DIRECTORIES:
-        base = SOURCE_ROOT / root
-        if not base.is_dir():
-            continue
-        for path in base.rglob("*"):
-            if path.suffix not in SOURCE_SUFFIXES or not path.is_file():
-                continue
-            # A file below an excluded directory is never first-party, however
-            # deep in the scan tree it is. Only path components inside the
-            # repository count: a directory above the source root is none of
-            # this scan's business.
-            relative_parents = path.relative_to(SOURCE_ROOT).parents
-            if any(is_excluded(part) for part in relative_parents):
-                continue
-            files.append(path)
-    return sorted(set(files))
+def is_first_party_source(path):
+    relative = path.relative_to(SOURCE_ROOT)
+    return (
+        relative.parts[0] in SCAN_DIRECTORIES
+        and path.suffix in SOURCE_SUFFIXES
+        and not any(is_excluded(parent) for parent in relative.parents)
+        and path.is_file()
+    )
+
+
+def source_files(paths):
+    """Select first-party files from explicit paths or scan the whole tree."""
+    candidates = (
+        (Path(os.path.abspath(path)) for path in paths)
+        if paths
+        else (
+            path
+            for root in SCAN_DIRECTORIES
+            for path in (SOURCE_ROOT / root).rglob("*")
+        )
+    )
+    return sorted(
+        {
+            path
+            for path in candidates
+            if path.is_relative_to(SOURCE_ROOT)
+            and is_first_party_source(path)
+            and path == path.resolve()
+        }
+    )
 
 
 def formatted_bytes(tool, path):
@@ -234,9 +245,7 @@ def main():
     mode.add_argument(
         "--check", action="store_true", help="read-only check (the default)"
     )
-    mode.add_argument(
-        "--write", action="store_true", help="format the files in place"
-    )
+    mode.add_argument("--write", action="store_true", help="format the files in place")
     parser.add_argument(
         "--clang-format",
         metavar="PATH",
@@ -249,6 +258,7 @@ def main():
         metavar="N",
         help="files to format in parallel (default: %(default)s)",
     )
+    parser.add_argument("files", nargs="*", help="format only these source files")
     arguments = parser.parse_args()
 
     try:
@@ -262,7 +272,9 @@ def main():
         print("format: %s is missing" % CONFIG_PATH, file=sys.stderr)
         return 2
 
-    files = source_files()
+    files = source_files(arguments.files)
+    if not files and arguments.files:
+        return 0
     if not files:
         # A check that scans nothing would pass for the wrong reason.
         print(

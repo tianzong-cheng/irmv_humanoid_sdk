@@ -1,10 +1,10 @@
-# Pinned formatter of this repository, installed into a tool environment outside
-# the build tree:
+# Pinned pre-commit driver and standalone C/C++ formatter:
 #
 #   python3 -m venv .tools/format
 #   .tools/format/bin/pip install -r tools/requirements-format.txt
-#   cmake --build build --target format-check
+#   .tools/format/bin/pre-commit install --install-hooks
 #
 # tools/format.py resolves .tools/format/bin/clang-format first and refuses to
 # run with any version other than the one pinned here.
 clang-format==18.1.8
+pre-commit==4.3.0

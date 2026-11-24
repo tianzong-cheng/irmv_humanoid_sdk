@@ -588,29 +588,40 @@ mkdir -p /tmp/run && cd /tmp/run
 
 ## Formatting and CI
 
-The whole first-party C/C++ tree is formatted with clang-format 18.1.8 and the
-single `.clang-format` at the repository root (`BasedOnStyle: Google`, two-space
-indentation). Third-party dependencies and generated sources — the generated
-IDL sources of `execution_idl` in particular — are never formatted.
+Repository formatting is managed by pre-commit:
+
+| Scope | Formatter |
+| --- | --- |
+| First-party C/C++ | clang-format 18.1.8 with the root `.clang-format` |
+| First-party `.py` files | Ruff formatter (no lint or import sorting) |
+| `web/` JavaScript, CSS and HTML (including tests) | Prettier (single quotes in JavaScript) |
+
+Generated code and vendored dependencies are excluded. With Python 3.10+
+and Node.js 20+ (`node` and `npm`) available:
 
 ```bash
 python3 -m venv .tools/format
 .tools/format/bin/pip install -r tools/requirements-format.txt
-cmake --build build --target format-check   # read-only, non-zero on any diff
-cmake --build build --target format          # formats in place
+.tools/format/bin/pre-commit install --install-hooks
+.tools/format/bin/pre-commit run --all-files
 ```
 
-Both targets run `tools/format.py`, which refuses any clang-format other than
-the pinned version, reports the version and path it found, and prints a unified
-diff for every file that is not formatted. `.github/workflows/ci.yml` runs four
-jobs: the Debug build with `ctest --output-on-failure`, `format-check` and the
-install step on Ubuntu 24.04; a runtime-only build
-(`-DIRMV_BUILD_APPLICATION=OFF`) that checks ONNX Runtime did not reach the
-runtime; an ASan+UBSan build that runs the deterministic core suite
-(`ctest -L core`); and a real-backend job on a self-hosted runner, gated on
-`vars.IRMV_REAL_CI == 'on'`. No stage is skipped silently: a failed dependency
-fetch, a failed build and a failed format check all fail the job, and logs are
-kept as artifacts on failure.
+The commit hook formats staged files. If it rewrites anything, review and
+stage the formatted files before retrying the commit. CI runs the same hooks
+on all tracked files and fails if any formatter makes changes. Web formatting
+does not add a build step or browser runtime dependencies.
+
+For C/C++ only, the existing CMake targets remain available after configuring
+the build:
+
+```bash
+cmake --build build --target format-check  # read-only; prints diffs
+cmake --build build --target format        # formats in place
+```
+
+Both targets use `tools/format.py`, the same pinned formatter and the same
+first-party source selection as the C/C++ hook. CI does not run a second
+CMake format check.
 
 ## Documentation
 
