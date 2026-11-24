@@ -1,214 +1,385 @@
 """Dependency closure is byte-attested, never inferred from the URDF alone."""
+
 from pathlib import Path
 import sys
 import tempfile
 import unittest
-ROOT=Path(__file__).resolve().parents[2]
-sys.path.insert(0,str(ROOT/'tools'))
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "tools"))
+
+
 class AssetTest(unittest.TestCase):
     def test_dependency_bytes_and_paths(self):
         from simulation.assets import closure
+
         with tempfile.TemporaryDirectory() as d:
-            p=Path(d)
-            (p/'model.xml').write_text('<mujoco><include file="part.xml"/></mujoco>')
-            (p/'part.xml').write_text('<mujoco><asset><mesh file="a.stl"/></asset></mujoco>')
-            (p/'a.stl').write_bytes(b'first')
-            first=closure(p/'model.xml')
-            self.assertEqual(len(first['files']),3)
-            (p/'a.stl').write_bytes(b'second')
-            self.assertNotEqual(first['digest'],closure(p/'model.xml')['digest'])
-            (p/'part.xml').write_text('<mujoco><include file="../outside.xml"/></mujoco>')
-            with self.assertRaises(ValueError):closure(p/'model.xml')
+            p = Path(d)
+            (p / "model.xml").write_text('<mujoco><include file="part.xml"/></mujoco>')
+            (p / "part.xml").write_text(
+                '<mujoco><asset><mesh file="a.stl"/></asset></mujoco>'
+            )
+            (p / "a.stl").write_bytes(b"first")
+            first = closure(p / "model.xml")
+            self.assertEqual(len(first["files"]), 3)
+            (p / "a.stl").write_bytes(b"second")
+            self.assertNotEqual(first["digest"], closure(p / "model.xml")["digest"])
+            (p / "part.xml").write_text(
+                '<mujoco><include file="../outside.xml"/></mujoco>'
+            )
+            with self.assertRaises(ValueError):
+                closure(p / "model.xml")
+
     def test_prepared_geometry_admission_refuses_manual_pose_override(self):
         from simulation.assets import admit_initial_geometry
-        expected=dict(initial_base_position=[0,0,.8],initial_base_quaternion=[1,0,0,0],
-                      initial_joint_position=[-.3,.6,-.3])
-        manifest=dict(initial_geometry=expected)
-        admit_initial_geometry(expected,manifest)
+
+        expected = dict(
+            initial_base_position=[0, 0, 0.8],
+            initial_base_quaternion=[1, 0, 0, 0],
+            initial_joint_position=[-0.3, 0.6, -0.3],
+        )
+        manifest = dict(initial_geometry=expected)
+        admit_initial_geometry(expected, manifest)
         for key in expected:
-            changed={k:list(v) for k,v in expected.items()}
-            changed[key][0]+=.1
-            with self.assertRaisesRegex(ValueError,'initial geometry'):
-                admit_initial_geometry(changed,manifest)
-        with self.assertRaisesRegex(ValueError,'initial geometry'):
-            admit_initial_geometry(expected,{})
+            changed = {k: list(v) for k, v in expected.items()}
+            changed[key][0] += 0.1
+            with self.assertRaisesRegex(ValueError, "initial geometry"):
+                admit_initial_geometry(changed, manifest)
+        with self.assertRaisesRegex(ValueError, "initial geometry"):
+            admit_initial_geometry(expected, {})
 
     def test_explicit_initial_pose_contract_is_validated_and_admitted(self):
         import json
         import xml.etree.ElementTree as ET
-        from prepare_simulation_asset import initial_stance,load_initial_pose
+        from prepare_simulation_asset import initial_stance, load_initial_pose
         from simulation.assets import admit_initial_geometry
-        names=['test_left','test_right']
-        movable={name:ET.fromstring(f'<joint name="{name}"><limit lower="-.9" upper=".9"/></joint>')
-                 for name in names}
-        default=[.25,-.3]
-        self.assertEqual(initial_stance(names,movable,default,None),default)
-        pose=dict(test_left=.6,test_right=.5)
-        self.assertEqual(initial_stance(names,movable,default,pose),[.6,.5])
-        self.assertEqual(load_initial_pose(json.dumps(pose)),pose)
+
+        names = ["test_left", "test_right"]
+        movable = {
+            name: ET.fromstring(
+                f'<joint name="{name}"><limit lower="-.9" upper=".9"/></joint>'
+            )
+            for name in names
+        }
+        default = [0.25, -0.3]
+        self.assertEqual(initial_stance(names, movable, default, None), default)
+        pose = dict(test_left=0.6, test_right=0.5)
+        self.assertEqual(initial_stance(names, movable, default, pose), [0.6, 0.5])
+        self.assertEqual(load_initial_pose(json.dumps(pose)), pose)
         with tempfile.TemporaryDirectory() as d:
-            path=Path(d)/'pose.json';path.write_text(json.dumps(pose))
-            self.assertEqual(load_initial_pose(str(path)),pose)
-        for case in [dict(test_left=0),
-                     dict(test_left=0,test_right=0,other=0),
-                     dict(test_left=True,test_right=0),
-                     dict(test_left='0',test_right=0),
-                     dict(test_left=float('nan'),test_right=0),
-                     dict(test_left=float('inf'),test_right=0),
-                     dict(test_left=.95,test_right=0)]:
+            path = Path(d) / "pose.json"
+            path.write_text(json.dumps(pose))
+            self.assertEqual(load_initial_pose(str(path)), pose)
+        for case in [
+            dict(test_left=0),
+            dict(test_left=0, test_right=0, other=0),
+            dict(test_left=True, test_right=0),
+            dict(test_left="0", test_right=0),
+            dict(test_left=float("nan"), test_right=0),
+            dict(test_left=float("inf"), test_right=0),
+            dict(test_left=0.95, test_right=0),
+        ]:
             with self.subTest(case=case):
                 with self.assertRaises(ValueError):
-                    initial_stance(names,movable,default,case)
-        geometry=dict(initial_base_position=[0,0,.8],initial_base_quaternion=[1,0,0,0],
-                      initial_joint_position=[.6,.5])
-        manifest=dict(initial_geometry=geometry)
-        admit_initial_geometry(geometry,manifest)
-        with self.assertRaisesRegex(ValueError,'initial geometry'):
-            admit_initial_geometry(dict(geometry,initial_joint_position=default),manifest)
+                    initial_stance(names, movable, default, case)
+        geometry = dict(
+            initial_base_position=[0, 0, 0.8],
+            initial_base_quaternion=[1, 0, 0, 0],
+            initial_joint_position=[0.6, 0.5],
+        )
+        manifest = dict(initial_geometry=geometry)
+        admit_initial_geometry(geometry, manifest)
+        with self.assertRaisesRegex(ValueError, "initial geometry"):
+            admit_initial_geometry(
+                dict(geometry, initial_joint_position=default), manifest
+            )
 
     def test_live_binding_requires_corrected_collision_support_attestation(self):
         import json
         from unittest.mock import patch
-        from simulation.assets import closure,sha256,verify_binding
+        from simulation.assets import closure, sha256, verify_binding
+
         with tempfile.TemporaryDirectory() as d:
-            p=Path(d);model=p/'robot.xml';policy=p/'policy.onnx'
-            model.write_text('<mujoco/>');policy.write_bytes(b'policy bytes')
-            geometry=dict(initial_base_position=[0,0,.8],
-                initial_base_quaternion=[1,0,0,0],initial_joint_position=[0])
-            manifest=dict(prepared_closure=closure(model),
-                policy_sha256=sha256(policy),initial_geometry=geometry)
-            path=model.with_suffix('.manifest.json')
+            p = Path(d)
+            model = p / "robot.xml"
+            policy = p / "policy.onnx"
+            model.write_text("<mujoco/>")
+            policy.write_bytes(b"policy bytes")
+            geometry = dict(
+                initial_base_position=[0, 0, 0.8],
+                initial_base_quaternion=[1, 0, 0, 0],
+                initial_joint_position=[0],
+            )
+            manifest = dict(
+                prepared_closure=closure(model),
+                policy_sha256=sha256(policy),
+                initial_geometry=geometry,
+            )
+            path = model.with_suffix(".manifest.json")
             path.write_text(json.dumps(manifest))
-            normalized=dict(engine_digest='e'*64,asset_digest=manifest['prepared_closure']['digest'],
-                policy_path=str(policy),engine_config=dict(model_path=str(model),**geometry))
-            with patch('simulation.assets.engine_identity',return_value=('e'*64,{})):
-                with self.assertRaisesRegex(ValueError,'collision support.*re-prepare'):
+            normalized = dict(
+                engine_digest="e" * 64,
+                asset_digest=manifest["prepared_closure"]["digest"],
+                policy_path=str(policy),
+                engine_config=dict(model_path=str(model), **geometry),
+            )
+            with patch(
+                "simulation.assets.engine_identity", return_value=("e" * 64, {})
+            ):
+                with self.assertRaisesRegex(
+                    ValueError, "collision support.*re-prepare"
+                ):
                     verify_binding(normalized)
-                manifest['collision_support_version']=1
+                manifest["collision_support_version"] = 1
                 path.write_text(json.dumps(manifest))
                 verify_binding(normalized)
 
     def test_ascii_mesh_conversion_preserves_vertices(self):
         from simulation.assets import binary_stl
         import struct
-        text=b'solid test\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid test\n'
-        data=binary_stl(text)
-        self.assertEqual(len(data),134)
-        self.assertEqual(struct.unpack_from('<I',data,80)[0],1)
-        self.assertEqual(struct.unpack_from('<12fH',data,84)[3:12],(0,0,0,1,0,0,0,1,0))
+
+        text = b"solid test\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid test\n"
+        data = binary_stl(text)
+        self.assertEqual(len(data), 134)
+        self.assertEqual(struct.unpack_from("<I", data, 80)[0], 1)
+        self.assertEqual(
+            struct.unpack_from("<12fH", data, 84)[3:12], (0, 0, 0, 1, 0, 0, 0, 1, 0)
+        )
+
     def test_large_stl_to_obj_preserves_triangle(self):
         from simulation.assets import stl_obj
         import struct
-        data=b'0'*80+struct.pack('<I',1)+struct.pack('<12fH',0,0,1,0,0,0,1,0,0,0,1,0,0)
-        self.assertEqual(stl_obj(data).splitlines(),['v 0 0 0','v 1 0 0','v 0 1 0','f 1 2 3'])
+
+        data = (
+            b"0" * 80
+            + struct.pack("<I", 1)
+            + struct.pack("<12fH", 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0)
+        )
+        self.assertEqual(
+            stl_obj(data).splitlines(), ["v 0 0 0", "v 1 0 0", "v 0 1 0", "f 1 2 3"]
+        )
+
     def test_binding_rejects_changed_asset_policy_and_engine(self):
         import json
         from unittest.mock import patch
-        from simulation.assets import closure,sha256,verify_binding
+        from simulation.assets import closure, sha256, verify_binding
+
         with tempfile.TemporaryDirectory() as d:
-            p=Path(d);model=p/'robot.xml';policy=p/'policy.onnx'
-            model.write_text('<mujoco/>');policy.write_bytes(b'policy bytes')
-            manifest=dict(prepared_closure=closure(model),policy_sha256=sha256(policy))
-            model.with_suffix('.manifest.json').write_text(json.dumps(manifest))
-            n=dict(engine_digest='e'*64,engine_config=dict(model_path=str(model)),
-                   asset_digest=manifest['prepared_closure']['digest'],policy_path=str(policy))
-            with patch('simulation.assets.engine_identity',return_value=('e'*64,{})):
+            p = Path(d)
+            model = p / "robot.xml"
+            policy = p / "policy.onnx"
+            model.write_text("<mujoco/>")
+            policy.write_bytes(b"policy bytes")
+            manifest = dict(
+                prepared_closure=closure(model), policy_sha256=sha256(policy)
+            )
+            model.with_suffix(".manifest.json").write_text(json.dumps(manifest))
+            n = dict(
+                engine_digest="e" * 64,
+                engine_config=dict(model_path=str(model)),
+                asset_digest=manifest["prepared_closure"]["digest"],
+                policy_path=str(policy),
+            )
+            with patch(
+                "simulation.assets.engine_identity", return_value=("e" * 64, {})
+            ):
                 verify_binding(n)
-                n['engine_digest']='a'*64
-                with self.assertRaisesRegex(ValueError,'engine digest'):verify_binding(n)
-                n['engine_digest']='e'*64;policy.write_bytes(b'changed policy')
-                with self.assertRaisesRegex(ValueError,'policy digest'):verify_binding(n)
-                policy.write_bytes(b'policy bytes');model.write_text('<mujoco model="changed"/>')
-                with self.assertRaisesRegex(ValueError,'asset closure'):verify_binding(n)
+                n["engine_digest"] = "a" * 64
+                with self.assertRaisesRegex(ValueError, "engine digest"):
+                    verify_binding(n)
+                n["engine_digest"] = "e" * 64
+                policy.write_bytes(b"changed policy")
+                with self.assertRaisesRegex(ValueError, "policy digest"):
+                    verify_binding(n)
+                policy.write_bytes(b"policy bytes")
+                model.write_text('<mujoco model="changed"/>')
+                with self.assertRaisesRegex(ValueError, "asset closure"):
+                    verify_binding(n)
+
     def test_assetdir_decoy_never_attested_even_after_loaded_mesh_mutation(self):
-        import hashlib,json
+        import hashlib, json
         from unittest.mock import patch
-        from simulation.assets import closure,sha256,verify_binding
+        from simulation.assets import closure, sha256, verify_binding
+
         with tempfile.TemporaryDirectory() as d:
-            p=Path(d);(p/'assets').mkdir()
-            model=p/'robot.xml';policy=p/'policy.onnx'
-            model.write_text('<mujoco><compiler assetdir="assets"/><asset><mesh file="shape.obj"/></asset></mujoco>')
-            (p/'shape.obj').write_bytes(b'decoy');actual=p/'assets/shape.obj'
-            actual.write_bytes(b'actual loaded mesh');policy.write_bytes(b'policy')
+            p = Path(d)
+            (p / "assets").mkdir()
+            model = p / "robot.xml"
+            policy = p / "policy.onnx"
+            model.write_text(
+                '<mujoco><compiler assetdir="assets"/><asset><mesh file="shape.obj"/></asset></mujoco>'
+            )
+            (p / "shape.obj").write_bytes(b"decoy")
+            actual = p / "assets/shape.obj"
+            actual.write_bytes(b"actual loaded mesh")
+            policy.write_bytes(b"policy")
             # Exact vulnerable legacy attestation; do not call fixed closure to build it.
-            files={name:sha256(p/name) for name in ('robot.xml','shape.obj')}
-            digest=hashlib.sha256(json.dumps(files,sort_keys=True,separators=(',',':')).encode()).hexdigest()
-            model.with_suffix('.manifest.json').write_text(json.dumps(dict(
-                prepared_closure=dict(files=files,digest=digest),policy_sha256=sha256(policy))))
-            n=dict(engine_digest='e'*64,engine_config=dict(model_path=str(model)),
-                   asset_digest=digest,policy_path=str(policy))
-            for changed in (False,True):
-                if changed:actual.write_bytes(b'CHANGED actual loaded mesh')
-                with self.subTest(changed=changed,entry='closure'):
-                    with self.assertRaisesRegex(ValueError,'unsupported.*resolution'):closure(model)
-                with self.subTest(changed=changed,entry='verify_binding'):
-                    with patch('simulation.assets.engine_identity',return_value=('e'*64,{})):
-                        with self.assertRaisesRegex(ValueError,'unsupported.*resolution'):verify_binding(n)
+            files = {name: sha256(p / name) for name in ("robot.xml", "shape.obj")}
+            digest = hashlib.sha256(
+                json.dumps(files, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            model.with_suffix(".manifest.json").write_text(
+                json.dumps(
+                    dict(
+                        prepared_closure=dict(files=files, digest=digest),
+                        policy_sha256=sha256(policy),
+                    )
+                )
+            )
+            n = dict(
+                engine_digest="e" * 64,
+                engine_config=dict(model_path=str(model)),
+                asset_digest=digest,
+                policy_path=str(policy),
+            )
+            for changed in (False, True):
+                if changed:
+                    actual.write_bytes(b"CHANGED actual loaded mesh")
+                with self.subTest(changed=changed, entry="closure"):
+                    with self.assertRaisesRegex(ValueError, "unsupported.*resolution"):
+                        closure(model)
+                with self.subTest(changed=changed, entry="verify_binding"):
+                    with patch(
+                        "simulation.assets.engine_identity", return_value=("e" * 64, {})
+                    ):
+                        with self.assertRaisesRegex(
+                            ValueError, "unsupported.*resolution"
+                        ):
+                            verify_binding(n)
 
     def test_include_compiler_resolution_is_explicitly_fail_closed(self):
         from simulation.assets import closure
-        cases=[
-            ('<compiler meshdir="assets"/>',''),
-            ('<compiler texturedir="assets"/>',''),
-            ('','<compiler meshdir="assets"/>'),
-            ('','<compiler texturedir="assets"/>'),
-            ('','<compiler assetdir="assets"/>'),
-            ('<compiler strippath="true"/>',''),
+
+        cases = [
+            ('<compiler meshdir="assets"/>', ""),
+            ('<compiler texturedir="assets"/>', ""),
+            ("", '<compiler meshdir="assets"/>'),
+            ("", '<compiler texturedir="assets"/>'),
+            ("", '<compiler assetdir="assets"/>'),
+            ('<compiler strippath="true"/>', ""),
         ]
         with tempfile.TemporaryDirectory() as d:
-            p=Path(d);(p/'assets').mkdir()
-            (p/'shape.obj').write_bytes(b'decoy');(p/'assets/shape.obj').write_bytes(b'actual')
-            for top,part in cases:
-                (p/'robot.xml').write_text('<mujoco>'+top+'<include file="part.xml"/></mujoco>')
-                (p/'part.xml').write_text('<mujoco>'+part+'<asset><mesh file="shape.obj"/></asset></mujoco>')
-                with self.subTest(top=top,part=part):
-                    with self.assertRaisesRegex(ValueError,'unsupported.*resolution'):closure(p/'robot.xml')
-            (p/'sub').mkdir();(p/'sub/part.xml').write_text('<mujoco><asset><mesh file="shape.obj"/></asset></mujoco>')
-            (p/'sub/shape.obj').write_bytes(b'another decoy')
-            (p/'robot.xml').write_text('<mujoco><include file="sub/part.xml"/></mujoco>')
-            with self.assertRaisesRegex(ValueError,'unsupported.*resolution'):closure(p/'robot.xml')
+            p = Path(d)
+            (p / "assets").mkdir()
+            (p / "shape.obj").write_bytes(b"decoy")
+            (p / "assets/shape.obj").write_bytes(b"actual")
+            for top, part in cases:
+                (p / "robot.xml").write_text(
+                    "<mujoco>" + top + '<include file="part.xml"/></mujoco>'
+                )
+                (p / "part.xml").write_text(
+                    "<mujoco>"
+                    + part
+                    + '<asset><mesh file="shape.obj"/></asset></mujoco>'
+                )
+                with self.subTest(top=top, part=part):
+                    with self.assertRaisesRegex(ValueError, "unsupported.*resolution"):
+                        closure(p / "robot.xml")
+            (p / "sub").mkdir()
+            (p / "sub/part.xml").write_text(
+                '<mujoco><asset><mesh file="shape.obj"/></asset></mujoco>'
+            )
+            (p / "sub/shape.obj").write_bytes(b"another decoy")
+            (p / "robot.xml").write_text(
+                '<mujoco><include file="sub/part.xml"/></mujoco>'
+            )
+            with self.assertRaisesRegex(ValueError, "unsupported.*resolution"):
+                closure(p / "robot.xml")
 
     def test_other_dependency_resolution_not_silently_ignored(self):
         from simulation.assets import closure
+
         with tempfile.TemporaryDirectory() as d:
-            p=Path(d)
-            (p/'child.xml').write_text('<mujoco/>');(p/'face.png').write_bytes(b'face')
-            for asset in ('<model file="child.xml"/>','<texture fileleft="face.png"/>'):
-                (p/'robot.xml').write_text('<mujoco><asset>'+asset+'</asset></mujoco>')
+            p = Path(d)
+            (p / "child.xml").write_text("<mujoco/>")
+            (p / "face.png").write_bytes(b"face")
+            for asset in (
+                '<model file="child.xml"/>',
+                '<texture fileleft="face.png"/>',
+            ):
+                (p / "robot.xml").write_text(
+                    "<mujoco><asset>" + asset + "</asset></mujoco>"
+                )
                 with self.subTest(asset=asset):
-                    with self.assertRaisesRegex(ValueError,'unsupported.*resolution'):closure(p/'robot.xml')
+                    with self.assertRaisesRegex(ValueError, "unsupported.*resolution"):
+                        closure(p / "robot.xml")
 
     def test_single_file_meshdir_still_hashes_loaded_mesh(self):
         from simulation.assets import closure
+
         with tempfile.TemporaryDirectory() as d:
-            p=Path(d);(p/'assets').mkdir()
-            (p/'shape.obj').write_bytes(b'decoy');actual=p/'assets/shape.obj';actual.write_bytes(b'first')
-            (p/'robot.xml').write_text('<mujoco><compiler meshdir="assets"/><asset><mesh file="shape.obj"/></asset></mujoco>')
-            first=closure(p/'robot.xml')
-            self.assertEqual(set(first['files']),{'robot.xml','assets/shape.obj'})
-            actual.write_bytes(b'changed')
-            self.assertNotEqual(first['digest'],closure(p/'robot.xml')['digest'])
+            p = Path(d)
+            (p / "assets").mkdir()
+            (p / "shape.obj").write_bytes(b"decoy")
+            actual = p / "assets/shape.obj"
+            actual.write_bytes(b"first")
+            (p / "robot.xml").write_text(
+                '<mujoco><compiler meshdir="assets"/><asset><mesh file="shape.obj"/></asset></mujoco>'
+            )
+            first = closure(p / "robot.xml")
+            self.assertEqual(set(first["files"]), {"robot.xml", "assets/shape.obj"})
+            actual.write_bytes(b"changed")
+            self.assertNotEqual(first["digest"], closure(p / "robot.xml")["digest"])
 
     def test_collision_support_uses_primitive_geometry_not_last_mesh(self):
         from simulation.assets import collision_support_z
-        identity=((1,0,0),(0,1,0),(0,0,1))
+
+        identity = ((1, 0, 0), (0, 1, 0), (0, 0, 1))
         # The v3 foot is a box, not a mesh: its lowest face is the half-extent
         # below the geom centre, never another geom's mesh vertices.
-        self.assertAlmostEqual(collision_support_z('box',(0.11,0.04,0.01),identity,(0.038,0,0.10349)),0.09349)
+        self.assertAlmostEqual(
+            collision_support_z(
+                "box", (0.11, 0.04, 0.01), identity, (0.038, 0, 0.10349)
+            ),
+            0.09349,
+        )
         # A primitive must never consume the last mesh's vertices as a fallback.
-        self.assertAlmostEqual(collision_support_z('box',(0.11,0.04,0.01),identity,(0.038,0,0.10349),((-1,-1,-5),)),0.09349)
-        self.assertAlmostEqual(collision_support_z('cylinder',(0.06,0.09),identity,(0,0,0)),-0.09)
-        self.assertAlmostEqual(collision_support_z('sphere',(0.05,),identity,(0,0,1)),0.95)
-        self.assertAlmostEqual(collision_support_z('mesh',(0,0,0),identity,(0,0,1),((0,0,-0.2),)),0.8)
-        root=2**-0.5
-        rotation=((1,0,0),(0,root,-root),(0,root,root))
-        self.assertAlmostEqual(collision_support_z('box',(1,2,3),rotation,(0,0,0)),-5*root)
-        self.assertAlmostEqual(collision_support_z('cylinder',(0.06,0.09),rotation,(0,0,1)),1-0.15*root)
-        self.assertAlmostEqual(collision_support_z('mesh',(0,0,0),rotation,(0,0,1),
-            ((0,1,3),(0,-2,-1),(.4,.3,.8))),1-3*root)
-        with self.assertRaisesRegex(ValueError,'support geometry'):
-            collision_support_z('plane',(1,),identity,(0,0,0))
-        with self.assertRaisesRegex(ValueError,'no vertices'):
-            collision_support_z('mesh',(0,0,0),identity,(0,0,0),())
+        self.assertAlmostEqual(
+            collision_support_z(
+                "box",
+                (0.11, 0.04, 0.01),
+                identity,
+                (0.038, 0, 0.10349),
+                ((-1, -1, -5),),
+            ),
+            0.09349,
+        )
+        self.assertAlmostEqual(
+            collision_support_z("cylinder", (0.06, 0.09), identity, (0, 0, 0)), -0.09
+        )
+        self.assertAlmostEqual(
+            collision_support_z("sphere", (0.05,), identity, (0, 0, 1)), 0.95
+        )
+        self.assertAlmostEqual(
+            collision_support_z(
+                "mesh", (0, 0, 0), identity, (0, 0, 1), ((0, 0, -0.2),)
+            ),
+            0.8,
+        )
+        root = 2**-0.5
+        rotation = ((1, 0, 0), (0, root, -root), (0, root, root))
+        self.assertAlmostEqual(
+            collision_support_z("box", (1, 2, 3), rotation, (0, 0, 0)), -5 * root
+        )
+        self.assertAlmostEqual(
+            collision_support_z("cylinder", (0.06, 0.09), rotation, (0, 0, 1)),
+            1 - 0.15 * root,
+        )
+        self.assertAlmostEqual(
+            collision_support_z(
+                "mesh",
+                (0, 0, 0),
+                rotation,
+                (0, 0, 1),
+                ((0, 1, 3), (0, -2, -1), (0.4, 0.3, 0.8)),
+            ),
+            1 - 3 * root,
+        )
+        with self.assertRaisesRegex(ValueError, "support geometry"):
+            collision_support_z("plane", (1,), identity, (0, 0, 0))
+        with self.assertRaisesRegex(ValueError, "no vertices"):
+            collision_support_z("mesh", (0, 0, 0), identity, (0, 0, 0), ())
 
-if __name__=='__main__':unittest.main()
+
+if __name__ == "__main__":
+    unittest.main()

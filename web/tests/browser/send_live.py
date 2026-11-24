@@ -37,29 +37,33 @@ def main() -> int:
         stamp = args.start + index * 10_000
         seq = 5000 + index
         value = args.value + 0.01 * math.sin(index)
-        send(2 + index, "sample", {
-            "kind": "sample",
-            "stamp_us": str(stamp),
-            "state_seq": str(seq),
-            "command_present": True,
-            "feedback_valid": True,
-            "output_valid": True,
-            "imu_valid": True,
-            "joint_count": 4,
-            "q": [value, 0.1, 0.2, 0.3],
-            "dq": [0.0, 0.0, 0.0, 0.0],
-            "tau_ff": [0.0, 0.0, 0.0, 0.0],
-            "kp": [40.0, 40.0, 40.0, 40.0],
-            "kd": [2.0, 2.0, 2.0, 2.0],
-            "measured_q": [value, 0.1, 0.2, 0.3],
-            "measured_dq": [0.0, 0.0, 0.0, 0.0],
-            "measured_tau_est": [0.0, 0.0, 0.0, 0.0],
-            "output_torque": [0.0, 0.0, 0.0, 0.0],
-            "joint_valid": [True, True, True, True],
-            "imu_orientation_rpy": [0.0, 0.0, 0.0],
-            "imu_angular_velocity": [0.0, 0.0, 0.0],
-            "imu_linear_acceleration": [0.0, 0.0, 0.0],
-        })
+        send(
+            2 + index,
+            "sample",
+            {
+                "kind": "sample",
+                "stamp_us": str(stamp),
+                "state_seq": str(seq),
+                "command_present": True,
+                "feedback_valid": True,
+                "output_valid": True,
+                "imu_valid": True,
+                "joint_count": 4,
+                "q": [value, 0.1, 0.2, 0.3],
+                "dq": [0.0, 0.0, 0.0, 0.0],
+                "tau_ff": [0.0, 0.0, 0.0, 0.0],
+                "kp": [40.0, 40.0, 40.0, 40.0],
+                "kd": [2.0, 2.0, 2.0, 2.0],
+                "measured_q": [value, 0.1, 0.2, 0.3],
+                "measured_dq": [0.0, 0.0, 0.0, 0.0],
+                "measured_tau_est": [0.0, 0.0, 0.0, 0.0],
+                "output_torque": [0.0, 0.0, 0.0, 0.0],
+                "joint_valid": [True, True, True, True],
+                "imu_orientation_rpy": [0.0, 0.0, 0.0],
+                "imu_angular_velocity": [0.0, 0.0, 0.0],
+                "imu_linear_acceleration": [0.0, 0.0, 0.0],
+            },
+        )
     return 0
 
 

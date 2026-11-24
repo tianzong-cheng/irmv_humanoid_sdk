@@ -144,7 +144,9 @@ GAP_REASONS = {0: "none", 1: "queue_full", 2: "write_failed", 3: "stopped"}
 # column is wide enough for every name a run can produce even when the run has
 # no gap at all: an empty text column that comes back float64 is the same silent
 # narrowing as a stamp that comes back rounded.
-GAP_REASON_DTYPE = np.dtype(f"<U{max(len(name) for name in (*GAP_REASONS.values(), 'unknown'))}")
+GAP_REASON_DTYPE = np.dtype(
+    f"<U{max(len(name) for name in (*GAP_REASONS.values(), 'unknown'))}"
+)
 
 # The clock every recorded stamp in both streams must come from, and the two
 # facts that make two independent runs comparable. A run whose identity could
@@ -253,7 +255,9 @@ def _read_output(reader: Path, run_directory: Path, begin_us: int, end_us: int):
             command += ["--to-us", str(end_us)]
     completed = subprocess.run(command, capture_output=True, text=True, check=False)
     if completed.returncode != 0:
-        raise SystemExit(f"record_to_npz: read_record failed: {completed.stderr.strip()}")
+        raise SystemExit(
+            f"record_to_npz: read_record failed: {completed.stderr.strip()}"
+        )
     lines = [line for line in completed.stdout.splitlines() if line.strip()]
     if not lines:
         raise SystemExit("record_to_npz: the reader printed nothing")
@@ -263,7 +267,9 @@ def _read_output(reader: Path, run_directory: Path, begin_us: int, end_us: int):
         try:
             records.append(json.loads(line))
         except json.JSONDecodeError as error:
-            raise SystemExit(f"record_to_npz: the reader printed a malformed line: {error}")
+            raise SystemExit(
+                f"record_to_npz: the reader printed a malformed line: {error}"
+            )
     return records, summary
 
 
@@ -314,8 +320,14 @@ def read_experiment(
             f"{summary['faults'].get('rows_in_range')}"
         )
 
-    result = {"samples": samples, "faults": faults, "summary": summary,
-              "simulation_events": [r for r in records if r.get("record_type")=="simulation_event"]}
+    result = {
+        "samples": samples,
+        "faults": faults,
+        "summary": summary,
+        "simulation_events": [
+            r for r in records if r.get("record_type") == "simulation_event"
+        ],
+    }
     if application_directory is None:
         result["application"] = None
         return result
@@ -325,12 +337,8 @@ def read_experiment(
     # velocity samples must still see the sample in force. The window is
     # applied when the exported rows and counts are selected.
     app_records, app_summary = _read_output(reader, application_directory, 0, None)
-    velocity = [
-        row for row in app_records if row.get("record_type") == "velocity"
-    ]
-    policy = [
-        row for row in app_records if row.get("record_type") == "policy_session"
-    ]
+    velocity = [row for row in app_records if row.get("record_type") == "velocity"]
+    policy = [row for row in app_records if row.get("record_type") == "policy_session"]
     if len(velocity) != app_summary["rows_in_range"]:
         raise SystemExit(
             "record_to_npz: the application reader printed "
@@ -345,11 +353,24 @@ def read_experiment(
         policy = [
             row
             for row in policy
-            if begin_us <= int(row["logical_us"] if app_summary.get("clock",{}).get("clock_domain")=="simulation" else row["monotonic_us"]) < end_us
+            if begin_us
+            <= int(
+                row["logical_us"]
+                if app_summary.get("clock", {}).get("clock_domain") == "simulation"
+                else row["monotonic_us"]
+            )
+            < end_us
         ]
     elif begin_us:
         policy = [
-            row for row in policy if int(row["logical_us"] if app_summary.get("clock",{}).get("clock_domain")=="simulation" else row["monotonic_us"]) >= begin_us
+            row
+            for row in policy
+            if int(
+                row["logical_us"]
+                if app_summary.get("clock", {}).get("clock_domain") == "simulation"
+                else row["monotonic_us"]
+            )
+            >= begin_us
         ]
     result["application"] = {
         "summary": app_summary,
@@ -368,22 +389,32 @@ def _clock_identity(summary: dict, label: str) -> tuple[tuple | None, str | None
     domain = clock.get("clock_domain", "host_monotonic")
     if domain == "simulation":
         run = clock.get("clock_run_id")
-        origin, physics, control = (clock.get(k) for k in
-            ("logical_origin_us", "physics_dt_us", "control_dt_us"))
-        if (clock.get("clock") != "simulation" or not clock.get("available")
-                or not isinstance(run, str) or len(run) != 32
-                or any(c not in "0123456789abcdef" for c in run) or set(run) == {"0"}
-                or type(origin) is not int or origin != 1
-                or type(physics) is not int or physics <= 0
-                or type(control) is not int or control < physics or control % physics):
+        origin, physics, control = (
+            clock.get(k)
+            for k in ("logical_origin_us", "physics_dt_us", "control_dt_us")
+        )
+        if (
+            clock.get("clock") != "simulation"
+            or not clock.get("available")
+            or not isinstance(run, str)
+            or len(run) != 32
+            or any(c not in "0123456789abcdef" for c in run)
+            or set(run) == {"0"}
+            or type(origin) is not int
+            or origin != 1
+            or type(physics) is not int
+            or physics <= 0
+            or type(control) is not int
+            or control < physics
+            or control % physics
+        ):
             return None, f"invalid {label} simulation clock identity"
         return (domain, run, origin, physics, control), None
     if domain != "host_monotonic":
         return None, f"unknown {label} clock domain"
     if clock.get("clock") != CLOCK_NAME:
         return None, (
-            f"the {label} run declares clock {clock.get('clock')!r}, "
-            f"not {CLOCK_NAME!r}"
+            f"the {label} run declares clock {clock.get('clock')!r}, not {CLOCK_NAME!r}"
         )
     if not clock.get("available"):
         return None, f"the {label} clock identity is unavailable"
@@ -412,11 +443,10 @@ def associate(
         application_boot, reason = _clock_identity(application_summary, "application")
     if reason is None and runtime_boot != application_boot:
         reason = (
-            ("the runs have different simulation clock identities: "
-             if runtime_boot[0] == "simulation" or application_boot[0] == "simulation"
-             else "the runs come from different boots: ") +
-            f"{runtime_boot!r} and {application_boot!r}"
-        )
+            "the runs have different simulation clock identities: "
+            if runtime_boot[0] == "simulation" or application_boot[0] == "simulation"
+            else "the runs come from different boots: "
+        ) + f"{runtime_boot!r} and {application_boot!r}"
     if reason is not None:
         return {
             "ok": False,
@@ -478,9 +508,13 @@ def _planned_period_us(sample_hz) -> float:
     try:
         frequency = float(sample_hz)
     except (TypeError, ValueError):
-        raise SystemExit(f"record_to_npz: invalid application sample rate {sample_hz!r}")
+        raise SystemExit(
+            f"record_to_npz: invalid application sample rate {sample_hz!r}"
+        )
     if frequency <= 0.0:
-        raise SystemExit(f"record_to_npz: invalid application sample rate {sample_hz!r}")
+        raise SystemExit(
+            f"record_to_npz: invalid application sample rate {sample_hz!r}"
+        )
     return 1e6 / frequency
 
 
@@ -576,19 +610,15 @@ def hold_forward(runtime_rows, velocity_rows, sample_hz, losses=None) -> dict:
         stamps = np.array([int(row["stamp_us"]) for row in segment], dtype=np.uint64)
         if end_us <= int(stamps[0]):
             continue
-        mask = (runtime_stamps >= stamps[0]) & (
-            runtime_stamps < np.uint64(end_us)
-        )
+        mask = (runtime_stamps >= stamps[0]) & (runtime_stamps < np.uint64(end_us))
         if not mask.any():
             continue
         indices = np.flatnonzero(mask)
-        positions = (
-            np.searchsorted(stamps, runtime_stamps[indices], side="right") - 1
-        )
+        positions = np.searchsorted(stamps, runtime_stamps[indices], side="right") - 1
         positions = np.clip(positions, 0, len(stamps) - 1)
-        deltas = runtime_stamps[indices].astype(np.int64) - stamps[
-            positions
-        ].astype(np.int64)
+        deltas = runtime_stamps[indices].astype(np.int64) - stamps[positions].astype(
+            np.int64
+        )
         valid = deltas < period_us
         chosen = indices[valid]
         local = positions[valid]
@@ -640,7 +670,9 @@ def _text_scalar(value, width: int):
     )
 
 
-def to_archive(rows, summary, faults=None, application=None, simulation_events=None) -> dict:
+def to_archive(
+    rows, summary, faults=None, application=None, simulation_events=None
+) -> dict:
     count = len(rows)
     arrays = {}
     for column, dtype in SCALAR_DTYPES.items():
@@ -657,10 +689,7 @@ def to_archive(rows, summary, faults=None, application=None, simulation_events=N
             arrays[column] = np.zeros((0, joint_count), dtype=np.float64)
             continue
         matrix = np.array(
-            [
-                [_decode_value(value, column) for value in row[column]]
-                for row in rows
-            ],
+            [[_decode_value(value, column) for value in row[column]] for row in rows],
             dtype=np.float64,
         )
         if matrix.shape != (count, joint_count):
@@ -675,10 +704,7 @@ def to_archive(rows, summary, faults=None, application=None, simulation_events=N
             arrays[column] = np.zeros((0, 3), dtype=np.float64)
             continue
         matrix = np.array(
-            [
-                [_decode_value(value, column) for value in row[column]]
-                for row in rows
-            ],
+            [[_decode_value(value, column) for value in row[column]] for row in rows],
             dtype=np.float64,
         )
         if matrix.shape != (count, 3):
@@ -735,8 +761,12 @@ def to_archive(rows, summary, faults=None, application=None, simulation_events=N
     arrays["corrupt"] = np.bool_(summary["corrupt"])
 
     gaps = summary["gaps"]
-    arrays["gap_first_seq"] = np.array([gap["first_seq"] for gap in gaps], dtype=np.uint64)
-    arrays["gap_last_seq"] = np.array([gap["last_seq"] for gap in gaps], dtype=np.uint64)
+    arrays["gap_first_seq"] = np.array(
+        [gap["first_seq"] for gap in gaps], dtype=np.uint64
+    )
+    arrays["gap_last_seq"] = np.array(
+        [gap["last_seq"] for gap in gaps], dtype=np.uint64
+    )
     arrays["gap_dropped"] = np.array([gap["dropped"] for gap in gaps], dtype=np.uint64)
     arrays["gap_reason"] = np.array(
         [GAP_REASONS.get(int(gap["reason"]), "unknown") for gap in gaps],
@@ -791,9 +821,7 @@ def to_archive(rows, summary, faults=None, application=None, simulation_events=N
         arrays[column] = np.array(values, dtype=dtype)
     for column, width in FAULT_TEXT_COLUMNS.items():
         source = column[len("fault_") :]
-        arrays[column] = _text_array(
-            [fault.get(source) for fault in faults], width
-        )
+        arrays[column] = _text_array([fault.get(source) for fault in faults], width)
 
     # The stream's own completion and loss accounting. It is exported even when
     # there is no row and no loss: a complete, empty stream and one whose rows
@@ -822,17 +850,13 @@ def to_archive(rows, summary, faults=None, application=None, simulation_events=N
         for column, dtype in VELOCITY_SCALAR_DTYPES.items():
             source = column[len("velocity_") :]
             if source in ("forward", "lateral", "yaw"):
-                values = [
-                    _decode_value(row.get(source), column) for row in selected
-                ]
+                values = [_decode_value(row.get(source), column) for row in selected]
             else:
                 values = [row.get(source) for row in selected]
             arrays[column] = np.array(values, dtype=dtype)
         for column, width in VELOCITY_TEXT_COLUMNS.items():
             source = column[len("velocity_") :]
-            arrays[column] = _text_array(
-                [row.get(source) for row in selected], width
-            )
+            arrays[column] = _text_array([row.get(source) for row in selected], width)
         for key in ("forward", "lateral", "yaw"):
             values = np.asarray(hold[key], dtype=np.float64)
             if values.shape != (count,):
@@ -842,9 +866,7 @@ def to_archive(rows, summary, faults=None, application=None, simulation_events=N
                 )
             arrays[f"velocity_hold_{key}"] = values
 
-        arrays["application_schema"] = _text_scalar(
-            app_summary.get("schema"), 48
-        )
+        arrays["application_schema"] = _text_scalar(app_summary.get("schema"), 48)
         arrays["application_version"] = np.int64(
             int(app_summary.get("version", app_summary.get("schema_version", 0)))
         )
@@ -854,43 +876,25 @@ def to_archive(rows, summary, faults=None, application=None, simulation_events=N
         arrays["application_runtime_config_id"] = _text_scalar(
             app_summary.get("config_id"), 64
         )
-        arrays["application_layout_id"] = _text_scalar(
-            app_summary.get("layout_id"), 64
-        )
+        arrays["application_layout_id"] = _text_scalar(app_summary.get("layout_id"), 64)
         arrays["application_joint_count"] = np.int64(
             int(app_summary.get("joint_count", 0))
         )
-        arrays["application_sample_hz"] = np.int64(
-            int(app_summary.get("sample_hz", 0))
-        )
-        arrays["application_source"] = _text_scalar(
-            app_summary.get("source"), 16
-        )
+        arrays["application_sample_hz"] = np.int64(int(app_summary.get("sample_hz", 0)))
+        arrays["application_source"] = _text_scalar(app_summary.get("source"), 16)
         clock = app_summary.get("clock") or {}
         arrays["application_clock"] = _text_scalar(clock.get("clock"), 32)
         arrays["application_boot_id"] = _text_scalar(clock.get("boot_id"), 64)
         model = app_summary.get("model") or {}
-        arrays["application_model_status"] = _text_scalar(
-            model.get("status"), 32
-        )
+        arrays["application_model_status"] = _text_scalar(model.get("status"), 32)
         arrays["application_model_name"] = _text_scalar(model.get("name"), 256)
-        arrays["application_model_sha256"] = _text_scalar(
-            model.get("sha256"), 64
-        )
-        arrays["application_complete"] = np.bool_(
-            bool(app_summary.get("complete"))
-        )
-        arrays["application_truncated"] = np.bool_(
-            bool(app_summary.get("truncated"))
-        )
+        arrays["application_model_sha256"] = _text_scalar(model.get("sha256"), 64)
+        arrays["application_complete"] = np.bool_(bool(app_summary.get("complete")))
+        arrays["application_truncated"] = np.bool_(bool(app_summary.get("truncated")))
         arrays["association_ok"] = np.bool_(bool(association["ok"]))
-        arrays["association_reason"] = _text_scalar(
-            association.get("reason", ""), 256
-        )
+        arrays["association_reason"] = _text_scalar(association.get("reason", ""), 256)
         arrays["application_rows_total"] = np.uint64(association["total"])
-        arrays["application_rows_excluded"] = np.uint64(
-            association.get("excluded", 0)
-        )
+        arrays["application_rows_excluded"] = np.uint64(association.get("excluded", 0))
 
         # The application stream's loss spans and its policy sidecar's
         # truncation are independent of the runtime rows. A window that selects
@@ -923,29 +927,53 @@ def to_archive(rows, summary, faults=None, application=None, simulation_events=N
             policy_json, dtype=np.dtype(f"<U{max(1, width)}")
         )
     clock = summary.get("clock") or {}
-    arrays["clock_domain"] = _text_scalar(clock.get("clock_domain", "host_monotonic"), 32)
-    arrays["clock_identity_json"] = np.array(json.dumps(clock,sort_keys=True))
+    arrays["clock_domain"] = _text_scalar(
+        clock.get("clock_domain", "host_monotonic"), 32
+    )
+    arrays["clock_identity_json"] = np.array(json.dumps(clock, sort_keys=True))
     if clock.get("clock_domain") == "simulation":
-        arrays["logical_stamp_us"] = np.array([r["stamp_us"] for r in rows],dtype=np.uint64)
-        arrays["clock_run_id"] = _text_scalar(clock.get("clock_run_id"),32)
-        for key in ("logical_origin_us","physics_dt_us","control_dt_us"):
+        arrays["logical_stamp_us"] = np.array(
+            [r["stamp_us"] for r in rows], dtype=np.uint64
+        )
+        arrays["clock_run_id"] = _text_scalar(clock.get("clock_run_id"), 32)
+        for key in ("logical_origin_us", "physics_dt_us", "control_dt_us"):
             arrays[key] = np.uint64(clock[key])
-        events=simulation_events or []
-        for key in ("logical_us","control_step","phase","sequence",
-                    "host_observed_us","host_operation_start_us","host_operation_duration_us",
-                    "host_release_duration_us","host_stop_duration_us"):
-            arrays["simulation_"+key]=np.array([e.get(key,0) for e in events],dtype=np.uint64)
-        arrays["simulation_event_kind"]=_text_array([e["kind"] for e in events],64)
-        lines=[json.dumps(e,sort_keys=True) for e in events]
-        arrays["simulation_event_json"]=np.array(lines,dtype=f"<U{max(map(len,lines),default=1)}")
-        arrays["simulation_evidence_json"]=np.array(json.dumps(summary.get("simulation_evidence",{}),sort_keys=True))
-        arrays["simulation_metadata_json"]=np.array(json.dumps(summary.get("simulation",{}),sort_keys=True))
-        arrays["simulation_evidence_complete"]=np.bool_(summary.get("simulation_evidence",{}).get("evidence_complete",False))
+        events = simulation_events or []
+        for key in (
+            "logical_us",
+            "control_step",
+            "phase",
+            "sequence",
+            "host_observed_us",
+            "host_operation_start_us",
+            "host_operation_duration_us",
+            "host_release_duration_us",
+            "host_stop_duration_us",
+        ):
+            arrays["simulation_" + key] = np.array(
+                [e.get(key, 0) for e in events], dtype=np.uint64
+            )
+        arrays["simulation_event_kind"] = _text_array([e["kind"] for e in events], 64)
+        lines = [json.dumps(e, sort_keys=True) for e in events]
+        arrays["simulation_event_json"] = np.array(
+            lines, dtype=f"<U{max(map(len, lines), default=1)}"
+        )
+        arrays["simulation_evidence_json"] = np.array(
+            json.dumps(summary.get("simulation_evidence", {}), sort_keys=True)
+        )
+        arrays["simulation_metadata_json"] = np.array(
+            json.dumps(summary.get("simulation", {}), sort_keys=True)
+        )
+        arrays["simulation_evidence_complete"] = np.bool_(
+            summary.get("simulation_evidence", {}).get("evidence_complete", False)
+        )
     return arrays
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("run_directory", type=Path)
     parser.add_argument("out_path", type=Path)
     parser.add_argument(
@@ -965,7 +993,9 @@ def main() -> int:
     args = parser.parse_args()
 
     if not args.reader.exists():
-        raise SystemExit(f"record_to_npz: no reader at {args.reader}; build the read_record target")
+        raise SystemExit(
+            f"record_to_npz: no reader at {args.reader}; build the read_record target"
+        )
     experiment = read_experiment(
         args.reader,
         args.run_directory,
@@ -978,9 +1008,7 @@ def main() -> int:
     application_payload = None
     if application is not None:
         app_summary = application["summary"]
-        association = associate(
-            summary, app_summary, application["velocity"]
-        )
+        association = associate(summary, app_summary, application["velocity"])
         # Association and hold-forward see the whole application recording; the
         # requested window only decides which rows and counts the archive
         # exports. A runtime row at the start of a window therefore still holds
@@ -999,11 +1027,7 @@ def main() -> int:
                 return []
             if end_us is None:
                 return [row for row in rows if int(row["stamp_us"]) >= begin_us]
-            return [
-                row
-                for row in rows
-                if begin_us <= int(row["stamp_us"]) < end_us
-            ]
+            return [row for row in rows if begin_us <= int(row["stamp_us"]) < end_us]
 
         selected = in_window(association["rows"])
         total = len(in_window(application["velocity"]))

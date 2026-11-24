@@ -90,8 +90,9 @@ def commit(repo, text, message, env):
     (repo / "tracked.txt").write_text(text, encoding="utf-8")
     added = git(repo, "add", "tracked.txt", env=env)
     check(added.returncode == 0, "git add in the fixture repository")
-    committed = git(repo, "-c", "commit.gpgsign=false", "commit", "-m",
-                    message, env=env)
+    committed = git(
+        repo, "-c", "commit.gpgsign=false", "commit", "-m", message, env=env
+    )
     check(committed.returncode == 0, "git commit " + message)
     return head(repo, env=env)
 
@@ -152,62 +153,75 @@ def main():
         initialized = run(["git", "init", "-q", repository], env=environment)
         check(initialized.returncode == 0, "git init in the temporary root")
         check(
-            git(repository, "config", "user.name", "Build Identity Test",
-                env=environment).returncode == 0,
+            git(
+                repository,
+                "config",
+                "user.name",
+                "Build Identity Test",
+                env=environment,
+            ).returncode
+            == 0,
             "configure the fixture user name",
         )
         check(
-            git(repository, "config", "user.email", "identity@example.invalid",
-                env=environment).returncode == 0,
+            git(
+                repository,
+                "config",
+                "user.email",
+                "identity@example.invalid",
+                env=environment,
+            ).returncode
+            == 0,
             "configure the fixture user email",
         )
 
         write_fixture(repository, module)
-        shutil.copyfile(header, repository / "include" / "irmv" /
-                        "build_identity.hpp")
+        shutil.copyfile(header, repository / "include" / "irmv" / "build_identity.hpp")
 
         sha_a = commit(repository, "A\n", "A", environment)
         build = temporary_root / "build"
         if not configure_and_build(repository, build, environment):
             return 1
-        check(generated_sha(build) == sha_a,
-              "the generated source carries commit A")
-        check(probe_sha(build) == sha_a,
-              "the linked probe reports commit A")
+        check(generated_sha(build) == sha_a, "the generated source carries commit A")
+        check(probe_sha(build) == sha_a, "the linked probe reports commit A")
 
         # A build with unchanged HEAD must not rewrite the generated source.
         generated = build / "generated" / "build_identity.cpp"
         before = generated.stat().st_mtime_ns
         time.sleep(0.02)
         check(
-            run(["cmake", "--build", build, "-j2"],
-                env=environment).returncode == 0,
+            run(["cmake", "--build", build, "-j2"], env=environment).returncode == 0,
             "rebuild with the same HEAD",
         )
-        check(generated.stat().st_mtime_ns == before,
-              "an unchanged SHA leaves the generated file's mtime untouched")
-        check(generated_sha(build) == sha_a,
-              "an unchanged SHA leaves the embedded revision at A")
+        check(
+            generated.stat().st_mtime_ns == before,
+            "an unchanged SHA leaves the generated file's mtime untouched",
+        )
+        check(
+            generated_sha(build) == sha_a,
+            "an unchanged SHA leaves the embedded revision at A",
+        )
 
         # A new commit reaches the generated source through the build alone:
         # no reconfigure is run between the two builds.
         sha_b = commit(repository, "B\n", "B", environment)
         check(sha_b != sha_a, "commit B differs from commit A")
-        check(generated_sha(build) == sha_a,
-              "the commit alone does not rewrite the generated source")
         check(
-            run(["cmake", "--build", build, "-j2"],
-                env=environment).returncode == 0,
+            generated_sha(build) == sha_a,
+            "the commit alone does not rewrite the generated source",
+        )
+        check(
+            run(["cmake", "--build", build, "-j2"], env=environment).returncode == 0,
             "build after commit B",
         )
-        check(generated_sha(build) == sha_b,
-              "the next build picks commit B up")
-        check(probe_sha(build) == sha_b,
-              "the relinked probe reports commit B")
+        check(generated_sha(build) == sha_b, "the next build picks commit B up")
+        check(probe_sha(build) == sha_b, "the relinked probe reports commit B")
 
         # The generator must not touch this repository's HEAD.
-        check(head(source_root) == original_head,
-              "the source repository's HEAD is unchanged")
+        check(
+            head(source_root) == original_head,
+            "the source repository's HEAD is unchanged",
+        )
 
         # A copied source with no .git is not a repository. It is put inside
         # the fixture repository, so Git would report that parent as the
@@ -222,19 +236,29 @@ def main():
         no_git = repository / "no-git"
         shutil.move(str(staged_no_git), str(no_git))
         parent = git(no_git, "rev-parse", "--show-toplevel", env=environment)
-        check(parent.returncode == 0,
-              "Git reports the fixture repository from the no-Git copy")
-        check(Path(parent.stdout.strip()).resolve() == repository.resolve(),
-              "the no-Git copy is inside the fixture repository")
+        check(
+            parent.returncode == 0,
+            "Git reports the fixture repository from the no-Git copy",
+        )
+        check(
+            Path(parent.stdout.strip()).resolve() == repository.resolve(),
+            "the no-Git copy is inside the fixture repository",
+        )
         no_git_build = temporary_root / "no-git-build"
         if not configure_and_build(no_git, no_git_build, environment):
             return 1
-        check(generated_sha(no_git_build) == "unknown",
-              "a source without .git embeds unknown")
-        check(probe_sha(no_git_build) == "unknown",
-              "the probe of a source without .git reports unknown")
-        check(head(source_root) == original_head,
-              "the no-Git copy leaves this repository's HEAD unchanged")
+        check(
+            generated_sha(no_git_build) == "unknown",
+            "a source without .git embeds unknown",
+        )
+        check(
+            probe_sha(no_git_build) == "unknown",
+            "the probe of a source without .git reports unknown",
+        )
+        check(
+            head(source_root) == original_head,
+            "the no-Git copy leaves this repository's HEAD unchanged",
+        )
     finally:
         shutil.rmtree(temporary_root, ignore_errors=True)
 

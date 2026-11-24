@@ -52,8 +52,11 @@ export function ValidateLayout(layout) {
   if (layout.version !== 1) {
     throw new LayoutError('the layout version is not 1');
   }
-  if (typeof layout.name !== 'string' || layout.name.length === 0 ||
-      layout.name.length > 200) {
+  if (
+    typeof layout.name !== 'string' ||
+    layout.name.length === 0 ||
+    layout.name.length > 200
+  ) {
     throw new LayoutError('the layout name is missing or too long');
   }
   if (!Array.isArray(layout.charts)) {
@@ -87,7 +90,8 @@ export function ResolveLayout(layout, catalog) {
   const missingSignals = [];
   const charts = layout.charts.map((chart) => ({
     ...chart,
-    autoTitle: !chart.title || catalog.some((signal) => signal.label === chart.title),
+    autoTitle:
+      !chart.title || catalog.some((signal) => signal.label === chart.title),
     curves: chart.curves.map((curve) => {
       const signal = signals.get(curve.signalId) ?? null;
       if (signal === null) {

@@ -29,9 +29,9 @@ def main() -> int:
     joint_name = schema["$defs"]["jointName"]
     assert joint_name["type"] == "string"
     assert joint_name["format"] == FORMAT_NAME
-    name_property = schema["properties"]["robot"]["properties"]["joints"][
-        "items"
-    ]["properties"]["name"]
+    name_property = schema["properties"]["robot"]["properties"]["joints"]["items"][
+        "properties"
+    ]["name"]
     assert name_property == {"$ref": "#/$defs/jointName"}
     positive_time = schema["$defs"]["positiveTimeUs"]
     assert positive_time == {
@@ -39,18 +39,17 @@ def main() -> int:
         "minimum": 1,
         "maximum": 2**64 - 1,
     }
-    rotate_bytes = schema["properties"]["telemetry"]["properties"][
-        "rotate_bytes"
-    ]
+    rotate_bytes = schema["properties"]["telemetry"]["properties"]["rotate_bytes"]
     assert rotate_bytes == {"$ref": "#/$defs/positiveTimeUs"}
     # The schema level set must stay in step with the parser: the full report
     # range, and nothing else.
     assert schema["properties"]["telemetry"]["properties"]["level"] == {
         "enum": ["TRACE", "DEBUG", "INFO", "WARNING", "ERROR", "FATAL"]
     }
-    assert fixture["telemetry"]["level"] in schema["properties"]["telemetry"][
-        "properties"
-    ]["level"]["enum"]
+    assert (
+        fixture["telemetry"]["level"]
+        in schema["properties"]["telemetry"]["properties"]["level"]["enum"]
+    )
 
     assert "simulation" in schema["properties"]["deployment"]["enum"]
     assert "sim" in schema["properties"]["backend"]["enum"]
@@ -64,7 +63,9 @@ def main() -> int:
         assert sim["properties"][key]["maximum"] == 3600000000
         assert sim["properties"][key]["minimum"] == 1
     assert set(sim["required"]) == set(sim["properties"]) - {
-        "host_startup_timeout_us", "host_phase_timeout_us"}
+        "host_startup_timeout_us",
+        "host_phase_timeout_us",
+    }
 
     for key, count in (("initial_base_position", 3), ("initial_base_quaternion", 4)):
         assert sim["properties"][key]["minItems"] == count
@@ -72,11 +73,17 @@ def main() -> int:
     mapping = sim["properties"]["joint_mapping"]["additionalProperties"]
     assert set(mapping["required"]) == {"joint", "actuator"}
     assert mapping["additionalProperties"] is False
-    pairs = {rule["if"]["properties"]["deployment"]["const"]:
-             rule["then"] for rule in schema["allOf"]
-             if "backend" in rule["then"].get("properties", {})}
+    pairs = {
+        rule["if"]["properties"]["deployment"]["const"]: rule["then"]
+        for rule in schema["allOf"]
+        if "backend" in rule["then"].get("properties", {})
+    }
     assert pairs["simulation"]["required"] == ["simulation"]
-    for deployment, backend in (("fake_only", "fake"), ("real", "real"), ("simulation", "sim")):
+    for deployment, backend in (
+        ("fake_only", "fake"),
+        ("real", "real"),
+        ("simulation", "sim"),
+    ):
         assert pairs[deployment]["properties"]["backend"] == {"const": backend}
     for deployment in ("fake_only", "real"):
         assert pairs[deployment]["not"] == {"required": ["simulation"]}
@@ -90,8 +97,7 @@ def main() -> int:
     assert schema_accepts_positive_time("1.8446744073709551615e19")
     assert not schema_accepts_positive_time("1.00000000000000001")
     assert all(
-        accepts_joint_name(joint["name"])
-        for joint in fixture["robot"]["joints"]
+        accepts_joint_name(joint["name"]) for joint in fixture["robot"]["joints"]
     )
     return 0
 

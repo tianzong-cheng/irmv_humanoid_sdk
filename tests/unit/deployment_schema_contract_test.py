@@ -41,9 +41,7 @@ def main() -> int:
     order = schema["properties"]["action"]["properties"]["order"]
     assert order["type"] == "array"
     assert (order["minItems"], order["maxItems"]) == (4, 4)
-    assert order["items"] == {
-        "enum": ["wrapper_clip", "scale", "offset", "term_clip"]
-    }
+    assert order["items"] == {"enum": ["wrapper_clip", "scale", "offset", "term_clip"]}
     terms = schema["properties"]["observation"]["properties"]["terms"]
     assert terms["minItems"] == terms["maxItems"] == 6
     assert terms["items"] is False
@@ -73,9 +71,7 @@ def main() -> int:
         "type": ["string", "null"],
         "pattern": "^[0-9a-f]{64}$",
     }
-    assert (
-        schema["properties"]["source"]["properties"]["missing"]["type"] == "array"
-    )
+    assert schema["properties"]["source"]["properties"]["missing"]["type"] == "array"
 
     # The fixtures the C++ test parses must satisfy the schema, both as they
     # are and with one planted witness of the required set: the same document
@@ -91,13 +87,13 @@ def main() -> int:
             except SchemaError:
                 pass
             else:
-                raise SchemaError(f"{name}: the schema accepts a document without {field}")
+                raise SchemaError(
+                    f"{name}: the schema accepts a document without {field}"
+                )
         # The null provenance fields of the three-order fixture must be exactly
         # the ones its missing list explains.
         nulls = sorted(
-            field
-            for field, value in document["source"].items()
-            if value is None
+            field for field, value in document["source"].items() if value is None
         )
         assert nulls == sorted(document["source"]["missing"]), (name, nulls)
 

@@ -56,11 +56,13 @@ export class EventsView {
       grouped.get(key).eventIds.push(event.event_id);
     }
     this.markers = [...grouped.values()].sort((left, right) =>
-      (left.timeUs < right.timeUs ? -1 : left.timeUs > right.timeUs ? 1 : 0));
+      left.timeUs < right.timeUs ? -1 : left.timeUs > right.timeUs ? 1 : 0,
+    );
   }
 
   Select(eventId) {
-    const event = this.events.find((entry) => entry.event_id === eventId) ?? null;
+    const event =
+      this.events.find((entry) => entry.event_id === eventId) ?? null;
     this.selected = event;
     if (event) {
       this.callbacks.onSelect?.(event);
@@ -79,7 +81,9 @@ export class EventsView {
       faults.truncated ? 'truncated' : '',
       faults.corrupt ? 'corrupt' : '',
       faults.losses?.length ? `${faults.losses.length} loss span(s)` : '',
-    ].filter(Boolean).join(' · ');
+    ]
+      .filter(Boolean)
+      .join(' · ');
   }
 
   Render(container) {
@@ -118,7 +122,9 @@ export class EventsView {
       more.type = 'button';
       more.className = 'event-more';
       more.textContent = 'Load more events';
-      more.addEventListener('click', () => this.callbacks.onMore?.(this.continuation));
+      more.addEventListener('click', () =>
+        this.callbacks.onMore?.(this.continuation),
+      );
       container.append(more);
     }
   }

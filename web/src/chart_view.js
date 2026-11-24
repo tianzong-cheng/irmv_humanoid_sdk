@@ -7,7 +7,14 @@
 
 import { Us } from './api.js';
 
-const FALLBACK_COLORS = ['#4f8ef7', '#f2a33c', '#3bb273', '#d95d8c', '#8a7cf0', '#38a3a5'];
+const FALLBACK_COLORS = [
+  '#4f8ef7',
+  '#f2a33c',
+  '#3bb273',
+  '#d95d8c',
+  '#8a7cf0',
+  '#38a3a5',
+];
 
 function FiniteNumbers(series, signalId) {
   const entry = series.find((item) => item?.signal?.id === signalId);
@@ -15,7 +22,9 @@ function FiniteNumbers(series, signalId) {
     return [];
   }
   return entry.points
-    .map((point) => (typeof point.v === 'number' && Number.isFinite(point.v) ? point.v : null))
+    .map((point) =>
+      typeof point.v === 'number' && Number.isFinite(point.v) ? point.v : null,
+    )
     .filter((value) => value !== null);
 }
 
@@ -44,7 +53,9 @@ function AxisRange(chart, series, axisId) {
 function NiceStep(target) {
   const power = 10 ** Math.floor(Math.log10(target));
   const fraction = target / power;
-  return (fraction < 1.5 ? 1 : fraction < 3.5 ? 2 : fraction < 7.5 ? 5 : 10) * power;
+  return (
+    (fraction < 1.5 ? 1 : fraction < 3.5 ? 2 : fraction < 7.5 ? 5 : 10) * power
+  );
 }
 
 export function ValueTicks(low, high, count = 5) {
@@ -70,9 +81,9 @@ export function TimeTicks(begin, end, origin, count = 5) {
   if (origin === null || origin === undefined || end <= begin) {
     return [];
   }
-  const step = BigInt(Math.max(1, Math.round(NiceStep(
-    Number(end - begin) / Math.max(1, count),
-  ))));
+  const step = BigInt(
+    Math.max(1, Math.round(NiceStep(Number(end - begin) / Math.max(1, count)))),
+  );
   const offset = begin - origin;
   // BigInt division truncates toward zero, which is ceil only for negatives.
   const first = (offset / step + (offset % step > 0n ? 1n : 0n)) * step;
@@ -112,7 +123,9 @@ export function CurveAppearance(canvas, curve, index) {
   const slot = styleIndex ? Number(styleIndex[1]) - 1 : index;
   const patterns = [[], [6, 3], [2, 3], [8, 3, 2, 3]];
   return {
-    color: curve.style?.startsWith('#') ? curve.style : colors[slot % colors.length],
+    color: curve.style?.startsWith('#')
+      ? curve.style
+      : colors[slot % colors.length],
     dash: patterns[slot % patterns.length],
   };
 }
@@ -133,8 +146,9 @@ export function SelectionZoom(view, start, end, timeWindow, mode = 'time') {
       axes: view.ranges.map(({ axisId, low, high }) => ({
         axisId,
         range: [
-          low + (plot.bottom - bottom) / (plot.bottom - plot.top) * (high - low),
-          low + (plot.bottom - top) / (plot.bottom - plot.top) * (high - low),
+          low +
+            ((plot.bottom - bottom) / (plot.bottom - plot.top)) * (high - low),
+          low + ((plot.bottom - top) / (plot.bottom - plot.top)) * (high - low),
         ],
       })),
     };
@@ -146,8 +160,11 @@ export function SelectionZoom(view, start, end, timeWindow, mode = 'time') {
   if (span <= 0n) {
     return null;
   }
-  const stamp = (x) => Us(timeWindow.beginUs) + span *
-    BigInt(Math.round((x - plot.left) / (plot.right - plot.left) * 1e9)) / 1000000000n;
+  const stamp = (x) =>
+    Us(timeWindow.beginUs) +
+    (span *
+      BigInt(Math.round(((x - plot.left) / (plot.right - plot.left)) * 1e9))) /
+      1000000000n;
   const beginUs = stamp(left);
   const endUs = stamp(right);
   if (endUs <= beginUs) {
@@ -159,20 +176,35 @@ export function SelectionZoom(view, start, end, timeWindow, mode = 'time') {
   };
 }
 
-export function Render(canvas, chart, series, timeWindow, cursor = null, markers = [], highlightedSignal = null, timeOriginUs = null) {
+export function Render(
+  canvas,
+  chart,
+  series,
+  timeWindow,
+  cursor = null,
+  markers = [],
+  highlightedSignal = null,
+  timeOriginUs = null,
+) {
   const ctx = canvas.getContext('2d');
   if (!ctx) {
     return { drawn: false, axisWidths: [], plotted: 0 };
   }
-  const axes = chart.axes.length > 0
-    ? chart.axes
-    : [{ id: 'axis-1', quantity: '', unit: '' }];
+  const axes =
+    chart.axes.length > 0
+      ? chart.axes
+      : [{ id: 'axis-1', quantity: '', unit: '' }];
   ctx.font = '11px system-ui, sans-serif';
-  const ranges = new Map(axes.map(axis => [axis.id, AxisRange(chart, series, axis.id)]));
+  const ranges = new Map(
+    axes.map((axis) => [axis.id, AxisRange(chart, series, axis.id)]),
+  );
   const axisWidths = axes.map((axis) => {
     const [low, high] = ranges.get(axis.id);
     const labels = [low, high, ...ValueTicks(low, high)].map(FormatValue);
-    return Math.max(36, ...labels.map(label => Math.ceil(ctx.measureText(label).width) + 12));
+    return Math.max(
+      36,
+      ...labels.map((label) => Math.ceil(ctx.measureText(label).width) + 12),
+    );
   });
   const gutter = axisWidths.reduce((sum, value) => sum + value, 0);
   // Keep every value axis in the canvas. Narrow chart bodies scroll rather
@@ -181,8 +213,10 @@ export function Render(canvas, chart, series, timeWindow, cursor = null, markers
   const width = Math.max(1, Math.round(canvas.clientWidth || 640));
   const height = Math.max(1, Math.round(canvas.clientHeight || 280));
   const ratio = globalThis.devicePixelRatio || 1;
-  if (canvas.width !== Math.round(width * ratio) ||
-      canvas.height !== Math.round(height * ratio)) {
+  if (
+    canvas.width !== Math.round(width * ratio) ||
+    canvas.height !== Math.round(height * ratio)
+  ) {
     canvas.width = Math.round(width * ratio);
     canvas.height = Math.round(height * ratio);
   }
@@ -211,9 +245,15 @@ export function Render(canvas, chart, series, timeWindow, cursor = null, markers
     ctx.fillRect(0, 0, width, height);
   }
   const intervals = Math.max(1, Math.floor((plotRight - plotLeft) / 100));
-  const origin = timeOriginUs === null || timeOriginUs === undefined ? null : Us(timeOriginUs);
+  const origin =
+    timeOriginUs === null || timeOriginUs === undefined
+      ? null
+      : Us(timeOriginUs);
   const timeTicks = TimeTicks(begin, end, origin, intervals);
-  const valueIntervals = Math.max(1, Math.min(5, Math.floor((plotBottom - plotTop) / 40)));
+  const valueIntervals = Math.max(
+    1,
+    Math.min(5, Math.floor((plotBottom - plotTop) / 40)),
+  );
   // A single horizontal grid follows the first value axis; overlaying grids
   // from unrelated units would make the background ambiguous and cluttered.
   const [gridLow, gridHigh] = ranges.get(axes[0].id);
@@ -228,7 +268,9 @@ export function Render(canvas, chart, series, timeWindow, cursor = null, markers
     ctx.lineTo(x, plotBottom);
   }
   for (const tick of ValueTicks(gridLow, gridHigh, valueIntervals)) {
-    const y = plotBottom - (tick - gridLow) / (gridHigh - gridLow) * (plotBottom - plotTop);
+    const y =
+      plotBottom -
+      ((tick - gridLow) / (gridHigh - gridLow)) * (plotBottom - plotTop);
     ctx.moveTo(plotLeft, y);
     ctx.lineTo(plotRight, y);
   }
@@ -244,7 +286,8 @@ export function Render(canvas, chart, series, timeWindow, cursor = null, markers
     const ticks = ValueTicks(low, high, valueIntervals);
     ctx.fillStyle = muted;
     for (const tick of ticks) {
-      const y = plotBottom - ((tick - low) / (high - low)) * (plotBottom - plotTop);
+      const y =
+        plotBottom - ((tick - low) / (high - low)) * (plotBottom - plotTop);
       ctx.fillStyle = muted;
       ctx.fillText(FormatValue(tick), columnLeft + 4, y + 3);
     }
@@ -260,11 +303,17 @@ export function Render(canvas, chart, series, timeWindow, cursor = null, markers
     const x = TimeToX(stamp, timeWindow, plotLeft, plotRight);
     const delta = stamp - origin;
     const magnitude = delta < 0n ? -delta : delta;
-    const fraction = String(magnitude % 1000000n).padStart(6, '0').replace(/0+$/, '');
+    const fraction = String(magnitude % 1000000n)
+      .padStart(6, '0')
+      .replace(/0+$/, '');
     const label = `${delta < 0n ? '-' : ''}${magnitude / 1000000n}${fraction ? `.${fraction}` : ''} s`;
     const halfLabel = ctx.measureText(label).width / 2;
-    ctx.textAlign = x - halfLabel < plotLeft ? 'left'
-      : x + halfLabel > plotRight ? 'right' : 'center';
+    ctx.textAlign =
+      x - halfLabel < plotLeft
+        ? 'left'
+        : x + halfLabel > plotRight
+          ? 'right'
+          : 'center';
     ctx.fillText(label, x, height - 7);
   }
   ctx.textAlign = 'left';
@@ -289,14 +338,21 @@ export function Render(canvas, chart, series, timeWindow, cursor = null, markers
     ctx.strokeStyle = color;
     ctx.fillStyle = color;
     ctx.setLineDash(dash);
-    ctx.globalAlpha = highlightedSignal && highlightedSignal !== curve.signalId ? 0.25 : 1;
+    ctx.globalAlpha =
+      highlightedSignal && highlightedSignal !== curve.signalId ? 0.25 : 1;
     ctx.lineWidth = highlightedSignal === curve.signalId ? 2.8 : 1.7;
-    const step = entry.signal?.value_kind === 'bool' || entry.signal?.value_kind === 'enum';
+    const step =
+      entry.signal?.value_kind === 'bool' ||
+      entry.signal?.value_kind === 'enum';
     let previous = null;
     let lastSegment = null;
     ctx.beginPath();
     for (const point of entry.points) {
-      if (!point.valid || typeof point.v !== 'number' || !Number.isFinite(point.v)) {
+      if (
+        !point.valid ||
+        typeof point.v !== 'number' ||
+        !Number.isFinite(point.v)
+      ) {
         previous = null;
         lastSegment = point.segment;
         continue;
@@ -307,7 +363,8 @@ export function Render(canvas, chart, series, timeWindow, cursor = null, markers
       lastSegment = point.segment;
       const stamp = Us(point.t);
       const x = TimeToX(stamp, timeWindow, plotLeft, plotRight);
-      const y = plotBottom - ((point.v - low) / (high - low)) * (plotBottom - plotTop);
+      const y =
+        plotBottom - ((point.v - low) / (high - low)) * (plotBottom - plotTop);
       if (previous === null) {
         ctx.moveTo(x, y);
       } else if (step) {
@@ -353,13 +410,18 @@ export function Render(canvas, chart, series, timeWindow, cursor = null, markers
       const values = cursor.values ?? new Map();
       chart.curves.forEach((curve) => {
         const value = values.get?.(curve.signalId);
-        if (!value || !value.valid || typeof value.value !== 'number' ||
-            !Number.isFinite(value.value)) {
+        if (
+          !value ||
+          !value.valid ||
+          typeof value.value !== 'number' ||
+          !Number.isFinite(value.value)
+        ) {
           return;
         }
         const axis = axes.find((item) => item.id === curve.axisId) ?? axes[0];
         const [low, high] = ranges.get(axis.id);
-        const y = plotBottom -
+        const y =
+          plotBottom -
           ((value.value - low) / (high - low)) * (plotBottom - plotTop);
         ctx.fillStyle = colorByCurve.get(curve.signalId) ?? fg;
         ctx.beginPath();
@@ -371,9 +433,20 @@ export function Render(canvas, chart, series, timeWindow, cursor = null, markers
 
   ctx.restore();
   return {
-    drawn: plotted > 0 || axes.length > 0, axisWidths, plotted,
-    plot: { left: plotLeft, right: plotRight, top: plotTop, bottom: plotBottom },
-    ranges: axes.map((axis) => ({ axisId: axis.id, low: ranges.get(axis.id)[0], high: ranges.get(axis.id)[1] })),
+    drawn: plotted > 0 || axes.length > 0,
+    axisWidths,
+    plotted,
+    plot: {
+      left: plotLeft,
+      right: plotRight,
+      top: plotTop,
+      bottom: plotBottom,
+    },
+    ranges: axes.map((axis) => ({
+      axisId: axis.id,
+      low: ranges.get(axis.id)[0],
+      high: ranges.get(axis.id)[1],
+    })),
   };
 }
 
@@ -384,6 +457,8 @@ export function TimeToX(stampUs, timeWindow, plotLeft, plotRight) {
   // Subtract absolute timestamps as BigInt first. Only the relative duration
   // becomes a float, preserving precision above 2^53 without quantizing the
   // screen position into a fixed number of time buckets.
-  return plotLeft + Number(Us(stampUs) - begin) / Number(span) *
-    (plotRight - plotLeft);
+  return (
+    plotLeft +
+    (Number(Us(stampUs) - begin) / Number(span)) * (plotRight - plotLeft)
+  );
 }

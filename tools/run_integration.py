@@ -52,6 +52,7 @@ from pathlib import Path
 # F_GETPIPE_SZ is not exported by every Python build.
 kFGetPipeSize = getattr(fcntl, "F_GETPIPE_SZ", 1032)
 
+
 # The client and the runtime both stamp observations with the host monotonic
 # clock, which is the clock Python exposes as time.monotonic on Linux: arrival
 # stamps of different processes are therefore directly comparable.
@@ -183,8 +184,10 @@ class Runtime:
                     % (self.process.returncode, pattern, minimum)
                 )
             if time.monotonic() >= deadline:
-                raise Failure("the runtime matched %r only %d time(s) within "
-                              "%.1f s" % (pattern, found, timeout_s))
+                raise Failure(
+                    "the runtime matched %r only %d time(s) within "
+                    "%.1f s" % (pattern, found, timeout_s)
+                )
             time.sleep(0.02)
 
     def signal(self, name):
@@ -330,8 +333,10 @@ class Application:
 
     def line_stamps(self):
         """One `(arrival_us, line)` per line the application printed."""
-        return [(stamp, line.decode("utf-8", "replace").rstrip("\r\n"))
-                for stamp, line in zip(self.stamps, self.lines)]
+        return [
+            (stamp, line.decode("utf-8", "replace").rstrip("\r\n"))
+            for stamp, line in zip(self.stamps, self.lines)
+        ]
 
     def wait_for(self, pattern, timeout_s, start=None):
         """Waits for a printed line while draining, and returns the matching one.
@@ -358,11 +363,15 @@ class Application:
                     seen += 1
                     if expression.search(line):
                         return line
-                raise Failure("the application exited with %s before matching %r"
-                              % (self.process.returncode, pattern))
+                raise Failure(
+                    "the application exited with %s before matching %r"
+                    % (self.process.returncode, pattern)
+                )
             if time.monotonic() >= deadline:
-                raise Failure("the application did not match %r within %.1f s"
-                              % (pattern, timeout_s))
+                raise Failure(
+                    "the application did not match %r within %.1f s"
+                    % (pattern, timeout_s)
+                )
             time.sleep(0.02)
 
     def signal(self, name):
@@ -373,8 +382,9 @@ class Application:
     def send_keys(self, keys):
         """Writes the bytes of `keys` to the terminal, exactly as a keyboard."""
         if self.process is None or self.process.poll() is not None:
-            raise Failure("the application is not running, keys %r were not sent"
-                          % keys)
+            raise Failure(
+                "the application is not running, keys %r were not sent" % keys
+            )
         if isinstance(keys, str):
             keys = keys.encode("utf-8")
         # Snapshot before writing: the application and drainer may publish the
@@ -414,8 +424,7 @@ class Application:
 
     def exit_line(self):
         """The one `application: exit ...` line, or None when it printed none."""
-        found = re.search(r"^application: exit [^\r\n]*", self.text(),
-                          re.MULTILINE)
+        found = re.search(r"^application: exit [^\r\n]*", self.text(), re.MULTILINE)
         return found.group(0) if found is not None else None
 
     def kill(self):
@@ -485,8 +494,9 @@ class Client:
 
     def signal(self, name):
         if self.process is None or self.process.poll() is not None:
-            raise Failure("client %s is not running, cannot send %s"
-                          % (self.name, name))
+            raise Failure(
+                "client %s is not running, cannot send %s" % (self.name, name)
+            )
         self.process.send_signal(getattr(signal, name))
         return now_us()
 
@@ -552,8 +562,11 @@ class Client:
         return [r for r in self.records() if r.get("kind") == "state"]
 
     def results(self):
-        return [r for r in self.records()
-                if r.get("kind") in ("result", "result_suppressed")]
+        return [
+            r
+            for r in self.records()
+            if r.get("kind") in ("result", "result_suppressed")
+        ]
 
 
 class Context:
@@ -610,12 +623,14 @@ class Context:
         for client in self.processes.clients.values():
             client.write_logs()
         (self.work_dir / "domain.txt").write_text(
-            "%d\n" % self.domain, encoding="utf-8")
+            "%d\n" % self.domain, encoding="utf-8"
+        )
 
 
 # ---------------------------------------------------------------------------
 # Scenario setup
 # ---------------------------------------------------------------------------
+
 
 def set_dotted(mapping, dotted, value):
     parts = dotted.split(".")
@@ -707,10 +722,16 @@ def choose_domain(declared, work_dir, lock_dir=None):
     directory is deeper than one level must pass the shared parent explicitly,
     or its locks would live in a namespace no other entry looks at.
     """
-    shared = (Path(lock_dir).resolve() if lock_dir is not None
-              else Path(work_dir).resolve().parent)
-    reserved = json.loads((Path(__file__).resolve().parents[1] /
-                           "tests/integration/dds_domains.json").read_text())["reserved"]
+    shared = (
+        Path(lock_dir).resolve()
+        if lock_dir is not None
+        else Path(work_dir).resolve().parent
+    )
+    reserved = json.loads(
+        (
+            Path(__file__).resolve().parents[1] / "tests/integration/dds_domains.json"
+        ).read_text()
+    )["reserved"]
     for offset in range(0, 40):
         candidate = 190 + ((declared - 190 + offset) % 40)
         # Serial test domains are maintained in one registry.
@@ -727,8 +748,7 @@ def choose_domain(declared, work_dir, lock_dir=None):
         # it, and the exclusive create then decides which one owns the domain.
         for _ in range(3):
             try:
-                handle = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-                                 0o644)
+                handle = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
             except FileExistsError:
                 if not lock_is_stale(lock):
                     break  # a live scenario holds this domain
@@ -739,8 +759,9 @@ def choose_domain(declared, work_dir, lock_dir=None):
                 continue
             os.write(handle, str(os.getpid()).encode())
             os.close(handle)
-            (Path(work_dir) / "domain.txt").write_text("%d\n" % candidate,
-                                                       encoding="utf-8")
+            (Path(work_dir) / "domain.txt").write_text(
+                "%d\n" % candidate, encoding="utf-8"
+            )
             return candidate, lock
     raise Failure("no free DDS domain below 230 was found for %d" % declared)
 
@@ -799,18 +820,21 @@ def build_application_arguments(ctx):
         raise Failure(
             "the application section of %s describes a configuration the "
             "runtime does not use; one scenario gives both processes the same "
-            "configuration (and therefore the same config_id)"
-            % ctx.scenario["name"])
+            "configuration (and therefore the same config_id)" % ctx.scenario["name"]
+        )
     declared_domain = settings.get("domain", ctx.scenario["domain"])
     if declared_domain != ctx.scenario["domain"]:
         raise Failure(
             "the application section declares domain %s but the scenario runs "
             "on %s; the two processes of one scenario share one domain"
-            % (declared_domain, ctx.scenario["domain"]))
+            % (declared_domain, ctx.scenario["domain"])
+        )
     config_path = ctx.work_dir / "config.json"
     if not config_path.exists():
-        raise Failure("the application needs the configuration the runtime "
-                      "generated; start the runtime first")
+        raise Failure(
+            "the application needs the configuration the runtime "
+            "generated; start the runtime first"
+        )
     # The invocation itself: `args` carries what the scenario wants the
     # application started with - `--locomotion-source external` being the case
     # that exists - and nothing the harness derives, so a scenario can never
@@ -819,8 +843,10 @@ def build_application_arguments(ctx):
     if not isinstance(extra, list) or not all(
         isinstance(argument, str) for argument in extra
     ):
-        raise Failure("the application args of %s must be a list of strings"
-                      % ctx.scenario["name"])
+        raise Failure(
+            "the application args of %s must be a list of strings"
+            % ctx.scenario["name"]
+        )
     return ["--config", str(config_path), "--domain", str(ctx.domain)] + extra
 
 
@@ -844,15 +870,20 @@ def start_application(ctx):
     state a scenario may create by accident.
     """
     if getattr(ctx, "application_binary", None) is None:
-        raise Failure("this scenario starts the application, but no application "
-                      "binary was given to the harness (--application)")
+        raise Failure(
+            "this scenario starts the application, but no application "
+            "binary was given to the harness (--application)"
+        )
     running = ctx.processes.application
     if running is not None and running.alive():
-        raise Failure("an application is already running, run %d; stop it "
-                      "first" % running.run_index)
+        raise Failure(
+            "an application is already running, run %d; stop it "
+            "first" % running.run_index
+        )
     arguments = build_application_arguments(ctx)
-    application = Application(ctx.application_binary, ctx.work_dir,
-                              len(ctx.applications) + 1)
+    application = Application(
+        ctx.application_binary, ctx.work_dir, len(ctx.applications) + 1
+    )
     application.start(arguments)
     ctx.processes.application = application
     ctx.applications.append(application)
@@ -861,10 +892,14 @@ def start_application(ctx):
 
 def client_arguments(ctx, step):
     arguments = [
-        "--mode", step["mode"],
-        "--scenario", step["scenario"],
-        "--domain", str(ctx.domain),
-        "--config", str(ctx.work_dir / "config.json"),
+        "--mode",
+        step["mode"],
+        "--scenario",
+        step["scenario"],
+        "--domain",
+        str(ctx.domain),
+        "--config",
+        str(ctx.work_dir / "config.json"),
     ]
     arguments += [str(value) for value in step.get("args", [])]
     return arguments
@@ -873,6 +908,7 @@ def client_arguments(ctx, step):
 # ---------------------------------------------------------------------------
 # Steps
 # ---------------------------------------------------------------------------
+
 
 def step_start_runtime(ctx, step):
     runtime = start_runtime(ctx)
@@ -886,11 +922,11 @@ def step_restart_runtime(ctx, step):
     code = previous.wait_exit(step.get("timeout_s", 10.0))
     if code is None:
         previous.kill()
-        raise Failure("the runtime did not exit on SIGTERM; a restart cannot "
-                      "reuse its domain")
+        raise Failure(
+            "the runtime did not exit on SIGTERM; a restart cannot reuse its domain"
+        )
     runtime = start_runtime(ctx)
-    return "restarted the runtime (previous exit %s), run %d" % (
-        code, len(ctx.runs))
+    return "restarted the runtime (previous exit %s), run %d" % (code, len(ctx.runs))
 
 
 def step_kill_runtime(ctx, step):
@@ -920,10 +956,11 @@ def step_stop_runtime(ctx, step):
         # as it can before the signal, otherwise the step would prove nothing.
         occupancy, capacity = runtime.pipe_occupancy()
         if capacity - occupancy > capacity // 8:
-            raise Failure("the log pipe of the runtime is not under back "
-                          "pressure (%d of %d bytes free), so the blocked "
-                          "consumer is not being measured"
-                          % (capacity - occupancy, capacity))
+            raise Failure(
+                "the log pipe of the runtime is not under back "
+                "pressure (%d of %d bytes free), so the blocked "
+                "consumer is not being measured" % (capacity - occupancy, capacity)
+            )
     runtime.signal(step.get("signal", "SIGTERM"))
     timeout_s = step.get("timeout_s", 10.0)
     code = runtime.wait_exit(timeout_s, drain=drain_first)
@@ -935,28 +972,35 @@ def step_stop_runtime(ctx, step):
         # to leave on its own (Damping with a revoked session). That the process
         # ignores the signal is then the assertion, and it is killed afterwards.
         if code is not None:
-            raise Failure("the runtime left a state it must not leave without a "
-                          "supervisor (exit %s)" % code)
+            raise Failure(
+                "the runtime left a state it must not leave without a "
+                "supervisor (exit %s)" % code
+            )
         # The runtime renders the state quoted, in the status and shutdown
         # lines alike; the unquoted form exists only in the clean-shutdown line,
         # which a refused stop never prints.
         reported = re.findall(r'state="(\w+)"', runtime.text())
         state = reported[-1] if reported else "unknown"
         runtime.kill()
-        return ("the runtime stayed in %s and was killed" % state)
+        return "the runtime stayed in %s and was killed" % state
     if code is None:
         runtime.kill()
-        raise Failure("the runtime did not exit within %.1f s of %s"
-                      % (timeout_s, step.get("signal", "SIGTERM")))
+        raise Failure(
+            "the runtime did not exit within %.1f s of %s"
+            % (timeout_s, step.get("signal", "SIGTERM"))
+        )
     expected_code = step.get("expect_code")
     if expected_code is not None and code != expected_code:
-        raise Failure("the runtime exited with %s instead of %s"
-                      % (code, expected_code))
+        raise Failure(
+            "the runtime exited with %s instead of %s" % (code, expected_code)
+        )
     clean = runtime.clean_stop()
     if step.get("expect_clean", True):
         if code != 0 or clean is None:
-            raise Failure("the runtime did not stop cleanly: exit %s, clean "
-                          "line %s" % (code, clean))
+            raise Failure(
+                "the runtime did not stop cleanly: exit %s, clean "
+                "line %s" % (code, clean)
+            )
     return "runtime exit=%s clean=%s" % (code, clean)
 
 
@@ -991,17 +1035,22 @@ def step_stop_application(ctx, step):
     code = application.wait_exit(timeout_s)
     if code is None:
         application.kill()
-        raise Failure("the application did not leave within %.1f s%s"
-                      % (timeout_s,
-                         " of %s" % signal_name if signal_name else ""))
+        raise Failure(
+            "the application did not leave within %.1f s%s"
+            % (timeout_s, " of %s" % signal_name if signal_name else "")
+        )
     line = application.exit_line()
     if line is None:
-        raise Failure("the application exited with %s without an exit line; "
-                      "the bounded exit never ran" % code)
+        raise Failure(
+            "the application exited with %s without an exit line; "
+            "the bounded exit never ran" % code
+        )
     expected = step.get("expect_code")
     if expected is not None and code != expected:
-        raise Failure("the application exited with %s instead of %s (line %r)"
-                      % (code, expected, line))
+        raise Failure(
+            "the application exited with %s instead of %s (line %r)"
+            % (code, expected, line)
+        )
     return "application exit=%s line=%r" % (code, line)
 
 
@@ -1024,15 +1073,22 @@ def step_restart_application(ctx, step):
     code = previous.wait_exit(step.get("timeout_s", 10.0))
     if code is None:
         previous.kill()
-        raise Failure("the application did not leave its ordered exit, so a "
-                      "restart would leave one runtime two supervision sessions")
+        raise Failure(
+            "the application did not leave its ordered exit, so a "
+            "restart would leave one runtime two supervision sessions"
+        )
     expected = step.get("expect_code")
     if expected is not None and code != expected:
-        raise Failure("the previous application exited with %s instead of %s "
-                      "(line %r)" % (code, expected, previous.exit_line()))
+        raise Failure(
+            "the previous application exited with %s instead of %s "
+            "(line %r)" % (code, expected, previous.exit_line())
+        )
     application = start_application(ctx)
-    return ("restarted the application (previous exit %s, line %r), run %d"
-            % (code, previous.exit_line(), len(ctx.applications)))
+    return "restarted the application (previous exit %s, line %r), run %d" % (
+        code,
+        previous.exit_line(),
+        len(ctx.applications),
+    )
 
 
 def step_wait_application_log(ctx, step):
@@ -1053,10 +1109,14 @@ def step_wait_log(ctx, step):
     # so the step proves lines this scenario caused instead of accepting one
     # that was already in the pipe.
     start = len(runtime.lines) if step.get("after_now") else 0
-    line = runtime.wait_for(step["pattern"], step.get("timeout_s", 10.0),
-                            minimum=count, start=start)
-    return "matched %d line(s) matching %r, last %r" % (count, step["pattern"],
-                                                        line.strip())
+    line = runtime.wait_for(
+        step["pattern"], step.get("timeout_s", 10.0), minimum=count, start=start
+    )
+    return "matched %d line(s) matching %r, last %r" % (
+        count,
+        step["pattern"],
+        line.strip(),
+    )
 
 
 def step_client(ctx, step):
@@ -1076,19 +1136,23 @@ def wait_for_client(ctx, client, step):
     code = client.wait_exit(timeout_s)
     if code is None:
         client.kill()
-        raise Failure("client %s did not finish within %.1f s"
-                      % (client.name, timeout_s))
+        raise Failure(
+            "client %s did not finish within %.1f s" % (client.name, timeout_s)
+        )
     allowed = step.get("allow_exit", [0])
     if code not in allowed:
-        raise Failure("client %s exited with %s (allowed %s); stderr: %s"
-                      % (client.name, code, allowed,
-                         client.stderr_text().strip()[-800:]))
+        raise Failure(
+            "client %s exited with %s (allowed %s); stderr: %s"
+            % (client.name, code, allowed, client.stderr_text().strip()[-800:])
+        )
     summary = client.summary()
     if code == 0 and summary is None:
         raise Failure("client %s exited 0 without a summary" % client.name)
     return "%s exit=%s checks=%s" % (
-        client.name, code, None if summary is None
-        else json.dumps(summary.get("checks", {})))
+        client.name,
+        code,
+        None if summary is None else json.dumps(summary.get("checks", {})),
+    )
 
 
 def step_wait_client(ctx, step):
@@ -1103,10 +1167,13 @@ def step_signal_client(ctx, step):
         # Pausing a process that already ended would be a step that did not run;
         # stopping one that ended by itself is already satisfied.
         if name in ("SIGTERM", "SIGKILL"):
-            return "%s had already exited with %s" % (client.name,
-                                                      client.process.returncode)
-        raise Failure("client %s had already exited, %s was not delivered"
-                      % (client.name, name))
+            return "%s had already exited with %s" % (
+                client.name,
+                client.process.returncode,
+            )
+        raise Failure(
+            "client %s had already exited, %s was not delivered" % (client.name, name)
+        )
     sent_us = client.signal(name)
     ctx.signals.append({"client": client.name, "signal": name, "t_us": sent_us})
     return "%s received %s at %d" % (client.name, name, sent_us)
@@ -1148,13 +1215,28 @@ def run_steps(ctx):
         try:
             detail = handler(ctx, step)
         except Failure as failure:
-            ctx.steps.append({"index": index, "action": action, "ok": False,
-                              "detail": str(failure), "t_us": started})
-            ctx.report.append("    step %2d %-20s FAILED: %s"
-                              % (index, action, failure))
+            ctx.steps.append(
+                {
+                    "index": index,
+                    "action": action,
+                    "ok": False,
+                    "detail": str(failure),
+                    "t_us": started,
+                }
+            )
+            ctx.report.append(
+                "    step %2d %-20s FAILED: %s" % (index, action, failure)
+            )
             raise Failure("step %d (%s) failed: %s" % (index, action, failure))
-        ctx.steps.append({"index": index, "action": action, "ok": True,
-                          "detail": detail, "t_us": started})
+        ctx.steps.append(
+            {
+                "index": index,
+                "action": action,
+                "ok": True,
+                "detail": detail,
+                "t_us": started,
+            }
+        )
         line = "    step %2d %-20s %s" % (index, action, detail)
         ctx.report.append(line)
         print(line)
@@ -1163,6 +1245,7 @@ def run_steps(ctx):
 # ---------------------------------------------------------------------------
 # Traces
 # ---------------------------------------------------------------------------
+
 
 def load_trace(ctx, name):
     """The trace of one run, reduced to its effective records.
@@ -1202,13 +1285,20 @@ def load_trace(ctx, name):
             end = record
     if not ticks:
         raise Failure("the output trace %s has no tick record" % name)
-    return {"path": path, "ticks": ticks, "records": records,
-            "duplicates": duplicates, "end": end, "lines": lines}
+    return {
+        "path": path,
+        "ticks": ticks,
+        "records": records,
+        "duplicates": duplicates,
+        "end": end,
+        "lines": lines,
+    }
 
 
 def tracked_ticks(trace):
-    return [t for t in trace["ticks"]
-            if t["action"] == "Tracking" and t["target_present"]]
+    return [
+        t for t in trace["ticks"] if t["action"] == "Tracking" and t["target_present"]
+    ]
 
 
 def clamp(value, limit):
@@ -1218,6 +1308,7 @@ def clamp(value, limit):
 # ---------------------------------------------------------------------------
 # Checks
 # ---------------------------------------------------------------------------
+
 
 def check_trace_complete(ctx, params):
     trace = load_trace(ctx, params["file"])
@@ -1231,18 +1322,19 @@ def check_trace_complete(ctx, params):
     problems = []
     if not contiguous:
         gaps = [b - a for a, b in zip(numbers, numbers[1:]) if b != a + 1]
-        problems.append("%d tick gaps in the sequence (e.g. %s)"
-                        % (len(gaps), gaps[:3]))
+        problems.append(
+            "%d tick gaps in the sequence (e.g. %s)" % (len(gaps), gaps[:3])
+        )
     if end is None:
         if not params.get("allow_missing_end"):
-            problems.append(
-                "the trace has no end record: the writer never finished")
+            problems.append("the trace has no end record: the writer never finished")
     elif end.get("dropped") or end.get("write_failures"):
-        problems.append("the writer dropped %s records and failed %s writes"
-                        % (end.get("dropped"), end.get("write_failures")))
+        problems.append(
+            "the writer dropped %s records and failed %s writes"
+            % (end.get("dropped"), end.get("write_failures"))
+        )
     if len(ticks) < minimum:
-        problems.append("only %d ticks, expected at least %d"
-                        % (len(ticks), minimum))
+        problems.append("only %d ticks, expected at least %d" % (len(ticks), minimum))
     # A scenario may restart the runtime: the counters of this trace belong to
     # the run that wrote it, not to whichever run happens to be last.
     run_index = None
@@ -1257,23 +1349,42 @@ def check_trace_complete(ctx, params):
         # The runtime reports its counters after joining the writer; the end
         # record is written by that same join. Disagreeing numbers would mean
         # the report read a value the writer still owned.
-        if (clean.get("trace_written") != end.get("recorded")
-                or clean.get("trace_dropped") != end.get("dropped")
-                or clean.get("trace_failures") != end.get("write_failures")):
+        if (
+            clean.get("trace_written") != end.get("recorded")
+            or clean.get("trace_dropped") != end.get("dropped")
+            or clean.get("trace_failures") != end.get("write_failures")
+        ):
             problems.append(
                 "the shutdown line reports trace_written=%s dropped=%s "
                 "failures=%s but the end record says recorded=%s dropped=%s "
                 "write_failures=%s"
-                % (clean.get("trace_written"), clean.get("trace_dropped"),
-                   clean.get("trace_failures"), end.get("recorded"),
-                   end.get("dropped"), end.get("write_failures")))
-    detail = ("%d records, %d ticks %d..%d contiguous=%s, %d ticks carried a "
-              "refused write and were reduced to their effective record, end=%s"
-              % (len(records), len(ticks), numbers[0], numbers[-1], contiguous,
-                 duplicates, end))
-    return (not problems, detail + ("" if not problems else "; " + "; ".join(problems)),
-            [("trace_ticks", len(ticks)),
-             ("trace_duplicate_ticks", duplicates)])
+                % (
+                    clean.get("trace_written"),
+                    clean.get("trace_dropped"),
+                    clean.get("trace_failures"),
+                    end.get("recorded"),
+                    end.get("dropped"),
+                    end.get("write_failures"),
+                )
+            )
+    detail = (
+        "%d records, %d ticks %d..%d contiguous=%s, %d ticks carried a "
+        "refused write and were reduced to their effective record, end=%s"
+        % (
+            len(records),
+            len(ticks),
+            numbers[0],
+            numbers[-1],
+            contiguous,
+            duplicates,
+            end,
+        )
+    )
+    return (
+        not problems,
+        detail + ("" if not problems else "; " + "; ".join(problems)),
+        [("trace_ticks", len(ticks)), ("trace_duplicate_ticks", duplicates)],
+    )
 
 
 def check_refused_write(ctx, params):
@@ -1296,37 +1407,57 @@ def check_refused_write(ctx, params):
     attempted_target = 0
     for group in groups:
         if len(group) > 2:
-            raise Failure("tick %d carries %d records: a tick writes once, or "
-                          "twice when a refusal is followed by the fallback"
-                          % (group[0]["tick"], len(group)))
+            raise Failure(
+                "tick %d carries %d records: a tick writes once, or "
+                "twice when a refusal is followed by the fallback"
+                % (group[0]["tick"], len(group))
+            )
         if any(not record["write_accepted"] for record in group):
             refused_ticks += 1
         if len(group) == 2:
             last = group[-1]
-            torque = last["torque"][:last["joint_count"]]
+            torque = last["torque"][: last["joint_count"]]
             if any(value != 0.0 for value in torque):
-                raise Failure("the second record of tick %d is not the "
-                              "zero-torque fallback: %s" % (last["tick"], torque))
+                raise Failure(
+                    "the second record of tick %d is not the "
+                    "zero-torque fallback: %s" % (last["tick"], torque)
+                )
             fallback_ticks += 1
         first = group[0]
-        if any(abs(value) > 1e-12
-               for value in first["torque"][:first["joint_count"]]):
+        if any(abs(value) > 1e-12 for value in first["torque"][: first["joint_count"]]):
             attempted_target += 1
     if trace["duplicates"] != fallback_ticks:
-        raise Failure("the consumer reduced %d records but %d ticks carry two "
-                      "records" % (trace["duplicates"], fallback_ticks))
-    faults = [tick for tick in trace["ticks"]
-              if tick["state"] == "Fault" and tick["fault_id"] != 0]
+        raise Failure(
+            "the consumer reduced %d records but %d ticks carry two "
+            "records" % (trace["duplicates"], fallback_ticks)
+        )
+    faults = [
+        tick
+        for tick in trace["ticks"]
+        if tick["state"] == "Fault" and tick["fault_id"] != 0
+    ]
     minimum = params.get("min_refusals", 1)
-    detail = ("%d tick(s) refused a write, %d of them carried the zero-torque "
-              "fallback as their effective record, %d commanded a non-zero "
-              "target first, %d tick(s) reported a latched fault id"
-              % (refused_ticks, fallback_ticks, attempted_target, len(faults)))
-    ok = (refused_ticks >= minimum and fallback_ticks >= 1
-          and attempted_target >= 1 and bool(faults))
-    return ok, detail, [("refused_write_ticks", refused_ticks),
-                        ("refused_write_fallbacks", fallback_ticks),
-                        ("fault_ticks", len(faults))]
+    detail = (
+        "%d tick(s) refused a write, %d of them carried the zero-torque "
+        "fallback as their effective record, %d commanded a non-zero "
+        "target first, %d tick(s) reported a latched fault id"
+        % (refused_ticks, fallback_ticks, attempted_target, len(faults))
+    )
+    ok = (
+        refused_ticks >= minimum
+        and fallback_ticks >= 1
+        and attempted_target >= 1
+        and bool(faults)
+    )
+    return (
+        ok,
+        detail,
+        [
+            ("refused_write_ticks", refused_ticks),
+            ("refused_write_fallbacks", fallback_ticks),
+            ("fault_ticks", len(faults)),
+        ],
+    )
 
 
 def check_output_formula(ctx, params):
@@ -1339,20 +1470,29 @@ def check_output_formula(ctx, params):
     for tick in tracked_ticks(trace):
         for joint in range(tick["joint_count"]):
             limit = limits[joint]
-            raw = (tick["target_kp"][joint] * (tick["target_q"][joint]
-                                               - tick["measured_q"][joint])
-                   + tick["target_kd"][joint] * (tick["target_dq"][joint]
-                                                 - tick["measured_dq"][joint])
-                   + tick["target_tau_ff"][joint])
+            raw = (
+                tick["target_kp"][joint]
+                * (tick["target_q"][joint] - tick["measured_q"][joint])
+                + tick["target_kd"][joint]
+                * (tick["target_dq"][joint] - tick["measured_dq"][joint])
+                + tick["target_tau_ff"][joint]
+            )
             expected = clamp(raw, limit)
             checked += 1
             if abs(expected - tick["torque"][joint]) > tolerance:
-                mismatches.append((tick["tick"], joint, expected,
-                                   tick["torque"][joint]))
-    detail = ("%d joint values over %d tracked ticks recomputed exactly, "
-              "%d mismatches%s"
-              % (checked, len(tracked_ticks(trace)), len(mismatches),
-                 "" if not mismatches else " e.g. %s" % (mismatches[:2],)))
+                mismatches.append(
+                    (tick["tick"], joint, expected, tick["torque"][joint])
+                )
+    detail = (
+        "%d joint values over %d tracked ticks recomputed exactly, "
+        "%d mismatches%s"
+        % (
+            checked,
+            len(tracked_ticks(trace)),
+            len(mismatches),
+            "" if not mismatches else " e.g. %s" % (mismatches[:2],),
+        )
+    )
     return (not mismatches, detail, [("formula_joint_values", checked)])
 
 
@@ -1368,12 +1508,19 @@ def check_command_recomputed(ctx, params):
     for key, ticks in groups.items():
         # Only a frame whose gains read the measured state can require a
         # different torque for a different measurement.
-        joint = next((index for index in range(ticks[0]["joint_count"])
-                      if ticks[0]["target_kp"][index] != 0.0
-                      or ticks[0]["target_kd"][index] != 0.0), None)
+        joint = next(
+            (
+                index
+                for index in range(ticks[0]["joint_count"])
+                if ticks[0]["target_kp"][index] != 0.0
+                or ticks[0]["target_kd"][index] != 0.0
+            ),
+            None,
+        )
         if joint is None:
             continue
         state_dependent += 1
+
         # Only the measured quantities the frame really reads: a frame with kd=0
         # does not look at the measured velocity at all.
         def reading(tick, index=joint):
@@ -1383,6 +1530,7 @@ def check_command_recomputed(ctx, params):
             if tick["target_kd"][index] != 0.0:
                 values.append(round(tick["measured_dq"][index], 9))
             return tuple(values)
+
         measurements = {reading(t) for t in ticks}
         if len(measurements) < 2:
             continue
@@ -1392,13 +1540,20 @@ def check_command_recomputed(ctx, params):
             stale.append(key)
     minimum = params.get("min_command_seqs", 1)
     ok = varying >= minimum and not stale
-    detail = ("%d of %d state-reading command sequences saw more than one "
-              "measurement and recomputed their torque; %d kept the torque "
-              "despite a different measurement%s"
-              % (varying, state_dependent, len(stale),
-                 "" if not stale else " %s" % stale[:3]))
-    return ok, detail, [("command_seqs_recomputed", varying),
-                        ("command_seqs_state_reading", state_dependent)]
+    detail = (
+        "%d of %d state-reading command sequences saw more than one "
+        "measurement and recomputed their torque; %d kept the torque "
+        "despite a different measurement%s"
+        % (varying, state_dependent, len(stale), "" if not stale else " %s" % stale[:3])
+    )
+    return (
+        ok,
+        detail,
+        [
+            ("command_seqs_recomputed", varying),
+            ("command_seqs_state_reading", state_dependent),
+        ],
+    )
 
 
 def check_torque_clamp(ctx, params):
@@ -1407,11 +1562,13 @@ def check_torque_clamp(ctx, params):
     bound = 0
     for tick in tracked_ticks(trace):
         for joint in range(tick["joint_count"]):
-            raw = (tick["target_kp"][joint] * (tick["target_q"][joint]
-                                               - tick["measured_q"][joint])
-                   + tick["target_kd"][joint] * (tick["target_dq"][joint]
-                                                 - tick["measured_dq"][joint])
-                   + tick["target_tau_ff"][joint])
+            raw = (
+                tick["target_kp"][joint]
+                * (tick["target_q"][joint] - tick["measured_q"][joint])
+                + tick["target_kd"][joint]
+                * (tick["target_dq"][joint] - tick["measured_dq"][joint])
+                + tick["target_tau_ff"][joint]
+            )
             if abs(raw) > limit and abs(abs(tick["torque"][joint]) - limit) < 1e-9:
                 bound += 1
     minimum = params.get("min_values", 1)
@@ -1431,11 +1588,17 @@ def check_torque_step(ctx, params):
             step = abs(current["torque"][joint] - previous["torque"][joint])
             if step > largest:
                 largest = step
-                where = (previous["tick"], joint,
-                         previous["torque"][joint], current["torque"][joint])
+                where = (
+                    previous["tick"],
+                    joint,
+                    previous["torque"][joint],
+                    current["torque"][joint],
+                )
     minimum = params.get("min_step_nm", 1.0)
-    detail = ("largest torque change between neighbouring ticks is %.6g Nm at %s"
-              % (largest, where))
+    detail = "largest torque change between neighbouring ticks is %.6g Nm at %s" % (
+        largest,
+        where,
+    )
     return largest >= minimum, detail, [("max_torque_step_nm", largest)]
 
 
@@ -1451,8 +1614,11 @@ def check_target_expiry(ctx, params):
         raise Failure("the trace holds only %d tracking epochs" % len(epochs))
     epoch = epochs[index]
     ticks = trace["ticks"]
-    last_index = max(position for position, tick in enumerate(ticks)
-                     if tick["epoch"] == epoch and tick["target_present"])
+    last_index = max(
+        position
+        for position, tick in enumerate(ticks)
+        if tick["epoch"] == epoch and tick["target_present"]
+    )
     last = ticks[last_index]
     following = ticks[last_index + 1] if last_index + 1 < len(ticks) else None
     if following is None:
@@ -1462,21 +1628,35 @@ def check_target_expiry(ctx, params):
     tolerance_us = params.get("tolerance_us", 0)
     problems = []
     if held_us > command_us + tolerance_us:
-        problems.append("the last tick that still held the target was already "
-                        "%.0f us past the deadline" % held_us)
+        problems.append(
+            "the last tick that still held the target was already "
+            "%.0f us past the deadline" % held_us
+        )
     if not (expired_us > command_us - tolerance_us):
-        problems.append("the next tick was only %.0f us past the receive stamp, "
-                        "so the target was not held to its deadline" % expired_us)
+        problems.append(
+            "the next tick was only %.0f us past the receive stamp, "
+            "so the target was not held to its deadline" % expired_us
+        )
     if following["target_present"]:
         problems.append("the next tick still reported a target")
     if following["action"] == "Tracking":
         problems.append("the next tick was still tracking")
-    detail = ("target received at %d, last tick with the target %d us later, "
-              "next tick %d us later in state %s/%s"
-              % (last["target"]["rx_us"], held_us, expired_us,
-                 following["state"], following["action"]))
-    return not problems, detail + ("" if not problems else "; " + "; ".join(problems)), [
-        ("held_us", held_us), ("expired_us", expired_us)]
+    detail = (
+        "target received at %d, last tick with the target %d us later, "
+        "next tick %d us later in state %s/%s"
+        % (
+            last["target"]["rx_us"],
+            held_us,
+            expired_us,
+            following["state"],
+            following["action"],
+        )
+    )
+    return (
+        not problems,
+        detail + ("" if not problems else "; " + "; ".join(problems)),
+        [("held_us", held_us), ("expired_us", expired_us)],
+    )
 
 
 def check_deadlines(ctx, params):
@@ -1490,8 +1670,11 @@ def check_deadlines(ctx, params):
     span_us = ticks[-1]["stamp_us"] - ticks[0]["stamp_us"]
     rate = (len(ticks) - 1) * 1e6 / span_us if span_us > 0 else 0.0
     minimum_rate = params.get("min_rate_hz", 400.0)
-    detail = ("largest tick gap %d us, %.1f Hz over %d ticks"
-              % (largest, rate, len(ticks)))
+    detail = "largest tick gap %d us, %.1f Hz over %d ticks" % (
+        largest,
+        rate,
+        len(ticks),
+    )
     ok = largest <= maximum and rate >= minimum_rate
     return ok, detail, [("max_tick_gap_us", largest), ("tick_rate_hz", rate)]
 
@@ -1505,11 +1688,16 @@ def check_fallback(ctx, params):
         base_us = ctx.client(base["client"]).started_us
     else:
         base_us = 0
-    states = [s for s in client.states()
-              if s["t_us"] >= base_us and s["stop_reason"] == params["reason"]]
+    states = [
+        s
+        for s in client.states()
+        if s["t_us"] >= base_us and s["stop_reason"] == params["reason"]
+    ]
     if not states:
-        raise Failure("no state with stop_reason %s was observed after %d"
-                      % (params["reason"], base_us))
+        raise Failure(
+            "no state with stop_reason %s was observed after %d"
+            % (params["reason"], base_us)
+        )
     first = states[0]
     latency_ms = (first["t_us"] - base_us) / 1000.0
     problems = []
@@ -1525,11 +1713,19 @@ def check_fallback(ctx, params):
         problems.append("the fallback came after only %.1f ms" % latency_ms)
     if latency_ms > params.get("max_ms", 1e9):
         problems.append("the fallback came after %.1f ms" % latency_ms)
-    detail = ("%s after %.1f ms (state %s, action %s, session %s, epoch %s)"
-              % (params["reason"], latency_ms, first["execution_state"],
-                 first["output_action"], first["session_id"][:8], first["epoch"]))
-    return not problems, detail + ("" if not problems else "; " + "; ".join(problems)), [
-        ("fallback_latency_ms", latency_ms)]
+    detail = "%s after %.1f ms (state %s, action %s, session %s, epoch %s)" % (
+        params["reason"],
+        latency_ms,
+        first["execution_state"],
+        first["output_action"],
+        first["session_id"][:8],
+        first["epoch"],
+    )
+    return (
+        not problems,
+        detail + ("" if not problems else "; " + "; ".join(problems)),
+        [("fallback_latency_ms", latency_ms)],
+    )
 
 
 def check_tracking_frozen(ctx, params):
@@ -1540,8 +1736,7 @@ def check_tracking_frozen(ctx, params):
     elif base["kind"] == "after_reason":
         # The fallback needs a few control periods to be noticed: everything
         # published before the state that reports it may still be tracking.
-        reported = [s for s in client.states()
-                    if s["stop_reason"] == base["reason"]]
+        reported = [s for s in client.states() if s["stop_reason"] == base["reason"]]
         if not reported:
             raise Failure("no state reported the stop reason %s" % base["reason"])
         base_us = reported[0]["t_us"]
@@ -1549,13 +1744,14 @@ def check_tracking_frozen(ctx, params):
         base_us = ctx.client(base["client"]).started_us
     states = [s for s in client.states() if s["t_us"] >= base_us]
     if len(states) < params.get("min_states", 5):
-        raise Failure("only %d states were observed after the event"
-                      % len(states))
+        raise Failure("only %d states were observed after the event" % len(states))
     tracking = [s for s in states if s["execution_state"] == "Tracking"]
     sequences = {s["last_applied_command_seq"] for s in states}
-    detail = ("%d states after the event, %d still tracking, "
-              "last_applied_command_seq values %s"
-              % (len(states), len(tracking), sorted(sequences)))
+    detail = (
+        "%d states after the event, %d still tracking, "
+        "last_applied_command_seq values %s"
+        % (len(states), len(tracking), sorted(sequences))
+    )
     ok = not tracking and len(sequences) <= params.get("max_sequences", 1)
     return ok, detail, [("states_after_event", len(states))]
 
@@ -1572,37 +1768,51 @@ def check_replay_rejected(ctx, params):
     bootstrap_applied = []
     unexpected = []
     for answer in answers:
-        names_scope = (answer.get("sent_session_id", "0" * 32) != "0" * 32
-                       or answer.get("sent_epoch", 0) != 0)
+        names_scope = (
+            answer.get("sent_session_id", "0" * 32) != "0" * 32
+            or answer.get("sent_epoch", 0) != 0
+        )
         if answer["status"] == "Applied":
             (scoped_applied if names_scope else bootstrap_applied).append(answer)
         elif answer["reason"] not in allowed:
             unexpected.append(answer)
     if scope == "session" and scoped_applied:
-        problems.append("%d replayed packets that named a session or an epoch "
-                        "were applied, which would re-authorize motion"
-                        % len(scoped_applied))
+        problems.append(
+            "%d replayed packets that named a session or an epoch "
+            "were applied, which would re-authorize motion" % len(scoped_applied)
+        )
     if scope == "all" and (scoped_applied or bootstrap_applied):
-        problems.append("%d replayed packets were applied"
-                        % (len(scoped_applied) + len(bootstrap_applied)))
+        problems.append(
+            "%d replayed packets were applied"
+            % (len(scoped_applied) + len(bootstrap_applied))
+        )
     if unexpected:
-        problems.append("unexpected rejection reasons %s"
-                        % sorted({a["reason"] for a in unexpected}))
+        problems.append(
+            "unexpected rejection reasons %s"
+            % sorted({a["reason"] for a in unexpected})
+        )
     counted = client.measurement("replay_session_scoped_applied", None)
     if counted:
-        problems.append("the client counted %s applied session-scoped replays"
-                        % counted)
+        problems.append(
+            "the client counted %s applied session-scoped replays" % counted
+        )
     reasons = {}
     for answer in answers:
         reasons[answer["reason"]] = reasons.get(answer["reason"], 0) + 1
-    detail = ("%d replayed requests answered, %d applied session-scoped, "
-              "%d bootstrap packets answered with a session for the same "
-              "supervisor (by design), reasons %s"
-              % (len(answers), len(scoped_applied), len(bootstrap_applied),
-                 reasons))
-    return not problems, detail + ("" if not problems else "; " + "; ".join(problems)), [
-        ("replayed_answers", len(answers)),
-        ("replayed_session_scoped_applied", len(scoped_applied))]
+    detail = (
+        "%d replayed requests answered, %d applied session-scoped, "
+        "%d bootstrap packets answered with a session for the same "
+        "supervisor (by design), reasons %s"
+        % (len(answers), len(scoped_applied), len(bootstrap_applied), reasons)
+    )
+    return (
+        not problems,
+        detail + ("" if not problems else "; " + "; ".join(problems)),
+        [
+            ("replayed_answers", len(answers)),
+            ("replayed_session_scoped_applied", len(scoped_applied)),
+        ],
+    )
 
 
 def check_flood_drops(ctx, params):
@@ -1615,24 +1825,38 @@ def check_flood_drops(ctx, params):
     request_dropped = clean.get("request_dropped")
     transport_dropped = clean.get("transport_dropped")
     if request_dropped is None or transport_dropped is None:
-        raise Failure("the runtime's clean-stop line did not report its inbound "
-                      "and transport drop counters, so the flood cannot be "
-                      "attributed")
+        raise Failure(
+            "the runtime's clean-stop line did not report its inbound "
+            "and transport drop counters, so the flood cannot be "
+            "attributed"
+        )
     # The runtime must own the losses it caused: unanswered requests have to be
     # visible in its own counters, not only in the client's arithmetic.
     runtime_observed = request_dropped + transport_dropped
-    detail = ("the flood sent %s requests and the runtime answered %s of them; "
-              "the runtime's own counters report request_dropped=%s of its "
-              "inbound queue plus transport_dropped=%s samples, so %s of the "
-              "unanswered requests are not attributed"
-              % (sent, answered, request_dropped, transport_dropped,
-                 (sent - answered) - runtime_observed))
-    return (answered < sent and runtime_observed >= 1,
-            detail,
-            [("flood_sent", sent), ("flood_answered", answered),
-             ("runtime_request_dropped", request_dropped),
-             ("runtime_transport_dropped", transport_dropped),
-             ("flood_unattributed", (sent - answered) - runtime_observed)])
+    detail = (
+        "the flood sent %s requests and the runtime answered %s of them; "
+        "the runtime's own counters report request_dropped=%s of its "
+        "inbound queue plus transport_dropped=%s samples, so %s of the "
+        "unanswered requests are not attributed"
+        % (
+            sent,
+            answered,
+            request_dropped,
+            transport_dropped,
+            (sent - answered) - runtime_observed,
+        )
+    )
+    return (
+        answered < sent and runtime_observed >= 1,
+        detail,
+        [
+            ("flood_sent", sent),
+            ("flood_answered", answered),
+            ("runtime_request_dropped", request_dropped),
+            ("runtime_transport_dropped", transport_dropped),
+            ("flood_unattributed", (sent - answered) - runtime_observed),
+        ],
+    )
 
 
 def check_client_check(ctx, params):
@@ -1651,23 +1875,25 @@ def check_client_measurement(ctx, params):
     client = ctx.client(params["client"])
     value = client.measurement(params["name"], None)
     if value is None:
-        raise Failure("client %s reported no measurement %s"
-                      % (params["client"], params["name"]))
+        raise Failure(
+            "client %s reported no measurement %s" % (params["client"], params["name"])
+        )
     problems = []
     if "min" in params and not value >= params["min"]:
         problems.append("%s < %s" % (value, params["min"]))
     if "max" in params and not value <= params["max"]:
         problems.append("%s > %s" % (value, params["max"]))
     detail = "%s = %s" % (params["name"], value)
-    return not problems, detail + ("" if not problems else " (%s)"
-                                   % "; ".join(problems)), [
-        (params["name"], value)]
+    return (
+        not problems,
+        detail + ("" if not problems else " (%s)" % "; ".join(problems)),
+        [(params["name"], value)],
+    )
 
 
 def check_confirmation_orders(ctx, params):
     client = ctx.client(params["client"])
-    orders = [r.get("order") for r in client.records()
-              if r.get("kind") == "confirmed"]
+    orders = [r.get("order") for r in client.records() if r.get("kind") == "confirmed"]
     required = set(params["orders"])
     detail = "%d confirmations, orders %s" % (len(orders), orders)
     return required.issubset(set(orders)), detail, [("confirmations", len(orders))]
@@ -1675,8 +1901,7 @@ def check_confirmation_orders(ctx, params):
 
 def check_targets_served(ctx, params):
     trace = load_trace(ctx, params["file"])
-    frames = {(t["epoch"], t["target"]["command_seq"])
-              for t in tracked_ticks(trace)}
+    frames = {(t["epoch"], t["target"]["command_seq"]) for t in tracked_ticks(trace)}
     minimum = params.get("min_command_seqs", 2)
     detail = "%d distinct target frames were commanded" % len(frames)
     return len(frames) >= minimum, detail, [("distinct_target_frames", len(frames))]
@@ -1686,9 +1911,11 @@ def check_replay_no_authorization(ctx, params):
     client = ctx.client(params["client"])
     tracking = [s for s in client.states() if s["execution_state"] == "Tracking"]
     sessions = {s["session_id"] for s in client.states()}
-    detail = ("%d states during the replay, %d in Tracking, sessions %s"
-              % (len(client.states()), len(tracking),
-                 sorted(value[:8] for value in sessions)))
+    detail = "%d states during the replay, %d in Tracking, sessions %s" % (
+        len(client.states()),
+        len(tracking),
+        sorted(value[:8] for value in sessions),
+    )
     ok = not tracking and client.measurement("replay_tracking_states", 0) == 0
     return ok, detail, [("replay_tracking_states", len(tracking))]
 
@@ -1703,18 +1930,26 @@ def check_instance_changed(ctx, params):
     before = instances(record)
     after = instances(replay)
     if len(before) != 1 or len(after) != 1:
-        raise Failure("expected one runtime instance per run, saw %s and %s"
-                      % (sorted(before), sorted(after)))
-    sent = {r["sent_runtime_id"] for r in replay.records()
-            if r.get("kind") == "replay"
-            and r.get("packet") == "request"
-            and "sent_runtime_id" in r}
+        raise Failure(
+            "expected one runtime instance per run, saw %s and %s"
+            % (sorted(before), sorted(after))
+        )
+    sent = {
+        r["sent_runtime_id"]
+        for r in replay.records()
+        if r.get("kind") == "replay"
+        and r.get("packet") == "request"
+        and "sent_runtime_id" in r
+    }
     old = next(iter(before))
     new = next(iter(after))
-    detail = ("recorded instance %s, live instance %s%s"
-              % (old[:12], new[:12],
-                 "" if not sent else ", replayed packets named %s"
-                 % sorted(value[:12] for value in sent)))
+    detail = "recorded instance %s, live instance %s%s" % (
+        old[:12],
+        new[:12],
+        ""
+        if not sent
+        else ", replayed packets named %s" % sorted(value[:12] for value in sent),
+    )
     return old != new and sent == {old}, detail, []
 
 
@@ -1724,10 +1959,15 @@ def check_logger_dropped(ctx, params):
         raise Failure("the runtime printed no clean shutdown line")
     dropped = clean.get("dropped", 0)
     undrained = clean.get("undrained", 0)
-    detail = ("the logger dropped %d events and left %d undrained while the "
-              "consumer was blocked" % (dropped, undrained))
-    return dropped >= params.get("min", 1), detail, [("log_dropped", dropped),
-                                                     ("log_undrained", undrained)]
+    detail = (
+        "the logger dropped %d events and left %d undrained while the "
+        "consumer was blocked" % (dropped, undrained)
+    )
+    return (
+        dropped >= params.get("min", 1),
+        detail,
+        [("log_dropped", dropped), ("log_undrained", undrained)],
+    )
 
 
 def check_overruns(ctx, params):
@@ -1736,10 +1976,14 @@ def check_overruns(ctx, params):
         raise Failure("the runtime printed no clean shutdown line")
     worst = clean.get("worst_overrun_us", 0)
     overruns = clean.get("overruns", 0)
-    detail = ("the control loop counted %d overruns, worst %d us, over %d ticks"
-              % (overruns, worst, clean.get("ticks", 0)))
-    ok = (worst <= params.get("max_worst_overrun_us", 5000)
-          and overruns <= params.get("max_overruns", 10 ** 9))
+    detail = "the control loop counted %d overruns, worst %d us, over %d ticks" % (
+        overruns,
+        worst,
+        clean.get("ticks", 0),
+    )
+    ok = worst <= params.get("max_worst_overrun_us", 5000) and overruns <= params.get(
+        "max_overruns", 10**9
+    )
     return ok, detail, [("overruns", overruns), ("worst_overrun_us", worst)]
 
 
@@ -1782,12 +2026,18 @@ def check_log_sequence(ctx, params):
         problems.append("no line matches %r after line %d" % (missing, cursor))
     if forbidden:
         problems.append("%s" % forbidden[:2])
-    detail = ("%d line(s); %d of %d ordered pattern(s) matched%s%s"
-              % (len(lines), len(matched), len(sequence),
-                 "" if not matched else " at lines %s" % matched,
-                 "" if not problems else "; " + "; ".join(problems)))
-    return not problems, detail, [("log_lines", len(lines)),
-                                  ("log_matched", len(matched))]
+    detail = "%d line(s); %d of %d ordered pattern(s) matched%s%s" % (
+        len(lines),
+        len(matched),
+        len(sequence),
+        "" if not matched else " at lines %s" % matched,
+        "" if not problems else "; " + "; ".join(problems),
+    )
+    return (
+        not problems,
+        detail,
+        [("log_lines", len(lines)), ("log_matched", len(matched))],
+    )
 
 
 def check_application_reaction(ctx, params):
@@ -1803,29 +2053,42 @@ def check_application_reaction(ctx, params):
     """
     run = params.get("run", 1)
     if run < 1 or run > len(ctx.applications):
-        raise Failure("the scenario started %d application run(s), not %d"
-                      % (len(ctx.applications), run))
+        raise Failure(
+            "the scenario started %d application run(s), not %d"
+            % (len(ctx.applications), run)
+        )
     application = ctx.applications[run - 1]
     base_us = ctx.step_time(params["after_step"])
     if base_us is None:
         raise Failure("the scenario has no %s step" % params["after_step"])
     expression = re.compile(params["pattern"])
-    found = [(stamp, line) for stamp, line in application.line_stamps()
-             if stamp >= base_us and expression.search(line)]
+    found = [
+        (stamp, line)
+        for stamp, line in application.line_stamps()
+        if stamp >= base_us and expression.search(line)
+    ]
     if not found:
-        raise Failure("the application printed no line matching %r after the "
-                      "%s step" % (params["pattern"], params["after_step"]))
+        raise Failure(
+            "the application printed no line matching %r after the "
+            "%s step" % (params["pattern"], params["after_step"])
+        )
     latency_ms = (found[0][0] - base_us) / 1000.0
     problems = []
     if latency_ms < params.get("min_ms", 0.0):
         problems.append("it arrived after only %.1f ms" % latency_ms)
     if latency_ms > params.get("max_ms", 1e9):
         problems.append("it arrived after %.1f ms" % latency_ms)
-    detail = ("%r arrived %.1f ms after %s: %r"
-              % (params["pattern"], latency_ms, params["after_step"],
-                 found[0][1].strip()[:160]))
-    return not problems, detail + ("" if not problems else "; " + "; ".join(problems)), [
-        ("application_latency_ms", latency_ms)]
+    detail = "%r arrived %.1f ms after %s: %r" % (
+        params["pattern"],
+        latency_ms,
+        params["after_step"],
+        found[0][1].strip()[:160],
+    )
+    return (
+        not problems,
+        detail + ("" if not problems else "; " + "; ".join(problems)),
+        [("application_latency_ms", latency_ms)],
+    )
 
 
 def check_command_advancing(ctx, params):
@@ -1844,8 +2107,11 @@ def check_command_advancing(ctx, params):
         raise Failure("no tick of %s tracked a target" % params["file"])
     sequences = [tick["last_applied_command_seq"] for tick in tracked]
     distinct = sorted(set(sequences))
-    backwards = [(before, after) for before, after in zip(sequences, sequences[1:])
-                 if after < before]
+    backwards = [
+        (before, after)
+        for before, after in zip(sequences, sequences[1:])
+        if after < before
+    ]
     span_us = tracked[-1]["stamp_us"] - tracked[0]["stamp_us"]
     problems = []
     if len(distinct) < params.get("min_command_seqs", 2):
@@ -1853,32 +2119,44 @@ def check_command_advancing(ctx, params):
     if span_us < params.get("min_span_us", 0):
         problems.append("the tracked window was only %.0f us" % span_us)
     if backwards:
-        problems.append("the applied sequence went backwards at %s"
-                        % backwards[:2])
-    detail = ("%d tracked tick(s) over %.0f us applied %d distinct command "
-              "sequence(s) %d..%d, %d backwards step(s)"
-              % (len(tracked), span_us, len(distinct), distinct[0],
-                 distinct[-1], len(backwards)))
-    return not problems, detail + ("" if not problems else "; " + "; ".join(problems)), [
-        ("distinct_command_seqs", len(distinct)),
-        ("tracked_window_us", span_us)]
+        problems.append("the applied sequence went backwards at %s" % backwards[:2])
+    detail = (
+        "%d tracked tick(s) over %.0f us applied %d distinct command "
+        "sequence(s) %d..%d, %d backwards step(s)"
+        % (
+            len(tracked),
+            span_us,
+            len(distinct),
+            distinct[0],
+            distinct[-1],
+            len(backwards),
+        )
+    )
+    return (
+        not problems,
+        detail + ("" if not problems else "; " + "; ".join(problems)),
+        [("distinct_command_seqs", len(distinct)), ("tracked_window_us", span_us)],
+    )
 
 
 def check_application_terminal(ctx, params):
     """The application handed the terminal back the way it found it."""
     run = params.get("run", 1)
     if run < 1 or run > len(ctx.applications):
-        raise Failure("the scenario started %d application run(s), not %d"
-                      % (len(ctx.applications), run))
+        raise Failure(
+            "the scenario started %d application run(s), not %d"
+            % (len(ctx.applications), run)
+        )
     application = ctx.applications[run - 1]
     if application.final_attributes is None:
-        raise Failure("the terminal of run %d was never read after the exit"
-                      % run)
+        raise Failure("the terminal of run %d was never read after the exit" % run)
     restored = application.final_attributes
     initial = application.initial_attributes
-    detail = ("the terminal attributes %s the ones the run started from"
-              % ("equal" if restored == initial else
-                 "differ from (%r != %r)" % (restored, initial)))
+    detail = "the terminal attributes %s the ones the run started from" % (
+        "equal"
+        if restored == initial
+        else "differ from (%r != %r)" % (restored, initial)
+    )
     return restored == initial, detail, []
 
 
@@ -1914,6 +2192,7 @@ CHECKS = {
 # Driver
 # ---------------------------------------------------------------------------
 
+
 def claim_work_dir(work):
     """Exclusive claim of one scenario's evidence directory.
 
@@ -1926,9 +2205,11 @@ def claim_work_dir(work):
     if claim.exists():
         if not lock_is_stale(claim):
             owner = lock_owner(claim)
-            raise Failure("%s is in use by another run (pid %s): two concurrent "
-                          "invocations must not share one work directory"
-                          % (work, owner if owner is not None else "unknown"))
+            raise Failure(
+                "%s is in use by another run (pid %s): two concurrent "
+                "invocations must not share one work directory"
+                % (work, owner if owner is not None else "unknown")
+            )
         try:
             claim.unlink()
         except OSError:
@@ -1946,17 +2227,26 @@ def release_work_dir(claim):
         pass
 
 
-def run_scenario(runtime_binary, client_binary, source, scenario_path, work_dir,
-                 application_binary=None):
+def run_scenario(
+    runtime_binary,
+    client_binary,
+    source,
+    scenario_path,
+    work_dir,
+    application_binary=None,
+):
     scenario = json.loads(Path(scenario_path).read_text())
     name = scenario["name"]
     actions = {step.get("action") for step in scenario.get("steps", [])}
     if actions & {"start_application", "restart_application"} and not (
-            application_binary and Path(application_binary).is_file()):
+        application_binary and Path(application_binary).is_file()
+    ):
         # Refused before anything is claimed or wiped: a scenario that drives
         # the real application never silently runs without it.
-        raise Failure("scenario %s starts the application, but no application "
-                      "binary was given (--application)" % name)
+        raise Failure(
+            "scenario %s starts the application, but no application "
+            "binary was given (--application)" % name
+        )
     work = Path(work_dir) / name
     # The claim file sits next to the scenario directory, so the directory that
     # holds it must exist before anything is claimed or wiped.
@@ -1967,11 +2257,14 @@ def run_scenario(runtime_binary, client_binary, source, scenario_path, work_dir,
     ctx = Context(scenario, source, work)
     ctx.runtime_binary = Path(runtime_binary).resolve()
     ctx.client_binary = Path(client_binary).resolve()
-    ctx.application_binary = (Path(application_binary).resolve()
-                              if application_binary else None)
+    ctx.application_binary = (
+        Path(application_binary).resolve() if application_binary else None
+    )
     ctx.domain, ctx.domain_lock = choose_domain(scenario["domain"], work)
-    print("  scenario %s: domain %d, %s"
-          % (name, ctx.domain, scenario.get("description", "")))
+    print(
+        "  scenario %s: domain %d, %s"
+        % (name, ctx.domain, scenario.get("description", ""))
+    )
     failures = []
     steps_done = False
     try:
@@ -2001,8 +2294,11 @@ def run_scenario(runtime_binary, client_binary, source, scenario_path, work_dir,
                     ok, detail, measurements = False, str(failure), []
                 except Exception as error:  # noqa: BLE001 - reported, not hidden
                     ok, detail, measurements = False, "check error: %r" % error, []
-            line = ("    check %-24s %s  %s"
-                    % (check["check"], "PASS" if ok else "FAIL", detail))
+            line = "    check %-24s %s  %s" % (
+                check["check"],
+                "PASS" if ok else "FAIL",
+                detail,
+            )
             ctx.report.append(line)
             print(line)
             for key, value in measurements:
@@ -2010,17 +2306,26 @@ def run_scenario(runtime_binary, client_binary, source, scenario_path, work_dir,
             if not ok:
                 failures.append("check %s: %s" % (check["check"], detail))
     else:
-        print("    %d check(s) not evaluated: a step did not complete"
-              % len(scenario.get("checks", [])))
+        print(
+            "    %d check(s) not evaluated: a step did not complete"
+            % len(scenario.get("checks", []))
+        )
 
-    summary = ["  scenario %s: domain %d, %s"
-               % (name, ctx.domain, scenario.get("description", ""))
-               ] + ctx.report + [
-        "    domain=%d runtime_arguments=%s" % (
-            ctx.domain, " ".join(ctx.runs[0].arguments) if ctx.runs else "-")]
+    summary = (
+        [
+            "  scenario %s: domain %d, %s"
+            % (name, ctx.domain, scenario.get("description", ""))
+        ]
+        + ctx.report
+        + [
+            "    domain=%d runtime_arguments=%s"
+            % (ctx.domain, " ".join(ctx.runs[0].arguments) if ctx.runs else "-")
+        ]
+    )
     if ctx.applications:
-        summary.append("    application_arguments=%s"
-                       % " ".join(ctx.applications[0].arguments))
+        summary.append(
+            "    application_arguments=%s" % " ".join(ctx.applications[0].arguments)
+        )
     if ctx.measurements:
         summary.append("    measurements: %s" % ", ".join(ctx.measurements))
     for failure in failures:
@@ -2040,13 +2345,16 @@ def scenario_files(source):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scenario", help="one scenario JSON file")
-    parser.add_argument("--all", action="store_true",
-                        help="run every scenario of the source tree")
+    parser.add_argument(
+        "--all", action="store_true", help="run every scenario of the source tree"
+    )
     parser.add_argument("--runtime", required=True)
     parser.add_argument("--client", required=True)
-    parser.add_argument("--application",
-                        help="the real upper process; required by a scenario "
-                             "that drives the application")
+    parser.add_argument(
+        "--application",
+        help="the real upper process; required by a scenario "
+        "that drives the application",
+    )
     parser.add_argument("--source", required=True)
     parser.add_argument("--work-dir", required=True)
     arguments = parser.parse_args()
@@ -2056,9 +2364,14 @@ def main():
     if arguments.all:
         results = []
         for path in scenario_files(arguments.source):
-            failures = run_scenario(arguments.runtime, arguments.client,
-                                    arguments.source, path, arguments.work_dir,
-                                    arguments.application)
+            failures = run_scenario(
+                arguments.runtime,
+                arguments.client,
+                arguments.source,
+                path,
+                arguments.work_dir,
+                arguments.application,
+            )
             results.append((path.stem, failures))
             # Participants of the previous scenario need a moment to release
             # their ports before the next domain is claimed.
@@ -2070,9 +2383,14 @@ def main():
                 print("    %s" % failure)
         return 1 if any(failures for _, failures in results) else 0
 
-    failures = run_scenario(arguments.runtime, arguments.client, arguments.source,
-                            arguments.scenario, arguments.work_dir,
-                            arguments.application)
+    failures = run_scenario(
+        arguments.runtime,
+        arguments.client,
+        arguments.source,
+        arguments.scenario,
+        arguments.work_dir,
+        arguments.application,
+    )
     if failures:
         for failure in failures:
             print("  failure: %s" % failure)

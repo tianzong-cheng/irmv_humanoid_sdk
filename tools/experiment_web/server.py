@@ -49,7 +49,8 @@ class ExperimentWebServer:
         self.layouts = LayoutStore(self.data_dir)
         self.live = LiveStore(self.records_root)
         self.live_socket_path = (
-            Path(telemetry_socket) if telemetry_socket is not None
+            Path(telemetry_socket)
+            if telemetry_socket is not None
             else self.data_dir / "live.sock"
         )
         self.live_receiver = LiveReceiver(self.live, self.live_socket_path)
@@ -105,7 +106,9 @@ class ExperimentWebServer:
 
 
 def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict) -> None:
-    body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
     try:
         handler.send_response(status)
         handler.send_header("Content-Type", "application/json; charset=utf-8")
@@ -119,8 +122,12 @@ def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict) 
         pass
 
 
-def _error(handler: BaseHTTPRequestHandler, status: int, message: str,
-           request_id: str | None = None) -> None:
+def _error(
+    handler: BaseHTTPRequestHandler,
+    status: int,
+    message: str,
+    request_id: str | None = None,
+) -> None:
     payload = {"ok": False, "error": message}
     if request_id is not None:
         payload["request_id"] = request_id
@@ -152,8 +159,9 @@ def _u64_param(params: dict[str, list[str]], key: str, default: int) -> int:
     return _int_param(params, key, default, 0, 2**64 - 1)
 
 
-def _int_param(params: dict[str, list[str]], key: str, default: int,
-               minimum: int, maximum: int) -> int:
+def _int_param(
+    params: dict[str, list[str]], key: str, default: int, minimum: int, maximum: int
+) -> int:
     raw = _one(params, key)
     if raw is None:
         return default
@@ -174,7 +182,9 @@ def _signal_ids(params: dict[str, list[str]]) -> list[str]:
                 loaded = json.loads(value)
             except json.JSONDecodeError as error:
                 raise CatalogError(f"signal_ids is not valid JSON: {error}") from error
-            if not isinstance(loaded, list) or not all(isinstance(item, str) for item in loaded):
+            if not isinstance(loaded, list) or not all(
+                isinstance(item, str) for item in loaded
+            ):
                 raise CatalogError("signal_ids is not an array of strings")
             result.extend(loaded)
         else:
@@ -258,7 +268,9 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             document = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise CatalogError(f"the request body is not valid JSON: {error}") from error
+            raise CatalogError(
+                f"the request body is not valid JSON: {error}"
+            ) from error
         if not isinstance(document, dict):
             raise CatalogError("the request body is not a JSON object")
         return document
@@ -266,8 +278,12 @@ class _Handler(BaseHTTPRequestHandler):
     def _bridge(self, request: dict) -> dict | None:
         reply = self.app.pool.query(request)
         if reply.get("transport_error"):
-            _error(self, HTTPStatus.BAD_GATEWAY, str(reply.get("error", "bridge failure")),
-                   str(reply.get("request_id", "")))
+            _error(
+                self,
+                HTTPStatus.BAD_GATEWAY,
+                str(reply.get("error", "bridge failure")),
+                str(reply.get("request_id", "")),
+            )
             return None
         return reply
 
@@ -297,7 +313,9 @@ class _Handler(BaseHTTPRequestHandler):
             _error(self, HTTPStatus.NOT_FOUND, "the resource does not exist")
             return True
         content = candidate.read_bytes()
-        content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+        content_type = (
+            mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+        )
         try:
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", content_type)
@@ -348,8 +366,7 @@ class _Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/layouts":
                 document = self._body()
                 layout_id = self.app.layouts.save(document)
-                _json_response(self, HTTPStatus.CREATED,
-                               {"ok": True, "id": layout_id})
+                _json_response(self, HTTPStatus.CREATED, {"ok": True, "id": layout_id})
                 return
             _error(self, HTTPStatus.NOT_FOUND, "the endpoint does not exist")
         except (CatalogError, LayoutError) as error:
@@ -418,7 +435,9 @@ class _Handler(BaseHTTPRequestHandler):
                 _json_response(self, HTTPStatus.OK, reply)
                 return
             runs = reply.get("runs", [])
-            page, continuation = paginate(runs, _one(params, "continuation"), _limit(params))
+            page, continuation = paginate(
+                runs, _one(params, "continuation"), _limit(params)
+            )
             live = self.app.live.CatalogStatus()
             for run in page:
                 run["live"] = live.get(run["run_id"], {"active": False, "age_ms": None})
@@ -470,20 +489,28 @@ class _Handler(BaseHTTPRequestHandler):
         if len(parts) == 4 and parts[:2] == ["api", "runs"]:
             run_id, operation = parts[2], parts[3]
             if not valid_run_id(run_id):
-                _error(self, HTTPStatus.BAD_REQUEST, "the run id is not 32 lower-case hex digits")
+                _error(
+                    self,
+                    HTTPStatus.BAD_REQUEST,
+                    "the run id is not 32 lower-case hex digits",
+                )
                 return
             self._run_query(run_id, operation, params)
             return
         _error(self, HTTPStatus.NOT_FOUND, "the endpoint does not exist")
 
-    def _run_query(self, run_id: str, operation: str,
-                   params: dict[str, list[str]]) -> None:
+    def _run_query(
+        self, run_id: str, operation: str, params: dict[str, list[str]]
+    ) -> None:
         request: dict = {"run_id": run_id}
         app_run_id = _one(params, "app_run_id")
         if app_run_id is not None:
             if not valid_run_id(app_run_id):
-                _error(self, HTTPStatus.BAD_REQUEST,
-                       "the application run id is not 32 lower-case hex digits")
+                _error(
+                    self,
+                    HTTPStatus.BAD_REQUEST,
+                    "the application run id is not 32 lower-case hex digits",
+                )
                 return
             request["app_run_id"] = app_run_id
         if operation == "describe":

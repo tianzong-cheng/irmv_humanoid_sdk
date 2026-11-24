@@ -11,7 +11,13 @@ export default defineConfig({
   expect: { timeout: 10_000 },
   workers: 1,
   fullyParallel: false,
-  reporter: [['list'], ['html', { open: 'never', outputFolder: path.join(here, 'playwright-report') }]],
+  reporter: [
+    ['list'],
+    [
+      'html',
+      { open: 'never', outputFolder: path.join(here, 'playwright-report') },
+    ],
+  ],
   use: {
     baseURL: 'http://127.0.0.1:8766',
     headless: true,

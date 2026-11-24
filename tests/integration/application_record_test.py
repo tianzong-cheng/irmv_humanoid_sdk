@@ -84,15 +84,23 @@ def main() -> int:
     )
     work.mkdir(parents=True, exist_ok=True)
     try:
-        return run(source_root, application_binary, runtime_binary, read_record,
-                   work, failures, fail)
+        return run(
+            source_root,
+            application_binary,
+            runtime_binary,
+            read_record,
+            work,
+            failures,
+            fail,
+        )
     finally:
         if args.keep_work is None:
             shutil.rmtree(work, ignore_errors=True)
 
 
-def run(source_root, application_binary, runtime_binary, read_record, work,
-        failures, fail) -> int:
+def run(
+    source_root, application_binary, runtime_binary, read_record, work, failures, fail
+) -> int:
     # The recorder's own directory, and a configuration that turns it on. It is
     # a copy of the shipped document with one section changed, so the two
     # processes of this run still agree on every other parameter - and on the
@@ -235,7 +243,9 @@ def run(source_root, application_binary, runtime_binary, read_record, work,
 
     summary = subprocess.run(
         [str(read_record), "--run", str(run_directory), "--summary-only"],
-        capture_output=True, text=True, check=False,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     if summary.returncode != 0:
         fail(f"read_record failed: {summary.stderr.strip()}")
@@ -257,16 +267,16 @@ def run(source_root, application_binary, runtime_binary, read_record, work,
     # identity of the command in force has to be the one the application sent.
     rows = subprocess.run(
         [str(read_record), "--run", str(run_directory)],
-        capture_output=True, text=True, check=False,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     if rows.returncode != 0:
         fail(f"read_record (rows) failed: {rows.stderr.strip()}")
         return 1
     lines = [line for line in rows.stdout.splitlines() if line.strip()]
     records = [json.loads(line) for line in lines[:-1]]
-    samples = [
-        row for row in records if row.get("record_type", "sample") == "sample"
-    ]
+    samples = [row for row in records if row.get("record_type", "sample") == "sample"]
     fault_rows = [row for row in records if row.get("record_type") == "fault"]
     if len(samples) != summary_json["rows_in_range"]:
         fail(
@@ -294,13 +304,9 @@ def run(source_root, application_binary, runtime_binary, read_record, work,
         producers = {row["producer_id"] for row in tracking}
         if len(producers) != 1 or "" in producers:
             fail(f"the tracking rows do not name one producer: {sorted(producers)}")
-        without_command = [
-            row for row in tracking if not row["command_present"]
-        ]
+        without_command = [row for row in tracking if not row["command_present"]]
         if without_command:
-            fail(
-                f"{len(without_command)} tracking row(s) carry no command in force"
-            )
+            fail(f"{len(without_command)} tracking row(s) carry no command in force")
         epochs = {row["epoch"] for row in tracking}
         if 0 in epochs:
             fail("a tracking row carries no authorization epoch")
@@ -335,9 +341,7 @@ def run(source_root, application_binary, runtime_binary, read_record, work,
             # marked valid with a real receive stamp.
             if any(
                 abs(float(value) - expected) > 1e-9
-                for value, expected in zip(
-                    row["measured_tau_est"], (0.25, -0.15)
-                )
+                for value, expected in zip(row["measured_tau_est"], (0.25, -0.15))
             ):
                 fail(
                     "a tracking row does not carry the fixture's tau_est: "
@@ -345,9 +349,7 @@ def run(source_root, application_binary, runtime_binary, read_record, work,
                 )
                 break
             if not all(bool(value) for value in row["joint_valid"]):
-                fail(
-                    "a tracking row marks a configured joint's feedback invalid"
-                )
+                fail("a tracking row marks a configured joint's feedback invalid")
                 break
             if not row["imu_valid"]:
                 fail("a tracking row does not mark the fixture's IMU valid")
@@ -385,13 +387,8 @@ def run(source_root, application_binary, runtime_binary, read_record, work,
         else:
             if not any(int(entry.get("epoch", 0)) != 0 for entry in sessions):
                 fail("no session event names an authorization epoch")
-            if not any(
-                entry.get("model_sha256") == "unknown" for entry in sessions
-            ):
-                fail(
-                    "the runtime invented a model digest instead of writing "
-                    "`unknown`"
-                )
+            if not any(entry.get("model_sha256") == "unknown" for entry in sessions):
+                fail("the runtime invented a model digest instead of writing `unknown`")
             row_epochs = {row["epoch"] for row in tracking}
             session_epochs = {int(entry.get("epoch", 0)) for entry in sessions}
             if not row_epochs & session_epochs:
@@ -408,9 +405,10 @@ def run(source_root, application_binary, runtime_binary, read_record, work,
     # processes' metadata rather than against the test's assumptions.
     if runtime_meta.get("schema_version") != 4:
         fail(f"the runtime meta declares schema {runtime_meta.get('schema_version')}")
-    if app_meta.get("schema") != "irmv.application_velocity" or int(
-        app_meta.get("version", 0)
-    ) != 1:
+    if (
+        app_meta.get("schema") != "irmv.application_velocity"
+        or int(app_meta.get("version", 0)) != 1
+    ):
         fail(
             "the application meta is not the velocity schema: "
             f"{app_meta.get('schema')} v{app_meta.get('version')}"
@@ -482,10 +480,7 @@ def run(source_root, application_binary, runtime_binary, read_record, work,
         if model_meta.get("status") != "loaded":
             fail(f"the application did not report its loaded model: {model_meta}")
         if model_meta.get("name") != Path(str(configured_model)).name:
-            fail(
-                "the application names another model file: "
-                f"{model_meta.get('name')}"
-            )
+            fail(f"the application names another model file: {model_meta.get('name')}")
 
     app_read = subprocess.run(
         [str(read_record), "--run", str(app_directory)],
@@ -499,13 +494,9 @@ def run(source_root, application_binary, runtime_binary, read_record, work,
         app_lines = [line for line in app_read.stdout.splitlines() if line.strip()]
         app_records = [json.loads(line) for line in app_lines[:-1]]
         app_summary_json = json.loads(app_lines[-1])
-        velocity = [
-            row for row in app_records if row.get("record_type") == "velocity"
-        ]
+        velocity = [row for row in app_records if row.get("record_type") == "velocity"]
         policy_rows = [
-            row
-            for row in app_records
-            if row.get("record_type") == "policy_session"
+            row for row in app_records if row.get("record_type") == "policy_session"
         ]
         if app_summary_json.get("record_kind") != "application":
             fail(

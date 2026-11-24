@@ -83,8 +83,9 @@ def runtime_run(root: Path, name: str, boot_id: str = "boot-one") -> Path:
     return directory
 
 
-def application_run(root: Path, name: str, boot_id: str = "boot-one",
-                    with_stream: bool = True) -> Path:
+def application_run(
+    root: Path, name: str, boot_id: str = "boot-one", with_stream: bool = True
+) -> Path:
     directory = root / name
     directory.mkdir()
     metadata = {
@@ -156,8 +157,9 @@ def layout(name: str = "compare") -> dict:
     }
 
 
-def start_server(reader: Path, records_root: Path, data_dir: Path,
-                 assets: Path) -> tuple[subprocess.Popen, str]:
+def start_server(
+    reader: Path, records_root: Path, data_dir: Path, assets: Path
+) -> tuple[subprocess.Popen, str]:
     environment = dict(os.environ)
     environment["PYTHONPATH"] = str(SOURCE_ROOT)
     process = subprocess.Popen(
@@ -207,9 +209,7 @@ def stop_server(process: subprocess.Popen) -> None:
 
 
 def opener() -> urllib.request.OpenerDirector:
-    return urllib.request.build_opener(
-        urllib.request.HTTPCookieProcessor(CookieJar())
-    )
+    return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(CookieJar()))
 
 
 def _decode(payload: bytes) -> object:
@@ -219,15 +219,21 @@ def _decode(payload: bytes) -> object:
         return payload.decode("utf-8", errors="replace")
 
 
-def call(http: urllib.request.OpenerDirector, method: str, url: str,
-         body: dict | None = None, headers: dict | None = None) -> tuple[int, object]:
+def call(
+    http: urllib.request.OpenerDirector,
+    method: str,
+    url: str,
+    body: dict | None = None,
+    headers: dict | None = None,
+) -> tuple[int, object]:
     data = None
     actual_headers = dict(headers or {})
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         actual_headers.setdefault("Content-Type", "application/json")
-    request = urllib.request.Request(url, data=data, method=method,
-                                     headers=actual_headers)
+    request = urllib.request.Request(
+        url, data=data, method=method, headers=actual_headers
+    )
     try:
         with http.open(request, timeout=10.0) as response:
             return response.status, _decode(response.read())
@@ -246,16 +252,16 @@ class ServerTest(unittest.TestCase):
         cls.data = cls.base / "data"
         cls.assets = cls.base / "assets"
         cls.assets.mkdir()
-        (cls.assets / "index.html").write_text("<html>workbench</html>", encoding="utf-8")
+        (cls.assets / "index.html").write_text(
+            "<html>workbench</html>", encoding="utf-8"
+        )
         (cls.assets / "styles.css").write_text("body{}", encoding="utf-8")
         cls.runtime = runtime_run(cls.records, "run_0001")
         cls.application = application_run(cls.records, "app_run_0001")
         cls.missing_application = application_run(
             cls.records, "app_run_0002", with_stream=False
         )
-        cls.process, cls.url = start_server(
-            READER, cls.records, cls.data, cls.assets
-        )
+        cls.process, cls.url = start_server(READER, cls.records, cls.data, cls.assets)
         cls.http = opener()
         status, _ = call(cls.http, "GET", cls.url)
         assert status == 200
@@ -283,7 +289,8 @@ class ServerTest(unittest.TestCase):
         try:
             for _ in range(8):
                 connection = http.client.HTTPConnection(
-                    self.url.removeprefix("http://").rstrip("/"), timeout=3)
+                    self.url.removeprefix("http://").rstrip("/"), timeout=3
+                )
                 connections.append(connection)
                 connection.request("GET", "/")
                 response = connection.getresponse()
@@ -363,9 +370,7 @@ class ServerTest(unittest.TestCase):
 
     def test_missing_application_stream_is_an_error(self) -> None:
         catalog = self.catalog()
-        missing = next(
-            run for run in catalog["runs"] if run["name"] == "app_run_0002"
-        )
+        missing = next(run for run in catalog["runs"] if run["name"] == "app_run_0002")
         status, described = call(
             self.http,
             "GET",
@@ -400,9 +405,7 @@ class ServerTest(unittest.TestCase):
         self.assertIn("begin_us", body["error"])
 
     def test_refuses_path_shaped_ids(self) -> None:
-        status, body = call(
-            self.http, "GET", f"{self.url}api/runs/2e2e/describe"
-        )
+        status, body = call(self.http, "GET", f"{self.url}api/runs/2e2e/describe")
         self.assertEqual(status, 400)
         self.assertFalse(body["ok"])
 
@@ -417,9 +420,7 @@ class ServerTest(unittest.TestCase):
         )
         self.assertEqual(status, 201)
         layout_id = created["id"]
-        status, loaded = call(
-            self.http, "GET", f"{self.url}api/layouts/{layout_id}"
-        )
+        status, loaded = call(self.http, "GET", f"{self.url}api/layouts/{layout_id}")
         self.assertEqual(status, 200)
         self.assertEqual(loaded["layout"]["dock"], layout()["dock"])
         self.assertEqual(loaded["layout"]["version"], 1)
@@ -435,23 +436,17 @@ class ServerTest(unittest.TestCase):
             headers=origin,
         )
         self.assertEqual(status, 200)
-        status, loaded = call(
-            self.http, "GET", f"{self.url}api/layouts/{layout_id}"
-        )
+        status, loaded = call(self.http, "GET", f"{self.url}api/layouts/{layout_id}")
         self.assertEqual(loaded["layout"]["name"], "renamed")
         status, _ = call(
             self.http, "DELETE", f"{self.url}api/layouts/{layout_id}", headers=origin
         )
         self.assertEqual(status, 200)
-        status, _ = call(
-            self.http, "GET", f"{self.url}api/layouts/{layout_id}"
-        )
+        status, _ = call(self.http, "GET", f"{self.url}api/layouts/{layout_id}")
         self.assertEqual(status, 404)
 
     def test_layout_write_requires_origin_and_json(self) -> None:
-        status, body = call(
-            self.http, "POST", f"{self.url}api/layouts", body=layout()
-        )
+        status, body = call(self.http, "POST", f"{self.url}api/layouts", body=layout())
         self.assertEqual(status, 403)
         self.assertFalse(body["ok"])
         status, body = call(
@@ -473,9 +468,13 @@ class ServerTest(unittest.TestCase):
 
     def test_invalid_layout_is_refused(self) -> None:
         document = layout()
-        document["dock"] = {"type": "split", "direction": "row", "ratio": 0.99,
-                            "first": {"type": "empty"},
-                            "second": {"type": "empty"}}
+        document["dock"] = {
+            "type": "split",
+            "direction": "row",
+            "ratio": 0.99,
+            "first": {"type": "empty"},
+            "second": {"type": "empty"},
+        }
         status, body = call(
             self.http,
             "POST",
@@ -544,9 +543,7 @@ class BridgeFailureTest(unittest.TestCase):
 
     def test_timeout_replaces_the_helper(self) -> None:
         reader = self.fake_reader(
-            "#!/usr/bin/env python3\n"
-            "import sys, time\n"
-            "time.sleep(30)\n"
+            "#!/usr/bin/env python3\nimport sys, time\ntime.sleep(30)\n"
         )
         pool = BridgePool(reader, self.records, timeout=0.2, size=1)
         started = time.monotonic()
@@ -577,8 +574,7 @@ class LiveServerTest(unittest.TestCase):
         call(self.http, "GET", self.url)
         status, catalog = call(self.http, "GET", f"{self.url}api/runs")
         self.run_id = next(
-            run["run_id"] for run in catalog["runs"]
-            if run["name"] == "run_live"
+            run["run_id"] for run in catalog["runs"] if run["name"] == "run_live"
         )
 
     def tearDown(self) -> None:
@@ -597,8 +593,9 @@ class LiveServerTest(unittest.TestCase):
         }
         client = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         try:
-            client.sendto(json.dumps(envelope).encode("utf-8"),
-                          str(self.data / "live.sock"))
+            client.sendto(
+                json.dumps(envelope).encode("utf-8"), str(self.data / "live.sock")
+            )
         finally:
             client.close()
 
@@ -655,15 +652,19 @@ class LiveServerTest(unittest.TestCase):
         self.assertTrue(live_range["live"]["active"])
         self.assertEqual(len(live_range["series"][0]["points"]), 2)
 
-        self.send("fault", 4, {
-            "record_seq": "9",
-            "detected_stamp_us": "1200",
-            "state_seq": "10",
-            "fault_id": "3",
-            "joint_index": 0,
-            "reason": 5,
-            "condition": 8,
-        })
+        self.send(
+            "fault",
+            4,
+            {
+                "record_seq": "9",
+                "detected_stamp_us": "1200",
+                "state_seq": "10",
+                "fault_id": "3",
+                "joint_index": 0,
+                "reason": 5,
+                "condition": 8,
+            },
+        )
         time.sleep(0.1)
         status, events = call(
             self.http,
@@ -693,8 +694,6 @@ class LiveServerTest(unittest.TestCase):
         )
         self.assertEqual(status, 404)
         self.assertFalse(snapshot["ok"])
-
-
 
 
 def main() -> int:

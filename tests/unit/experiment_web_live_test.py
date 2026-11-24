@@ -71,8 +71,14 @@ def application_run(root: Path, name: str) -> Path:
     return directory
 
 
-def envelope(run_path: Path, source: str, transport_seq: int, kind: str,
-             payload: dict, emitter: str = "e" * 32) -> dict:
+def envelope(
+    run_path: Path,
+    source: str,
+    transport_seq: int,
+    kind: str,
+    payload: dict,
+    emitter: str = "e" * 32,
+) -> dict:
     return {
         "version": 1,
         "emitter_id": emitter,
@@ -138,11 +144,14 @@ class LiveStoreTest(unittest.TestCase):
         run = runtime_run(self.root, "run_status")
         run_id = run_id_for_directory(self.root, run)
         self.store.ingest(envelope(run, "runtime", 1, "hello", {}), now_ms=1000)
-        self.assertEqual(self.store.CatalogStatus(now_ms=1500)[run_id],
-                         {"active": True, "age_ms": 500})
+        self.assertEqual(
+            self.store.CatalogStatus(now_ms=1500)[run_id],
+            {"active": True, "age_ms": 500},
+        )
         self.assertFalse(self.store.CatalogStatus(now_ms=5001)[run_id]["active"])
-        self.store.ingest(envelope(run, "runtime", 2, "status", {"complete": True}),
-                          now_ms=6000)
+        self.store.ingest(
+            envelope(run, "runtime", 2, "status", {"complete": True}), now_ms=6000
+        )
         self.assertFalse(self.store.CatalogStatus(now_ms=6001)[run_id]["active"])
 
     def test_unchanged_snapshot_reports_stale_stream(self) -> None:
@@ -154,7 +163,9 @@ class LiveStoreTest(unittest.TestCase):
         snapshot = store.Snapshot(run_id, [], 0, 5000)
         self.assertTrue(snapshot.get("active"))
         now[0] = 5.0
-        stale = store.Snapshot(run_id, [], 0, 5000, after_revision=int(snapshot["revision"]))
+        stale = store.Snapshot(
+            run_id, [], 0, 5000, after_revision=int(snapshot["revision"])
+        )
         self.assertFalse(stale["changed"])
         self.assertFalse(stale["active"])
 
@@ -192,10 +203,12 @@ class LiveStoreTest(unittest.TestCase):
         store_b.ingest(
             envelope(run_b, "runtime", 3, "sample", runtime_sample(1000, 1, 0.1))
         )
-        a = self.store.Snapshot(run_id_for_directory(self.root, run_a),
-                                ["runtime/j1/q"], 0, 5000, 10)
-        b = store_b.Snapshot(run_id_for_directory(self.root, run_b),
-                             ["runtime/j1/q"], 0, 5000, 10)
+        a = self.store.Snapshot(
+            run_id_for_directory(self.root, run_a), ["runtime/j1/q"], 0, 5000, 10
+        )
+        b = store_b.Snapshot(
+            run_id_for_directory(self.root, run_b), ["runtime/j1/q"], 0, 5000, 10
+        )
         self.assertEqual(
             [(p["t"], p["v"]) for p in a["series"][0]["points"]],
             [(p["t"], p["v"]) for p in b["series"][0]["points"]],
@@ -207,8 +220,9 @@ class LiveStoreTest(unittest.TestCase):
         self.store.ingest(envelope(run, "runtime", 1, "hello", {}))
         sample = envelope(run, "runtime", 2, "sample", runtime_sample(1000, 1))
         self.store.ingest(sample)
-        revision = self.store.Snapshot(run_id, ["runtime/j1/q"], 0, 5000,
-                                       10)["revision"]
+        revision = self.store.Snapshot(run_id, ["runtime/j1/q"], 0, 5000, 10)[
+            "revision"
+        ]
         self.store.ingest(sample)
         snapshot = self.store.Snapshot(run_id, ["runtime/j1/q"], 0, 5000, 10)
         self.assertEqual(snapshot["revision"], revision)
@@ -246,17 +260,20 @@ class LiveStoreTest(unittest.TestCase):
                 {
                     "signal": {"id": "runtime/j1/q"},
                     "points": [
-                        {"t": "1000", "seq": "1", "v": 0.1, "valid": True,
-                         "segment": 0, "agg": "first"}
+                        {
+                            "t": "1000",
+                            "seq": "1",
+                            "v": 0.1,
+                            "valid": True,
+                            "segment": 0,
+                            "agg": "first",
+                        }
                     ],
                 }
             ],
-            "committed": {"begin_us": "1000", "end_us": "2001",
-                          "complete": False},
+            "committed": {"begin_us": "1000", "end_us": "2001", "complete": False},
         }
-        merged = self.store.merge_range(
-            reply, run_id, ["runtime/j1/q"], 0, 5000, 10
-        )
+        merged = self.store.merge_range(reply, run_id, ["runtime/j1/q"], 0, 5000, 10)
         points = merged["series"][0]["points"]
         keys = [(point["t"], point["seq"]) for point in points]
         self.assertEqual(len(keys), len(set(keys)))
@@ -266,9 +283,7 @@ class LiveStoreTest(unittest.TestCase):
     def test_application_source_mismatch_is_refused(self) -> None:
         run = runtime_run(self.root, "run_wrong_source")
         with self.assertRaises(LiveError):
-            self.store.ingest(
-                envelope(run, "application", 1, "hello", {})
-            )
+            self.store.ingest(envelope(run, "application", 1, "hello", {}))
 
     def test_two_runtime_restarts_are_separate_runs(self) -> None:
         first = runtime_run(self.root, "run_boot_a", "boot-a")
@@ -287,21 +302,22 @@ class LiveStoreTest(unittest.TestCase):
             envelope(second, "runtime", 2, "sample", runtime_sample(9000, 1)),
             now_ms=2.0,
         )
-        first_snapshot = self.store.Snapshot(first_id, ["runtime/j1/q"], 0,
-                                             10000, 10)
-        second_snapshot = self.store.Snapshot(second_id, ["runtime/j1/q"], 0,
-                                              10000, 10)
+        first_snapshot = self.store.Snapshot(first_id, ["runtime/j1/q"], 0, 10000, 10)
+        second_snapshot = self.store.Snapshot(second_id, ["runtime/j1/q"], 0, 10000, 10)
         self.assertEqual(first_snapshot["coverage"]["begin_us"], "1000")
         self.assertEqual(second_snapshot["coverage"]["begin_us"], "9000")
-        self.assertNotEqual(first_snapshot["identity"]["run_path"],
-                            second_snapshot["identity"]["run_path"])
+        self.assertNotEqual(
+            first_snapshot["identity"]["run_path"],
+            second_snapshot["identity"]["run_path"],
+        )
 
     def test_more_than_eight_live_runs_are_refused(self) -> None:
         for index in range(8):
             run = runtime_run(self.root, f"run_{index}")
             self.store.ingest(envelope(run, "runtime", 1, "hello", {}))
-            self.store.ingest(envelope(run, "runtime", 2, "sample",
-                                       runtime_sample(1000, 1)))
+            self.store.ingest(
+                envelope(run, "runtime", 2, "sample", runtime_sample(1000, 1))
+            )
         ninth = runtime_run(self.root, "run_ninth")
         with self.assertRaises(LiveError):
             self.store.ingest(envelope(ninth, "runtime", 1, "hello", {}))
@@ -315,13 +331,17 @@ class LiveStoreTest(unittest.TestCase):
         for index in range(20):
             stamp = index * 1_000_000
             self.store.ingest(
-                envelope(run, "runtime", sequence + 1, "sample",
-                         runtime_sample(stamp, sequence)),
+                envelope(
+                    run,
+                    "runtime",
+                    sequence + 1,
+                    "sample",
+                    runtime_sample(stamp, sequence),
+                ),
                 now_ms=float(index),
             )
             sequence += 1
-        snapshot = self.store.Snapshot(run_id, ["runtime/j1/q"], 0, 20_000_000,
-                                       100)
+        snapshot = self.store.Snapshot(run_id, ["runtime/j1/q"], 0, 20_000_000, 100)
         self.assertIsNotNone(snapshot["coverage"]["evicted_before_us"])
         self.assertGreater(int(snapshot["coverage"]["evicted_before_us"]), 0)
         self.assertLessEqual(len(snapshot["series"][0]["points"]), 400)
@@ -331,8 +351,14 @@ class LiveStoreTest(unittest.TestCase):
         run_id = run_id_for_directory(self.root, run)
         self.store.ingest(envelope(run, "runtime", 1, "hello", {}))
         snapshot = self.store.Snapshot(run_id, ["runtime/j1/q"], 0, 5000, 10)
-        same = self.store.Snapshot(run_id, ["runtime/j1/q"], 0, 5000, 10,
-                                   after_revision=int(snapshot["revision"]))
+        same = self.store.Snapshot(
+            run_id,
+            ["runtime/j1/q"],
+            0,
+            5000,
+            10,
+            after_revision=int(snapshot["revision"]),
+        )
         self.assertFalse(same["changed"])
 
     def test_application_values_come_from_their_own_run(self) -> None:
@@ -340,11 +366,9 @@ class LiveStoreTest(unittest.TestCase):
         run_id = run_id_for_directory(self.root, run)
         self.store.ingest(envelope(run, "application", 1, "hello", {}))
         self.store.ingest(
-            envelope(run, "application", 2, "sample",
-                     application_sample(1000, 0, 0.4))
+            envelope(run, "application", 2, "sample", application_sample(1000, 0, 0.4))
         )
-        snapshot = self.store.Snapshot(run_id, ["application//forward"], 0,
-                                       5000, 10)
+        snapshot = self.store.Snapshot(run_id, ["application//forward"], 0, 5000, 10)
         self.assertEqual(snapshot["series"][0]["points"][0]["v"], 0.4)
 
     def test_live_gap_starts_a_new_segment_and_never_joins_commit(self) -> None:
@@ -362,16 +386,24 @@ class LiveStoreTest(unittest.TestCase):
         self.assertGreater(segments[-1], segments[0])
         reply = {
             "ok": True,
-            "series": [{
-                "signal": {"id": "runtime/j1/q"},
-                "points": [{"t": "1000", "seq": "1", "v": 0.1,
-                            "valid": True, "segment": 0, "agg": "first"}],
-            }],
-            "committed": {"begin_us": "1000", "end_us": "1001",
-                          "complete": False},
+            "series": [
+                {
+                    "signal": {"id": "runtime/j1/q"},
+                    "points": [
+                        {
+                            "t": "1000",
+                            "seq": "1",
+                            "v": 0.1,
+                            "valid": True,
+                            "segment": 0,
+                            "agg": "first",
+                        }
+                    ],
+                }
+            ],
+            "committed": {"begin_us": "1000", "end_us": "1001", "complete": False},
         }
-        merged = self.store.merge_range(reply, run_id, ["runtime/j1/q"],
-                                        0, 40000, 100)
+        merged = self.store.merge_range(reply, run_id, ["runtime/j1/q"], 0, 40000, 100)
         points = merged["series"][0]["points"]
         self.assertEqual(points[0]["segment"], 0)
         self.assertGreater(points[1]["segment"], 0)
@@ -381,10 +413,15 @@ class LiveStoreTest(unittest.TestCase):
         run_id = run_id_for_directory(self.root, run)
         self.store.ingest(envelope(run, "runtime", 1, "hello", {}))
         for seq in range(2000):
-            self.store.ingest(envelope(
-                run, "runtime", seq + 2, "fault",
-                {"record_seq": str(seq), "detected_stamp_us": str(seq)},
-            ))
+            self.store.ingest(
+                envelope(
+                    run,
+                    "runtime",
+                    seq + 2,
+                    "fault",
+                    {"record_seq": str(seq), "detected_stamp_us": str(seq)},
+                )
+            )
         snapshot = self.store.Snapshot(run_id, ["runtime/j1/q"], 0, 5000, 10)
         self.assertLessEqual(len(snapshot["faults"]), 1024)
         for index in range(100):
@@ -400,8 +437,13 @@ class LiveStoreTest(unittest.TestCase):
         run_id = run_id_for_directory(self.root, run)
         self.store.ingest(envelope(run, "runtime", 1, "hello", {}))
         self.store.ingest(
-            envelope(run, "runtime", 2, "fault",
-                     {"record_seq": "4", "detected_stamp_us": "1000"})
+            envelope(
+                run,
+                "runtime",
+                2,
+                "fault",
+                {"record_seq": "4", "detected_stamp_us": "1000"},
+            )
         )
         reply = {"ok": True, "events": [{"event_id": "4"}]}
         merged = self.store.merge_events(reply, run_id)

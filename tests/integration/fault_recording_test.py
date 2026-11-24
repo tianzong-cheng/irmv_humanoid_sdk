@@ -227,7 +227,9 @@ def run(source_root, runtime_binary, read_record, peer_binary, work, failures, f
         # recorder would be killed instead of finalizing its fault stream.
         peer_text = wait_for(peer_log, r'"event": *"reset_applied"', 25)
         if '"reset_applied"' not in peer_text:
-            fail(f"the peer did not observe the reset being applied: {peer_text[-800:]}")
+            fail(
+                f"the peer did not observe the reset being applied: {peer_text[-800:]}"
+            )
     finally:
         if runtime_process is not None:
             code = stop_process(runtime_process, 20)
@@ -281,7 +283,9 @@ def run(source_root, runtime_binary, read_record, peer_binary, work, failures, f
     faults = [row for row in records if row.get("record_type") == "fault"]
 
     if summary.get("record_kind") != "runtime":
-        fail(f"read_record did not dispatch the runtime run: {summary.get('record_kind')}")
+        fail(
+            f"read_record did not dispatch the runtime run: {summary.get('record_kind')}"
+        )
     if len(samples) != summary.get("rows_in_range"):
         fail(
             f"read_record printed {len(samples)} sample(s) but reports "
@@ -367,7 +371,9 @@ def run(source_root, runtime_binary, read_record, peer_binary, work, failures, f
     if faults and fault_states:
         first_published = fault_states[0]
         first_file = faults[0]
-        if int(first_published.get("fault_id", 0)) != int(first_file.get("fault_id", -1)):
+        if int(first_published.get("fault_id", 0)) != int(
+            first_file.get("fault_id", -1)
+        ):
             fail(
                 "DDS and the fault file name different fault ids: "
                 f"{first_published.get('fault_id')} != {first_file.get('fault_id')}"
@@ -408,7 +414,9 @@ def run(source_root, runtime_binary, read_record, peer_binary, work, failures, f
             )
         last_stamp = max(int(entry.get("stamp_us", 0)) for entry in fault_states)
         if faults:
-            recurrence = int(faults[2].get("detected_stamp_us", 0)) if len(faults) >= 3 else 0
+            recurrence = (
+                int(faults[2].get("detected_stamp_us", 0)) if len(faults) >= 3 else 0
+            )
             if last_stamp < recurrence:
                 fail(
                     "no DDS state was observed at or after the recurrence "

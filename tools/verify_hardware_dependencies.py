@@ -22,7 +22,9 @@ def fail(message: str) -> None:
 def gitlink_of(source: Path, path: str) -> str:
     result = subprocess.run(
         ["git", "-C", str(source), "ls-tree", "HEAD", path],
-        text=True, capture_output=True)
+        text=True,
+        capture_output=True,
+    )
     if result.returncode != 0 or not result.stdout.strip():
         fail(f"{path} is not recorded as a gitlink")
     return result.stdout.split()[2]
@@ -30,8 +32,8 @@ def gitlink_of(source: Path, path: str) -> str:
 
 def commit_of(path: Path) -> str:
     result = subprocess.run(
-        ["git", "-C", str(path), "rev-parse", "HEAD"],
-        text=True, capture_output=True)
+        ["git", "-C", str(path), "rev-parse", "HEAD"], text=True, capture_output=True
+    )
     if result.returncode != 0:
         fail(f"{path} is not a git checkout")
     return result.stdout.strip()
@@ -69,8 +71,10 @@ def main() -> int:
 
     vendor = source / pins["vendor_library"]["path"]
     if not vendor.exists():
-        print("vendor library not checked out; digest and architecture are "
-              "verified only in the real-dependency job")
+        print(
+            "vendor library not checked out; digest and architecture are "
+            "verified only in the real-dependency job"
+        )
     else:
         digest = hashlib.sha256(vendor.read_bytes()).hexdigest()
         if digest != pins["vendor_library"]["sha256"]:

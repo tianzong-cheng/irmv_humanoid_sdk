@@ -44,8 +44,7 @@ MODE_KEYS = (
 VELOCITY_PAIRS = (
     (("velocity_forward", "forward"), ("velocity_backward", "backward")),
     (("velocity_left", "left"), ("velocity_right", "right")),
-    (("velocity_yaw_left", "yaw left"),
-     ("velocity_yaw_right", "yaw right")),
+    (("velocity_yaw_left", "yaw left"), ("velocity_yaw_right", "yaw right")),
 )
 
 
@@ -57,19 +56,22 @@ def find_binary(name: str, explicit: str | None) -> str:
     if environment:
         candidates.append(Path(environment) / name)
     here = Path(__file__).resolve()
-    candidates.extend([
-        here.parent / name,
-        here.parent.parent / "build" / name,
-        here.parent.parent / "build-real" / name,
-    ])
+    candidates.extend(
+        [
+            here.parent / name,
+            here.parent.parent / "build" / name,
+            here.parent.parent / "build-real" / name,
+        ]
+    )
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate)
     found = shutil_which(name)
     if found:
         return found
-    raise SystemExit(f"sdk_launch: cannot find {name}; pass --{name} or set "
-                     "IRMV_BIN_DIR")
+    raise SystemExit(
+        f"sdk_launch: cannot find {name}; pass --{name} or set IRMV_BIN_DIR"
+    )
 
 
 def shutil_which(name: str) -> str | None:
@@ -92,8 +94,9 @@ def runtime_log_path() -> Path:
     configured = os.environ.get("IRMV_LAUNCH_LOG_DIR")
     directory = Path(configured) if configured else (Path.cwd() / "logs")
     directory.mkdir(parents=True, exist_ok=True)
-    return directory / ("launcher_runtime_%d_%d.log" %
-                        (os.getpid(), int(time.time() * 1000)))
+    return directory / (
+        "launcher_runtime_%d_%d.log" % (os.getpid(), int(time.time() * 1000))
+    )
 
 
 def read_log_tail(path: Path, count: int = 20) -> list[str]:
@@ -131,13 +134,13 @@ def render_key_legend(config_path: str) -> list[str]:
         if key is not None:
             modes.append("%s=%s" % (key, label))
     velocities = []
-    for (first_action, first_label), (second_action,
-                                      second_label) in VELOCITY_PAIRS:
+    for (first_action, first_label), (second_action, second_label) in VELOCITY_PAIRS:
         first = key_of(first_action)
         second = key_of(second_action)
         if first is not None and second is not None:
-            velocities.append("%s/%s=%s/%s" %
-                              (first, second, first_label, second_label))
+            velocities.append(
+                "%s/%s=%s/%s" % (first, second, first_label, second_label)
+            )
         elif first is not None:
             velocities.append("%s=%s" % (first, first_label))
         elif second is not None:
@@ -151,8 +154,7 @@ def render_key_legend(config_path: str) -> list[str]:
     return lines
 
 
-def wait_ready(log_path: Path, process: subprocess.Popen,
-               timeout: float) -> bool:
+def wait_ready(log_path: Path, process: subprocess.Popen, timeout: float) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
@@ -172,17 +174,23 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument("--config", required=True)
     parser.add_argument("--domain", type=int, default=None)
-    parser.add_argument("--locomotion-source", default=None,
-                        choices=["none", "local", "external"])
+    parser.add_argument(
+        "--locomotion-source", default=None, choices=["none", "local", "external"]
+    )
     parser.add_argument("--runtime", default=None)
     parser.add_argument("--application", default=None)
     parser.add_argument(
-        "--web-telemetry-socket", default=None,
+        "--web-telemetry-socket",
+        default=None,
         help="explicitly enable the workbench live outlet for the two SDK "
-             "processes; the launcher never starts the web service")
-    parser.add_argument("--stop-all", action="store_true",
-                        help="after the application exits, also send the "
-                             "runtime SIGTERM (explicit whole-system stop)")
+        "processes; the launcher never starts the web service",
+    )
+    parser.add_argument(
+        "--stop-all",
+        action="store_true",
+        help="after the application exits, also send the "
+        "runtime SIGTERM (explicit whole-system stop)",
+    )
     options = parser.parse_args(argv)
 
     runtime = find_binary("robot_runtime", options.runtime)
@@ -204,21 +212,33 @@ def main(argv: list[str]) -> int:
     log_path = runtime_log_path()
     with log_path.open("w", encoding="utf-8") as runtime_log:
         runtime_process = subprocess.Popen(
-            [runtime, *common], stdin=subprocess.DEVNULL,
-            stdout=runtime_log, stderr=subprocess.STDOUT, text=True,
-            bufsize=1, start_new_session=True, env=child_environment)
+            [runtime, *common],
+            stdin=subprocess.DEVNULL,
+            stdout=runtime_log,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+            env=child_environment,
+        )
     print("sdk_launch: runtime diagnostics: %s" % log_path)
 
     if not wait_ready(log_path, runtime_process, START_TIMEOUT_S):
-        state = ("exited with %s" % runtime_process.poll()
-                 if runtime_process.poll() is not None else "still running")
-        print("sdk_launch: the runtime did not become ready (%s)" % state,
-              file=sys.stderr)
+        state = (
+            "exited with %s" % runtime_process.poll()
+            if runtime_process.poll() is not None
+            else "still running"
+        )
+        print(
+            "sdk_launch: the runtime did not become ready (%s)" % state, file=sys.stderr
+        )
         for line in read_log_tail(log_path):
             print("runtime: " + line, file=sys.stderr)
         if runtime_process.poll() is None:
-            print("sdk_launch: runtime pid %d left running" %
-                  runtime_process.pid, file=sys.stderr)
+            print(
+                "sdk_launch: runtime pid %d left running" % runtime_process.pid,
+                file=sys.stderr,
+            )
         return 1
 
     app_arguments = [application, *common]
@@ -227,13 +247,13 @@ def main(argv: list[str]) -> int:
     for line in render_key_legend(options.config):
         print(line, flush=True)
     try:
-        application_process = subprocess.Popen(app_arguments,
-                                               env=child_environment)
+        application_process = subprocess.Popen(app_arguments, env=child_environment)
     except OSError as error:
-        print("sdk_launch: the application did not start: %s" % error,
-              file=sys.stderr)
-        print("sdk_launch: runtime is still running, pid %d" %
-              runtime_process.pid, file=sys.stderr)
+        print("sdk_launch: the application did not start: %s" % error, file=sys.stderr)
+        print(
+            "sdk_launch: runtime is still running, pid %d" % runtime_process.pid,
+            file=sys.stderr,
+        )
         return 1
 
     def forward(signum, _frame):
@@ -256,18 +276,21 @@ def main(argv: list[str]) -> int:
     runtime_status = runtime_process.poll()
     if runtime_status is None:
         print("sdk_launch: application exited with %d" % application_status)
-        print("sdk_launch: runtime is still running, pid %d; send it SIGTERM "
-              "for the ordered ZeroTorque stop" % runtime_process.pid)
+        print(
+            "sdk_launch: runtime is still running, pid %d; send it SIGTERM "
+            "for the ordered ZeroTorque stop" % runtime_process.pid
+        )
         if options.stop_all:
-            print("sdk_launch: --stop-all requested; sending SIGTERM to the "
-                  "runtime")
+            print("sdk_launch: --stop-all requested; sending SIGTERM to the runtime")
             runtime_process.send_signal(signal.SIGTERM)
             try:
                 runtime_status = runtime_process.wait(timeout=30)
             except subprocess.TimeoutExpired:
-                print("sdk_launch: the runtime did not stop within 30 s; pid "
-                      "%d is still running" % runtime_process.pid,
-                      file=sys.stderr)
+                print(
+                    "sdk_launch: the runtime did not stop within 30 s; pid "
+                    "%d is still running" % runtime_process.pid,
+                    file=sys.stderr,
+                )
                 return 1
             print("sdk_launch: runtime exited with %d" % runtime_status)
         # The default path leaves the runtime alive; it is a separate decision

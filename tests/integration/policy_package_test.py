@@ -40,17 +40,34 @@ def make_model(dimension: int, out_dimension: int) -> onnx.ModelProto:
     graph = onnx.helper.make_graph(
         [node],
         "policy",
-        [onnx.helper.make_tensor_value_info("obs", onnx.TensorProto.FLOAT, [1, dimension])],
-        [onnx.helper.make_tensor_value_info("actions", onnx.TensorProto.FLOAT, [1, out_dimension])],
+        [
+            onnx.helper.make_tensor_value_info(
+                "obs", onnx.TensorProto.FLOAT, [1, dimension]
+            )
+        ],
+        [
+            onnx.helper.make_tensor_value_info(
+                "actions", onnx.TensorProto.FLOAT, [1, out_dimension]
+            )
+        ],
         [weight],
     )
-    model = onnx.helper.make_model(graph, opset_imports=[onnx.helper.make_opsetid("", 18)])
+    model = onnx.helper.make_model(
+        graph, opset_imports=[onnx.helper.make_opsetid("", 18)]
+    )
     model.ir_version = IR_VERSION
     model.metadata_props.add(key="unrelated", value="kept")
     return model
 
 
-def write_package(path: Path, document: dict | None, *, entries: int = 1, dimension: int = 18, out_dimension: int = 3):
+def write_package(
+    path: Path,
+    document: dict | None,
+    *,
+    entries: int = 1,
+    dimension: int = 18,
+    out_dimension: int = 3,
+):
     model = make_model(dimension, out_dimension)
     if document is not None:
         for _ in range(entries):
@@ -95,7 +112,13 @@ def write_model_with_newer_ir(path: Path, document: dict) -> None:
 
 def run_verify(source: Path, before: Path, after: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [sys.executable, str(source / "tools" / "verify_policy.py"), str(before), str(after), "--quiet"],
+        [
+            sys.executable,
+            str(source / "tools" / "verify_policy.py"),
+            str(before),
+            str(after),
+            "--quiet",
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -105,14 +128,22 @@ def run_verify(source: Path, before: Path, after: Path) -> subprocess.CompletedP
 
 def main() -> int:
     source_root = Path(sys.argv[1]).resolve()
-    fixture = json.loads((source_root / "tests" / "support" / "deployment" / "valid_three_orders.json").read_text())
+    fixture = json.loads(
+        (
+            source_root / "tests" / "support" / "deployment" / "valid_three_orders.json"
+        ).read_text()
+    )
     failures: list[str] = []
 
     def expect(note: str, accepted: bool, result: subprocess.CompletedProcess) -> None:
         if accepted and result.returncode != 0:
-            failures.append(f"{note}: expected acceptance, got rc={result.returncode}: {result.stderr.strip()}")
+            failures.append(
+                f"{note}: expected acceptance, got rc={result.returncode}: {result.stderr.strip()}"
+            )
         if not accepted and result.returncode == 0:
-            failures.append(f"{note}: expected a refusal, but the tool accepted the package")
+            failures.append(
+                f"{note}: expected a refusal, but the tool accepted the package"
+            )
         if not accepted and result.returncode != 0 and not result.stderr.strip():
             failures.append(f"{note}: refused without a diagnostic")
 
@@ -125,17 +156,30 @@ def main() -> int:
         write_package(before, None)
         write_package(after, fixture)
         expect("the exported package", True, run_verify(source_root, before, after))
-        expect("a model that already carries the contract", True, run_verify(source_root, after, after))
+        expect(
+            "a model that already carries the contract",
+            True,
+            run_verify(source_root, after, after),
+        )
 
         cases = {
             "a model without the contract": (lambda: write_package(after, None)),
-            "a model that carries the contract twice": (lambda: write_package(after, fixture, entries=2)),
+            "a model that carries the contract twice": (
+                lambda: write_package(after, fixture, entries=2)
+            ),
             "a document of the wrong policy type": (
                 lambda: write_package(after, {**fixture, "policy_type": "joint_torque"})
             ),
             "a document claiming another input": (
                 lambda: write_package(
-                    after, {**fixture, "model": {**fixture["model"], "input": {"name": "obs", "dimension": 15}}}
+                    after,
+                    {
+                        **fixture,
+                        "model": {
+                            **fixture["model"],
+                            "input": {"name": "obs", "dimension": 15},
+                        },
+                    },
                 )
             ),
             "a document with an unsupported observation frame": (
@@ -146,15 +190,22 @@ def main() -> int:
                         "observation": {
                             **fixture["observation"],
                             "terms": [
-                                {**fixture["observation"]["terms"][0], "frame": "world"},
+                                {
+                                    **fixture["observation"]["terms"][0],
+                                    "frame": "world",
+                                },
                                 *fixture["observation"]["terms"][1:],
                             ],
                         },
                     },
                 )
             ),
-            "a model whose weights moved": (lambda: write_model_with_moved_weights(after, fixture)),
-            "a model of a newer IR version": (lambda: write_model_with_newer_ir(after, fixture)),
+            "a model whose weights moved": (
+                lambda: write_model_with_moved_weights(after, fixture)
+            ),
+            "a model of a newer IR version": (
+                lambda: write_model_with_newer_ir(after, fixture)
+            ),
         }
         for note, mutate in cases.items():
             mutate()

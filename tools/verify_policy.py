@@ -39,7 +39,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from deployment_contract import SchemaError, load_policy_document, validate_file  # noqa: E402
 
 METADATA_KEY = "irmv.deployment"
-DEFAULT_SCHEMA = Path(__file__).resolve().parents[1] / "schema" / "onnx-deployment-v1.schema.json"
+DEFAULT_SCHEMA = (
+    Path(__file__).resolve().parents[1] / "schema" / "onnx-deployment-v1.schema.json"
+)
 
 # The highest ONNX IR version the pinned ONNX Runtime (see
 # cmake/Dependencies.cmake, IRMV_ONNXRUNTIME_VERSION) can load. A model saved by
@@ -95,23 +97,33 @@ def read_document(model: onnx.ModelProto, schema_path: Path) -> dict:
     if not entries:
         raise VerificationError(f"the model carries no {METADATA_KEY} entry")
     if len(entries) > 1:
-        raise VerificationError(f"the model carries {len(entries)} {METADATA_KEY} entries")
+        raise VerificationError(
+            f"the model carries {len(entries)} {METADATA_KEY} entries"
+        )
     try:
         document = load_policy_document(entries[0].value)
         validate_file(schema_path, document, METADATA_KEY)
     except SchemaError as error:
-        raise VerificationError(f"the {METADATA_KEY} document is not conforming: {error}") from error
+        raise VerificationError(
+            f"the {METADATA_KEY} document is not conforming: {error}"
+        ) from error
 
     input_name, input_dimension = tensor_shape(model.graph.input[0])
     output_name, output_dimension = tensor_shape(model.graph.output[0])
     declared_input = document["model"]["input"]
     declared_output = document["model"]["output"]
-    if (declared_input["name"], declared_input["dimension"]) != (input_name, input_dimension):
+    if (declared_input["name"], declared_input["dimension"]) != (
+        input_name,
+        input_dimension,
+    ):
         raise VerificationError(
             "the document declares the input "
             f"{declared_input['name']!r}[{declared_input['dimension']}] but the graph has {input_name!r}[{input_dimension}]"
         )
-    if (declared_output["name"], declared_output["dimension"]) != (output_name, output_dimension):
+    if (declared_output["name"], declared_output["dimension"]) != (
+        output_name,
+        output_dimension,
+    ):
         raise VerificationError(
             "the document declares the output "
             f"{declared_output['name']!r}[{declared_output['dimension']}] but the graph has"
@@ -125,8 +137,14 @@ def compare_computation(before: onnx.ModelProto, after: onnx.ModelProto) -> None
 
     if before.graph.SerializeToString() != after.graph.SerializeToString():
         raise VerificationError("the two models do not describe the same graph")
-    before_ops = [(node.op_type, tuple(node.input), tuple(node.output)) for node in before.graph.node]
-    after_ops = [(node.op_type, tuple(node.input), tuple(node.output)) for node in after.graph.node]
+    before_ops = [
+        (node.op_type, tuple(node.input), tuple(node.output))
+        for node in before.graph.node
+    ]
+    after_ops = [
+        (node.op_type, tuple(node.input), tuple(node.output))
+        for node in after.graph.node
+    ]
     if before_ops != after_ops:
         raise VerificationError("the two models do not contain the same operators")
     if [initializer.name for initializer in before.graph.initializer] != [
@@ -149,10 +167,14 @@ def run(model_path: Path, input_name: str, values: np.ndarray) -> np.ndarray:
     options.intra_op_num_threads = 1
     options.inter_op_num_threads = 1
     options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
-    session = ort.InferenceSession(str(model_path), sess_options=options, providers=["CPUExecutionProvider"])
+    session = ort.InferenceSession(
+        str(model_path), sess_options=options, providers=["CPUExecutionProvider"]
+    )
     outputs = session.run(None, {input_name: values})
     if len(outputs) != 1:
-        raise VerificationError(f"{model_path}: expected exactly one output, got {len(outputs)}")
+        raise VerificationError(
+            f"{model_path}: expected exactly one output, got {len(outputs)}"
+        )
     return outputs[0]
 
 
@@ -165,36 +187,52 @@ def verify(before_path: Path, after_path: Path, schema_path: Path) -> dict:
     entries = deployment_entries(after)
     try:
         from_file = json.loads(entries[0].value)
-    except json.JSONDecodeError as error:  # already parsed above; kept for the readback comparison
-        raise VerificationError(f"the {METADATA_KEY} value is not valid JSON: {error}") from error
+    except (
+        json.JSONDecodeError
+    ) as error:  # already parsed above; kept for the readback comparison
+        raise VerificationError(
+            f"the {METADATA_KEY} value is not valid JSON: {error}"
+        ) from error
     if from_file != document:
-        raise VerificationError("the document read back from the file differs from the one validated")
+        raise VerificationError(
+            "the document read back from the file differs from the one validated"
+        )
 
     input_name, input_dimension = tensor_shape(after.graph.input[0])
     values = fixed_input(input_name, input_dimension)
     reference = run(before_path, input_name, values)
     candidate = run(after_path, input_name, values)
     if reference.shape != candidate.shape:
-        raise VerificationError(f"the output shape changed: {reference.shape} -> {candidate.shape}")
+        raise VerificationError(
+            f"the output shape changed: {reference.shape} -> {candidate.shape}"
+        )
     if not np.array_equal(reference, candidate):
         difference = float(np.max(np.abs(reference - candidate)))
-        raise VerificationError(f"the outputs differ after the metadata write (max |delta| = {difference})")
+        raise VerificationError(
+            f"the outputs differ after the metadata write (max |delta| = {difference})"
+        )
 
     # The runtime's own view of the file, not the file's protobuf: the SDK reads
     # the contract through this interface.
     options = ort.SessionOptions()
     options.intra_op_num_threads = 1
     options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
-    session = ort.InferenceSession(str(after_path), sess_options=options, providers=["CPUExecutionProvider"])
+    session = ort.InferenceSession(
+        str(after_path), sess_options=options, providers=["CPUExecutionProvider"]
+    )
     readback = session.get_modelmeta().custom_metadata_map
     if readback.get(METADATA_KEY) != entries[0].value:
-        raise VerificationError("ONNX Runtime does not return the document the file stores")
+        raise VerificationError(
+            "ONNX Runtime does not return the document the file stores"
+        )
 
     return {
         "input": f"{input_name}[{input_dimension}]",
         "output": f"{document['model']['output']['name']}[{document['model']['output']['dimension']}]",
         "action_joints": len(document["action"]["joints"]),
-        "observation_dimension": sum(term["dimension"] for term in document["observation"]["terms"]),
+        "observation_dimension": sum(
+            term["dimension"] for term in document["observation"]["terms"]
+        ),
         "policy_period_us": document["policy_period_us"],
         "normalizer": document["normalizer"]["location"],
         "missing": document["source"]["missing"],
@@ -204,10 +242,18 @@ def verify(before_path: Path, after_path: Path, schema_path: Path) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("before", type=Path, help="the model the contract was written into")
-    parser.add_argument("after", type=Path, help="the model carrying the irmv.deployment contract")
-    parser.add_argument("--schema", type=Path, default=DEFAULT_SCHEMA, help="the frozen contract schema")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "before", type=Path, help="the model the contract was written into"
+    )
+    parser.add_argument(
+        "after", type=Path, help="the model carrying the irmv.deployment contract"
+    )
+    parser.add_argument(
+        "--schema", type=Path, default=DEFAULT_SCHEMA, help="the frozen contract schema"
+    )
     parser.add_argument("--quiet", action="store_true", help="print only the failures")
     args = parser.parse_args(argv)
 
@@ -217,10 +263,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"verify_policy: FAILED: {error}", file=sys.stderr)
         return 1
     if not args.quiet:
-        print(f"verify_policy: {args.after} carries {METADATA_KEY} and is unchanged numerically")
+        print(
+            f"verify_policy: {args.after} carries {METADATA_KEY} and is unchanged numerically"
+        )
         print(f"  model    {summary['input']} -> {summary['output']}")
-        print(f"  contract {summary['action_joints']} action joints, {summary['observation_dimension']} observation"
-              f" components, {summary['policy_period_us']} us period, normalizer {summary['normalizer']}")
+        print(
+            f"  contract {summary['action_joints']} action joints, {summary['observation_dimension']} observation"
+            f" components, {summary['policy_period_us']} us period, normalizer {summary['normalizer']}"
+        )
         print(f"  output   {summary['output_sample']}")
         if summary["missing"]:
             print(f"  missing  {', '.join(summary['missing'])}")

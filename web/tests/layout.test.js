@@ -28,21 +28,37 @@ test('a layout with an empty dock and no charts is valid', () => {
 });
 
 test('unknown versions, bad ratios and invalid ranges are refused', () => {
-  const layout = DropSignal(EmptyLayout(), signal('j1', 'q', 'joint_position'),
-                            null, 'empty');
+  const layout = DropSignal(
+    EmptyLayout(),
+    signal('j1', 'q', 'joint_position'),
+    null,
+    'empty',
+  );
   layout.version = 2;
   assert.throws(() => ValidateLayout(layout), LayoutError);
 
-  const valid = DropSignal(EmptyLayout(), signal('j1', 'q', 'joint_position'),
-                           null, 'empty');
+  const valid = DropSignal(
+    EmptyLayout(),
+    signal('j1', 'q', 'joint_position'),
+    null,
+    'empty',
+  );
   valid.charts[0].axes[0].range = [1, 1];
   assert.throws(() => ValidateLayout(valid), LayoutError);
 
-  const ratio = DropSignal(EmptyLayout(), signal('j1', 'q', 'joint_position'),
-                           null, 'empty');
+  const ratio = DropSignal(
+    EmptyLayout(),
+    signal('j1', 'q', 'joint_position'),
+    null,
+    'empty',
+  );
   const first = ratio.charts[0].id;
-  const split = DropSignal(ratio, signal('j1', 'dq', 'joint_velocity'),
-                           first, 'left');
+  const split = DropSignal(
+    ratio,
+    signal('j1', 'dq', 'joint_velocity'),
+    first,
+    'left',
+  );
   split.dock.ratio = 0.95;
   assert.throws(() => ValidateLayout(split), LayoutError);
 });
@@ -52,8 +68,18 @@ test('a layout deeper than 32 is refused', () => {
   const right = signal('right', 'q', 'joint_position');
   const layout = EmptyLayout();
   layout.charts = [
-    { id: 'c1', title: '', curves: [{ signalId: left.id, axisId: 'a1', style: 's1' }], axes: [{ id: 'a1', quantity: 'joint_position', unit: 'rad' }] },
-    { id: 'c2', title: '', curves: [{ signalId: right.id, axisId: 'a2', style: 's2' }], axes: [{ id: 'a2', quantity: 'joint_position', unit: 'rad' }] },
+    {
+      id: 'c1',
+      title: '',
+      curves: [{ signalId: left.id, axisId: 'a1', style: 's1' }],
+      axes: [{ id: 'a1', quantity: 'joint_position', unit: 'rad' }],
+    },
+    {
+      id: 'c2',
+      title: '',
+      curves: [{ signalId: right.id, axisId: 'a2', style: 's2' }],
+      axes: [{ id: 'a2', quantity: 'joint_position', unit: 'rad' }],
+    },
   ];
   let node = { type: 'leaf', chartId: 'c1' };
   for (let index = 0; index < 40; index += 1) {

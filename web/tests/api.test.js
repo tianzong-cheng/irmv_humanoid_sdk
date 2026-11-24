@@ -82,8 +82,12 @@ test('an abort is not reported as an experiment failure', async () => {
       error.name = 'AbortError';
       return Promise.reject(error);
     },
-    onError: () => { failed += 1; },
-    onAbort: () => { aborted += 1; },
+    onError: () => {
+      failed += 1;
+    },
+    onAbort: () => {
+      aborted += 1;
+    },
   });
   const result = await pending;
   assert.equal(result.aborted, true);

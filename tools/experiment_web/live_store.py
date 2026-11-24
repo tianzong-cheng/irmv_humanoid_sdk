@@ -65,8 +65,9 @@ def _decode_joint(name: str) -> str:
     return unquote(name)
 
 
-def _bucket_reduce(points: list[dict], begin_us: int, end_us: int,
-                   pixel_width: int) -> list[dict]:
+def _bucket_reduce(
+    points: list[dict], begin_us: int, end_us: int, pixel_width: int
+) -> list[dict]:
     if not points:
         return []
     width = max(1, (end_us - begin_us + max(1, pixel_width) - 1) // max(1, pixel_width))
@@ -114,8 +115,9 @@ def _bucket_reduce(points: list[dict], begin_us: int, end_us: int,
 
 
 class _RunTail:
-    def __init__(self, run_id: str, run_path: Path, source: str,
-                 metadata: dict) -> None:
+    def __init__(
+        self, run_id: str, run_path: Path, source: str, metadata: dict
+    ) -> None:
         self.run_id = run_id
         self.run_path = run_path
         self.source = source
@@ -149,8 +151,7 @@ class LiveStore:
     MAX_GLOBAL_BYTES = 128 * 1024 * 1024
     MAX_FAULTS_PER_RUN = 1024
 
-    def __init__(self, records_root: Path | str,
-                 clock=None) -> None:
+    def __init__(self, records_root: Path | str, clock=None) -> None:
         self.records_root = canonical_records_root(records_root)
         self._clock = clock or time.monotonic
         self._lock = threading.Lock()
@@ -166,7 +167,9 @@ class LiveStore:
             with (run_path / "meta.json").open("r", encoding="utf-8") as handle:
                 metadata = json.load(handle)
         except (OSError, json.JSONDecodeError) as error:
-            raise LiveError(f"the live run has no readable metadata: {error}") from error
+            raise LiveError(
+                f"the live run has no readable metadata: {error}"
+            ) from error
         if not isinstance(metadata, dict):
             raise LiveError("the live run metadata is not an object")
         return metadata
@@ -214,9 +217,7 @@ class LiveStore:
             if run is None:
                 if len(self._runs) >= self.MAX_RUNS:
                     self._rejected.append(run_id)
-                    raise LiveError(
-                        "the live tail limit of 8 active runs is reached"
-                    )
+                    raise LiveError("the live tail limit of 8 active runs is reached")
                 run = _RunTail(run_id, run_path, source, metadata)
                 self._runs[run_id] = run
             elif run.run_path != run_path:
@@ -254,9 +255,11 @@ class LiveStore:
                 size = len(encoded.encode("utf-8"))
                 previous = run.faults.pop(record_seq, None)
                 if previous is not None:
-                    previous_size = len(json.dumps(
-                        previous, separators=(",", ":"), ensure_ascii=False
-                    ).encode("utf-8"))
+                    previous_size = len(
+                        json.dumps(
+                            previous, separators=(",", ":"), ensure_ascii=False
+                        ).encode("utf-8")
+                    )
                     run.fault_bytes -= previous_size
                     self._bytes -= previous_size
                     run.bytes -= previous_size
@@ -267,9 +270,11 @@ class LiveStore:
                 while len(run.faults) > self.MAX_FAULTS_PER_RUN:
                     oldest_seq = next(iter(run.faults))
                     removed = run.faults.pop(oldest_seq)
-                    removed_size = len(json.dumps(
-                        removed, separators=(",", ":"), ensure_ascii=False
-                    ).encode("utf-8"))
+                    removed_size = len(
+                        json.dumps(
+                            removed, separators=(",", ":"), ensure_ascii=False
+                        ).encode("utf-8")
+                    )
                     run.fault_bytes -= removed_size
                     run.bytes -= removed_size
                     self._bytes -= removed_size
@@ -280,8 +285,11 @@ class LiveStore:
                 return
             if kind != "sample":
                 raise LiveError("the live message kind is unknown")
-            sample = self._runtime_sample_key(payload) if source == "runtime" \
+            sample = (
+                self._runtime_sample_key(payload)
+                if source == "runtime"
                 else self._application_sample_key(payload)
+            )
             encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
             size = len(encoded.encode("utf-8"))
             existing = run.samples.get(sample["key"])
@@ -302,11 +310,13 @@ class LiveStore:
             run.bytes += size
             stamp = sample["stamp_us"]
             run.coverage_begin_us = (
-                stamp if run.coverage_begin_us is None
+                stamp
+                if run.coverage_begin_us is None
                 else min(run.coverage_begin_us, stamp)
             )
             run.coverage_end_us = (
-                stamp if run.coverage_end_us is None
+                stamp
+                if run.coverage_end_us is None
                 else max(run.coverage_end_us, stamp)
             )
             run.last_transport_seq = max(run.last_transport_seq, transport_seq)
@@ -332,7 +342,9 @@ class LiveStore:
             stamp = int(payload["stamp_us"])
             sequence = int(payload["sample_seq"])
         except (KeyError, TypeError, ValueError) as error:
-            raise LiveError("an application sample has no stamp/sample sequence") from error
+            raise LiveError(
+                "an application sample has no stamp/sample sequence"
+            ) from error
         payload.setdefault("stamp_us", str(stamp))
         payload.setdefault("sample_seq", str(sequence))
         return {"key": ("application", stamp, sequence), "stamp_us": stamp}
@@ -351,14 +363,15 @@ class LiveStore:
             run.samples.pop(oldest_key)
             self._bytes -= oldest["bytes"]
             run.bytes -= oldest["bytes"]
-            run.evicted_until_us = max(run.evicted_until_us,
-                                       oldest["stamp_us"] + 1)
+            run.evicted_until_us = max(run.evicted_until_us, oldest["stamp_us"] + 1)
         while run.faults and run.bytes > self.MAX_RUN_BYTES:
             oldest_seq = next(iter(run.faults))
             removed = run.faults.pop(oldest_seq)
-            removed_size = len(json.dumps(
-                removed, separators=(",", ":"), ensure_ascii=False
-            ).encode("utf-8"))
+            removed_size = len(
+                json.dumps(removed, separators=(",", ":"), ensure_ascii=False).encode(
+                    "utf-8"
+                )
+            )
             run.fault_bytes -= removed_size
             run.bytes -= removed_size
             self._bytes -= removed_size
@@ -373,9 +386,11 @@ class LiveStore:
                 if oldest_run.faults:
                     oldest_seq = next(iter(oldest_run.faults))
                     removed = oldest_run.faults.pop(oldest_seq)
-                    removed_size = len(json.dumps(
-                        removed, separators=(",", ":"), ensure_ascii=False
-                    ).encode("utf-8"))
+                    removed_size = len(
+                        json.dumps(
+                            removed, separators=(",", ":"), ensure_ascii=False
+                        ).encode("utf-8")
+                    )
                     oldest_run.fault_bytes -= removed_size
                     oldest_run.bytes -= removed_size
                     self._bytes -= removed_size
@@ -432,9 +447,12 @@ class LiveStore:
             if previous is not None:
                 broken = stamp <= previous[0] or stamp - previous[0] > (period * 3) // 2
                 if run.source == "application":
-                    if payload.get("identity_known") != previous[1].get("identity_known") or \
-                            payload.get("runtime_id") != previous[1].get("runtime_id") or \
-                            payload.get("session_id") != previous[1].get("session_id"):
+                    if (
+                        payload.get("identity_known")
+                        != previous[1].get("identity_known")
+                        or payload.get("runtime_id") != previous[1].get("runtime_id")
+                        or payload.get("session_id") != previous[1].get("session_id")
+                    ):
                         broken = True
                 if run.evicted_until_us and previous[0] < run.evicted_until_us:
                     broken = True
@@ -453,7 +471,10 @@ class LiveStore:
         if source == "application":
             for stamp, payload, segment in ordered:
                 if field not in payload and field not in {
-                    "stamp_us", "sample_seq", "latest_state_seq", "identity_known"
+                    "stamp_us",
+                    "sample_seq",
+                    "latest_state_seq",
+                    "identity_known",
                 }:
                     continue
                 value = payload.get(field)
@@ -497,8 +518,13 @@ class LiveStore:
                 if value is None:
                     continue
                 if field in {
-                    "healthy", "damping_eligible", "command_present",
-                    "feedback_valid", "imu_valid", "send_accepted", "output_valid",
+                    "healthy",
+                    "damping_eligible",
+                    "command_present",
+                    "feedback_valid",
+                    "imu_valid",
+                    "send_accepted",
+                    "output_valid",
                 }:
                     value = 1 if value else 0
             points.append(
@@ -526,15 +552,23 @@ class LiveStore:
                 for run_id, run in self._runs.items()
             }
 
-    def Snapshot(self, run_id: str, signal_ids: list[str], begin_us: int,
-                 end_us: int, pixel_width: int = 800,
-                 after_revision: int | None = None) -> dict:
+    def Snapshot(
+        self,
+        run_id: str,
+        signal_ids: list[str],
+        begin_us: int,
+        end_us: int,
+        pixel_width: int = 800,
+        after_revision: int | None = None,
+    ) -> dict:
         with self._lock:
             run = self._runs.get(run_id)
             if run is None:
                 raise LiveError("the run has no active live tail")
             revision = run.revision
-            active = run.pending and self._clock() * 1000.0 - run.last_arrival_ms <= 3000
+            active = (
+                run.pending and self._clock() * 1000.0 - run.last_arrival_ms <= 3000
+            )
             if after_revision is not None and after_revision == revision:
                 return {
                     "ok": True,
@@ -560,11 +594,15 @@ class LiveStore:
                 "sample_hz": run.sample_hz,
             }
             coverage = {
-                "begin_us": None if run.coverage_begin_us is None
+                "begin_us": None
+                if run.coverage_begin_us is None
                 else str(run.coverage_begin_us),
-                "end_us": None if run.coverage_end_us is None
+                "end_us": None
+                if run.coverage_end_us is None
                 else str(run.coverage_end_us),
-                "evicted_before_us": str(run.evicted_until_us) if run.evicted_until_us else None,
+                "evicted_before_us": str(run.evicted_until_us)
+                if run.evicted_until_us
+                else None,
             }
             payload = {
                 "ok": True,
@@ -584,12 +622,25 @@ class LiveStore:
             }
             return payload
 
-    def SnapshotTail(self, run_id: str, signal_ids: list[str], begin_us: int,
-                     end_us: int, pixel_width: int = 800) -> dict:
+    def SnapshotTail(
+        self,
+        run_id: str,
+        signal_ids: list[str],
+        begin_us: int,
+        end_us: int,
+        pixel_width: int = 800,
+    ) -> dict:
         return self.Snapshot(run_id, signal_ids, begin_us, end_us, pixel_width)
 
-    def merge_range(self, reply: dict, run_id: str, signal_ids: list[str],
-                    begin_us: int, end_us: int, pixel_width: int) -> dict:
+    def merge_range(
+        self,
+        reply: dict,
+        run_id: str,
+        signal_ids: list[str],
+        begin_us: int,
+        end_us: int,
+        pixel_width: int,
+    ) -> dict:
         """Append uncommitted tail points to a committed range reply.
 
         A live point at or after the committed coverage end is appended unless
@@ -597,8 +648,7 @@ class LiveStore:
         therefore win even when a tail copy of the same sample is still cached.
         """
         try:
-            snapshot = self.Snapshot(run_id, signal_ids, begin_us, end_us,
-                                     pixel_width)
+            snapshot = self.Snapshot(run_id, signal_ids, begin_us, end_us, pixel_width)
         except LiveError:
             return reply
         committed_end = None
@@ -655,11 +705,11 @@ class LiveStore:
                 run = self._runs.get(run_id)
                 if run is None:
                     return reply
-                live = sorted(run.faults.values(),
-                              key=lambda fault: int(fault.get("detected_stamp_us", 0)))
-                existing = {
-                    event.get("event_id") for event in reply.get("events", [])
-                }
+                live = sorted(
+                    run.faults.values(),
+                    key=lambda fault: int(fault.get("detected_stamp_us", 0)),
+                )
+                existing = {event.get("event_id") for event in reply.get("events", [])}
                 for fault in live:
                     event_id = str(fault.get("record_seq"))
                     if event_id not in existing:
@@ -694,8 +744,9 @@ class LiveReceiver:
         self._socket.bind(str(self.path))
         os.chmod(self.path, 0o600)
         self._closed = False
-        self._thread = threading.Thread(target=self._run, name="live-receiver",
-                                        daemon=True)
+        self._thread = threading.Thread(
+            target=self._run, name="live-receiver", daemon=True
+        )
 
     def start(self) -> None:
         self._thread.start()

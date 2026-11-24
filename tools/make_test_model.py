@@ -29,18 +29,30 @@ def weights(dimension: int, out_dimension: int, scale: float = 1.0) -> onnx.Tens
         "W",
         onnx.TensorProto.FLOAT,
         [dimension, out_dimension],
-        (np.linspace(-1.0, 1.0, dimension * out_dimension).astype(np.float32) * scale).tobytes(),
+        (
+            np.linspace(-1.0, 1.0, dimension * out_dimension).astype(np.float32) * scale
+        ).tobytes(),
         raw=True,
     )
 
 
-def base_graph(dimension: int, out_dimension: int, input_width: object, weight_scale: float = 1.0) -> onnx.GraphProto:
+def base_graph(
+    dimension: int, out_dimension: int, input_width: object, weight_scale: float = 1.0
+) -> onnx.GraphProto:
     node = onnx.helper.make_node("MatMul", [INPUT, "W"], [OUTPUT])
     return onnx.helper.make_graph(
         [node],
         "policy",
-        [onnx.helper.make_tensor_value_info(INPUT, onnx.TensorProto.FLOAT, [1, input_width])],
-        [onnx.helper.make_tensor_value_info(OUTPUT, onnx.TensorProto.FLOAT, [1, out_dimension])],
+        [
+            onnx.helper.make_tensor_value_info(
+                INPUT, onnx.TensorProto.FLOAT, [1, input_width]
+            )
+        ],
+        [
+            onnx.helper.make_tensor_value_info(
+                OUTPUT, onnx.TensorProto.FLOAT, [1, out_dimension]
+            )
+        ],
         [weights(dimension, out_dimension, weight_scale)],
     )
 
@@ -61,14 +73,18 @@ def typed_graph(
         onnx.TensorProto.DOUBLE: np.float64,
         onnx.TensorProto.FLOAT16: np.float16,
     }.get(input_type, np.float32)
-    values = (np.linspace(-1.0, 1.0, dimension * out_dimension).astype(numpy_type)).tobytes()
+    values = (
+        np.linspace(-1.0, 1.0, dimension * out_dimension).astype(numpy_type)
+    ).tobytes()
     weight = onnx.helper.make_tensor(
         "W", input_type, [dimension, out_dimension], values, raw=True
     )
     matmul_output = "raw"
     nodes = [onnx.helper.make_node("MatMul", [INPUT, "W"], [matmul_output])]
     if output_type != input_type:
-        nodes.append(onnx.helper.make_node("Cast", [matmul_output], [OUTPUT], to=output_type))
+        nodes.append(
+            onnx.helper.make_node("Cast", [matmul_output], [OUTPUT], to=output_type)
+        )
     else:
         nodes.append(onnx.helper.make_node("Identity", [matmul_output], [OUTPUT]))
     return onnx.helper.make_graph(
@@ -80,7 +96,9 @@ def typed_graph(
     )
 
 
-def long_running_graph(dimension: int, out_dimension: int, iterations: int = 200_000_000) -> onnx.GraphProto:
+def long_running_graph(
+    dimension: int, out_dimension: int, iterations: int = 200_000_000
+) -> onnx.GraphProto:
     """A valid model whose Loop body keeps running until the executor terminates.
 
     The body is a real loop-carried add, not something constant folding can
@@ -89,14 +107,25 @@ def long_running_graph(dimension: int, out_dimension: int, iterations: int = 200
     """
     weight = weights(dimension, out_dimension)
     trip = onnx.helper.make_tensor(
-        "M", onnx.TensorProto.INT64, [], np.array([iterations], dtype=np.int64).tobytes(), raw=True
+        "M",
+        onnx.TensorProto.INT64,
+        [],
+        np.array([iterations], dtype=np.int64).tobytes(),
+        raw=True,
     )
     enter = onnx.helper.make_tensor(
-        "COND", onnx.TensorProto.BOOL, [], np.array([True], dtype=np.bool_).tobytes(), raw=True
+        "COND",
+        onnx.TensorProto.BOOL,
+        [],
+        np.array([True], dtype=np.bool_).tobytes(),
+        raw=True,
     )
     step = onnx.helper.make_tensor(
-        "STEP", onnx.TensorProto.FLOAT, [1, out_dimension],
-        np.full((1, out_dimension), 1e-9, dtype=np.float32).tobytes(), raw=True,
+        "STEP",
+        onnx.TensorProto.FLOAT,
+        [1, out_dimension],
+        np.full((1, out_dimension), 1e-9, dtype=np.float32).tobytes(),
+        raw=True,
     )
 
     body = onnx.helper.make_graph(
@@ -108,21 +137,35 @@ def long_running_graph(dimension: int, out_dimension: int, iterations: int = 200
         [
             onnx.helper.make_tensor_value_info("iter", onnx.TensorProto.INT64, []),
             onnx.helper.make_tensor_value_info("cond_in", onnx.TensorProto.BOOL, []),
-            onnx.helper.make_tensor_value_info("acc_in", onnx.TensorProto.FLOAT, [1, out_dimension]),
+            onnx.helper.make_tensor_value_info(
+                "acc_in", onnx.TensorProto.FLOAT, [1, out_dimension]
+            ),
         ],
         [
             onnx.helper.make_tensor_value_info("cond_out", onnx.TensorProto.BOOL, []),
-            onnx.helper.make_tensor_value_info("acc_out", onnx.TensorProto.FLOAT, [1, out_dimension]),
+            onnx.helper.make_tensor_value_info(
+                "acc_out", onnx.TensorProto.FLOAT, [1, out_dimension]
+            ),
         ],
     )
     graph = onnx.helper.make_graph(
         [
             onnx.helper.make_node("MatMul", [INPUT, "W"], ["initial"]),
-            onnx.helper.make_node("Loop", ["M", "COND", "initial"], [OUTPUT], body=body),
+            onnx.helper.make_node(
+                "Loop", ["M", "COND", "initial"], [OUTPUT], body=body
+            ),
         ],
         "policy",
-        [onnx.helper.make_tensor_value_info(INPUT, onnx.TensorProto.FLOAT, [1, dimension])],
-        [onnx.helper.make_tensor_value_info(OUTPUT, onnx.TensorProto.FLOAT, [1, out_dimension])],
+        [
+            onnx.helper.make_tensor_value_info(
+                INPUT, onnx.TensorProto.FLOAT, [1, dimension]
+            )
+        ],
+        [
+            onnx.helper.make_tensor_value_info(
+                OUTPUT, onnx.TensorProto.FLOAT, [1, out_dimension]
+            )
+        ],
         [weight, trip, enter, step],
     )
     return graph
@@ -135,16 +178,24 @@ def long_running_graph(dimension: int, out_dimension: int, iterations: int = 200
 IR_VERSION = 10
 
 
-def make_model(graph: onnx.GraphProto, document: dict | None, entries: int = 1) -> onnx.ModelProto:
-    model = onnx.helper.make_model(graph, opset_imports=[onnx.helper.make_opsetid("", 18)])
+def make_model(
+    graph: onnx.GraphProto, document: dict | None, entries: int = 1
+) -> onnx.ModelProto:
+    model = onnx.helper.make_model(
+        graph, opset_imports=[onnx.helper.make_opsetid("", 18)]
+    )
     model.ir_version = IR_VERSION
     if document is not None:
         for _ in range(entries):
-            model.metadata_props.add(key=METADATA_KEY, value=json.dumps(document, sort_keys=True))
+            model.metadata_props.add(
+                key=METADATA_KEY, value=json.dumps(document, sort_keys=True)
+            )
     return model
 
 
-def save(directory: Path, name: str, model: onnx.ModelProto, check: bool = True) -> None:
+def save(
+    directory: Path, name: str, model: onnx.ModelProto, check: bool = True
+) -> None:
     # A deliberately duplicated metadata key is one of the fixtures, and the
     # ONNX checker rejects exactly that - which is also how the SDK's own
     # verification tool detects it - so the checker only runs where the model is
@@ -279,7 +330,9 @@ def write_fake_deployment(directory: Path, config_path: Path, domain: int) -> No
     save(
         directory,
         "policy.onnx",
-        make_model(base_graph(dimension, out_dimension, dimension, weight_scale=0.01), document),
+        make_model(
+            base_graph(dimension, out_dimension, dimension, weight_scale=0.01), document
+        ),
     )
 
     config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -296,14 +349,22 @@ def write_fake_deployment(directory: Path, config_path: Path, domain: int) -> No
     for key in ("joint_velocity_limits", "torque_limits", "target_velocity_limits"):
         config["runtime"]["safety"][key] = spread(config["runtime"]["safety"][key])
     for key in ("position_delta", "velocity_delta", "torque_delta"):
-        config["runtime"]["continuity"][key] = spread(config["runtime"]["continuity"][key])
-    config["application"]["initialization"]["target_position"] = {name: 0.0 for name in joints}
+        config["runtime"]["continuity"][key] = spread(
+            config["runtime"]["continuity"][key]
+        )
+    config["application"]["initialization"]["target_position"] = {
+        name: 0.0 for name in joints
+    }
     gain = next(iter(config["application"]["initialization"]["gains"].values()))
-    config["application"]["initialization"]["gains"] = {name: dict(gain) for name in joints}
+    config["application"]["initialization"]["gains"] = {
+        name: dict(gain) for name in joints
+    }
     config["application"]["policy"]["model_path"] = str(model_path)
     config["application"]["policy"]["inference_timeout_us"] = 100000
     config["dds"]["domain"] = domain
-    (directory / "sdk.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    (directory / "sdk.json").write_text(
+        json.dumps(config, indent=2) + "\n", encoding="utf-8"
+    )
 
     # The Fake deployment's feedback has to cover the same twelve joints, and
     # the IMU has to be valid: the local policy's observation contains the
@@ -333,7 +394,9 @@ def write_fake_deployment(directory: Path, config_path: Path, domain: int) -> No
             }
         ]
     }
-    (directory / "fake_scenario.json").write_text(json.dumps(scenario, indent=2) + "\n", encoding="utf-8")
+    (directory / "fake_scenario.json").write_text(
+        json.dumps(scenario, indent=2) + "\n", encoding="utf-8"
+    )
 
 
 def main() -> int:
@@ -349,8 +412,16 @@ def main() -> int:
     assert fixture["model"]["output"]["name"] == OUTPUT
     directory.mkdir(parents=True, exist_ok=True)
 
-    save(directory, "valid.onnx", make_model(base_graph(dimension, out_dimension, dimension), fixture))
-    save(directory, "no_metadata.onnx", make_model(base_graph(dimension, out_dimension, dimension), None))
+    save(
+        directory,
+        "valid.onnx",
+        make_model(base_graph(dimension, out_dimension, dimension), fixture),
+    )
+    save(
+        directory,
+        "no_metadata.onnx",
+        make_model(base_graph(dimension, out_dimension, dimension), None),
+    )
     save(
         directory,
         "duplicated.onnx",
@@ -405,7 +476,10 @@ def main() -> int:
             base_graph(dimension, out_dimension, dimension),
             {
                 **fixture,
-                "action": {**fixture["action"], "joints": ["shoulder", *fixture["action"]["joints"][1:]]},
+                "action": {
+                    **fixture["action"],
+                    "joints": ["shoulder", *fixture["action"]["joints"][1:]],
+                },
             },
         ),
     )
@@ -417,10 +491,18 @@ def main() -> int:
                 [onnx.helper.make_node("MatMul", [INPUT, "W"], [OUTPUT])],
                 "policy",
                 [
-                    onnx.helper.make_tensor_value_info(INPUT, onnx.TensorProto.FLOAT, [1, dimension]),
-                    onnx.helper.make_tensor_value_info("bias", onnx.TensorProto.FLOAT, [1, out_dimension]),
+                    onnx.helper.make_tensor_value_info(
+                        INPUT, onnx.TensorProto.FLOAT, [1, dimension]
+                    ),
+                    onnx.helper.make_tensor_value_info(
+                        "bias", onnx.TensorProto.FLOAT, [1, out_dimension]
+                    ),
                 ],
-                [onnx.helper.make_tensor_value_info(OUTPUT, onnx.TensorProto.FLOAT, [1, out_dimension])],
+                [
+                    onnx.helper.make_tensor_value_info(
+                        OUTPUT, onnx.TensorProto.FLOAT, [1, out_dimension]
+                    )
+                ],
                 [weights(dimension, out_dimension)],
             ),
             fixture,
@@ -429,7 +511,11 @@ def main() -> int:
 
     # An output that is not finite: the graph divides the finite action by zero.
     zero = onnx.helper.make_tensor(
-        "Z", onnx.TensorProto.FLOAT, [1, out_dimension], np.zeros(out_dimension, dtype=np.float32).tobytes(), raw=True
+        "Z",
+        onnx.TensorProto.FLOAT,
+        [1, out_dimension],
+        np.zeros(out_dimension, dtype=np.float32).tobytes(),
+        raw=True,
     )
     non_finite_graph = onnx.helper.make_graph(
         [
@@ -437,8 +523,16 @@ def main() -> int:
             onnx.helper.make_node("Div", ["finite", "Z"], [OUTPUT]),
         ],
         "policy",
-        [onnx.helper.make_tensor_value_info(INPUT, onnx.TensorProto.FLOAT, [1, dimension])],
-        [onnx.helper.make_tensor_value_info(OUTPUT, onnx.TensorProto.FLOAT, [1, out_dimension])],
+        [
+            onnx.helper.make_tensor_value_info(
+                INPUT, onnx.TensorProto.FLOAT, [1, dimension]
+            )
+        ],
+        [
+            onnx.helper.make_tensor_value_info(
+                OUTPUT, onnx.TensorProto.FLOAT, [1, out_dimension]
+            )
+        ],
         [weights(dimension, out_dimension), zero],
     )
     save(directory, "non_finite.onnx", make_model(non_finite_graph, fixture))
@@ -462,10 +556,14 @@ def main() -> int:
         save(
             directory,
             name,
-            make_model(typed_graph(dimension, out_dimension, input_type, output_type), fixture),
+            make_model(
+                typed_graph(dimension, out_dimension, input_type, output_type), fixture
+            ),
         )
 
-    print(f"make_test_model: {len(list(directory.glob('*.onnx')))} fixtures in {directory}")
+    print(
+        f"make_test_model: {len(list(directory.glob('*.onnx')))} fixtures in {directory}"
+    )
     return 0
 
 

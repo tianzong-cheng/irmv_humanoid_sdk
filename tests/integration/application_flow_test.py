@@ -107,14 +107,18 @@ class Process:
             # leaves; on Linux the master still reports the slave's termios.
             master, slave = pty.openpty()
             self.process = subprocess.Popen(
-                self.command, cwd=str(cwd), stdin=slave, stdout=slave,
-                stderr=slave)
+                self.command, cwd=str(cwd), stdin=slave, stdout=slave, stderr=slave
+            )
             os.close(slave)
             self.master = os.fdopen(master, "rb")
         else:
             self.process = subprocess.Popen(
-                self.command, cwd=str(cwd), stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                self.command,
+                cwd=str(cwd),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
             self.master = self.process.stdout
         self.pid = self.process.pid
         self._reader = threading.Thread(target=self._read, daemon=True)
@@ -130,8 +134,11 @@ class Process:
                         if self.process.poll() is not None:
                             return
                         continue
-                chunk = os.read(descriptor.fileno(), 4096) if self.terminal \
+                chunk = (
+                    os.read(descriptor.fileno(), 4096)
+                    if self.terminal
                     else descriptor.readline()
+                )
             except (OSError, ValueError):
                 return
             if not chunk:
@@ -174,8 +181,7 @@ class Process:
             if not self.alive():
                 self._drain()
                 with self._condition:
-                    return [line for line in self.lines[start:]
-                            if predicate(line)]
+                    return [line for line in self.lines[start:] if predicate(line)]
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return found
@@ -199,8 +205,10 @@ class Process:
     def send_keys(self, keys):
         if not self.alive():
             return False
-        os.write(self.master.fileno(), keys.encode("utf-8")
-                 if isinstance(keys, str) else keys)
+        os.write(
+            self.master.fileno(),
+            keys.encode("utf-8") if isinstance(keys, str) else keys,
+        )
         return True
 
     def exit_line(self):
@@ -262,25 +270,30 @@ class Case:
         """
         declared = 190 + ((os.getpid() * 7 + sum(self.name.encode())) % 40)
         self.domain, self.lock = RUN_INTEGRATION.choose_domain(
-            declared, self.work, lock_dir=self.work.parent.parent)
+            declared, self.work, lock_dir=self.work.parent.parent
+        )
         return self.domain
 
     def configuration(self, fake_scenario="tests/support/fake_static.json"):
         config = json.loads((SOURCE_DIR / "config/sdk.json").read_text("utf-8"))
         config["dds"]["domain"] = self.domain
         config["telemetry"]["directory"] = str(self.work / "logs")
-        (self.work / "config.json").write_text(json.dumps(config, indent=2),
-                                               "utf-8")
+        (self.work / "config.json").write_text(json.dumps(config, indent=2), "utf-8")
         scenario = self.work / "fake_scenario.json"
         shutil.copyfile(SOURCE_DIR / fake_scenario, scenario)
         return self.work / "config.json", scenario
 
     def runtime_arguments(self, config, scenario, trace=False, run=1):
-        arguments = ["--config", str(config), "--domain", str(self.domain),
-                     "--fake-scenario", str(scenario)]
+        arguments = [
+            "--config",
+            str(config),
+            "--domain",
+            str(self.domain),
+            "--fake-scenario",
+            str(scenario),
+        ]
         if trace:
-            arguments += ["--output-trace", str(self.work / ("trace%d.jsonl"
-                                                             % run))]
+            arguments += ["--output-trace", str(self.work / ("trace%d.jsonl" % run))]
         return arguments
 
     def application_arguments(self, config):
@@ -292,8 +305,7 @@ class Case:
         return runtime
 
     def start_application(self, arguments):
-        application = Process(APPLICATION_BINARY, arguments, self.work,
-                              terminal=True)
+        application = Process(APPLICATION_BINARY, arguments, self.work, terminal=True)
         self.processes.append(application)
         self.applications.append(application)
         return application
@@ -303,7 +315,8 @@ class Case:
         for index, process in enumerate(self.processes, start=1):
             name = "application" if process.terminal else "runtime"
             (self.work / ("%s_run%d.log" % (name, index))).write_text(
-                process.output(), "utf-8")
+                process.output(), "utf-8"
+            )
 
     def finish(self):
         for process in reversed(self.processes):
@@ -319,9 +332,13 @@ class Case:
 
 def wait_status(process, behaviour, timeout=BEHAVIOR_WAIT_S, start=0):
     """Waits for one status line of the application reporting `behaviour`."""
-    return process.wait_lines(lambda line: line.startswith("[application] ")
-                              and ("behavior=%s" % behaviour) in line,
-                              timeout, start=start)
+    return process.wait_lines(
+        lambda line: (
+            line.startswith("[application] ") and ("behavior=%s" % behaviour) in line
+        ),
+        timeout,
+        start=start,
+    )
 
 
 def press(process, keys, behaviour, timeout=BEHAVIOR_WAIT_S):
@@ -329,22 +346,27 @@ def press(process, keys, behaviour, timeout=BEHAVIOR_WAIT_S):
     marker = process.line_count()
     process.send_keys(keys)
     found = wait_status(process, behaviour, timeout, start=marker)
-    check(bool(found), "key %r did not produce behavior=%s: %s"
-          % (keys, behaviour, process.output()[-600:]))
+    check(
+        bool(found),
+        "key %r did not produce behavior=%s: %s"
+        % (keys, behaviour, process.output()[-600:]),
+    )
     return found
 
 
 def reach_ready(case):
     """Drives an application to the Ready hold over a fresh runtime."""
     config, scenario = case.configuration()
-    runtime = case.start_runtime(case.runtime_arguments(config, scenario,
-                                                        trace=True))
-    check(bool(runtime.wait_lines(pattern('state="ZeroTorque"'), START_WAIT_S)),
-          "the runtime did not reach ZeroTorque: %s" % runtime.output()[-600:])
+    runtime = case.start_runtime(case.runtime_arguments(config, scenario, trace=True))
+    check(
+        bool(runtime.wait_lines(pattern('state="ZeroTorque"'), START_WAIT_S)),
+        "the runtime did not reach ZeroTorque: %s" % runtime.output()[-600:],
+    )
     application = case.start_application(case.application_arguments(config))
-    check(bool(wait_status(application, "Standby", START_WAIT_S)),
-          "the application never reached Standby: %s"
-          % application.output()[-600:])
+    check(
+        bool(wait_status(application, "Standby", START_WAIT_S)),
+        "the application never reached Standby: %s" % application.output()[-600:],
+    )
     press(application, "d", "Damping")
     press(application, "i", "Ready")
     return runtime, application
@@ -362,52 +384,83 @@ def latency_ms(process, predicate, reference):
 # Cases
 # ---------------------------------------------------------------------------
 
+
 def case_restart(root):
     """The runtime is replaced under a running application."""
     case = Case(root, "restart")
     case.claim_domain()
     config, scenario = case.configuration()
     first = case.start_runtime(case.runtime_arguments(config, scenario))
-    check(bool(first.wait_lines(pattern('state="ZeroTorque"'), START_WAIT_S)),
-          "the first runtime did not reach ZeroTorque")
+    check(
+        bool(first.wait_lines(pattern('state="ZeroTorque"'), START_WAIT_S)),
+        "the first runtime did not reach ZeroTorque",
+    )
     application = case.start_application(case.application_arguments(config))
-    check(bool(wait_status(application, "Standby", START_WAIT_S)),
-          "the application never reached Standby: %s"
-          % application.output()[-600:])
+    check(
+        bool(wait_status(application, "Standby", START_WAIT_S)),
+        "the application never reached Standby: %s" % application.output()[-600:],
+    )
 
     identity = re.search(r'runtime_id="([0-9a-f]+)"', first.output())
     first.signal("SIGTERM")
     code = first.wait_exit(STOP_BOUND_S)
-    check(code == 0, "the runtime in ZeroTorque did not stop cleanly (exit %s)"
-          % code)
+    check(code == 0, "the runtime in ZeroTorque did not stop cleanly (exit %s)" % code)
 
     marker = application.line_count()
     second = case.start_runtime(case.runtime_arguments(config, scenario))
-    check(bool(second.wait_lines(pattern('state="ZeroTorque"'), START_WAIT_S)),
-          "the second runtime did not reach ZeroTorque")
+    check(
+        bool(second.wait_lines(pattern('state="ZeroTorque"'), START_WAIT_S)),
+        "the second runtime did not reach ZeroTorque",
+    )
     restarted = re.search(r'runtime_id="([0-9a-f]+)"', second.output())
-    check(identity is not None and restarted is not None
-          and identity.group(1) != restarted.group(1),
-          "the restarted runtime reports the same instance identity")
+    check(
+        identity is not None
+        and restarted is not None
+        and identity.group(1) != restarted.group(1),
+        "the restarted runtime reports the same instance identity",
+    )
 
     faults = wait_status(application, "Fault", FALLBACK_WAIT_S, start=marker)
-    check(bool(faults), "the application did not report Fault after the runtime "
-          "was replaced: %s" % application.output()[-600:])
+    check(
+        bool(faults),
+        "the application did not report Fault after the runtime "
+        "was replaced: %s" % application.output()[-600:],
+    )
     rebound = application.wait_lines(
-        lambda line: "behavior=Fault" in line and "runtime=ZeroTorque" in line
-        and "session=owned" in line, FALLBACK_WAIT_S, start=marker)
-    check(bool(rebound), "the application did not bind the new instance while "
-          "staying latched in Fault: %s" % application.output()[-600:])
-    forbidden = [line for line in application.stamped(marker)
-                 if any(("behavior=%s" % state) in line
-                        for state in ("Standby", "Damping", "Initializing",
-                                      "Ready", "Locomotion"))]
-    check(not forbidden, "the application returned to a behaviour of its own "
-          "after the runtime was replaced: %s" % forbidden[:2])
-    case.notes.append("instance %s -> %s, %d Fault line(s) after the restart"
-                      % (identity.group(1)[:8] if identity else "?",
-                         restarted.group(1)[:8] if restarted else "?",
-                         len(faults)))
+        lambda line: (
+            "behavior=Fault" in line
+            and "runtime=ZeroTorque" in line
+            and "session=owned" in line
+        ),
+        FALLBACK_WAIT_S,
+        start=marker,
+    )
+    check(
+        bool(rebound),
+        "the application did not bind the new instance while "
+        "staying latched in Fault: %s" % application.output()[-600:],
+    )
+    forbidden = [
+        line
+        for line in application.stamped(marker)
+        if any(
+            ("behavior=%s" % state) in line
+            for state in ("Standby", "Damping", "Initializing", "Ready", "Locomotion")
+        )
+    ]
+    check(
+        not forbidden,
+        "the application returned to a behaviour of its own "
+        "after the runtime was replaced: %s" % forbidden[:2],
+    )
+    case.notes.append(
+        "instance %s -> %s, %d Fault line(s) after the restart"
+        % (
+            identity.group(1)[:8] if identity else "?",
+            restarted.group(1)[:8] if restarted else "?",
+            len(faults),
+        )
+    )
     return case
 
 
@@ -426,57 +479,80 @@ def case_state_link(root):
     stopped = time.monotonic()
     check(runtime.signal("SIGSTOP"), "the runtime could not be stopped")
     unknown = application.wait_lines(
-        lambda line: "runtime=Unknown" in line, FALLBACK_WAIT_S, start=marker)
-    check(bool(unknown), "the application never reported an unknown lower "
-          "state: %s" % application.output()[-600:])
-    latency = latency_ms(application, lambda line: "runtime=Unknown" in line,
-                         stopped)
-    check(latency is not None and latency <= STATE_WINDOW_MS + STATE_SLACK_MS,
-          "the unknown lower state was reported after %s ms" % latency)
-    check(latency is not None and latency >= STATE_WINDOW_MS * 0.5,
-          "the unknown lower state came after only %s ms, before the state "
-          "window could have lapsed" % latency)
-    check(bool(wait_status(application, "Fault", FALLBACK_WAIT_S, start=marker)),
-          "the application did not latch its own Fault while the link was "
-          "silent: %s" % application.output()[-600:])
+        lambda line: "runtime=Unknown" in line, FALLBACK_WAIT_S, start=marker
+    )
+    check(
+        bool(unknown),
+        "the application never reported an unknown lower "
+        "state: %s" % application.output()[-600:],
+    )
+    latency = latency_ms(application, lambda line: "runtime=Unknown" in line, stopped)
+    check(
+        latency is not None and latency <= STATE_WINDOW_MS + STATE_SLACK_MS,
+        "the unknown lower state was reported after %s ms" % latency,
+    )
+    check(
+        latency is not None and latency >= STATE_WINDOW_MS * 0.5,
+        "the unknown lower state came after only %s ms, before the state "
+        "window could have lapsed" % latency,
+    )
+    check(
+        bool(wait_status(application, "Fault", FALLBACK_WAIT_S, start=marker)),
+        "the application did not latch its own Fault while the link was "
+        "silent: %s" % application.output()[-600:],
+    )
     check(runtime.alive(), "the runtime died while it was stopped")
 
     time.sleep(1.2)
     check(runtime.signal("SIGCONT"), "the runtime could not be continued")
-    kept = runtime.wait_lines(pattern('state="'), 4.0, minimum=2,
-                              start=runtime_marker)
+    kept = runtime.wait_lines(pattern('state="'), 4.0, minimum=2, start=runtime_marker)
     check(len(kept) >= 2, "the runtime stopped controlling after SIGCONT")
-    owned = application.wait_lines(pattern("session=owned"), FALLBACK_WAIT_S,
-                                   start=marker)
-    check(bool(owned), "the application did not bind the resumed runtime again: "
-          "%s" % application.output()[-600:])
-    after = [line for line in application.stamped(marker)
-             if any(("behavior=%s" % state) in line
-                    for state in ("Standby", "Damping", "Initializing", "Ready",
-                                  "Locomotion"))]
-    check(not after, "the latched Fault did not survive the resumption: %s"
-          % after[:2])
+    owned = application.wait_lines(
+        pattern("session=owned"), FALLBACK_WAIT_S, start=marker
+    )
+    check(
+        bool(owned),
+        "the application did not bind the resumed runtime again: "
+        "%s" % application.output()[-600:],
+    )
+    after = [
+        line
+        for line in application.stamped(marker)
+        if any(
+            ("behavior=%s" % state) in line
+            for state in ("Standby", "Damping", "Initializing", "Ready", "Locomotion")
+        )
+    ]
+    check(not after, "the latched Fault did not survive the resumption: %s" % after[:2])
 
     check(application.send_keys("x"), "the exit key could not be sent")
     code = application.wait_exit(EXIT_WAIT_S)
     line = application.exit_line()
-    check(code == 0 and line is not None and "stop=confirmed" in line,
-          "the exit after the resumed link was not confirmed (exit %s, %r)"
-          % (code, line))
+    check(
+        code == 0 and line is not None and "stop=confirmed" in line,
+        "the exit after the resumed link was not confirmed (exit %s, %r)"
+        % (code, line),
+    )
     # The runtime is left damping with a session whose supervisor is gone: it
     # deliberately refuses to leave on its own, which is what is asserted here.
-    kept_damping = runtime.wait_lines(pattern('state="Damping"'), 5.0,
-                                     minimum=2, start=runtime.line_count())
-    check(len(kept_damping) >= 2,
-          "the runtime stopped logging while it was left damping")
+    kept_damping = runtime.wait_lines(
+        pattern('state="Damping"'), 5.0, minimum=2, start=runtime.line_count()
+    )
+    check(
+        len(kept_damping) >= 2, "the runtime stopped logging while it was left damping"
+    )
     check(runtime.signal("SIGTERM"), "the runtime could not be signalled")
     refused = runtime.wait_lines(pattern("no request path is available"), 3.0)
-    check(bool(refused), "the runtime left a damping state without a "
-          "supervision session, which it must not: %s"
-          % runtime.output()[-400:])
+    check(
+        bool(refused),
+        "the runtime left a damping state without a "
+        "supervision session, which it must not: %s" % runtime.output()[-400:],
+    )
     check(runtime.alive(), "the runtime exited although it had no supervisor")
-    case.notes.append("unknown after %.0f ms, resume kept %d status line(s)"
-                      % (latency if latency is not None else -1, len(kept)))
+    case.notes.append(
+        "unknown after %.0f ms, resume kept %d status line(s)"
+        % (latency if latency is not None else -1, len(kept))
+    )
     return case
 
 
@@ -488,45 +564,71 @@ def case_app_paused(root):
     marker = runtime.line_count()
     stopped = time.monotonic()
     check(application.signal("SIGSTOP"), "the application could not be stopped")
-    fallback = runtime.wait_lines(pattern("CommandTimeout"), FALLBACK_WAIT_S,
-                                  start=marker)
-    check(bool(fallback), "the runtime did not fall back on its own command "
-          "timeout while the application was paused: %s"
-          % runtime.output()[-600:])
+    fallback = runtime.wait_lines(
+        pattern("CommandTimeout"), FALLBACK_WAIT_S, start=marker
+    )
+    check(
+        bool(fallback),
+        "the runtime did not fall back on its own command "
+        "timeout while the application was paused: %s" % runtime.output()[-600:],
+    )
     latency = latency_ms(runtime, pattern("CommandTimeout"), stopped)
-    check(latency is not None and 50.0 <= latency <= 600.0,
-          "the command timeout came after %s ms" % latency)
-    check('stop="CommandTimeout"' in fallback[0],
-          "the runtime left tracking for another reason: %s" % fallback[0])
-    check('from="Tracking"' in fallback[0],
-          "the runtime was not tracking when the timeout hit: %s" % fallback[0])
+    check(
+        latency is not None and 50.0 <= latency <= 600.0,
+        "the command timeout came after %s ms" % latency,
+    )
+    check(
+        'stop="CommandTimeout"' in fallback[0],
+        "the runtime left tracking for another reason: %s" % fallback[0],
+    )
+    check(
+        'from="Tracking"' in fallback[0],
+        "the runtime was not tracking when the timeout hit: %s" % fallback[0],
+    )
     check(runtime.alive(), "the runtime died while the application was paused")
 
     resume_marker = application.line_count()
-    check(application.signal("SIGCONT"), "the application could not be "
-          "continued")
+    check(application.signal("SIGCONT"), "the application could not be continued")
     # Only lines printed after the resumption count: the same status was on the
     # terminal before the pause, and accepting it would prove nothing.
     settled = application.wait_lines(
-        lambda line: "runtime=Damping" in line
-        and ("behavior=Damping" in line or "behavior=Fault" in line),
-        FALLBACK_WAIT_S, start=resume_marker)
-    check(bool(settled), "the application did not show the lower layer's own "
-          "fallback after it was resumed: %s" % application.output()[-600:])
+        lambda line: (
+            "runtime=Damping" in line
+            and ("behavior=Damping" in line or "behavior=Fault" in line)
+        ),
+        FALLBACK_WAIT_S,
+        start=resume_marker,
+    )
+    check(
+        bool(settled),
+        "the application did not show the lower layer's own "
+        "fallback after it was resumed: %s" % application.output()[-600:],
+    )
     # The fallback is not just a behaviour change: the lower layer's own stop
     # reason has to reach the display, or an operator cannot tell its command
     # timeout from any other stop.
-    check(bool(settled) and "stop=CommandTimeout" in settled[0],
-          "the application did not surface the lower layer's stop reason: %s"
-          % (settled[0] if settled else application.output()[-600:]))
-    again = [line for line in application.stamped(resume_marker)
-             if any(("behavior=%s" % state) in line
-                    for state in ("Initializing", "Ready", "Locomotion"))]
-    check(not again, "the application resumed the tracking behaviour the runtime "
-          "had already dropped: %s" % again[:2])
-    case.notes.append("runtime fell back %.0f ms after the SIGSTOP, %r"
-                      % (latency if latency is not None else -1,
-                         settled[0][:60] if settled else ""))
+    check(
+        bool(settled) and "stop=CommandTimeout" in settled[0],
+        "the application did not surface the lower layer's stop reason: %s"
+        % (settled[0] if settled else application.output()[-600:]),
+    )
+    again = [
+        line
+        for line in application.stamped(resume_marker)
+        if any(
+            ("behavior=%s" % state) in line
+            for state in ("Initializing", "Ready", "Locomotion")
+        )
+    ]
+    check(
+        not again,
+        "the application resumed the tracking behaviour the runtime "
+        "had already dropped: %s" % again[:2],
+    )
+    case.notes.append(
+        "runtime fell back %.0f ms after the SIGSTOP, %r"
+        % (latency if latency is not None else -1, settled[0][:60] if settled else "")
+    )
     return case
 
 
@@ -539,26 +641,36 @@ def case_app_killed(root):
     killed = time.monotonic()
     check(application.signal("SIGKILL"), "the application could not be killed")
     code = application.wait_exit(KILL_WAIT_S)
-    check(code == -signal.SIGKILL,
-          "the killed application reported exit %s" % code)
+    check(code == -signal.SIGKILL, "the killed application reported exit %s" % code)
 
-    fallback = runtime.wait_lines(pattern("CommandTimeout"), FALLBACK_WAIT_S,
-                                  start=marker)
-    check(bool(fallback), "the runtime did not fall back on its own command "
-          "timeout after the application was killed: %s"
-          % runtime.output()[-600:])
-    expired = runtime.wait_lines(pattern("SessionExpired"), FALLBACK_WAIT_S,
-                                 start=marker)
-    check(bool(expired), "the runtime did not expire the supervisor lease after "
-          "the application was killed: %s" % runtime.output()[-600:])
+    fallback = runtime.wait_lines(
+        pattern("CommandTimeout"), FALLBACK_WAIT_S, start=marker
+    )
+    check(
+        bool(fallback),
+        "the runtime did not fall back on its own command "
+        "timeout after the application was killed: %s" % runtime.output()[-600:],
+    )
+    expired = runtime.wait_lines(
+        pattern("SessionExpired"), FALLBACK_WAIT_S, start=marker
+    )
+    check(
+        bool(expired),
+        "the runtime did not expire the supervisor lease after "
+        "the application was killed: %s" % runtime.output()[-600:],
+    )
     lease_ms = latency_ms(runtime, pattern("SessionExpired"), killed)
-    check(lease_ms is not None and 200.0 <= lease_ms <= 1500.0,
-          "the lease expired after %s ms (supervisor_us is 300 ms)" % lease_ms)
+    check(
+        lease_ms is not None and 200.0 <= lease_ms <= 1500.0,
+        "the lease expired after %s ms (supervisor_us is 300 ms)" % lease_ms,
+    )
     check(runtime.alive(), "the runtime died with the application")
-    kept = runtime.wait_lines(pattern('state="Damping"'), 5.0, minimum=2,
-                              start=runtime.line_count())
-    check(len(kept) >= 2, "the runtime stopped damping after the application "
-          "was killed")
+    kept = runtime.wait_lines(
+        pattern('state="Damping"'), 5.0, minimum=2, start=runtime.line_count()
+    )
+    check(
+        len(kept) >= 2, "the runtime stopped damping after the application was killed"
+    )
 
     # The runtime's own per-tick record is the evidence for the revocation: the
     # session of every tick after the expiry is the all-zero "none" id.
@@ -571,18 +683,29 @@ def case_app_killed(root):
             continue  # the writer was killed mid-line; the trace is evidence
         if record.get("kind") == "tick":
             ticks.append(record)
-    revoked = [tick for tick in ticks
-               if tick["session_id"] == "0" * 32 and tick["state"] == "Damping"]
-    check(len(revoked) >= 10, "the runtime's own trace holds only %d damping "
-          "tick(s) without a session out of %d" % (len(revoked), len(ticks)))
+    revoked = [
+        tick
+        for tick in ticks
+        if tick["session_id"] == "0" * 32 and tick["state"] == "Damping"
+    ]
+    check(
+        len(revoked) >= 10,
+        "the runtime's own trace holds only %d damping "
+        "tick(s) without a session out of %d" % (len(revoked), len(ticks)),
+    )
 
     check(runtime.signal("SIGTERM"), "the runtime could not be signalled")
     refused = runtime.wait_lines(pattern("no request path is available"), 3.0)
-    check(bool(refused), "the runtime left a damping state without a "
-          "supervision session, which it must not")
+    check(
+        bool(refused),
+        "the runtime left a damping state without a "
+        "supervision session, which it must not",
+    )
     check(runtime.alive(), "the runtime exited although it had no supervisor")
-    case.notes.append("fallback and lease expiry in the runtime's own log, %d "
-                      "damping tick(s) without a session" % len(revoked))
+    case.notes.append(
+        "fallback and lease expiry in the runtime's own log, %d "
+        "damping tick(s) without a session" % len(revoked)
+    )
     return case
 
 
@@ -600,27 +723,47 @@ def case_normal_exit(root):
         check(False, "the harness reuse case needs the test client %s" % client)
         return case
     command = [
-        sys.executable, str(SOURCE_DIR / "tools/run_integration.py"),
-        "--scenario", str(scenario),
-        "--runtime", str(RUNTIME_BINARY),
-        "--client", str(client),
-        "--application", str(APPLICATION_BINARY),
-        "--source", str(SOURCE_DIR),
-        "--work-dir", str(case.work / "harness"),
+        sys.executable,
+        str(SOURCE_DIR / "tools/run_integration.py"),
+        "--scenario",
+        str(scenario),
+        "--runtime",
+        str(RUNTIME_BINARY),
+        "--client",
+        str(client),
+        "--application",
+        str(APPLICATION_BINARY),
+        "--source",
+        str(SOURCE_DIR),
+        "--work-dir",
+        str(case.work / "harness"),
     ]
-    result = subprocess.run(command, cwd=str(SOURCE_DIR), text=True,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            timeout=300)
-    summary = [line.strip() for line in result.stdout.splitlines()
-               if line.strip().startswith("scenario application_normal:")]
+    result = subprocess.run(
+        command,
+        cwd=str(SOURCE_DIR),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=300,
+    )
+    summary = [
+        line.strip()
+        for line in result.stdout.splitlines()
+        if line.strip().startswith("scenario application_normal:")
+    ]
     passed = any(line.endswith("PASSED") for line in summary)
-    check(result.returncode == 0 and passed,
-          "the harness scenario application_normal did not pass (exit %s):\n%s"
-          % (result.returncode, result.stdout[-1500:]))
+    check(
+        result.returncode == 0 and passed,
+        "the harness scenario application_normal did not pass (exit %s):\n%s"
+        % (result.returncode, result.stdout[-1500:]),
+    )
     # The harness claims the domain and the evidence directory exclusively and
     # releases both; a leftover lock would mean it did not finish its cleanup.
-    leftovers = sorted(path.name for path in (case.work / "harness").glob(".*")
-                       if path.name.startswith((".claim-", ".domain-")))
+    leftovers = sorted(
+        path.name
+        for path in (case.work / "harness").glob(".*")
+        if path.name.startswith((".claim-", ".domain-"))
+    )
     check(not leftovers, "the harness left its locks behind: %s" % leftovers)
     domain = case.work / "harness" / "application_normal" / "domain.txt"
     check(domain.is_file(), "the harness recorded no domain for the scenario")
@@ -634,8 +777,9 @@ def case_normal_exit(root):
 def case_locomotion(root):
     """The phase invariant: no run of this acceptance enters Locomotion."""
     case = Case(root, "locomotion")
-    logs = sorted(Path(root).glob("*/application*.log")) + \
-        sorted(Path(root).glob("*/harness/*/application*.log"))
+    logs = sorted(Path(root).glob("*/application*.log")) + sorted(
+        Path(root).glob("*/harness/*/application*.log")
+    )
     offenders = []
     inspected = 0
     for path in logs:
@@ -644,10 +788,12 @@ def case_locomotion(root):
         if "behavior=Locomotion" in text:
             offenders.append(str(path))
     check(not offenders, "behavior=Locomotion was observed in %s" % offenders)
-    case.notes.append("BOUNDARY not accepted: behavior=Locomotion never "
-                      "appeared in %d application log(s); the enumerator exists "
-                      "and its entry guard refuses, but this phase ships no "
-                      "locomotion target generator" % inspected)
+    case.notes.append(
+        "BOUNDARY not accepted: behavior=Locomotion never "
+        "appeared in %d application log(s); the enumerator exists "
+        "and its entry guard refuses, but this phase ships no "
+        "locomotion target generator" % inspected
+    )
     return case
 
 
@@ -655,31 +801,39 @@ def case_locomotion(root):
 # Driver
 # ---------------------------------------------------------------------------
 
+
 def main():
     global APPLICATION_BINARY
     global RUNTIME_BINARY
     global SOURCE_DIR
     global RUN_INTEGRATION
     if len(sys.argv) != 4:
-        print("usage: application_flow_test.py <application> <robot_runtime> "
-              "<source directory>")
+        print(
+            "usage: application_flow_test.py <application> <robot_runtime> "
+            "<source directory>"
+        )
         return 2
     APPLICATION_BINARY = Path(sys.argv[1]).resolve()
     RUNTIME_BINARY = Path(sys.argv[2]).resolve()
     SOURCE_DIR = Path(sys.argv[3]).resolve()
-    for name, binary in (("application", APPLICATION_BINARY),
-                         ("robot_runtime", RUNTIME_BINARY)):
+    for name, binary in (
+        ("application", APPLICATION_BINARY),
+        ("robot_runtime", RUNTIME_BINARY),
+    ):
         if not binary.is_file():
             print("FAIL: the %s binary %s does not exist" % (name, binary))
             return 1
 
     spec = importlib.util.spec_from_file_location(
-        "run_integration", SOURCE_DIR / "tools/run_integration.py")
+        "run_integration", SOURCE_DIR / "tools/run_integration.py"
+    )
     RUN_INTEGRATION = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(RUN_INTEGRATION)
 
-    print("application_flow_test: application=%s runtime=%s source=%s"
-          % (APPLICATION_BINARY, RUNTIME_BINARY, SOURCE_DIR))
+    print(
+        "application_flow_test: application=%s runtime=%s source=%s"
+        % (APPLICATION_BINARY, RUNTIME_BINARY, SOURCE_DIR)
+    )
     # The evidence lives next to the scenario matrix's evidence and is kept: the
     # logs of the cases are what a reader inspects afterwards.
     root = RUNTIME_BINARY.parent / "integration" / "application_flow"
@@ -687,8 +841,14 @@ def main():
     root.mkdir(parents=True, exist_ok=True)
     print("application_flow_test: evidence in %s" % root)
     try:
-        for builder in (case_restart, case_state_link, case_app_paused,
-                        case_app_killed, case_normal_exit, case_locomotion):
+        for builder in (
+            case_restart,
+            case_state_link,
+            case_app_paused,
+            case_app_killed,
+            case_normal_exit,
+            case_locomotion,
+        ):
             try:
                 builder(root)
             except Exception as error:  # noqa: BLE001 - reported, not hidden
@@ -707,11 +867,11 @@ def main():
     for case in CASES:
         survivors = case.survivors()
         if survivors:
-            check(False, "case %s left process(es) %s behind"
-                  % (case.name, survivors))
-        print("case %-12s domain %3d %s" % (
-            case.name, case.domain,
-            "; ".join(case.notes) if case.notes else "-"))
+            check(False, "case %s left process(es) %s behind" % (case.name, survivors))
+        print(
+            "case %-12s domain %3d %s"
+            % (case.name, case.domain, "; ".join(case.notes) if case.notes else "-")
+        )
     if FAILURES:
         print("%d check(s) failed" % len(FAILURES))
         return 1

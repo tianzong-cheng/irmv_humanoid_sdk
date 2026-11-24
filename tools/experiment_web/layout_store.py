@@ -34,7 +34,11 @@ def new_layout_id() -> str:
 
 
 def _finite(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
 
 
 def _validate_axis(axis: object) -> None:
@@ -170,7 +174,9 @@ class LayoutStore:
         result["id"] = layout_id
         return result
 
-    def list_page(self, continuation: str | None, limit: int) -> tuple[list, str | None]:
+    def list_page(
+        self, continuation: str | None, limit: int
+    ) -> tuple[list, str | None]:
         entries = []
         for path in sorted(self.directory.glob("*.json")):
             layout_id = path.stem

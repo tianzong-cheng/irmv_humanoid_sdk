@@ -12,6 +12,7 @@ the endpoint forward and compact feedback readback only after every substep
 passed, so a failed substep cannot advance the rest of the interval. Fixed
 staging buffers and three graphs are allocated at initialization.
 """
+
 import math
 from typing import Sequence
 
@@ -27,36 +28,44 @@ def _warp_kernels(wp):
         return cached
 
     @wp.kernel
-    def snapshot(time: wp.array(dtype=wp.float32),
-                 nacon: wp.array(dtype=wp.int32),
-                 nefc: wp.array(dtype=wp.int32),
-                 ncollision: wp.array(dtype=wp.int32),
-                 slot: int,
-                 time_out: wp.array(dtype=wp.float32),
-                 int_out: wp.array(dtype=wp.int32)):
+    def snapshot(
+        time: wp.array(dtype=wp.float32),
+        nacon: wp.array(dtype=wp.int32),
+        nefc: wp.array(dtype=wp.int32),
+        ncollision: wp.array(dtype=wp.int32),
+        slot: int,
+        time_out: wp.array(dtype=wp.float32),
+        int_out: wp.array(dtype=wp.int32),
+    ):
         time_out[slot] = time[0]
         int_out[3 * slot + 0] = nacon[0]
         int_out[3 * slot + 1] = nefc[0]
         int_out[3 * slot + 2] = ncollision[0]
 
     @wp.kernel
-    def gather_counts(nacon: wp.array(dtype=wp.int32),
-                      nefc: wp.array(dtype=wp.int32),
-                      ncollision: wp.array(dtype=wp.int32),
-                      out: wp.array(dtype=wp.int32)):
+    def gather_counts(
+        nacon: wp.array(dtype=wp.int32),
+        nefc: wp.array(dtype=wp.int32),
+        ncollision: wp.array(dtype=wp.int32),
+        out: wp.array(dtype=wp.int32),
+    ):
         out[0] = nacon[0]
         out[1] = nefc[0]
         out[2] = ncollision[0]
 
     @wp.kernel
-    def gather(time: wp.array(dtype=wp.float32),
-               qpos: wp.array2d(dtype=wp.float32),
-               qvel: wp.array2d(dtype=wp.float32),
-               qacc: wp.array2d(dtype=wp.float32),
-               qfrc_actuator: wp.array2d(dtype=wp.float32),
-               sensordata: wp.array2d(dtype=wp.float32),
-               nq: int, nv: int, ns: int,
-               out: wp.array(dtype=wp.float32)):
+    def gather(
+        time: wp.array(dtype=wp.float32),
+        qpos: wp.array2d(dtype=wp.float32),
+        qvel: wp.array2d(dtype=wp.float32),
+        qacc: wp.array2d(dtype=wp.float32),
+        qfrc_actuator: wp.array2d(dtype=wp.float32),
+        sensordata: wp.array2d(dtype=wp.float32),
+        nq: int,
+        nv: int,
+        ns: int,
+        out: wp.array(dtype=wp.float32),
+    ):
         tid = wp.tid()
         if tid == 0:
             out[0] = time[0]
@@ -91,51 +100,80 @@ def validate_model(model, config: dict) -> dict:
 
     joints = config.get("joint_names", [])
     actuators = config.get("actuator_names", [])
-    if (not joints or len(joints) != len(actuators) or len(set(joints)) != len(joints)
-            or len(set(actuators)) != len(actuators) or len(actuators) != model.nu):
+    if (
+        not joints
+        or len(joints) != len(actuators)
+        or len(set(joints)) != len(joints)
+        or len(set(actuators)) != len(actuators)
+        or len(actuators) != model.nu
+    ):
         raise ValueError("require unique, complete joint/actuator mapping")
     base = find(mj.mjtObj.mjOBJ_BODY, config.get("base_body"))
     root = int(model.body_jntadr[base])
-    if (model.body_parentid[base] != 0 or model.body_jntnum[base] != 1
-            or root < 0 or model.jnt_type[root] != mj.mjtJoint.mjJNT_FREE):
+    if (
+        model.body_parentid[base] != 0
+        or model.body_jntnum[base] != 1
+        or root < 0
+        or model.jnt_type[root] != mj.mjtJoint.mjJNT_FREE
+    ):
         raise ValueError("base must have a free joint attached to world")
     weld = find(mj.mjtObj.mjOBJ_EQUALITY, config.get("weld_name"))
-    if (model.neq != 1 or model.eq_type[weld] != mj.mjtEq.mjEQ_WELD
-            or model.eq_obj1id[weld] != base or model.eq_obj2id[weld] != 0
-            or not model.eq_active0[weld]):
+    if (
+        model.neq != 1
+        or model.eq_type[weld] != mj.mjtEq.mjEQ_WELD
+        or model.eq_obj1id[weld] != base
+        or model.eq_obj2id[weld] != 0
+        or not model.eq_active0[weld]
+    ):
         raise ValueError("require one initially active base-to-world weld")
     site = find(mj.mjtObj.mjOBJ_SITE, config.get("imu_site"))
-    if (model.site_bodyid[site] != base
-            or not np.array_equal(model.site_quat[site], [1, 0, 0, 0])
-            or not np.array_equal(model.site_pos[site], [0, 0, 0])):
+    if (
+        model.site_bodyid[site] != base
+        or not np.array_equal(model.site_quat[site], [1, 0, 0, 0])
+        or not np.array_equal(model.site_pos[site], [0, 0, 0])
+    ):
         raise ValueError("IMU must use base axes and origin")
     mapping = []
     for joint_name, actuator_name in zip(joints, actuators):
         j = find(mj.mjtObj.mjOBJ_JOINT, joint_name)
         a = find(mj.mjtObj.mjOBJ_ACTUATOR, actuator_name)
-        if (model.jnt_type[j] != mj.mjtJoint.mjJNT_HINGE
-                or model.jnt_stiffness[j] != 0 or model.dof_damping[model.jnt_dofadr[j]] != 0
-                or model.jnt_actfrclimited[j]
-                or model.actuator_trntype[a] != mj.mjtTrn.mjTRN_JOINT
-                or model.actuator_trnid[a, 0] != j
-                or not np.array_equal(model.actuator_gear[a], [1, 0, 0, 0, 0, 0])
-                or model.actuator_dyntype[a] != mj.mjtDyn.mjDYN_NONE
-                or model.actuator_gaintype[a] != mj.mjtGain.mjGAIN_FIXED
-                or model.actuator_gainprm[a, 0] != 1
-                or model.actuator_biastype[a] != mj.mjtBias.mjBIAS_NONE
-                or model.actuator_ctrllimited[a] or model.actuator_forcelimited[a]):
-            raise ValueError("require direct unit-gear unlimited torque motors without PD")
+        if (
+            model.jnt_type[j] != mj.mjtJoint.mjJNT_HINGE
+            or model.jnt_stiffness[j] != 0
+            or model.dof_damping[model.jnt_dofadr[j]] != 0
+            or model.jnt_actfrclimited[j]
+            or model.actuator_trntype[a] != mj.mjtTrn.mjTRN_JOINT
+            or model.actuator_trnid[a, 0] != j
+            or not np.array_equal(model.actuator_gear[a], [1, 0, 0, 0, 0, 0])
+            or model.actuator_dyntype[a] != mj.mjtDyn.mjDYN_NONE
+            or model.actuator_gaintype[a] != mj.mjtGain.mjGAIN_FIXED
+            or model.actuator_gainprm[a, 0] != 1
+            or model.actuator_biastype[a] != mj.mjtBias.mjBIAS_NONE
+            or model.actuator_ctrllimited[a]
+            or model.actuator_forcelimited[a]
+        ):
+            raise ValueError(
+                "require direct unit-gear unlimited torque motors without PD"
+            )
         mapping.append((int(model.jnt_qposadr[j]), int(model.jnt_dofadr[j]), a))
     controlled = {b for _, b, _ in mapping}
-    if controlled != set(range(model.nv)) - set(range(int(model.jnt_dofadr[root]), int(model.jnt_dofadr[root])+6)):
+    if controlled != set(range(model.nv)) - set(
+        range(int(model.jnt_dofadr[root]), int(model.jnt_dofadr[root]) + 6)
+    ):
         raise ValueError("joint mapping must cover every non-base DOF")
     sensors = []
-    for kind, size in [(mj.mjtSensor.mjSENS_FRAMEQUAT, 4),
-                       (mj.mjtSensor.mjSENS_GYRO, 3),
-                       (mj.mjtSensor.mjSENS_ACCELEROMETER, 3)]:
-        found = [i for i in range(model.nsensor) if model.sensor_type[i] == kind
-                 and model.sensor_objtype[i] == mj.mjtObj.mjOBJ_SITE
-                 and model.sensor_objid[i] == site]
+    for kind, size in [
+        (mj.mjtSensor.mjSENS_FRAMEQUAT, 4),
+        (mj.mjtSensor.mjSENS_GYRO, 3),
+        (mj.mjtSensor.mjSENS_ACCELEROMETER, 3),
+    ]:
+        found = [
+            i
+            for i in range(model.nsensor)
+            if model.sensor_type[i] == kind
+            and model.sensor_objtype[i] == mj.mjtObj.mjOBJ_SITE
+            and model.sensor_objid[i] == site
+        ]
         if len(found) != 1:
             raise ValueError("require one orientation/gyro/accelerometer at IMU site")
         i = found[0]
@@ -147,13 +185,20 @@ def validate_model(model, config: dict) -> dict:
         raise ValueError("physics timestep must be positive integer microseconds")
     # Fail unsupported precision ranges before CUDA initialization.
     EngineTimeDiagnostic(round(dt * 1000000))
-    return dict(mapping=mapping, root_q=int(model.jnt_qposadr[root]),
-                root_v=int(model.jnt_dofadr[root]), weld=weld, sensors=sensors, timestep=dt)
+    return dict(
+        mapping=mapping,
+        root_q=int(model.jnt_qposadr[root]),
+        root_v=int(model.jnt_dofadr[root]),
+        weld=weld,
+        sensors=sensors,
+        timestep=dt,
+    )
 
 
 def LoadConfiguredSpec(config):
     """Load the declared pose before compilation; no CUDA initialization."""
     import mujoco as mj
+
     spec = mj.MjSpec.from_file(str(config["model_path"]))
     base = spec.body(config["base_body"])
     if base is None:
@@ -179,6 +224,7 @@ class MujocoWarpEngine:
         import mujoco as mj
         import mujoco_warp as mjw
         import warp as wp
+
         self._mjw, self._wp = mjw, wp
         self._model = LoadConfiguredModel(config)
         self._layout = validate_model(self._model, config)
@@ -191,7 +237,9 @@ class MujocoWarpEngine:
         self._host = mj.MjData(self._model)
         if "initial_joint_position" in config:
             q = config["initial_joint_position"]
-            if len(q) != len(self._layout["mapping"]) or any(not math.isfinite(x) for x in q):
+            if len(q) != len(self._layout["mapping"]) or any(
+                not math.isfinite(x) for x in q
+            ):
                 raise ValueError("initial joints must be finite and match mapping")
             for value, (address, _, _) in zip(q, self._layout["mapping"]):
                 self._host.qpos[address] = value
@@ -200,7 +248,7 @@ class MujocoWarpEngine:
             if len(velocity) != 6 or any(not math.isfinite(x) for x in velocity):
                 raise ValueError("initial velocity must contain six finite values")
             address = self._layout["root_v"]
-            self._host.qvel[address:address+6] = velocity
+            self._host.qvel[address : address + 6] = velocity
         self._physics_step = 0
         self._time_diagnostic = EngineTimeDiagnostic(round(self.timestep_s * 1000000))
         try:
@@ -227,13 +275,14 @@ class MujocoWarpEngine:
             self._counts = wp.zeros((3,), dtype=wp.int32, device=dev)
             self._step_time = wp.zeros((1,), dtype=wp.float32, device=dev)
             self._step_int = wp.zeros((3,), dtype=wp.int32, device=dev)
-        self._host_compact = wp.zeros((self._compact_len,), dtype=wp.float32,
-                                      device="cpu", pinned=True)
+        self._host_compact = wp.zeros(
+            (self._compact_len,), dtype=wp.float32, device="cpu", pinned=True
+        )
         self._host_counts = wp.zeros((3,), dtype=wp.int32, device="cpu", pinned=True)
-        self._host_step_time = wp.zeros((1,), dtype=wp.float32,
-                                        device="cpu", pinned=True)
-        self._host_step_int = wp.zeros((3,), dtype=wp.int32,
-                                       device="cpu", pinned=True)
+        self._host_step_time = wp.zeros(
+            (1,), dtype=wp.float32, device="cpu", pinned=True
+        )
+        self._host_step_int = wp.zeros((3,), dtype=wp.int32, device="cpu", pinned=True)
         self._allocate_ctrl_host()
         self._step_graph = self._capture_step()
         self._tail_graph = self._capture_tail()
@@ -242,20 +291,46 @@ class MujocoWarpEngine:
     def _launch_readback_kernels(self):
         nq, nv, ns = self._sizes
         d = self._data
-        self._wp.launch(self._gather, dim=self._compact_len,
-                        inputs=[d.time, d.qpos, d.qvel, d.qacc, d.qfrc_actuator,
-                                d.sensordata, nq, nv, ns, self._compact])
-        self._wp.launch(self._gather_counts, dim=1,
-                        inputs=[d.nacon, d.nefc, d.ncollision, self._counts])
+        self._wp.launch(
+            self._gather,
+            dim=self._compact_len,
+            inputs=[
+                d.time,
+                d.qpos,
+                d.qvel,
+                d.qacc,
+                d.qfrc_actuator,
+                d.sensordata,
+                nq,
+                nv,
+                ns,
+                self._compact,
+            ],
+        )
+        self._wp.launch(
+            self._gather_counts,
+            dim=1,
+            inputs=[d.nacon, d.nefc, d.ncollision, self._counts],
+        )
 
     def _capture_step(self):
         """Capture one physics step plus its compact diagnostics (no execution)."""
         wp, d, m = self._wp, self._data, self._gpu_model
         with wp.ScopedDevice(self._device), wp.ScopedCapture() as capture:
             self._mjw.step(m, d)
-            wp.launch(self._snapshot, dim=1,
-                      inputs=[d.time, d.nacon, d.nefc, d.ncollision, 0,
-                              self._step_time, self._step_int])
+            wp.launch(
+                self._snapshot,
+                dim=1,
+                inputs=[
+                    d.time,
+                    d.nacon,
+                    d.nefc,
+                    d.ncollision,
+                    0,
+                    self._step_time,
+                    self._step_int,
+                ],
+            )
         return capture.graph
 
     def _capture_tail(self):
@@ -275,9 +350,14 @@ class MujocoWarpEngine:
 
     def _allocate_ctrl_host(self):
         import numpy as np
+
         shape = tuple(self._data.ctrl.shape)
-        host = self._wp.array(np.zeros(shape, dtype=np.float32), dtype=self._wp.float32,
-                              device="cpu", pinned=True)
+        host = self._wp.array(
+            np.zeros(shape, dtype=np.float32),
+            dtype=self._wp.float32,
+            device="cpu",
+            pinned=True,
+        )
         self._ctrl_host = host
         self._ctrl_scratch = np.zeros(shape, dtype=np.float32)
         self._ctrl_pending = False
@@ -289,15 +369,20 @@ class MujocoWarpEngine:
 
     def _check_counts(self, nacon, nefc, ncollision):
         d = self._data
-        if int(nacon) > int(d.naconmax) or int(nefc) > int(d.njmax) \
-                or int(ncollision) > int(d.naconmax):
+        if (
+            int(nacon) > int(d.naconmax)
+            or int(nefc) > int(d.njmax)
+            or int(ncollision) > int(d.naconmax)
+        ):
             raise RuntimeError("MuJoCo Warp capacity overflow")
 
     def _check_overflow(self):
         d = self._data
-        self._check_counts(max(int(x) for x in d.nacon.numpy().flat),
-                           max(int(x) for x in d.nefc.numpy().flat),
-                           max(int(x) for x in d.ncollision.numpy().flat))
+        self._check_counts(
+            max(int(x) for x in d.nacon.numpy().flat),
+            max(int(x) for x in d.nefc.numpy().flat),
+            max(int(x) for x in d.ncollision.numpy().flat),
+        )
 
     def _readback(self):
         """Launch the readback graph and copy compact state into pinned staging."""
@@ -311,12 +396,13 @@ class MujocoWarpEngine:
 
     def _feedback_from_host(self, host, validate_time):
         import numpy as np
+
         nq, nv, _ = self._sizes
-        qpos = host[1:1+nq]
-        qvel = host[1+nq:1+nq+nv]
-        qacc = host[1+nq+nv:1+nq+2*nv]
-        qfrc = host[1+nq+2*nv:1+nq+3*nv]
-        sens = host[1+nq+3*nv:]
+        qpos = host[1 : 1 + nq]
+        qvel = host[1 + nq : 1 + nq + nv]
+        qacc = host[1 + nq + nv : 1 + nq + 2 * nv]
+        qfrc = host[1 + nq + 2 * nv : 1 + nq + 3 * nv]
+        sens = host[1 + nq + 3 * nv :]
         if not np.isfinite(host[1:]).all():
             raise RuntimeError("nonfinite engine state")
         if validate_time:
@@ -329,14 +415,20 @@ class MujocoWarpEngine:
         h.sensordata[:] = sens
         h.time = float(host[0])
         q, v = layout["root_q"], layout["root_v"]
-        sensors = [tuple(float(x) for x in sens[a:a+n]) for a, n in layout["sensors"]]
-        return Feedback(self._physics_step, float(h.time),
-                        tuple(float(qpos[a]) for a, _, _ in layout["mapping"]),
-                        tuple(float(qvel[b]) for _, b, _ in layout["mapping"]),
-                        tuple(float(qfrc[b]) for _, b, _ in layout["mapping"]),
-                        *sensors, tuple(float(x) for x in qpos[q:q+3]),
-                        tuple(float(x) for x in qvel[v:v+6]),
-                        tuple(float(x) for x in qpos[q+3:q+7]))
+        sensors = [
+            tuple(float(x) for x in sens[a : a + n]) for a, n in layout["sensors"]
+        ]
+        return Feedback(
+            self._physics_step,
+            float(h.time),
+            tuple(float(qpos[a]) for a, _, _ in layout["mapping"]),
+            tuple(float(qvel[b]) for _, b, _ in layout["mapping"]),
+            tuple(float(qfrc[b]) for _, b, _ in layout["mapping"]),
+            *sensors,
+            tuple(float(x) for x in qpos[q : q + 3]),
+            tuple(float(x) for x in qvel[v : v + 6]),
+            tuple(float(x) for x in qpos[q + 3 : q + 7]),
+        )
 
     def read_feedback(self) -> Feedback:
         self._require_ready()
@@ -361,7 +453,8 @@ class MujocoWarpEngine:
         # (including finite doubles that overflow float32) must never touch
         # the pinned buffer a queued H2D may still be reading.
         import numpy as np
-        with np.errstate(over='ignore'):
+
+        with np.errstate(over="ignore"):
             rounded = np.asarray(tuple(torque), dtype=np.float64).astype(np.float32)
         if not np.isfinite(rounded).all():
             raise ValueError("torque outside engine numeric range")
@@ -383,8 +476,15 @@ class MujocoWarpEngine:
 
     def step(self, substeps: int) -> Feedback:
         self._require_ready()
-        if type(substeps) is not int or substeps <= 0 or (self._physics_step + substeps) * round(self.timestep_s * 1000000) > 3600000000:
-            raise ValueError("require positive substeps within 3600-logical-second experiment limit")
+        if (
+            type(substeps) is not int
+            or substeps <= 0
+            or (self._physics_step + substeps) * round(self.timestep_s * 1000000)
+            > 3600000000
+        ):
+            raise ValueError(
+                "require positive substeps within 3600-logical-second experiment limit"
+            )
         wp = self._wp
         for _ in range(substeps):
             # One captured physics step, then host-visible diagnostics before
@@ -423,10 +523,27 @@ class MujocoWarpEngine:
             self._wp.synchronize_device(self._device)
         self._ready = False
         self._ctrl_pending = False
-        for name in ("_step_graph", "_tail_graph", "_readback_graph",
-                     "_compact", "_counts", "_step_time", "_step_int",
-                     "_host_compact", "_host_counts", "_host_step_time",
-                     "_host_step_int", "_ctrl_host", "_ctrl_scratch", "_sizes",
-                     "_snapshot", "_gather_counts", "_gather",
-                     "_data", "_gpu_model", "_host", "_model"):
+        for name in (
+            "_step_graph",
+            "_tail_graph",
+            "_readback_graph",
+            "_compact",
+            "_counts",
+            "_step_time",
+            "_step_int",
+            "_host_compact",
+            "_host_counts",
+            "_host_step_time",
+            "_host_step_int",
+            "_ctrl_host",
+            "_ctrl_scratch",
+            "_sizes",
+            "_snapshot",
+            "_gather_counts",
+            "_gather",
+            "_data",
+            "_gpu_model",
+            "_host",
+            "_model",
+        ):
             self.__dict__.pop(name, None)

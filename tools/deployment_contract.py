@@ -51,7 +51,9 @@ def validate(root: dict, node: dict, instance: object, path: str) -> None:
         raise SchemaError(f"{path}: no oneOf branch accepted the value ({failures})")
 
     if "const" in node and instance != node["const"]:
-        raise SchemaError(f"{path}: expected constant {node['const']!r}, got {instance!r}")
+        raise SchemaError(
+            f"{path}: expected constant {node['const']!r}, got {instance!r}"
+        )
     if "enum" in node and instance not in node["enum"]:
         raise SchemaError(f"{path}: {instance!r} is not one of {node['enum']}")
 
@@ -129,13 +131,13 @@ def validate(root: dict, node: dict, instance: object, path: str) -> None:
             raise SchemaError(f"{path}: does not match {node['pattern']}")
 
 
-
-
 def load_schema(path: str | Path) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def validate_file(schema_path: str | Path, document: object, label: str = "document") -> None:
+def validate_file(
+    schema_path: str | Path, document: object, label: str = "document"
+) -> None:
     """Validates one parsed document against a schema file."""
 
     schema = load_schema(schema_path)

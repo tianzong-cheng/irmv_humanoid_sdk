@@ -137,10 +137,11 @@ def close(actual: float, expected: float) -> bool:
 rows = [velocity_row(1_000_000, 0, forward=0.1)]
 rows.append(velocity_row(1_010_000, 1, forward=0.2))
 rows.append(velocity_row(1_020_000, 2, forward=0.3))
-association = record_to_npz.associate(
-    runtime_summary(), application_summary(), rows
+association = record_to_npz.associate(runtime_summary(), application_summary(), rows)
+check(
+    association["ok"],
+    f"the same boot/identity did not associate: {association['reason']}",
 )
-check(association["ok"], f"the same boot/identity did not associate: {association['reason']}")
 check(association["excluded"] == 0, "the phase case excluded a matching row")
 holds = hold_values(
     [
@@ -152,10 +153,22 @@ holds = hold_values(
     rows,
 )
 check(np.isnan(holds["forward"][0]), "a value was invented before the recording began")
-check(close(float(holds["forward"][1]), 0.1), "the first sample was not held at its own stamp")
-check(close(float(holds["forward"][2]), 0.2), "the held value was paired by index, not by stamp")
-check(close(float(holds["forward"][3]), 0.3), "an exact sample stamp did not select its own sample")
-check(close(float(holds["lateral"][2]), -0.2), "the lateral value was not held with the sample")
+check(
+    close(float(holds["forward"][1]), 0.1),
+    "the first sample was not held at its own stamp",
+)
+check(
+    close(float(holds["forward"][2]), 0.2),
+    "the held value was paired by index, not by stamp",
+)
+check(
+    close(float(holds["forward"][3]), 0.3),
+    "an exact sample stamp did not select its own sample",
+)
+check(
+    close(float(holds["lateral"][2]), -0.2),
+    "the lateral value was not held with the sample",
+)
 check(close(float(holds["yaw"][2]), 0.3), "the yaw value was not held with the sample")
 
 # ---------------------------------------------------------------------------
@@ -228,16 +241,17 @@ for label, summary, app, app_rows, needle in (
 spanned = [
     velocity_row(2_000_000, 0, forward=0.5),
     velocity_row(2_010_000, 1, forward=0.6),
-    velocity_row(2_020_000, 2, runtime_id=RUNTIME_ID_B, session_id=SESSION_ID_B, forward=9.0),
-    velocity_row(2_030_000, 3, runtime_id=RUNTIME_ID_B, session_id=SESSION_ID_B, forward=9.0),
+    velocity_row(
+        2_020_000, 2, runtime_id=RUNTIME_ID_B, session_id=SESSION_ID_B, forward=9.0
+    ),
+    velocity_row(
+        2_030_000, 3, runtime_id=RUNTIME_ID_B, session_id=SESSION_ID_B, forward=9.0
+    ),
 ]
-association = record_to_npz.associate(
-    runtime_summary(), application_summary(), spanned
-)
+association = record_to_npz.associate(runtime_summary(), application_summary(), spanned)
 check(association["ok"], "the A-only part of a spanning file did not associate")
 check(
-    [row["runtime_id"] for row in association["rows"]]
-    == [RUNTIME_ID_A, RUNTIME_ID_A],
+    [row["runtime_id"] for row in association["rows"]] == [RUNTIME_ID_A, RUNTIME_ID_A],
     "the A/B file kept rows of the other runtime instance",
 )
 check(association["excluded"] == 2, "the A/B file did not count the excluded rows")
@@ -283,7 +297,9 @@ runtime = [
     runtime_row(3_120_000),  # one period past the end of the recording
 ]
 held = hold_values(runtime, lost, losses=losses)
-check(close(float(held["forward"][0]), 1.0), "the first sample was not held at its stamp")
+check(
+    close(float(held["forward"][0]), 1.0), "the first sample was not held at its stamp"
+)
 check(
     close(float(held["forward"][1]), 1.0),
     "a sample was not held to the next planned deadline",
@@ -434,7 +450,10 @@ tail = hold_values(
     tail_samples,
     losses=tail_losses,
 )
-check(close(float(tail["forward"][0]), 7.0), "the last sample was not held before a future loss")
+check(
+    close(float(tail["forward"][0]), 7.0),
+    "the last sample was not held before a future loss",
+)
 check(
     np.isnan(tail["forward"][1]),
     "a value was held at the first lost sample's deadline",
@@ -519,28 +538,52 @@ check(
 
 # Explicit simulation identity must dominate the host boot identity.
 import copy
+
 sim_runtime = runtime_summary()
 sim_app = application_summary()
-sim_clock = dict(clock="simulation", clock_domain="simulation", available=True,
-                 boot_id=BOOT_ID, clock_run_id="12"*16, logical_origin_us=1,
-                 physics_dt_us=1000, control_dt_us=2000)
+sim_clock = dict(
+    clock="simulation",
+    clock_domain="simulation",
+    available=True,
+    boot_id=BOOT_ID,
+    clock_run_id="12" * 16,
+    logical_origin_us=1,
+    physics_dt_us=1000,
+    control_dt_us=2000,
+)
 sim_runtime["clock"] = copy.deepcopy(sim_clock)
 sim_app["clock"] = copy.deepcopy(sim_clock)
-check(record_to_npz.associate(sim_runtime, sim_app, [velocity_row(1, 1)])["ok"],
-      "same simulation identity did not associate")
-for key, value in (("clock_run_id", "34"*16), ("logical_origin_us", 2),
-                   ("physics_dt_us", 500), ("control_dt_us", 4000),
-                   ("clock_domain", "host_monotonic")):
+check(
+    record_to_npz.associate(sim_runtime, sim_app, [velocity_row(1, 1)])["ok"],
+    "same simulation identity did not associate",
+)
+for key, value in (
+    ("clock_run_id", "34" * 16),
+    ("logical_origin_us", 2),
+    ("physics_dt_us", 500),
+    ("control_dt_us", 4000),
+    ("clock_domain", "host_monotonic"),
+):
     foreign = copy.deepcopy(sim_app)
     foreign["clock"][key] = value
-    check(not record_to_npz.associate(sim_runtime, foreign, [velocity_row(1, 1)])["ok"],
-          "simulation association ignored " + key)
+    check(
+        not record_to_npz.associate(sim_runtime, foreign, [velocity_row(1, 1)])["ok"],
+        "simulation association ignored " + key,
+    )
     if key == "clock_run_id":
-        check("simulation clock" in record_to_npz.associate(sim_runtime, foreign,
-              [velocity_row(1, 1)])["reason"], "different simulation runs mislabeled as host boots")
-check(not record_to_npz.associate(sim_runtime, sim_app,
-                                 [velocity_row(1, 1, runtime_id=RUNTIME_ID_B)])["ok"],
-      "simulation association bypassed actual runtime/session identity")
+        check(
+            "simulation clock"
+            in record_to_npz.associate(sim_runtime, foreign, [velocity_row(1, 1)])[
+                "reason"
+            ],
+            "different simulation runs mislabeled as host boots",
+        )
+check(
+    not record_to_npz.associate(
+        sim_runtime, sim_app, [velocity_row(1, 1, runtime_id=RUNTIME_ID_B)]
+    )["ok"],
+    "simulation association bypassed actual runtime/session identity",
+)
 
 if failures:
     print(

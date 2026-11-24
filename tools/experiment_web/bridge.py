@@ -51,7 +51,9 @@ class _Bridge:
             process.stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
             process.stdin.flush()
         except (BrokenPipeError, OSError) as error:
-            raise BridgeError(f"the reader is not accepting requests: {error}") from error
+            raise BridgeError(
+                f"the reader is not accepting requests: {error}"
+            ) from error
         ready, _, _ = select.select([process.stdout], [], [], timeout)
         if not ready:
             raise BridgeError("the reader did not answer within the deadline")
@@ -108,7 +110,12 @@ class BridgePool:
             request_id = uuid.uuid4().hex
             request["request_id"] = request_id
         if self._closed:
-            return {"request_id": request_id, "ok": False, "transport_error": True, "error": "the service is closing"}
+            return {
+                "request_id": request_id,
+                "ok": False,
+                "transport_error": True,
+                "error": "the service is closing",
+            }
         try:
             bridge = self._available.get(timeout=self._timeout)
         except queue.Empty:
@@ -142,7 +149,12 @@ class BridgePool:
             return reply
         except BridgeError as error:
             discard = True
-            return {"request_id": request_id, "ok": False, "transport_error": True, "error": str(error)}
+            return {
+                "request_id": request_id,
+                "ok": False,
+                "transport_error": True,
+                "error": str(error),
+            }
         finally:
             if discard:
                 bridge.kill()

@@ -23,27 +23,38 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--records-root", required=True)
     parser.add_argument("--data-dir", required=True)
     parser.add_argument("--port", type=int, default=0)
-    parser.add_argument("--reader", default=None,
-                        help="defaults to the reader installed in this prefix")
-    parser.add_argument("--assets", default=None,
-                        help="defaults to the static workbench of this prefix")
-    parser.add_argument("--telemetry-socket", default=None,
-                        help="defaults to <data-dir>/live.sock")
+    parser.add_argument(
+        "--reader", default=None, help="defaults to the reader installed in this prefix"
+    )
+    parser.add_argument(
+        "--assets", default=None, help="defaults to the static workbench of this prefix"
+    )
+    parser.add_argument(
+        "--telemetry-socket", default=None, help="defaults to <data-dir>/live.sock"
+    )
     options = parser.parse_args(argv)
 
-    reader = Path(options.reader) if options.reader else prefix / "bin" / "web_record_query"
+    reader = (
+        Path(options.reader) if options.reader else prefix / "bin" / "web_record_query"
+    )
     if not reader.is_file():
-        print(f"irmv_experiment_web: the read-only reader is missing: {reader}",
-              file=sys.stderr)
+        print(
+            f"irmv_experiment_web: the read-only reader is missing: {reader}",
+            file=sys.stderr,
+        )
         return 1
     assets = Path(options.assets) if options.assets else package_root / "web"
     if not (assets / "index.html").is_file():
-        print(f"irmv_experiment_web: the static workbench is missing: {assets}",
-              file=sys.stderr)
+        print(
+            f"irmv_experiment_web: the static workbench is missing: {assets}",
+            file=sys.stderr,
+        )
         return 1
-    socket_path = (Path(options.telemetry_socket)
-                   if options.telemetry_socket
-                   else Path(options.data_dir) / "live.sock")
+    socket_path = (
+        Path(options.telemetry_socket)
+        if options.telemetry_socket
+        else Path(options.data_dir) / "live.sock"
+    )
     try:
         server = ExperimentWebServer(
             records_root=Path(options.records_root),

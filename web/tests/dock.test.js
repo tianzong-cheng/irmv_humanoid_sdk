@@ -43,7 +43,10 @@ test('a signal dropped on an empty workspace creates one chart', () => {
   const layout = DropSignal(EmptyLayout(), q, null, 'empty');
   assert.equal(layout.dock.type, 'leaf');
   assert.equal(layout.charts.length, 1);
-  assert.deepEqual(layout.charts[0].curves.map((curve) => curve.signalId), [q.id]);
+  assert.deepEqual(
+    layout.charts[0].curves.map((curve) => curve.signalId),
+    [q.id],
+  );
 });
 
 test('an edge drop splits the target chart on that side', () => {

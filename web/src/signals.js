@@ -5,7 +5,9 @@ const UNSAFE = /[^A-Za-z0-9_.-]/gu;
 export function EscapeJoint(name) {
   return String(name ?? '').replace(UNSAFE, (character) => {
     const bytes = new TextEncoder().encode(character);
-    return [...bytes].map((byte) => `%${byte.toString(16).toUpperCase().padStart(2, '0')}`).join('');
+    return [...bytes]
+      .map((byte) => `%${byte.toString(16).toUpperCase().padStart(2, '0')}`)
+      .join('');
   });
 }
 
@@ -35,8 +37,12 @@ export function SignalKey(signal) {
 }
 
 export function SameAxis(left, right) {
-  return Boolean(left) && Boolean(right) &&
-    left.quantity === right.quantity && left.unit === right.unit;
+  return (
+    Boolean(left) &&
+    Boolean(right) &&
+    left.quantity === right.quantity &&
+    left.unit === right.unit
+  );
 }
 
 export function CatalogMap(catalog) {

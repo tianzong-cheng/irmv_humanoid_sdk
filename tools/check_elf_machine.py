@@ -15,8 +15,7 @@ def main() -> int:
         return 1
     machine = struct.unpack("<H", header[18:20])[0]
     if machine != expected:
-        print(f"{path} has ELF machine {machine}, expected {expected}",
-              file=sys.stderr)
+        print(f"{path} has ELF machine {machine}, expected {expected}", file=sys.stderr)
         return 1
     return 0
 

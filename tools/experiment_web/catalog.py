@@ -55,7 +55,9 @@ def resolve_run_directory(root: Path, selector: str) -> Path:
     return candidate
 
 
-def paginate(items: list, continuation: str | None, limit: int = 100) -> tuple[list, str | None]:
+def paginate(
+    items: list, continuation: str | None, limit: int = 100
+) -> tuple[list, str | None]:
     """Return one bounded page and the continuation of the next one."""
 
     if limit < 1:

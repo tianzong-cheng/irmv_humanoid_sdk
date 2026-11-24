@@ -59,17 +59,50 @@ def _runtime_row(index: int, joints: int) -> dict:
 
 
 def _chunk(rows: list[dict], joints: int) -> bytes:
-    columns = ["q", "dq", "tau_ff", "kp", "kd", "measured_q",
-               "measured_dq", "output_torque", "measured_tau_est"]
+    columns = [
+        "q",
+        "dq",
+        "tau_ff",
+        "kp",
+        "kd",
+        "measured_q",
+        "measured_dq",
+        "output_torque",
+        "measured_tau_est",
+    ]
     payload = bytearray()
     for row in rows:
         payload += struct.pack(
             "<QQIIIQ7B16s6Q9dQ",
-            row["stamp_us"], row["state_seq"], 3, 2, 0, 0,
-            1, 1, 1, 1, 1, 1, 1, bytes.fromhex("33" * 16),
-            1, row["state_seq"], row["state_seq"],
-            row["stamp_us"] + 5, row["state_seq"], row["stamp_us"] - 100,
-            0.01, 0.02, 0.03, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6,
+            row["stamp_us"],
+            row["state_seq"],
+            3,
+            2,
+            0,
+            0,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            bytes.fromhex("33" * 16),
+            1,
+            row["state_seq"],
+            row["state_seq"],
+            row["stamp_us"] + 5,
+            row["state_seq"],
+            row["stamp_us"] - 100,
+            0.01,
+            0.02,
+            0.03,
+            0.1,
+            0.2,
+            0.3,
+            0.4,
+            0.5,
+            0.6,
             row["stamp_us"] + 7,
         )
     for column in columns:
@@ -79,10 +112,18 @@ def _chunk(rows: list[dict], joints: int) -> bytes:
     for row in rows:
         payload += bytes(1 for _ in range(joints))
     header = struct.pack(
-        "<8sIIIIQQQQII", b"IRMVCH01", 4, joints, len(rows), len(payload),
-        rows[0]["stamp_us"], rows[-1]["stamp_us"],
-        rows[0]["state_seq"], rows[-1]["state_seq"],
-        zlib.crc32(payload) & 0xFFFFFFFF, 0,
+        "<8sIIIIQQQQII",
+        b"IRMVCH01",
+        4,
+        joints,
+        len(rows),
+        len(payload),
+        rows[0]["stamp_us"],
+        rows[-1]["stamp_us"],
+        rows[0]["state_seq"],
+        rows[-1]["state_seq"],
+        zlib.crc32(payload) & 0xFFFFFFFF,
+        0,
     )
     header = header[:60] + struct.pack("<I", zlib.crc32(header[:60]) & 0xFFFFFFFF)
     return header + bytes(payload)
@@ -93,24 +134,41 @@ def generate(root: Path, joints: int, rows: int) -> Path:
     if (run / "index.json").is_file():
         try:
             index = json.loads((run / "index.json").read_text())
-            if index.get("rows_recorded") == rows and index.get("joint_count") == joints:
+            if (
+                index.get("rows_recorded") == rows
+                and index.get("joint_count") == joints
+            ):
                 return run
         except (OSError, ValueError):
             pass
     if run.exists():
         import shutil
+
         shutil.rmtree(run)
     run.mkdir(parents=True)
     meta = {
-        "schema_version": 4, "config_id": "a" * 64, "layout_id": "b" * 64,
-        "backend": "fake", "control_hz": 500.0, "sample_hz": 100,
+        "schema_version": 4,
+        "config_id": "a" * 64,
+        "layout_id": "b" * 64,
+        "backend": "fake",
+        "control_hz": 500.0,
+        "sample_hz": 100,
         "joint_count": joints,
         "joints": [f"joint_{index:02d}" for index in range(joints)],
-        "sdk_git_sha": "benchmark", "clock": {
-            "clock": "linux_clock_monotonic", "boot_id": "benchmark",
-            "available": True},
-        "units": {"position": "rad", "velocity": "rad_s", "torque": "Nm",
-                  "kp": "Nm_per_rad", "kd": "Nm_s_per_rad", "time": "us"},
+        "sdk_git_sha": "benchmark",
+        "clock": {
+            "clock": "linux_clock_monotonic",
+            "boot_id": "benchmark",
+            "available": True,
+        },
+        "units": {
+            "position": "rad",
+            "velocity": "rad_s",
+            "torque": "Nm",
+            "kp": "Nm_per_rad",
+            "kd": "Nm_s_per_rad",
+            "time": "us",
+        },
     }
     (run / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
     (run / "sessions.json").write_text("[]", encoding="utf-8")
@@ -121,21 +179,39 @@ def generate(root: Path, joints: int, rows: int) -> Path:
         subset = [_runtime_row(index, joints) for index in range(start, stop)]
         name = f"chunk_{start // ROWS_PER_CHUNK:06d}.bin"
         (run / name).write_bytes(_chunk(subset, joints))
-        chunks.append({
-            "file": name, "rows": len(subset),
-            "first_stamp_us": subset[0]["stamp_us"],
-            "last_stamp_us": subset[-1]["stamp_us"],
-            "first_state_seq": subset[0]["state_seq"],
-            "last_state_seq": subset[-1]["state_seq"],
-        })
-    (run / "index.json").write_text(json.dumps({
-        "schema_version": 4, "complete": True, "joint_count": joints,
-        "rows_recorded": rows, "chunks": chunks, "gaps": [],
-        "write_failures": 0,
-        "faults": {"complete": True, "recorded": 0, "written": 0,
-                   "queue_dropped": 0, "generation_dropped": 0,
-                   "write_failures": 0, "losses": []},
-    }), encoding="utf-8")
+        chunks.append(
+            {
+                "file": name,
+                "rows": len(subset),
+                "first_stamp_us": subset[0]["stamp_us"],
+                "last_stamp_us": subset[-1]["stamp_us"],
+                "first_state_seq": subset[0]["state_seq"],
+                "last_state_seq": subset[-1]["state_seq"],
+            }
+        )
+    (run / "index.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 4,
+                "complete": True,
+                "joint_count": joints,
+                "rows_recorded": rows,
+                "chunks": chunks,
+                "gaps": [],
+                "write_failures": 0,
+                "faults": {
+                    "complete": True,
+                    "recorded": 0,
+                    "written": 0,
+                    "queue_dropped": 0,
+                    "generation_dropped": 0,
+                    "write_failures": 0,
+                    "losses": [],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     return run
 
 
@@ -166,8 +242,11 @@ def percentile(values: list[float], fraction: float) -> float:
 def bridge_query(reader: Path, root: Path, request: dict) -> tuple[float, int, int]:
     process = subprocess.Popen(
         [str(reader), "--records-root", str(root)],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        text=True, bufsize=1,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        bufsize=1,
     )
     before = rss_kb(process.pid)
     started = time.perf_counter()
@@ -189,16 +268,33 @@ def bridge_query(reader: Path, root: Path, request: dict) -> tuple[float, int, i
 
 def http_service(records: Path, data: Path, reader: Path, socket_path: Path):
     process = subprocess.Popen(
-        [sys.executable, "-m", "tools.experiment_web",
-         "--records-root", str(records), "--data-dir", str(data),
-         "--reader", str(reader), "--assets", str(SOURCE / "web"),
-         "--port", "0", "--telemetry-socket", str(socket_path)],
-        cwd=str(SOURCE), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        [
+            sys.executable,
+            "-m",
+            "tools.experiment_web",
+            "--records-root",
+            str(records),
+            "--data-dir",
+            str(data),
+            "--reader",
+            str(reader),
+            "--assets",
+            str(SOURCE / "web"),
+            "--port",
+            "0",
+            "--telemetry-socket",
+            str(socket_path),
+        ],
+        cwd=str(SOURCE),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
     assert process.stdout is not None
     url = process.stdout.readline().strip().rstrip("/")
     opener = urllib.request.build_opener(
-        urllib.request.HTTPCookieProcessor(CookieJar()))
+        urllib.request.HTTPCookieProcessor(CookieJar())
+    )
     with opener.open(url + "/", timeout=10) as response:
         response.read()
     return process, url, opener
@@ -211,8 +307,9 @@ def main() -> int:
     parser.add_argument("--signals", type=int, default=24)
     parser.add_argument("--iterations", type=int, default=5)
     parser.add_argument("--root", default=str(SOURCE / "build" / "web-benchmark"))
-    parser.add_argument("--reader",
-                        default=str(SOURCE / "build-bench" / "web_record_query"))
+    parser.add_argument(
+        "--reader", default=str(SOURCE / "build-bench" / "web_record_query")
+    )
     options = parser.parse_args()
     root = Path(options.root)
     records = root / "records"
@@ -226,10 +323,8 @@ def main() -> int:
         return 1
     fields = ["q", "measured_q", "tau_ff", "output_torque"]
     signal_ids = [
-        f"runtime/joint_{joint:02d}/{field}"
-        for joint in range(6)
-        for field in fields
-    ][:options.signals]
+        f"runtime/joint_{joint:02d}/{field}" for joint in range(6) for field in fields
+    ][: options.signals]
     index = json.loads((run / "index.json").read_text())
     begin = index["chunks"][0]["first_stamp_us"]
     end = index["chunks"][-1]["last_stamp_us"] + 1
@@ -248,14 +343,16 @@ def main() -> int:
         elapsed, before, after = bridge_query(reader, records, request)
         bridge_times.append(elapsed)
         memory = (before, after)
-    process, url, opener = http_service(records, data, reader,
-                                        data / "live.sock")
+    process, url, opener = http_service(records, data, reader, data / "live.sock")
     http_times = []
     try:
         from urllib.parse import quote
-        path = (f"/api/runs/{request['run_id']}/range?signal_ids="
-                f"{quote(','.join(signal_ids), safe='')}"
-                f"&begin_us={begin}&end_us={end}&pixel_width=800")
+
+        path = (
+            f"/api/runs/{request['run_id']}/range?signal_ids="
+            f"{quote(','.join(signal_ids), safe='')}"
+            f"&begin_us={begin}&end_us={end}&pixel_width=800"
+        )
         for _ in range(options.iterations):
             started = time.perf_counter()
             with opener.open(url + path, timeout=60) as response:
@@ -270,13 +367,19 @@ def main() -> int:
         for seq in range(40):
             stamp = base + seq * 10_000
             envelope = {
-                "version": 1, "emitter_id": emitter, "run_path": str(run),
-                "source": "runtime", "transport_seq": str(seq + 1),
+                "version": 1,
+                "emitter_id": emitter,
+                "run_path": str(run),
+                "source": "runtime",
+                "transport_seq": str(seq + 1),
                 "kind": "sample",
                 "payload": {
-                    "kind": "sample", "stamp_us": str(stamp),
-                    "state_seq": str(seq + 1), "command_present": True,
-                    "feedback_valid": True, "joint_count": options.joints,
+                    "kind": "sample",
+                    "stamp_us": str(stamp),
+                    "state_seq": str(seq + 1),
+                    "command_present": True,
+                    "feedback_valid": True,
+                    "joint_count": options.joints,
                     "q": [0.0] * options.joints,
                     "joint_valid": [True] * options.joints,
                     "measured_tau_est": [0.0] * options.joints,
@@ -287,13 +390,17 @@ def main() -> int:
             deadline = time.monotonic() + 1.0
             while time.monotonic() < deadline:
                 with opener.open(
-                        url + f"/api/live/snapshot?run_id={request['run_id']}"
-                        f"&signal_ids={quote('runtime/joint_00/q', safe='')}"
-                        f"&begin_us={base}&end_us={base + 5_000_000}"
-                        f"&pixel_width=4096", timeout=5) as response:
+                    url + f"/api/live/snapshot?run_id={request['run_id']}"
+                    f"&signal_ids={quote('runtime/joint_00/q', safe='')}"
+                    f"&begin_us={base}&end_us={base + 5_000_000}"
+                    f"&pixel_width=4096",
+                    timeout=5,
+                ) as response:
                     snapshot = json.loads(response.read())
-                if any(int(point["seq"]) == seq + 1
-                       for point in snapshot.get("series", [{}])[0].get("points", [])):
+                if any(
+                    int(point["seq"]) == seq + 1
+                    for point in snapshot.get("series", [{}])[0].get("points", [])
+                ):
                     live_times.append((time.monotonic() - sent_at) * 1000.0)
                     break
                 time.sleep(0.002)
@@ -310,8 +417,10 @@ def main() -> int:
             "platform": sys.platform,
         },
         "record": {
-            "joints": options.joints, "rows": options.rows,
-            "sample_hz": 100, "seconds": options.rows / 100.0,
+            "joints": options.joints,
+            "rows": options.rows,
+            "sample_hz": 100,
+            "seconds": options.rows / 100.0,
             "bytes": sum(path.stat().st_size for path in run.glob("chunk_*.bin")),
         },
         "signals": signal_ids,
@@ -325,8 +434,11 @@ def main() -> int:
             "p95": percentile(http_times, 0.95),
             "max": max(http_times),
         },
-        "bridge_rss_kb": {"before": memory[0], "after": memory[1],
-                          "delta": memory[1] - memory[0]},
+        "bridge_rss_kb": {
+            "before": memory[0],
+            "after": memory[1],
+            "delta": memory[1] - memory[0],
+        },
         "live_source_to_snapshot_ms": {
             "samples": len(live_times),
             "p50": percentile(live_times, 0.5),
@@ -338,8 +450,7 @@ def main() -> int:
             "the bridge decodes one chunk at a time and holds one window",
         ],
     }
-    (root / "report.json").write_text(json.dumps(report, indent=2),
-                                      encoding="utf-8")
+    (root / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))
     return 0
 

@@ -13,10 +13,7 @@ import {
   CreateChart,
   RemoveCurve,
 } from './chart_model.js';
-import {
-  LayoutError,
-  ValidateLayout,
-} from './layout_model.js';
+import { LayoutError, ValidateLayout } from './layout_model.js';
 import { SignalKey } from './signals.js';
 
 const EDGES = new Set(['left', 'right', 'top', 'bottom']);
@@ -77,7 +74,9 @@ function NodeForChart(node, chartId) {
   if (node.type !== 'split') {
     return null;
   }
-  return NodeForChart(node.first, chartId) ?? NodeForChart(node.second, chartId);
+  return (
+    NodeForChart(node.first, chartId) ?? NodeForChart(node.second, chartId)
+  );
 }
 
 function ContainsChart(node, chartId) {
@@ -87,7 +86,9 @@ function ContainsChart(node, chartId) {
   if (node.type !== 'split') {
     return false;
   }
-  return ContainsChart(node.first, chartId) || ContainsChart(node.second, chartId);
+  return (
+    ContainsChart(node.first, chartId) || ContainsChart(node.second, chartId)
+  );
 }
 
 function CheckZone(zone) {
@@ -125,7 +126,9 @@ function ChartFor(layout, chartId) {
 function ReplaceChart(layout, chart) {
   return {
     ...layout,
-    charts: layout.charts.map((entry) => (entry.id === chart.id ? chart : entry)),
+    charts: layout.charts.map((entry) =>
+      entry.id === chart.id ? chart : entry,
+    ),
   };
 }
 
@@ -147,7 +150,10 @@ export function DropSignal(layout, signal, targetChartId, zone) {
     if (next.dock.type !== 'empty') {
       throw new LayoutError('the layout already has a dock tree');
     }
-    const chart = AddCurve(CreateChart(NextChartId(next), signal.label ?? ''), signal);
+    const chart = AddCurve(
+      CreateChart(NextChartId(next), signal.label ?? ''),
+      signal,
+    );
     next.charts.push(chart);
     next.dock = { type: 'leaf', chartId: chart.id };
     return Finalize(next);
@@ -161,9 +167,14 @@ export function DropSignal(layout, signal, targetChartId, zone) {
     return Finalize(ReplaceChart(next, updated));
   }
   CheckZone(zone);
-  const chart = AddCurve(CreateChart(NextChartId(next), signal.label ?? ''), signal);
+  const chart = AddCurve(
+    CreateChart(NextChartId(next), signal.label ?? ''),
+    signal,
+  );
   next.charts.push(chart);
-  return Finalize(SplitTarget(next, targetChartId, zone, { type: 'leaf', chartId: chart.id }));
+  return Finalize(
+    SplitTarget(next, targetChartId, zone, { type: 'leaf', chartId: chart.id }),
+  );
 }
 
 export function MoveChart(layout, chartId, targetChartId, zone) {
@@ -189,7 +200,9 @@ export function MoveChart(layout, chartId, targetChartId, zone) {
   }
   next.charts = next.charts.filter((chart) => chart.id !== chartId);
   next.charts.push(moved);
-  return Finalize(SplitTarget(next, targetChartId, zone, { type: 'leaf', chartId }));
+  return Finalize(
+    SplitTarget(next, targetChartId, zone, { type: 'leaf', chartId }),
+  );
 }
 
 export function RemoveSignal(layout, chartId, signalId) {

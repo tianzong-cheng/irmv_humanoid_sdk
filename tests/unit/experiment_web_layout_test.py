@@ -109,9 +109,7 @@ class LayoutDocumentTest(unittest.TestCase):
 
     def test_refuses_more_than_128_charts(self) -> None:
         document = layout()
-        document["charts"] = [
-            {"id": f"c{index}", "curves": []} for index in range(129)
-        ]
+        document["charts"] = [{"id": f"c{index}", "curves": []} for index in range(129)]
         with self.assertRaises(LayoutError):
             validate_layout(document)
 
@@ -139,8 +137,9 @@ class LayoutStoreTest(unittest.TestCase):
             document = layout("first")
             saved_id = store.save(document)
             document["name"] = "second"
-            with mock.patch.object(layout_store.os, "replace",
-                                   side_effect=OSError("interrupted")):
+            with mock.patch.object(
+                layout_store.os, "replace", side_effect=OSError("interrupted")
+            ):
                 with self.assertRaises(OSError):
                     store.save(document, saved_id)
             previous = store.get(saved_id)

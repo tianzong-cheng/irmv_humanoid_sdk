@@ -54,7 +54,6 @@ def wait_for(path: Path, pattern: str, timeout_s: float) -> str:
     return text
 
 
-
 def targets_of_epoch(trace_path: Path, epoch: int) -> list:
     """The targets of one epoch the runtime really adopted, deduplicated."""
 
@@ -117,8 +116,9 @@ def main() -> int:
     )
     work.mkdir(parents=True, exist_ok=True)
     try:
-        return run(application, runtime, producer_binary, source_root, work,
-                   failures, fail)
+        return run(
+            application, runtime, producer_binary, source_root, work, failures, fail
+        )
     finally:
         if args.keep_work is None:
             shutil.rmtree(work, ignore_errors=True)
@@ -256,7 +256,10 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
             return 1
         producer_id = matched.group(1)
 
-        if re.search(r"producer=publishing", producer_log.read_text(encoding="utf-8", errors="replace")):
+        if re.search(
+            r"producer=publishing",
+            producer_log.read_text(encoding="utf-8", errors="replace"),
+        ):
             fail("the producer published a frame before any authorization")
 
         prepared = wait_for(application_log, r"producer=prepared prepare_id=\d+", 20)
@@ -275,7 +278,9 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
             r"behavior=Locomotion runtime=Tracking",
             30,
         )
-        epoch_match = re.search(r"producer=authorized epoch=(\d+) first_seq=(\d+)", authorized)
+        epoch_match = re.search(
+            r"producer=authorized epoch=(\d+) first_seq=(\d+)", authorized
+        )
         if epoch_match is None:
             fail(f"the producer was never authorized; tail: {authorized[-900:]}")
             return 1
@@ -317,7 +322,9 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
         targets = []
         target_q_values = set()
         last_identity = None
-        for line in trace_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        for line in trace_path.read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines():
             if not line.strip():
                 continue
             try:
@@ -353,7 +360,9 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
                     f"the first adopted target is not the request's first frame: "
                     f"{sequences[0]} != {first_seq}"
                 )
-            if any(later <= earlier for earlier, later in zip(sequences, sequences[1:])):
+            if any(
+                later <= earlier for earlier, later in zip(sequences, sequences[1:])
+            ):
                 fail("the adopted target sequence is not strictly increasing")
             if sequences[-1] <= first_seq:
                 fail("no target of the producer itself was adopted")
@@ -368,7 +377,9 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
             # the operator commands a forward velocity, which is what makes
             # the velocity lane a tested path and not a formality.
             if len(target_q_values) < 2:
-                fail("the producer's targets never moved while a forward intent was held")
+                fail(
+                    "the producer's targets never moved while a forward intent was held"
+                )
 
         # The stop: the operator leaves the behaviour, the producer is told,
         # and the ordered exit is confirmed as always.
@@ -412,8 +423,12 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
         def back_to_ready(note: str) -> None:
             before = count_app(r"behavior=Ready runtime=Tracking ")
             key("initialize")
-            wait_more(f"{note}: the initialization", r"behavior=Ready runtime=Tracking ",
-                      before, 25)
+            wait_more(
+                f"{note}: the initialization",
+                r"behavior=Ready runtime=Tracking ",
+                before,
+                25,
+            )
 
         def authorize(note: str) -> int:
             """The locomotion key, and the epoch it authorized (0 on failure)."""
@@ -421,11 +436,17 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
             states = count_app(r"behavior=Locomotion runtime=Tracking ")
             notices = count_app(r"producer=authorized ")
             key("start_locomotion")
-            text = wait_more(f"{note}: the locomotion authorization",
-                             r"behavior=Locomotion runtime=Tracking ", states, 30)
+            text = wait_more(
+                f"{note}: the locomotion authorization",
+                r"behavior=Locomotion runtime=Tracking ",
+                states,
+                30,
+            )
             found = re.findall(r"producer=authorized epoch=(\d+) first_seq=(\d+)", text)
             if len(found) != notices + 1:
-                fail(f"{note}: the producer was authorized {len(found) - notices} times")
+                fail(
+                    f"{note}: the producer was authorized {len(found) - notices} times"
+                )
                 return 0
             return int(found[-1][0])
 
@@ -440,7 +461,9 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
         producer_process.wait(timeout=10)
         back_to_ready("the restart")
         producer_process, producer_log = start_producer()
-        text = wait_more("the restarted producer", r"producer=selected id=", selected, 25)
+        text = wait_more(
+            "the restarted producer", r"producer=selected id=", selected, 25
+        )
         selected_ids = re.findall(r"producer=selected id=([0-9a-f]{32})", text)
         if selected_ids[-1] == producer_id:
             fail("the restarted producer was selected under the old identity")
@@ -461,10 +484,14 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
         back_to_ready("the replacement")
         selected = selected_before(r"producer=selected id=")
         replacing_process, _ = start_producer()
-        text = wait_more("the replacing producer", r"producer=selected id=", selected, 25)
+        text = wait_more(
+            "the replacing producer", r"producer=selected id=", selected, 25
+        )
         replacing_ids = re.findall(r"producer=selected id=([0-9a-f]{32})", text)
         if replacing_ids[-1] in (producer_id, selected_ids[-1]):
-            fail(f"the replacing producer was selected under an identity already used: {replacing_ids[-3:]}")
+            fail(
+                f"the replacing producer was selected under an identity already used: {replacing_ids[-3:]}"
+            )
         prepared = selected_before(r"producer=prepared ")
         wait_more("the replacing preparation", r"producer=prepared ", prepared, 25)
         replacement_epoch = authorize("the replacement")
@@ -477,7 +504,9 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
         # actually selected. A replaced producer that is no longer authorized
         # has nothing to hear in a stop notice, so the runtime's own trace - the
         # producer of every adopted frame - is what this checks.
-        replacement_targets = targets_of_epoch(work / "trace_run1.jsonl", replacement_epoch)
+        replacement_targets = targets_of_epoch(
+            work / "trace_run1.jsonl", replacement_epoch
+        )
         if not replacement_targets:
             fail("the replacement authorized a context the runtime never adopted")
         elif any(
@@ -509,7 +538,9 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
         live_targets = targets_of_epoch(work / "trace_run1.jsonl", replacement_epoch)
         if not live_targets:
             fail("the live context stopped being adopted while it was live")
-        elif any(target.get("producer_id") != replacing_ids[-1] for target in live_targets):
+        elif any(
+            target.get("producer_id") != replacing_ids[-1] for target in live_targets
+        ):
             fail(
                 "the live context started adopting frames of another producer: "
                 f"{sorted({target.get('producer_id') for target in live_targets})}"
@@ -569,8 +600,9 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
         falling = count_app(r"behavior=Damping runtime=Damping ")
         deferred_process.send_signal(signal.SIGKILL)
         deferred_process.wait(timeout=10)
-        fell_back = wait_more("the fallback", r"behavior=Damping runtime=Damping ",
-                              falling, 15)
+        fell_back = wait_more(
+            "the fallback", r"behavior=Damping runtime=Damping ", falling, 15
+        )
         if re.search(r"behavior=Fault", fell_back):
             fail("the application faulted when its producer died")
         back_to_ready("the recovery")
@@ -640,11 +672,15 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
     else:
         events = [
             json.loads(line)
-            for line in sidecar.read_text(encoding="utf-8", errors="replace").splitlines()
+            for line in sidecar.read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines()
             if line.strip()
         ]
         if len(events) < 4:
-            fail(f"the sidecar holds {len(events)} session(s), not one per authorized context")
+            fail(
+                f"the sidecar holds {len(events)} session(s), not one per authorized context"
+            )
         # The runtime's own per-tick trace is where the identity of an adopted
         # context is written while the run happens, so the join is checked
         # against what the runtime published rather than against a file only a
@@ -665,8 +701,13 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
         }
         names = {joint["name"] for joint in document["robot"]["joints"]}
         for event in events:
-            if event.get("schema") != "irmv.policy_session" or event.get("version") != 2:
-                fail(f"a sidecar line is not this schema: {event.get('schema')} v{event.get('version')}")
+            if (
+                event.get("schema") != "irmv.policy_session"
+                or event.get("version") != 2
+            ):
+                fail(
+                    f"a sidecar line is not this schema: {event.get('schema')} v{event.get('version')}"
+                )
             if event.get("source") != "external":
                 fail(f"an external run recorded source={event.get('source')}")
             if (event.get("model") or {}).get("name") != "":
@@ -674,7 +715,11 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
                     "an external run invented a model name: "
                     f"{(event.get('model') or {}).get('name')}"
                 )
-            key = (event["session_id"], int(event["epoch"]), event["producer_process_id"])
+            key = (
+                event["session_id"],
+                int(event["epoch"]),
+                event["producer_process_id"],
+            )
             if key not in joined:
                 fail(
                     f"the session record {key} is not joined to any runtime session; "
@@ -684,7 +729,9 @@ def run(application, runtime, producer_binary, source_root, work, failures, fail
                 )
             gains = event.get("gains") or []
             if len(gains) != 2 * len(names):
-                fail(f"the external session recorded {len(gains)} gain rows, not two per joint")
+                fail(
+                    f"the external session recorded {len(gains)} gain rows, not two per joint"
+                )
             for row in gains:
                 if row["gain"] not in ("kp", "kd") or row["joint"] not in names:
                     fail(f"a gain row names {row['joint']}.{row['gain']}")

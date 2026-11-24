@@ -208,9 +208,7 @@ def make_fault_run(
     write_json(target / "index.json", index)
 
 
-def make_application_run(
-    directory: Path, runtime_meta: dict, t0: int
-) -> dict:
+def make_application_run(directory: Path, runtime_meta: dict, t0: int) -> dict:
     """Write one application run with a loss, a gap and a foreign tail."""
 
     directory.mkdir()
@@ -489,17 +487,25 @@ def main() -> int:
 
         for column in (*UINT64_COLUMNS, *UINT32_COLUMNS, *BOOL_COLUMNS, "producer_id"):
             if data[column].shape != (rows_written,):
-                fail(f"{column} has shape {data[column].shape}, expected ({rows_written},)")
+                fail(
+                    f"{column} has shape {data[column].shape}, expected ({rows_written},)"
+                )
         joints = int(data["joint_names"].shape[0])
         for column in FLOAT_COLUMNS:
             if data[column].shape != (rows_written, joints):
-                fail(f"{column} has shape {data[column].shape}, expected ({rows_written}, {joints})")
+                fail(
+                    f"{column} has shape {data[column].shape}, expected ({rows_written}, {joints})"
+                )
         for column in IMU_COLUMNS:
             if data[column].shape != (rows_written, 3):
-                fail(f"{column} has shape {data[column].shape}, expected ({rows_written}, 3)")
+                fail(
+                    f"{column} has shape {data[column].shape}, expected ({rows_written}, 3)"
+                )
         for column in JOINT_BOOL_COLUMNS:
             if data[column].shape != (rows_written, joints):
-                fail(f"{column} has shape {data[column].shape}, expected ({rows_written}, {joints})")
+                fail(
+                    f"{column} has shape {data[column].shape}, expected ({rows_written}, {joints})"
+                )
         if int(data["imu_rx_stamp_us"].shape[0]) != rows_written:
             fail("imu_rx_stamp_us does not have one value per row")
 
@@ -545,7 +551,9 @@ def main() -> int:
         metadata = json.loads((run / "meta.json").read_text())
         archived_units = json.loads(str(data["units"]))
         if archived_units != metadata["units"]:
-            fail(f"the archive units {archived_units} are not the run's {metadata['units']}")
+            fail(
+                f"the archive units {archived_units} are not the run's {metadata['units']}"
+            )
 
         # The IMU convention the run can state is written down, and what the
         # driver contract does not fix is marked unknown rather than guessed at:
@@ -572,7 +580,10 @@ def main() -> int:
         # The archive itself - not the run directory it came from - must carry
         # the declared order, units and the conventions marked unknown.
         orientation = imu_conventions.get("orientation_rpy", {})
-        if orientation.get("order") != "roll,pitch,yaw" or orientation.get("unit") != "rad":
+        if (
+            orientation.get("order") != "roll,pitch,yaw"
+            or orientation.get("unit") != "rad"
+        ):
             fail("the archive does not state RPY as roll,pitch,yaw in rad")
         acceleration = imu_conventions.get("linear_acceleration", {})
         if acceleration.get("unit") != "m_s2":
@@ -581,8 +592,13 @@ def main() -> int:
             fail("the archive claims a gravity convention the driver does not define")
         for vector in ("orientation_rpy", "angular_velocity", "linear_acceleration"):
             entry = imu_conventions.get(vector, {})
-            if entry.get("axis_frame") != "unknown" or entry.get("axis_order") != "unknown":
-                fail(f"the archive states an axis convention for {vector} the driver does not define")
+            if (
+                entry.get("axis_frame") != "unknown"
+                or entry.get("axis_order") != "unknown"
+            ):
+                fail(
+                    f"the archive states an axis convention for {vector} the driver does not define"
+                )
 
         # Every column is checked against the reader's own output row by row:
         # the archive is a copy of a read, so a value it changed is a value it
@@ -598,7 +614,9 @@ def main() -> int:
         else:
             if [row["producer_id"] for row in rows_read] != list(data["producer_id"]):
                 fail("the archive does not carry the producer identity of every row")
-            if [row["stamp_us"] for row in rows_read] != [int(value) for value in data["stamp_us"]]:
+            if [row["stamp_us"] for row in rows_read] != [
+                int(value) for value in data["stamp_us"]
+            ]:
                 fail("the archive stamps are not the reader's stamps")
             # The columns a v1 run could not carry: the measured feedback and
             # the output stage's torque. They are checked against the reader's
@@ -639,7 +657,9 @@ def main() -> int:
             # model and never invents one.
             session_table = run_summary.get("sessions", [])
             if len(session_table) != int(data["session_joint_count"].shape[0]):
-                fail("the archive does not carry the same number of sessions as the run")
+                fail(
+                    "the archive does not carry the same number of sessions as the run"
+                )
             if [entry["producer_id"] for entry in session_table] != list(
                 data["session_producer_id"]
             ) or [entry["epoch"] for entry in session_table] != [
@@ -666,23 +686,25 @@ def main() -> int:
             # The reader writes a non-finite sample double as an explicit
             # string. The export must restore it without folding either
             # infinity into NaN.
-            synthetic_row["measured_tau_est"] = (
-                ["NaN", "+Inf"] + [0.0] * (joints - 2)
-            )
+            synthetic_row["measured_tau_est"] = ["NaN", "+Inf"] + [0.0] * (joints - 2)
             synthetic_row["imu_orientation_rpy"] = ["-Inf", 0.0, 1.0]
             synthetic_path = work / "synthetic.npz"
             np.savez_compressed(
                 synthetic_path, **record_to_npz.to_archive([synthetic_row], run_summary)
             )
             synthetic = np.load(synthetic_path, allow_pickle=False)
-            if synthetic["stamp_us"].dtype != np.uint64 or int(synthetic["stamp_us"][0]) != above_two_53:
+            if (
+                synthetic["stamp_us"].dtype != np.uint64
+                or int(synthetic["stamp_us"][0]) != above_two_53
+            ):
                 fail(
                     f"a stamp above 2**53 came back as {synthetic['stamp_us'][0]!r} "
                     f"of dtype {synthetic['stamp_us'].dtype}"
                 )
-            if synthetic["imu_rx_stamp_us"].dtype != np.uint64 or int(
-                synthetic["imu_rx_stamp_us"][0]
-            ) != above_two_53 + 2:
+            if (
+                synthetic["imu_rx_stamp_us"].dtype != np.uint64
+                or int(synthetic["imu_rx_stamp_us"][0]) != above_two_53 + 2
+            ):
                 fail(
                     f"an IMU stamp above 2**53 came back as "
                     f"{synthetic['imu_rx_stamp_us'][0]!r} of dtype "
@@ -691,9 +713,13 @@ def main() -> int:
             if synthetic["joint_valid"].dtype != np.bool_ or list(
                 synthetic["joint_valid"][0]
             ) != [index % 2 == 0 for index in range(joints)]:
-                fail("the per-joint validity flags did not survive the export as booleans")
+                fail(
+                    "the per-joint validity flags did not survive the export as booleans"
+                )
             if str(synthetic["producer_id"][0]) != PRODUCER_ID:
-                fail(f"the producer identity came back as {str(synthetic['producer_id'][0])!r}")
+                fail(
+                    f"the producer identity came back as {str(synthetic['producer_id'][0])!r}"
+                )
             if not np.isnan(synthetic["measured_tau_est"][0][0]):
                 fail("a NaN sample value did not survive the export as NaN")
             if not np.isposinf(synthetic["measured_tau_est"][0][1]):
@@ -707,17 +733,31 @@ def main() -> int:
             empty = record_to_npz.to_archive([], run_summary)
             for column in IMU_COLUMNS:
                 if empty[column].shape != (0, 3) or empty[column].dtype != np.float64:
-                    fail(f"an empty run exported {column} with shape "
-                         f"{empty[column].shape} and dtype {empty[column].dtype}")
+                    fail(
+                        f"an empty run exported {column} with shape "
+                        f"{empty[column].shape} and dtype {empty[column].dtype}"
+                    )
             for column in (*FLOAT_COLUMNS, *JOINT_BOOL_COLUMNS):
-                expected_dtype = np.bool_ if column in JOINT_BOOL_COLUMNS else np.float64
-                if empty[column].shape != (0, joints) or empty[column].dtype != expected_dtype:
-                    fail(f"an empty run exported {column} with shape "
-                         f"{empty[column].shape} and dtype {empty[column].dtype}")
-            if empty["imu_rx_stamp_us"].shape != (0,) or empty["imu_rx_stamp_us"].dtype != np.uint64:
-                fail(f"an empty run exported imu_rx_stamp_us with shape "
-                     f"{empty['imu_rx_stamp_us'].shape} and dtype "
-                     f"{empty['imu_rx_stamp_us'].dtype}")
+                expected_dtype = (
+                    np.bool_ if column in JOINT_BOOL_COLUMNS else np.float64
+                )
+                if (
+                    empty[column].shape != (0, joints)
+                    or empty[column].dtype != expected_dtype
+                ):
+                    fail(
+                        f"an empty run exported {column} with shape "
+                        f"{empty[column].shape} and dtype {empty[column].dtype}"
+                    )
+            if (
+                empty["imu_rx_stamp_us"].shape != (0,)
+                or empty["imu_rx_stamp_us"].dtype != np.uint64
+            ):
+                fail(
+                    f"an empty run exported imu_rx_stamp_us with shape "
+                    f"{empty['imu_rx_stamp_us'].shape} and dtype "
+                    f"{empty['imu_rx_stamp_us'].dtype}"
+                )
             # The fault table is independent of the sample rows and keeps its
             # own shape when there is no occurrence at all.
             for column, dtype in (
@@ -783,7 +823,10 @@ def main() -> int:
                 ("fault_write_failures", np.uint64),
                 ("fault_missing_occurrences", np.uint64),
             ):
-                if empty_faults[column].shape != () or empty_faults[column].dtype != dtype:
+                if (
+                    empty_faults[column].shape != ()
+                    or empty_faults[column].dtype != dtype
+                ):
                     fail(
                         f"an empty fault stream exported {column} with shape "
                         f"{empty_faults[column].shape} and dtype "
@@ -802,16 +845,22 @@ def main() -> int:
                 ("fault_loss_last_stamp_us", np.uint64),
                 ("fault_loss_dropped", np.uint64),
             ):
-                if empty_faults[column].shape != (0,) or empty_faults[column].dtype != dtype:
+                if (
+                    empty_faults[column].shape != (0,)
+                    or empty_faults[column].dtype != dtype
+                ):
                     fail(
                         f"an empty fault stream exported {column} with shape "
                         f"{empty_faults[column].shape} and dtype "
                         f"{empty_faults[column].dtype}"
                     )
-            if empty_faults["fault_loss_reason"].shape != (0,) or empty_faults[
-                "fault_loss_reason"
-            ].dtype.kind != "U":
-                fail("an empty fault stream exported fault_loss_reason without text shape")
+            if (
+                empty_faults["fault_loss_reason"].shape != (0,)
+                or empty_faults["fault_loss_reason"].dtype.kind != "U"
+            ):
+                fail(
+                    "an empty fault stream exported fault_loss_reason without text shape"
+                )
             for column, dtype in (
                 ("application_loss_first_sample_seq", np.uint64),
                 ("application_loss_last_sample_seq", np.uint64),
@@ -819,7 +868,10 @@ def main() -> int:
                 ("application_loss_last_stamp_us", np.uint64),
                 ("application_loss_dropped", np.uint64),
             ):
-                if empty_faults[column].shape != (0,) or empty_faults[column].dtype != dtype:
+                if (
+                    empty_faults[column].shape != (0,)
+                    or empty_faults[column].dtype != dtype
+                ):
                     fail(
                         f"an empty application stream exported {column} with "
                         f"shape {empty_faults[column].shape} and dtype "
@@ -887,7 +939,9 @@ def main() -> int:
             }
             lossy = record_to_npz.to_archive([], lossy_summary, [], lossy_app)
             if bool(lossy["fault_complete"]) or not bool(lossy["fault_truncated"]):
-                fail("a truncated fault stream was not exported as incomplete/truncated")
+                fail(
+                    "a truncated fault stream was not exported as incomplete/truncated"
+                )
             if int(lossy["fault_missing_occurrences"]) != 4:
                 fail("the fault stream's missing-occurrence count was not exported")
             if int(lossy["fault_recorded"]) != 5 or int(lossy["fault_written"]) != 2:
@@ -897,17 +951,19 @@ def main() -> int:
                 or int(lossy["fault_write_failures"]) != 3
             ):
                 fail("the fault stream's queue/write loss counts were not exported")
-            if lossy["fault_loss_dropped"].shape != (1,) or int(
-                lossy["fault_loss_dropped"][0]
-            ) != 4:
+            if (
+                lossy["fault_loss_dropped"].shape != (1,)
+                or int(lossy["fault_loss_dropped"][0]) != 4
+            ):
                 fail("the fault loss span was not exported")
             if str(lossy["fault_loss_reason"][0]) != "write_failed":
                 fail("the fault loss reason did not survive as text")
             if int(lossy["fault_loss_last_record_seq"][0]) != 5:
                 fail("the fault loss span's record range was not exported")
-            if lossy["application_loss_dropped"].shape != (1,) or int(
-                lossy["application_loss_dropped"][0]
-            ) != 10:
+            if (
+                lossy["application_loss_dropped"].shape != (1,)
+                or int(lossy["application_loss_dropped"][0]) != 10
+            ):
                 fail("the application loss span was not exported")
             if str(lossy["application_loss_reason"][0]) != "queue_full":
                 fail("the application loss reason did not survive as text")
@@ -965,7 +1021,9 @@ def main() -> int:
                 (data["stamp_us"] >= window_start) & (data["stamp_us"] < window_end)
             ]
             if not np.array_equal(subset["state_seq"], expected):
-                fail("the windowed export does not match the same rows of the whole run")
+                fail(
+                    "the windowed export does not match the same rows of the whole run"
+                )
 
         # A run killed before its recorder finalizes is unfinished even when
         # every committed chunk reads cleanly. Both exports must carry that
@@ -1010,15 +1068,18 @@ def main() -> int:
                 else:
                     deadline = time.monotonic() + 20
                     while time.monotonic() < deadline:
-                        runs = [entry for entry in killed_runs.iterdir()
-                                if entry.is_dir()]
+                        runs = [
+                            entry for entry in killed_runs.iterdir() if entry.is_dir()
+                        ]
                         if runs:
                             index_path = runs[0] / "index.json"
                             try:
                                 current = json.loads(index_path.read_text())
                             except (OSError, ValueError):
                                 current = {}
-                            if int(current.get("rows_recorded", 0)) > 0 and current.get("chunks"):
+                            if int(current.get("rows_recorded", 0)) > 0 and current.get(
+                                "chunks"
+                            ):
                                 killed_run = runs[0]
                                 break
                         time.sleep(0.1)
@@ -1044,7 +1105,9 @@ def main() -> int:
                             check=False,
                         )
                         if killed_convert.returncode != 0:
-                            fail(f"the killed-run conversion failed: {killed_convert.stderr.strip()}")
+                            fail(
+                                f"the killed-run conversion failed: {killed_convert.stderr.strip()}"
+                            )
                         else:
                             unfinished = np.load(killed_archive, allow_pickle=False)
                             if "complete" not in unfinished:
@@ -1052,7 +1115,9 @@ def main() -> int:
                             elif bool(unfinished["complete"]):
                                 fail("the killed-run archive marks the run complete")
                             if int(unfinished["stamp_us"].shape[0]) == 0:
-                                fail("the killed-run archive exported no committed rows")
+                                fail(
+                                    "the killed-run archive exported no committed rows"
+                                )
             finally:
                 if killed.poll() is None:
                     killed.kill()
@@ -1101,9 +1166,13 @@ def main() -> int:
             if fault_summary.get("record_kind") != "runtime":
                 fail("read_record did not dispatch the fault run")
             if fault_stats.get("complete") is not True:
-                fail(f"the summary does not mark the fault stream complete: {fault_stats}")
+                fail(
+                    f"the summary does not mark the fault stream complete: {fault_stats}"
+                )
             if int(fault_stats.get("rows_in_range", -1)) != 3:
-                fail(f"the summary reports {fault_stats.get('rows_in_range')} fault rows")
+                fail(
+                    f"the summary reports {fault_stats.get('rows_in_range')} fault rows"
+                )
             if int(fault_stats.get("missing_occurrences", -1)) != 0:
                 fail(f"the summary reports missing fault occurrences: {fault_stats}")
             if len(fault_rows) != 3:
@@ -1116,13 +1185,17 @@ def main() -> int:
                 ]:
                     fail("the fault condition names did not survive the reader")
                 if [row["joint_index"] for row in fault_rows] != [0, None, 1]:
-                    fail(f"the fault joint indices are {[row['joint_index'] for row in fault_rows]}")
+                    fail(
+                        f"the fault joint indices are {[row['joint_index'] for row in fault_rows]}"
+                    )
                 if [row["observed_value"] for row in fault_rows] != [
                     "NaN",
                     "+Inf",
                     "-Inf",
                 ]:
-                    fail("the reader did not preserve the explicit non-finite fault values")
+                    fail(
+                        "the reader did not preserve the explicit non-finite fault values"
+                    )
                 if [row["output_action"] for row in fault_rows] != [0, 0, 0]:
                     fail("the fault output actions did not survive the reader")
 
@@ -1179,24 +1252,18 @@ def main() -> int:
         if app_read.returncode != 0:
             fail(f"the application run was not readable: {app_read.stderr.strip()}")
         else:
-            app_lines = [
-                line for line in app_read.stdout.splitlines() if line.strip()
-            ]
+            app_lines = [line for line in app_read.stdout.splitlines() if line.strip()]
             app_records = [json.loads(line) for line in app_lines[:-1]]
             app_summary = json.loads(app_lines[-1])
             velocity_rows = [
                 row for row in app_records if row.get("record_type") == "velocity"
             ]
             policy_rows = [
-                row
-                for row in app_records
-                if row.get("record_type") == "policy_session"
+                row for row in app_records if row.get("record_type") == "policy_session"
             ]
             if app_summary.get("record_kind") != "application":
                 fail("read_record did not dispatch the application run")
-            if app_summary.get("complete") is not True or app_summary.get(
-                "truncated"
-            ):
+            if app_summary.get("complete") is not True or app_summary.get("truncated"):
                 fail(f"the application run is not a complete stream: {app_summary}")
             if int(app_summary.get("rows_in_range", -1)) != len(app_fixture["rows"]):
                 fail(
@@ -1207,7 +1274,10 @@ def main() -> int:
                 fail("the velocity rows did not survive the reader")
             if int(app_summary.get("policy_sessions", -1)) != len(policy_rows):
                 fail("the policy-session count does not match the printed rows")
-            if str(app_summary.get("model", {}).get("name")) != app_fixture["model_name"]:
+            if (
+                str(app_summary.get("model", {}).get("name"))
+                != app_fixture["model_name"]
+            ):
                 fail(
                     "the application metadata lost its UTF-8 model file name: "
                     f"{app_summary.get('model')}"
@@ -1238,7 +1308,9 @@ def main() -> int:
                 check=False,
             )
             if windowed.returncode != 0:
-                fail(f"the {label} application window failed: {windowed.stderr.strip()}")
+                fail(
+                    f"the {label} application window failed: {windowed.stderr.strip()}"
+                )
                 continue
             windowed_lines = [
                 line for line in windowed.stdout.splitlines() if line.strip()
@@ -1261,9 +1333,10 @@ def main() -> int:
                     f"{windowed_summary.get('policy_sessions')} policy session(s), "
                     f"expected {expected_policy}"
                 )
-            if expected_policy == 0 and int(
-                windowed_summary.get("rows_in_range", -1)
-            ) != 0:
+            if (
+                expected_policy == 0
+                and int(windowed_summary.get("rows_in_range", -1)) != 0
+            ):
                 fail(f"the {label} window returned velocity rows")
 
         associated_path = work / "associated.npz"
@@ -1360,9 +1433,7 @@ def main() -> int:
                 fail("velocity_hold_yaw is not aligned with the runtime rows")
             gap_target = app_fixture["gap_start"] + 50_000
             gap_index = int(
-                np.searchsorted(
-                    data["stamp_us"], np.uint64(gap_target), side="right"
-                )
+                np.searchsorted(data["stamp_us"], np.uint64(gap_target), side="right")
                 - 1
             )
             if 0 <= gap_index < rows_written:
@@ -1598,7 +1669,9 @@ def main() -> int:
         # perfect join.
         empty_app = work / "app-empty"
         empty_app.mkdir()
-        write_json(empty_app / "meta.json", json.loads((app_run / "meta.json").read_text()))
+        write_json(
+            empty_app / "meta.json", json.loads((app_run / "meta.json").read_text())
+        )
         write_json(
             empty_app / "index.json",
             {
@@ -1627,7 +1700,9 @@ def main() -> int:
             check=False,
         )
         if empty_convert.returncode != 0:
-            fail(f"the empty application conversion failed: {empty_convert.stderr.strip()}")
+            fail(
+                f"the empty application conversion failed: {empty_convert.stderr.strip()}"
+            )
         else:
             empty_linked = np.load(empty_path, allow_pickle=False)
             if bool(empty_linked["association_ok"]):
@@ -1662,7 +1737,10 @@ def main() -> int:
                 "application_loss_last_stamp_us",
                 "application_loss_dropped",
             ):
-                if empty_linked[column].shape != (0,) or empty_linked[column].dtype != np.uint64:
+                if (
+                    empty_linked[column].shape != (0,)
+                    or empty_linked[column].dtype != np.uint64
+                ):
                     fail(
                         f"an empty application exported {column} with shape "
                         f"{empty_linked[column].shape} and dtype "
@@ -1823,31 +1901,53 @@ def main() -> int:
         sim_policy = work / "simulation-policy"
         shutil.copytree(app_run, sim_policy)
         sim_meta = json.loads((sim_policy / "meta.json").read_text())
-        sim_meta["clock"] = dict(clock="simulation", clock_domain="simulation",
-            available=True, clock_run_id="12"*16, logical_origin_us=1,
-            physics_dt_us=1000, control_dt_us=2000)
+        sim_meta["clock"] = dict(
+            clock="simulation",
+            clock_domain="simulation",
+            available=True,
+            clock_run_id="12" * 16,
+            logical_origin_us=1,
+            physics_dt_us=1000,
+            control_dt_us=2000,
+        )
         write_json(sim_policy / "meta.json", sim_meta)
         policy_path = sim_policy / "policy_sessions.jsonl"
         policy_entry = json.loads(policy_path.read_text().splitlines()[0])
         policy_entry["logical_us"] = t0
         policy_entry["monotonic_us"] = t0 + 100_000_000
         policy_path.write_text(json.dumps(policy_entry) + "\n")
-        windowed = subprocess.run([str(reader), "--run", str(sim_policy),
-            "--from-us", str(t0), "--to-us", str(t0+1)],
-            capture_output=True, text=True)
+        windowed = subprocess.run(
+            [
+                str(reader),
+                "--run",
+                str(sim_policy),
+                "--from-us",
+                str(t0),
+                "--to-us",
+                str(t0 + 1),
+            ],
+            capture_output=True,
+            text=True,
+        )
         if windowed.returncode != 0:
             fail("explicit logical policy stamp was refused: " + windowed.stderr)
         else:
-            selected = [json.loads(line) for line in windowed.stdout.splitlines()[:-1]
-                        if json.loads(line).get("record_type") == "policy_session"]
-            if len(selected) != 1 or selected[0]["monotonic_us"] != t0+100_000_000:
+            selected = [
+                json.loads(line)
+                for line in windowed.stdout.splitlines()[:-1]
+                if json.loads(line).get("record_type") == "policy_session"
+            ]
+            if len(selected) != 1 or selected[0]["monotonic_us"] != t0 + 100_000_000:
                 fail("policy logical window selection lost independent host timing")
         del policy_entry["logical_us"]
         policy_path.write_text(json.dumps(policy_entry) + "\n")
-        missing = subprocess.run([str(reader), "--run", str(sim_policy)],
-                                 capture_output=True, text=True)
+        missing = subprocess.run(
+            [str(reader), "--run", str(sim_policy)], capture_output=True, text=True
+        )
         if missing.returncode == 0:
-            fail("simulation policy row missing logical_us silently reused host monotonic time")
+            fail(
+                "simulation policy row missing logical_us silently reused host monotonic time"
+            )
 
         corrupt_fault = work / "corrupt-fault"
         shutil.copytree(fault_run, corrupt_fault)

@@ -35,8 +35,9 @@ DOMAIN = 155
 DOMAIN_CONFIG = 9
 
 
-def copy_config(source: Path, target: Path, records: Path, logs: Path,
-                enabled: bool) -> Path:
+def copy_config(
+    source: Path, target: Path, records: Path, logs: Path, enabled: bool
+) -> Path:
     config = json.loads((source / "config" / "sdk.json").read_text(encoding="utf-8"))
     config["telemetry"]["directory"] = str(logs)
     config["telemetry"]["recorder"] = {
@@ -70,8 +71,9 @@ def stop_process(process: subprocess.Popen, timeout: float = 8.0) -> None:
         process.wait(timeout=5.0)
 
 
-def run_processes(config: Path, runtime: Path, application: Path,
-                  telemetry_socket: Path | None = None) -> tuple[int, int]:
+def run_processes(
+    config: Path, runtime: Path, application: Path, telemetry_socket: Path | None = None
+) -> tuple[int, int]:
     environment = os.environ.copy()
     if telemetry_socket is not None:
         environment["IRMV_WEB_TELEMETRY_SOCKET"] = str(telemetry_socket)
@@ -80,16 +82,22 @@ def run_processes(config: Path, runtime: Path, application: Path,
     with runtime_log.open("wb") as runtime_out, application_log.open("wb") as app_out:
         runtime_process = subprocess.Popen(
             [str(runtime), "--config", str(config), "--domain", str(DOMAIN)],
-            stdin=subprocess.DEVNULL, stdout=runtime_out, stderr=subprocess.STDOUT,
-            cwd=str(SOURCE), env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=runtime_out,
+            stderr=subprocess.STDOUT,
+            cwd=str(SOURCE),
+            env=environment,
         )
         try:
             time.sleep(1.0)
             master, slave = pty.openpty()
             application_process = subprocess.Popen(
                 [str(application), "--config", str(config), "--domain", str(DOMAIN)],
-                stdin=slave, stdout=app_out, stderr=subprocess.STDOUT,
-                cwd=str(SOURCE), env=environment,
+                stdin=slave,
+                stdout=app_out,
+                stderr=subprocess.STDOUT,
+                cwd=str(SOURCE),
+                env=environment,
             )
             os.close(slave)
             try:
@@ -106,14 +114,23 @@ class Service:
     def __init__(self, records: Path, data: Path, reader: Path) -> None:
         self.process = subprocess.Popen(
             [
-                sys.executable, "-m", "tools.experiment_web",
-                "--records-root", str(records),
-                "--data-dir", str(data),
-                "--reader", str(reader),
-                "--assets", str(SOURCE / "web"),
-                "--port", "0",
+                sys.executable,
+                "-m",
+                "tools.experiment_web",
+                "--records-root",
+                str(records),
+                "--data-dir",
+                str(data),
+                "--reader",
+                str(reader),
+                "--assets",
+                str(SOURCE / "web"),
+                "--port",
+                "0",
             ],
-            cwd=str(SOURCE), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cwd=str(SOURCE),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
         )
         assert self.process.stdout is not None
@@ -152,8 +169,9 @@ class ExperimentWebTest(unittest.TestCase):
         cls.records.mkdir()
         cls.logs = cls.base / "logs"
         cls.data = cls.base / "data"
-        cls.config = copy_config(SOURCE, cls.base / "sdk.json", cls.records,
-                                 cls.logs, True)
+        cls.config = copy_config(
+            SOURCE, cls.base / "sdk.json", cls.records, cls.logs, True
+        )
         run_processes(cls.config, RUNTIME, APPLICATION)
 
     @classmethod
@@ -161,12 +179,18 @@ class ExperimentWebTest(unittest.TestCase):
         cls.temp.cleanup()
 
     def runtime_dirs(self) -> list[Path]:
-        return sorted(path for path in self.records.iterdir()
-                      if path.is_dir() and path.name.startswith("run_"))
+        return sorted(
+            path
+            for path in self.records.iterdir()
+            if path.is_dir() and path.name.startswith("run_")
+        )
 
     def application_dirs(self) -> list[Path]:
-        return sorted(path for path in self.records.iterdir()
-                      if path.is_dir() and path.name.startswith("app_run_"))
+        return sorted(
+            path
+            for path in self.records.iterdir()
+            if path.is_dir() and path.name.startswith("app_run_")
+        )
 
     def test_recording_precedes_the_service(self) -> None:
         self.assertTrue(self.runtime_dirs(), "the runtime wrote no run")
@@ -178,13 +202,16 @@ class ExperimentWebTest(unittest.TestCase):
             names = {run["name"] for run in catalog["runs"]}
             self.assertTrue(any(name.startswith("run_") for name in names))
             self.assertTrue(any(name.startswith("app_run_") for name in names))
-            runtime = next(run for run in catalog["runs"]
-                           if run["kind"] == "runtime")
+            runtime = next(run for run in catalog["runs"] if run["kind"] == "runtime")
             status, described = service.call(
-                "GET", f"/api/runs/{runtime['run_id']}/describe")
+                "GET", f"/api/runs/{runtime['run_id']}/describe"
+            )
             self.assertEqual(status, 200)
-            signal = next(signal for signal in described["context"]["signals"]
-                          if signal["field"] == "q")
+            signal = next(
+                signal
+                for signal in described["context"]["signals"]
+                if signal["field"] == "q"
+            )
             status, ranged = service.call(
                 "GET",
                 f"/api/runs/{runtime['run_id']}/range"
@@ -209,8 +236,7 @@ class ExperimentWebTest(unittest.TestCase):
             service.url + "/api/layouts",
             data=json.dumps(layout).encode("utf-8"),
             method="POST",
-            headers={"Content-Type": "application/json",
-                     "Origin": service.url},
+            headers={"Content-Type": "application/json", "Origin": service.url},
         )
         with service.opener.open(request) as response:
             saved = json.loads(response.read().decode("utf-8"))
@@ -230,8 +256,7 @@ class ExperimentWebTest(unittest.TestCase):
         base.mkdir()
         records = base / "records"
         records.mkdir()
-        config = copy_config(SOURCE, base / "sdk.json", records,
-                             base / "logs", False)
+        config = copy_config(SOURCE, base / "sdk.json", records, base / "logs", False)
         run_processes(config, RUNTIME, APPLICATION)
         self.assertEqual(list(records.iterdir()), [])
         service = Service(self.records, self.data, READER)
@@ -254,13 +279,16 @@ class ExperimentWebTest(unittest.TestCase):
         service = Service(self.records, self.data, READER)
         try:
             status, catalog = service.call("GET", "/api/runs")
-            entry = next(run for run in catalog["runs"]
-                         if run["name"] == "run_corrupt_copy")
+            entry = next(
+                run for run in catalog["runs"] if run["name"] == "run_corrupt_copy"
+            )
             status, described = service.call(
-                "GET", f"/api/runs/{entry['run_id']}/describe")
+                "GET", f"/api/runs/{entry['run_id']}/describe"
+            )
             self.assertTrue(described["ok"])
-            signal = next(item for item in described["context"]["signals"]
-                          if item["field"] == "q")
+            signal = next(
+                item for item in described["context"]["signals"] if item["field"] == "q"
+            )
             status, ranged = service.call(
                 "GET",
                 f"/api/runs/{entry['run_id']}/range"
@@ -284,16 +312,24 @@ class ExperimentWebTest(unittest.TestCase):
         service = Service(self.records, self.data, READER)
         try:
             status, catalog = service.call("GET", "/api/runs")
-            empty_id = next(run["run_id"] for run in catalog["runs"]
-                            if run["name"] == "run_empty_faults")
-            missing_id = next(run["run_id"] for run in catalog["runs"]
-                              if run["name"] == "run_missing_faults")
+            empty_id = next(
+                run["run_id"]
+                for run in catalog["runs"]
+                if run["name"] == "run_empty_faults"
+            )
+            missing_id = next(
+                run["run_id"]
+                for run in catalog["runs"]
+                if run["name"] == "run_missing_faults"
+            )
             status, events = service.call(
-                "GET", f"/api/runs/{empty_id}/events?begin_us=0")
+                "GET", f"/api/runs/{empty_id}/events?begin_us=0"
+            )
             self.assertEqual(status, 200)
             self.assertTrue(events["ok"])
             status, events = service.call(
-                "GET", f"/api/runs/{missing_id}/events?begin_us=0")
+                "GET", f"/api/runs/{missing_id}/events?begin_us=0"
+            )
             self.assertEqual(status, 200)
             self.assertFalse(events["ok"])
             self.assertIn("cannot find", events["error"])
@@ -303,18 +339,17 @@ class ExperimentWebTest(unittest.TestCase):
     def test_real_recorder_live_tail_reaches_the_service(self) -> None:
         service = Service(self.records, self.data, READER)
         try:
-            run_processes(self.config, RUNTIME, APPLICATION,
-                          self.data / "live.sock")
-            newest = max(self.runtime_dirs(),
-                         key=lambda path: path.stat().st_mtime)
+            run_processes(self.config, RUNTIME, APPLICATION, self.data / "live.sock")
+            newest = max(self.runtime_dirs(), key=lambda path: path.stat().st_mtime)
             status, catalog = service.call("GET", "/api/runs")
             self.assertEqual(status, 200)
-            runtime = next(run for run in catalog["runs"]
-                           if run["name"] == newest.name)
+            runtime = next(run for run in catalog["runs"] if run["name"] == newest.name)
             status, described = service.call(
-                "GET", f"/api/runs/{runtime['run_id']}/describe")
-            signal = next(item for item in described["context"]["signals"]
-                          if item["field"] == "q")
+                "GET", f"/api/runs/{runtime['run_id']}/describe"
+            )
+            signal = next(
+                item for item in described["context"]["signals"] if item["field"] == "q"
+            )
             status, snapshot = service.call(
                 "GET",
                 f"/api/live/snapshot?run_id={runtime['run_id']}"

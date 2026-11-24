@@ -209,8 +209,12 @@ def main() -> int:
             application_process.stdin.flush()
 
         def occurrences(pattern: str) -> int:
-            return len(re.findall(pattern, application_log.read_text(
-                encoding="utf-8", errors="replace")))
+            return len(
+                re.findall(
+                    pattern,
+                    application_log.read_text(encoding="utf-8", errors="replace"),
+                )
+            )
 
         def expect(note: str, pattern: str, timeout_s: float = 25) -> None:
             text = wait_for(application_log, pattern, timeout_s)
@@ -227,8 +231,9 @@ def main() -> int:
                 time.sleep(0.02)
             return False
 
-        def expect_one_more(note: str, pattern: str, before: int,
-                            timeout_s: float = 20) -> bool:
+        def expect_one_more(
+            note: str, pattern: str, before: int, timeout_s: float = 20
+        ) -> bool:
             # A round has to produce a *transition*, not a line that was already
             # in the log from an earlier round: the count has to grow. Without
             # this the run would report hundreds of thousands of cycles that
@@ -279,7 +284,8 @@ def main() -> int:
                             f"the {name} of cycle {cycles + 1}: no new "
                             f"{pattern!r} after three keys; tail: "
                             + application_log.read_text(
-                                encoding="utf-8", errors="replace")[-600:]
+                                encoding="utf-8", errors="replace"
+                            )[-600:]
                         )
             cycles += 1
             # One line per round, so an acceptance record carries the state the
@@ -294,22 +300,28 @@ def main() -> int:
             if now >= next_sample:
                 stats_application.append(sample_stats(application_process.pid))
                 stats_runtime.append(sample_stats(runtime_process.pid))
-                for label, stats in (("application", stats_application[-1]),
-                                     ("runtime", stats_runtime[-1])):
+                for label, stats in (
+                    ("application", stats_application[-1]),
+                    ("runtime", stats_runtime[-1]),
+                ):
                     resource_log.write(
                         f"{len(stats_application)}\t{label}\t"
                         f"{stats['rss_kb']}\t{stats['threads']}\t"
-                        f"{stats['fds']}\n")
+                        f"{stats['fds']}\n"
+                    )
                 resource_log.flush()
                 next_sample = now + args.sample_s
 
         stats_application.append(sample_stats(application_process.pid))
         stats_runtime.append(sample_stats(runtime_process.pid))
-        for label, stats in (("application", stats_application[-1]),
-                             ("runtime", stats_runtime[-1])):
+        for label, stats in (
+            ("application", stats_application[-1]),
+            ("runtime", stats_runtime[-1]),
+        ):
             resource_log.write(
                 f"{len(stats_application)}\t{label}\t"
-                f"{stats['rss_kb']}\t{stats['threads']}\t{stats['fds']}\n")
+                f"{stats['rss_kb']}\t{stats['threads']}\t{stats['fds']}\n"
+            )
         resource_log.flush()
 
         text = application_log.read_text(encoding="utf-8", errors="replace")
@@ -323,7 +335,8 @@ def main() -> int:
         # last accepted and the age it expired at: that pair is the measurement
         # the acceptance is read from when a run ends on the lease.
         runtime_text = (work / "runtime.log").read_text(
-            encoding="utf-8", errors="replace")
+            encoding="utf-8", errors="replace"
+        )
         for line in runtime_text.splitlines():
             if "SupervisorTimeout" in line:
                 print(f"application_stability_test: {line.strip()}", flush=True)

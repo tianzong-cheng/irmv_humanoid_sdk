@@ -32,16 +32,14 @@ def write_cyclonedds_prefix(prefix: Path, manifest: Optional[str]) -> None:
     (prefix / "lib/cmake/CycloneDDS").mkdir(parents=True)
     (prefix / "lib/cmake/CycloneDDS-CXX").mkdir(parents=True)
     (prefix / "lib/cmake/CycloneDDS/CycloneDDSConfig.cmake").write_text("")
-    (prefix / "lib/cmake/CycloneDDS-CXX/CycloneDDS-CXXConfig.cmake").write_text(
-        "")
+    (prefix / "lib/cmake/CycloneDDS-CXX/CycloneDDS-CXXConfig.cmake").write_text("")
     (prefix / "lib/libddsc.so.11").write_bytes(b"")
     (prefix / "lib/libddscxx.so.11").write_bytes(b"")
     if manifest is not None:
         (prefix / "irmv-cyclonedds-manifest.txt").write_text(manifest)
 
 
-def check_cyclonedds_prefix_contract(source: Path,
-                                     directory: Path) -> Optional[str]:
+def check_cyclonedds_prefix_contract(source: Path, directory: Path) -> Optional[str]:
     """Returns a failure description, or None when the contract holds.
 
     The check drives irmv_require_cyclonedds_prefix directly, so it proves the
@@ -50,13 +48,15 @@ def check_cyclonedds_prefix_contract(source: Path,
     script = directory / "require-cyclonedds-prefix.cmake"
     dependencies = (source / "cmake/Dependencies.cmake").as_posix()
     script.write_text(
-        f'include("{dependencies}")\n'
-        'irmv_require_cyclonedds_prefix("${PREFIX}")\n')
+        f'include("{dependencies}")\nirmv_require_cyclonedds_prefix("${{PREFIX}}")\n'
+    )
 
     def run(prefix: Path):
         return subprocess.run(
             ["cmake", f"-DPREFIX={prefix}", "-P", str(script)],
-            text=True, capture_output=True)
+            text=True,
+            capture_output=True,
+        )
 
     pinned = directory / "cyclonedds-pinned"
     write_cyclonedds_prefix(
@@ -64,43 +64,46 @@ def check_cyclonedds_prefix_contract(source: Path,
         "irmv-cyclonedds-manifest 2\n"
         f"cyclonedds-version={PINNED_CYCLONEDDS['version']}\n"
         f"cyclonedds={PINNED_CYCLONEDDS['c']}\n"
-        f"cyclonedds-cxx={PINNED_CYCLONEDDS['cxx']}\n")
+        f"cyclonedds-cxx={PINNED_CYCLONEDDS['cxx']}\n",
+    )
     result = run(pinned)
     if result.returncode != 0:
-        return ("a prefix with the pinned 11.0.1 manifest is refused\n" +
-                result.stderr)
+        return "a prefix with the pinned 11.0.1 manifest is refused\n" + result.stderr
 
     old = directory / "cyclonedds-old"
     write_cyclonedds_prefix(
         old,
         "irmv-cyclonedds-manifest 1\n"
         f"cyclonedds={OLD_CYCLONEDDS['c']}\n"
-        f"cyclonedds-cxx={OLD_CYCLONEDDS['cxx']}\n")
+        f"cyclonedds-cxx={OLD_CYCLONEDDS['cxx']}\n",
+    )
     wrong_version = directory / "cyclonedds-wrong-version"
     write_cyclonedds_prefix(
         wrong_version,
         "irmv-cyclonedds-manifest 2\n"
         "cyclonedds-version=11.0.0\n"
         f"cyclonedds={PINNED_CYCLONEDDS['c']}\n"
-        f"cyclonedds-cxx={PINNED_CYCLONEDDS['cxx']}\n")
+        f"cyclonedds-cxx={PINNED_CYCLONEDDS['cxx']}\n",
+    )
     wrong_commit = directory / "cyclonedds-wrong-commit"
     write_cyclonedds_prefix(
         wrong_commit,
         "irmv-cyclonedds-manifest 2\n"
         f"cyclonedds-version={PINNED_CYCLONEDDS['version']}\n"
         f"cyclonedds={PINNED_CYCLONEDDS['c']}\n"
-        "cyclonedds-cxx=" + "0" * 40 + "\n")
+        "cyclonedds-cxx=" + "0" * 40 + "\n",
+    )
     for prefix_path, label in (
-            (old, "a prefix built from the previous 0.10.5 pins"),
-            (wrong_version, "a prefix pinned to the wrong release"),
-            (wrong_commit, "a prefix pinned to a wrong C++ commit")):
+        (old, "a prefix built from the previous 0.10.5 pins"),
+        (wrong_version, "a prefix pinned to the wrong release"),
+        (wrong_commit, "a prefix pinned to a wrong C++ commit"),
+    ):
         result = run(prefix_path)
         if result.returncode == 0:
             return label + " configured successfully"
         message = " ".join(result.stderr.split())
         if "manifest does not pin CycloneDDS 11.0.1" not in message:
-            return (label + " is not refused as a non-pinned prefix\n" +
-                    result.stderr)
+            return label + " is not refused as a non-pinned prefix\n" + result.stderr
 
     unmanifested = directory / "cyclonedds-unmanifested"
     write_cyclonedds_prefix(unmanifested, None)
@@ -109,7 +112,7 @@ def check_cyclonedds_prefix_contract(source: Path,
         return "a prefix without provenance was accepted"
     message = " ".join(result.stderr.split())
     if "no irmv-cyclonedds-manifest.txt" not in message:
-        return ("the missing-manifest refusal is not named\n" + result.stderr)
+        return "the missing-manifest refusal is not named\n" + result.stderr
     return None
 
 
@@ -118,8 +121,14 @@ def main() -> int:
     prefix = Path(sys.argv[2]) if len(sys.argv) > 2 else None
 
     verified = subprocess.run(
-        [sys.executable, str(source / "tools/verify_hardware_dependencies.py"),
-         str(source)], text=True, capture_output=True)
+        [
+            sys.executable,
+            str(source / "tools/verify_hardware_dependencies.py"),
+            str(source),
+        ],
+        text=True,
+        capture_output=True,
+    )
     if verified.returncode != 0:
         print("FAIL: dependency pins\n" + verified.stdout + verified.stderr)
         return 1
@@ -131,9 +140,15 @@ def main() -> int:
             return 1
 
         build = Path(directory) / "runtime-only"
-        configure = ["cmake", "-S", str(source), "-B", str(build),
-                     "-DIRMV_BUILD_APPLICATION=OFF",
-                     "-DCMAKE_BUILD_TYPE=Debug"]
+        configure = [
+            "cmake",
+            "-S",
+            str(source),
+            "-B",
+            str(build),
+            "-DIRMV_BUILD_APPLICATION=OFF",
+            "-DCMAKE_BUILD_TYPE=Debug",
+        ]
         if prefix and prefix.is_dir():
             configure.append(f"-DIRMV_CYCLONEDDS_PREFIX={prefix}")
         result = subprocess.run(configure, text=True, capture_output=True)
@@ -145,7 +160,9 @@ def main() -> int:
             return 1
         targets = subprocess.run(
             ["cmake", "--build", str(build), "--target", "help"],
-            text=True, capture_output=True).stdout.lower()
+            text=True,
+            capture_output=True,
+        ).stdout.lower()
         for required in ("robot_runtime", "irmv_hardware", "maintenance_test"):
             if required not in targets:
                 print("FAIL: runtime-only build lacks %s" % required)
@@ -160,11 +177,19 @@ def main() -> int:
         if control.is_dir() and (control / "include").is_dir():
             bad = Path(directory) / "bad-pin"
             result = subprocess.run(
-                ["cmake", "-S", str(source), "-B", str(bad),
-                 "-DIRMV_ENABLE_REAL_BACKEND=ON",
-                 "-DIRMV_IRMV_CONTROL_SOURCE_DIR=" + str(control),
-                 "-DIRMV_IRMV_CONTROL_COMMIT=deadbeef"],
-                text=True, capture_output=True)
+                [
+                    "cmake",
+                    "-S",
+                    str(source),
+                    "-B",
+                    str(bad),
+                    "-DIRMV_ENABLE_REAL_BACKEND=ON",
+                    "-DIRMV_IRMV_CONTROL_SOURCE_DIR=" + str(control),
+                    "-DIRMV_IRMV_CONTROL_COMMIT=deadbeef",
+                ],
+                text=True,
+                capture_output=True,
+            )
             if result.returncode == 0:
                 print("FAIL: a mismatched IRMVControl pin configured successfully")
                 return 1
@@ -176,31 +201,43 @@ def main() -> int:
             # build, using the manifest the configure step actually reads.
             pins = json.loads((source / "deps/hardware-pins.json").read_text())
             for field, value, needle in (
-                    ("sha256", "0" * 64, "vendor library SHA-256"),
-                    ("elf_machine", 183, "architecture check failed")):
+                ("sha256", "0" * 64, "vendor library SHA-256"),
+                ("elf_machine", 183, "architecture check failed"),
+            ):
                 changed = json.loads(json.dumps(pins))
                 changed["vendor_library"][field] = value
                 manifest = Path(directory) / f"pins-{field}.json"
                 manifest.write_text(json.dumps(changed))
                 bad_vendor = Path(directory) / f"bad-{field}"
                 result = subprocess.run(
-                    ["cmake", "-S", str(source), "-B", str(bad_vendor),
-                     "-DIRMV_ENABLE_REAL_BACKEND=ON",
-                     "-DIRMV_IRMV_CONTROL_SOURCE_DIR=" + str(control),
-                     "-DIRMV_YIS_IMU_SOURCE_DIR=" +
-                     str(source / "deps/yis_imu_driver"),
-                     f"-DIRMV_PINS_FILE={manifest}"],
-                    text=True, capture_output=True)
+                    [
+                        "cmake",
+                        "-S",
+                        str(source),
+                        "-B",
+                        str(bad_vendor),
+                        "-DIRMV_ENABLE_REAL_BACKEND=ON",
+                        "-DIRMV_IRMV_CONTROL_SOURCE_DIR=" + str(control),
+                        "-DIRMV_YIS_IMU_SOURCE_DIR="
+                        + str(source / "deps/yis_imu_driver"),
+                        f"-DIRMV_PINS_FILE={manifest}",
+                    ],
+                    text=True,
+                    capture_output=True,
+                )
                 if result.returncode == 0:
                     print(f"FAIL: a wrong vendor {field} configured")
                     return 1
                 if needle not in result.stderr:
-                    print(f"FAIL: the wrong vendor {field} is not named\n" +
-                          result.stderr)
+                    print(
+                        f"FAIL: the wrong vendor {field} is not named\n" + result.stderr
+                    )
                     return 1
         else:
-            print("IRMVControl is not checked out; the commit-mismatch "
-                  "configuration check belongs to the real-dependency job")
+            print(
+                "IRMVControl is not checked out; the commit-mismatch "
+                "configuration check belongs to the real-dependency job"
+            )
     print("hardware package contract passed")
     return 0
 

@@ -150,14 +150,28 @@ def build_workspace(source_dir):
     real["deployment"] = "real"
     real["backend"] = "real"
     real["robot"]["buses"] = [
-        {"name": "can0", "device_type": 41, "device_index": 0, "channel": 0,
-         "arbitration_bps": 1000000, "data_bps": 5000000,
-         "iso_mode": True, "resistance_enabled": False},
+        {
+            "name": "can0",
+            "device_type": 41,
+            "device_index": 0,
+            "channel": 0,
+            "arbitration_bps": 1000000,
+            "data_bps": 5000000,
+            "iso_mode": True,
+            "resistance_enabled": False,
+        },
     ]
     for index, joint in enumerate(real["robot"]["joints"]):
-        joint.update({"bus": "can0", "motor_id": index + 1, "direction": 1,
-                      "reduction_ratio": 1.0, "encoder_offset": 0.0,
-                      "torque_constant": 1.0})
+        joint.update(
+            {
+                "bus": "can0",
+                "motor_id": index + 1,
+                "direction": 1,
+                "reduction_ratio": 1.0,
+                "encoder_offset": 0.0,
+                "torque_constant": 1.0,
+            }
+        )
     (workspace / "real.json").write_text(json.dumps(real), "utf-8")
     (workspace / "malformed.json").write_text(
         '{"schema_version": 1, "backend": "fake"', "utf-8"
@@ -166,13 +180,15 @@ def build_workspace(source_dir):
         source_dir / "tests/support/fake_scenario.json", workspace / "normal.json"
     )
     (workspace / "fault.json").write_text(
-        json.dumps({"entries": [{"elapsed_us": 0, "feedback": {
-            "joints": [{"dq": 15.0}, {}]}}]}),
+        json.dumps(
+            {"entries": [{"elapsed_us": 0, "feedback": {"joints": [{"dq": 15.0}, {}]}}]}
+        ),
         "utf-8",
     )
     (workspace / "write_fail.json").write_text(
-        json.dumps({"entries": [{"elapsed_us": 0,
-                                 "write_result": {"accepted": False}}]}),
+        json.dumps(
+            {"entries": [{"elapsed_us": 0, "write_result": {"accepted": False}}]}
+        ),
         "utf-8",
     )
     (workspace / "scenario_broken.json").write_text("{not json", "utf-8")
@@ -190,175 +206,337 @@ def test_startup_rejections(workspace):
         ("real backend", workspace / "real.json", "real backend"),
     ]
     for name, config_path, expected in cases:
-        with Runtime(["--config", str(config_path), "--domain", str(DOMAIN)],
-                     workspace) as runtime:
+        with Runtime(
+            ["--config", str(config_path), "--domain", str(DOMAIN)], workspace
+        ) as runtime:
             code = runtime.wait_exit(EXIT_WAIT_S)
-            check(code is not None and code != 0,
-                  failure_report(name, runtime, "expected a non-zero exit, got %s" % code))
+            check(
+                code is not None and code != 0,
+                failure_report(
+                    name, runtime, "expected a non-zero exit, got %s" % code
+                ),
+            )
             output = runtime.output()
-            check(expected in output,
-                  failure_report(name, runtime, "message %r is missing" % expected))
-            check("[runtime]" not in output,
-                  failure_report(name, runtime, "the runtime started anyway"))
+            check(
+                expected in output,
+                failure_report(name, runtime, "message %r is missing" % expected),
+            )
+            check(
+                "[runtime]" not in output,
+                failure_report(name, runtime, "the runtime started anyway"),
+            )
 
-    with Runtime(["--config", str(workspace / "real.json"), "--domain", str(DOMAIN),
-                  "--fake-scenario", str(workspace / "normal.json")],
-                 workspace) as runtime:
+    with Runtime(
+        [
+            "--config",
+            str(workspace / "real.json"),
+            "--domain",
+            str(DOMAIN),
+            "--fake-scenario",
+            str(workspace / "normal.json"),
+        ],
+        workspace,
+    ) as runtime:
         code = runtime.wait_exit(EXIT_WAIT_S)
-        check(code is not None and code != 0,
-              failure_report("real backend with scenario", runtime,
-                             "expected a non-zero exit, got %s" % code))
+        check(
+            code is not None and code != 0,
+            failure_report(
+                "real backend with scenario",
+                runtime,
+                "expected a non-zero exit, got %s" % code,
+            ),
+        )
         output = runtime.output()
-        check("fake-only" in output,
-              failure_report("real backend with scenario", runtime,
-                             "the message does not name the fake-only options"))
+        check(
+            "fake-only" in output,
+            failure_report(
+                "real backend with scenario",
+                runtime,
+                "the message does not name the fake-only options",
+            ),
+        )
 
-    with Runtime(["--config", str(workspace / "config.json"), "--domain", str(DOMAIN),
-                  "--fake-scenario", str(workspace / "scenario_broken.json")],
-                 workspace) as runtime:
+    with Runtime(
+        [
+            "--config",
+            str(workspace / "config.json"),
+            "--domain",
+            str(DOMAIN),
+            "--fake-scenario",
+            str(workspace / "scenario_broken.json"),
+        ],
+        workspace,
+    ) as runtime:
         code = runtime.wait_exit(EXIT_WAIT_S)
-        check(code is not None and code != 0,
-              failure_report("broken scenario", runtime,
-                             "expected a non-zero exit, got %s" % code))
-        check("scenario" in runtime.output(),
-              failure_report("broken scenario", runtime,
-                             "the message does not name the scenario"))
+        check(
+            code is not None and code != 0,
+            failure_report(
+                "broken scenario", runtime, "expected a non-zero exit, got %s" % code
+            ),
+        )
+        check(
+            "scenario" in runtime.output(),
+            failure_report(
+                "broken scenario", runtime, "the message does not name the scenario"
+            ),
+        )
 
-    with Runtime(["--config", str(workspace / "config.json"), "--frobnicate"],
-                 workspace) as runtime:
+    with Runtime(
+        ["--config", str(workspace / "config.json"), "--frobnicate"], workspace
+    ) as runtime:
         code = runtime.wait_exit(EXIT_WAIT_S)
-        check(code is not None and code != 0,
-              failure_report("unknown argument", runtime,
-                             "expected a non-zero exit, got %s" % code))
-        check("usage: robot_runtime" in runtime.output(),
-              failure_report("unknown argument", runtime, "no usage line"))
+        check(
+            code is not None and code != 0,
+            failure_report(
+                "unknown argument", runtime, "expected a non-zero exit, got %s" % code
+            ),
+        )
+        check(
+            "usage: robot_runtime" in runtime.output(),
+            failure_report("unknown argument", runtime, "no usage line"),
+        )
 
-    with Runtime(["--config", str(workspace / "config.json"), "--domain", "1000"],
-                 workspace) as runtime:
+    with Runtime(
+        ["--config", str(workspace / "config.json"), "--domain", "1000"], workspace
+    ) as runtime:
         code = runtime.wait_exit(EXIT_WAIT_S)
-        check(code is not None and code != 0,
-              failure_report("domain out of range", runtime,
-                             "expected a non-zero exit, got %s" % code))
+        check(
+            code is not None and code != 0,
+            failure_report(
+                "domain out of range",
+                runtime,
+                "expected a non-zero exit, got %s" % code,
+            ),
+        )
         # The usage line of every argument error contains the word "domain", so
         # the check names the rejection itself.
-        check("--domain must be between 0 and 230" in runtime.output(),
-              failure_report("domain out of range", runtime,
-                             "the message does not name the accepted range"))
+        check(
+            "--domain must be between 0 and 230" in runtime.output(),
+            failure_report(
+                "domain out of range",
+                runtime,
+                "the message does not name the accepted range",
+            ),
+        )
 
 
 def test_normal_start_and_shutdown(workspace):
-    with Runtime(base_arguments(workspace) +
-                 ["--fake-scenario", str(workspace / "normal.json")],
-                 workspace) as runtime:
+    with Runtime(
+        base_arguments(workspace) + ["--fake-scenario", str(workspace / "normal.json")],
+        workspace,
+    ) as runtime:
         started = runtime.wait_for(
-            lambda line: "[runtime] runtime started" in line
-            and 'domain="%d"' % DOMAIN in line, START_WAIT_S)
-        check(started, failure_report("normal start", runtime,
-                                      "no startup line with the overridden domain"))
+            lambda line: (
+                "[runtime] runtime started" in line and 'domain="%d"' % DOMAIN in line
+            ),
+            START_WAIT_S,
+        )
+        check(
+            started,
+            failure_report(
+                "normal start", runtime, "no startup line with the overridden domain"
+            ),
+        )
         if started:
-            check('state="Boot"' in started[0],
-                  failure_report("normal start", runtime,
-                                 "the startup line does not report Boot"))
+            check(
+                'state="Boot"' in started[0],
+                failure_report(
+                    "normal start", runtime, "the startup line does not report Boot"
+                ),
+            )
         completed = runtime.wait_for(
-            lambda line: "BootCompleted" in line and 'from="Boot"' in line
-            and 'to="ZeroTorque"' in line, START_WAIT_S)
-        check(completed, failure_report("normal start", runtime,
-                                        "Boot did not complete to ZeroTorque"))
+            lambda line: (
+                "BootCompleted" in line
+                and 'from="Boot"' in line
+                and 'to="ZeroTorque"' in line
+            ),
+            START_WAIT_S,
+        )
+        check(
+            completed,
+            failure_report(
+                "normal start", runtime, "Boot did not complete to ZeroTorque"
+            ),
+        )
         status = runtime.wait_for(
             lambda line: "[runtime] status" in line and 'state="ZeroTorque"' in line,
-            START_WAIT_S)
-        check(status, failure_report("normal start", runtime,
-                                     "no status line in ZeroTorque"))
+            START_WAIT_S,
+        )
+        check(
+            status,
+            failure_report("normal start", runtime, "no status line in ZeroTorque"),
+        )
         runtime.terminate()
         code = runtime.wait_exit(EXIT_WAIT_S)
-        check(code == 0, failure_report("normal shutdown", runtime,
-                                        "expected exit 0, got %s" % code))
+        check(
+            code == 0,
+            failure_report(
+                "normal shutdown", runtime, "expected exit 0, got %s" % code
+            ),
+        )
         output = runtime.output()
-        check("[runtime] shutdown" in output and 'state="ZeroTorque"' in output,
-              failure_report("normal shutdown", runtime, "no clean shutdown line"))
-        check("still required" not in output,
-              failure_report("normal shutdown", runtime,
-                             "a ZeroTorque confirmation was reported as missing"))
-        check("clean shutdown" in output,
-              failure_report("normal shutdown", runtime,
-                             "the process did not report the clean stop"))
+        check(
+            "[runtime] shutdown" in output and 'state="ZeroTorque"' in output,
+            failure_report("normal shutdown", runtime, "no clean shutdown line"),
+        )
+        check(
+            "still required" not in output,
+            failure_report(
+                "normal shutdown",
+                runtime,
+                "a ZeroTorque confirmation was reported as missing",
+            ),
+        )
+        check(
+            "clean shutdown" in output,
+            failure_report(
+                "normal shutdown", runtime, "the process did not report the clean stop"
+            ),
+        )
 
 
 def test_fault_latch_keeps_running(workspace):
-    with Runtime(base_arguments(workspace) +
-                 ["--fake-scenario", str(workspace / "fault.json")],
-                 workspace) as runtime:
+    with Runtime(
+        base_arguments(workspace) + ["--fake-scenario", str(workspace / "fault.json")],
+        workspace,
+    ) as runtime:
         latched = runtime.wait_for(
-            lambda line: "FaultLatched" in line
-            and 'fault="JointVelocityExceeded"' in line, FAULT_WAIT_S)
-        check(latched, failure_report("overspeed fault", runtime,
-                                      "the velocity fault was not logged"))
+            lambda line: (
+                "FaultLatched" in line and 'fault="JointVelocityExceeded"' in line
+            ),
+            FAULT_WAIT_S,
+        )
+        check(
+            latched,
+            failure_report(
+                "overspeed fault", runtime, "the velocity fault was not logged"
+            ),
+        )
         if latched:
-            check(latched[0].startswith("ERROR "),
-                  failure_report("overspeed fault", runtime,
-                                 "the fault was not logged at ERROR level"))
-            check('from="Boot"' in latched[0] and 'to="Fault"' in latched[0]
-                  and 'action="' in latched[0],
-                  failure_report("overspeed fault", runtime,
-                                 "the fault line lacks its transition or action"))
+            check(
+                latched[0].startswith("ERROR "),
+                failure_report(
+                    "overspeed fault",
+                    runtime,
+                    "the fault was not logged at ERROR level",
+                ),
+            )
+            check(
+                'from="Boot"' in latched[0]
+                and 'to="Fault"' in latched[0]
+                and 'action="' in latched[0],
+                failure_report(
+                    "overspeed fault",
+                    runtime,
+                    "the fault line lacks its transition or action",
+                ),
+            )
         fault_status = runtime.wait_for(
             lambda line: "[runtime] status" in line and 'state="Fault"' in line,
-            FAULT_WAIT_S)
-        check(fault_status, failure_report("overspeed fault", runtime,
-                                           "the runtime did not stay in Fault"))
+            FAULT_WAIT_S,
+        )
+        check(
+            fault_status,
+            failure_report(
+                "overspeed fault", runtime, "the runtime did not stay in Fault"
+            ),
+        )
         runtime.terminate()
         code = runtime.wait_exit(STAY_ALIVE_WAIT_S)
-        check(code is None,
-              failure_report("fault shutdown", runtime,
-                             "the process exited with %s instead of staying up" % code))
+        check(
+            code is None,
+            failure_report(
+                "fault shutdown",
+                runtime,
+                "the process exited with %s instead of staying up" % code,
+            ),
+        )
         output = runtime.output()
-        check("Reset is required" in output,
-              failure_report("fault shutdown", runtime, "no Reset warning"))
-        check("[runtime] shutdown" not in output,
-              failure_report("fault shutdown", runtime,
-                             "a clean shutdown was reported under a latched fault"))
+        check(
+            "Reset is required" in output,
+            failure_report("fault shutdown", runtime, "no Reset warning"),
+        )
+        check(
+            "[runtime] shutdown" not in output,
+            failure_report(
+                "fault shutdown",
+                runtime,
+                "a clean shutdown was reported under a latched fault",
+            ),
+        )
         runtime.kill()
         code = runtime.wait_exit(EXIT_WAIT_S)
-        check(code is not None and code < 0,
-              failure_report("fault shutdown", runtime,
-                             "hard kill reported exit %s" % code))
+        check(
+            code is not None and code < 0,
+            failure_report(
+                "fault shutdown", runtime, "hard kill reported exit %s" % code
+            ),
+        )
 
 
 def test_write_failure_keeps_running(workspace):
-    with Runtime(base_arguments(workspace) +
-                 ["--fake-scenario", str(workspace / "write_fail.json")],
-                 workspace) as runtime:
+    with Runtime(
+        base_arguments(workspace)
+        + ["--fake-scenario", str(workspace / "write_fail.json")],
+        workspace,
+    ) as runtime:
         latched = runtime.wait_for(
             lambda line: "FaultLatched" in line and 'fault="WriteFailed"' in line,
-            FAULT_WAIT_S)
-        check(latched, failure_report("write failure", runtime,
-                                      "the refused write was not logged"))
+            FAULT_WAIT_S,
+        )
+        check(
+            latched,
+            failure_report(
+                "write failure", runtime, "the refused write was not logged"
+            ),
+        )
         status = runtime.wait_for(
             lambda line: "[runtime] status" in line and 'state="Fault"' in line,
-            FAULT_WAIT_S)
-        check(status, failure_report("write failure", runtime,
-                                     "the runtime did not stay in Fault"))
-        check(runtime.alive(), failure_report("write failure", runtime,
-                                              "the runtime exited"))
+            FAULT_WAIT_S,
+        )
+        check(
+            status,
+            failure_report(
+                "write failure", runtime, "the runtime did not stay in Fault"
+            ),
+        )
+        check(
+            runtime.alive(),
+            failure_report("write failure", runtime, "the runtime exited"),
+        )
         runtime.kill()
 
 
 def test_unsupervised_zerotorque(workspace):
-    with Runtime(base_arguments(workspace) +
-                 ["--fake-scenario", str(workspace / "normal.json")],
-                 workspace) as runtime:
+    with Runtime(
+        base_arguments(workspace) + ["--fake-scenario", str(workspace / "normal.json")],
+        workspace,
+    ) as runtime:
         lines = runtime.wait_for(
             lambda line: "[runtime] status" in line and 'state="ZeroTorque"' in line,
-            START_WAIT_S, minimum=ZERO_TORQUE_STATUS_LINES)
-        check(len(lines) >= ZERO_TORQUE_STATUS_LINES,
-              failure_report("unsupervised runtime", runtime,
-                             "only %d ZeroTorque status lines" % len(lines)))
-        check(runtime.alive(), failure_report("unsupervised runtime", runtime,
-                                              "the runtime exited"))
+            START_WAIT_S,
+            minimum=ZERO_TORQUE_STATUS_LINES,
+        )
+        check(
+            len(lines) >= ZERO_TORQUE_STATUS_LINES,
+            failure_report(
+                "unsupervised runtime",
+                runtime,
+                "only %d ZeroTorque status lines" % len(lines),
+            ),
+        )
+        check(
+            runtime.alive(),
+            failure_report("unsupervised runtime", runtime, "the runtime exited"),
+        )
         runtime.terminate()
         code = runtime.wait_exit(EXIT_WAIT_S)
-        check(code == 0, failure_report("unsupervised runtime", runtime,
-                                        "expected exit 0, got %s" % code))
+        check(
+            code == 0,
+            failure_report(
+                "unsupervised runtime", runtime, "expected exit 0, got %s" % code
+            ),
+        )
 
 
 def main():
@@ -373,8 +551,9 @@ def main():
         print("FAIL: robot_runtime binary %s does not exist" % BINARY)
         return 1
 
-    print("runtime_cli_test: binary=%s source=%s domain=%d"
-          % (BINARY, SOURCE_DIR, DOMAIN))
+    print(
+        "runtime_cli_test: binary=%s source=%s domain=%d" % (BINARY, SOURCE_DIR, DOMAIN)
+    )
     workspace = build_workspace(SOURCE_DIR)
     try:
         test_startup_rejections(workspace)

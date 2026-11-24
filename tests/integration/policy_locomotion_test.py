@@ -51,7 +51,11 @@ def wait_for(path: Path, pattern: str, timeout_s: float) -> str:
 
 
 def main() -> int:
-    application, runtime, source_root = sys.argv[1], sys.argv[2], Path(sys.argv[3]).resolve()
+    application, runtime, source_root = (
+        sys.argv[1],
+        sys.argv[2],
+        Path(sys.argv[3]).resolve(),
+    )
     failures: list[str] = []
 
     def fail(note: str) -> None:
@@ -76,7 +80,9 @@ def main() -> int:
             check=False,
         )
         if generated.returncode != 0:
-            print(f"policy_locomotion_test: the deployment was not generated: {generated.stderr}")
+            print(
+                f"policy_locomotion_test: the deployment was not generated: {generated.stderr}"
+            )
             return 1
 
         # The recorder on, and one experimental gain override keyed to this
@@ -96,7 +102,9 @@ def main() -> int:
         document["application"]["policy_overrides"] = [
             {"model_sha256": model_sha256, "joints": {overridden_joint: {"kp": 60.0}}}
         ]
-        (work / "sdk.json").write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        (work / "sdk.json").write_text(
+            json.dumps(document, indent=2) + "\n", encoding="utf-8"
+        )
         (work / "runs").mkdir(parents=True, exist_ok=True)
 
         config = work / "sdk.json"
@@ -149,14 +157,18 @@ def main() -> int:
             expect("the handover", "behavior=Standby runtime=ZeroTorque ")
             startup = application_log.read_text(encoding="utf-8", errors="replace")
             if "policy=" not in startup or "joints=12" not in startup:
-                fail(f"the policy was not loaded from the configured path: {startup[:400]}")
+                fail(
+                    f"the policy was not loaded from the configured path: {startup[:400]}"
+                )
 
             key("damping")
             expect("the damping stop", "behavior=Damping runtime=Damping ")
             key("initialize")
             expect("the initialization", "behavior=Ready runtime=Tracking ")
             key("start_locomotion")
-            locomotion = expect("the locomotion behaviour", "behavior=Locomotion runtime=Tracking ", 30)
+            locomotion = expect(
+                "the locomotion behaviour", "behavior=Locomotion runtime=Tracking ", 30
+            )
 
             # The runtime must really be tracking the context the upper layer
             # authorized, and it must not have fallen back on its own timeouts.
@@ -174,7 +186,9 @@ def main() -> int:
             if "cause=LocalPolicyFailed" in held:
                 fail("the local policy failed while holding Locomotion")
             if "stop=CommandTimeout" in held or "stop=SourceStateTimeout" in held:
-                fail("the runtime stopped the target while the local policy was running")
+                fail(
+                    "the runtime stopped the target while the local policy was running"
+                )
 
             key("exit")
             expect("the ordered exit", "application: exit stop=confirmed", 25)
@@ -217,20 +231,31 @@ def main() -> int:
         else:
             events = [
                 json.loads(line)
-                for line in sidecar.read_text(encoding="utf-8", errors="replace").splitlines()
+                for line in sidecar.read_text(
+                    encoding="utf-8", errors="replace"
+                ).splitlines()
                 if line.strip()
             ]
             if len(events) != 1:
-                fail(f"the sidecar holds {len(events)} session(s), not one for the one context")
+                fail(
+                    f"the sidecar holds {len(events)} session(s), not one for the one context"
+                )
             else:
                 event = events[0]
-                if event.get("schema") != "irmv.policy_session" or event.get("version") != 2:
-                    fail(f"the sidecar line is {event.get('schema')} v{event.get('version')}")
+                if (
+                    event.get("schema") != "irmv.policy_session"
+                    or event.get("version") != 2
+                ):
+                    fail(
+                        f"the sidecar line is {event.get('schema')} v{event.get('version')}"
+                    )
                 if event.get("source") != "local":
                     fail(f"a local run recorded source={event.get('source')}")
                 model = event.get("model") or {}
                 if model.get("sha256") != model_sha256:
-                    fail(f"the session names model {model.get('sha256')}, not {model_sha256}")
+                    fail(
+                        f"the session names model {model.get('sha256')}, not {model_sha256}"
+                    )
                 if model.get("path") != str((work / "policy.onnx").resolve()):
                     fail(f"the session names the model at {model.get('path')}")
                 if model.get("name") != "policy.onnx":
@@ -241,7 +266,9 @@ def main() -> int:
                 if model.get("input") != "obs" or model.get("output") != "actions":
                     fail("the session does not name the model's own I/O")
                 if len(model.get("contract_sha256") or "") != 64:
-                    fail("the session does not name the deployment contract it was joined to")
+                    fail(
+                        "the session does not name the deployment contract it was joined to"
+                    )
                 gains = event.get("gains") or []
                 if len(gains) != 1 or gains[0].get("joint") != overridden_joint:
                     fail(f"the session recorded {gains}, not the one overridden gain")
@@ -275,7 +302,9 @@ def main() -> int:
 
     if failures:
         return 1
-    print("policy_locomotion_test: Standby -> Damping -> Initializing -> Ready -> Locomotion -> exit")
+    print(
+        "policy_locomotion_test: Standby -> Damping -> Initializing -> Ready -> Locomotion -> exit"
+    )
     return 0
 
 

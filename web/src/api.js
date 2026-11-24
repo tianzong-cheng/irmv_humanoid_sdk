@@ -54,7 +54,10 @@ function AppendParams(params, values) {
       }
       continue;
     }
-    params.set(key, typeof value === 'bigint' ? value.toString() : String(value));
+    params.set(
+      key,
+      typeof value === 'bigint' ? value.toString() : String(value),
+    );
   }
 }
 
@@ -167,7 +170,10 @@ export class Api {
   }
 
   async _request(path, { method = 'GET', params = {}, body, signal } = {}) {
-    const url = new URL(`${this.base}${path}`, globalThis.location?.origin ?? 'http://127.0.0.1');
+    const url = new URL(
+      `${this.base}${path}`,
+      globalThis.location?.origin ?? 'http://127.0.0.1',
+    );
     const search = new URLSearchParams();
     AppendParams(search, params);
     for (const [key, value] of search) {
@@ -199,7 +205,9 @@ export class Api {
       if (error?.name === 'AbortError') {
         throw error;
       }
-      throw new ApiError('the service answered without JSON', { status: response.status });
+      throw new ApiError('the service answered without JSON', {
+        status: response.status,
+      });
     }
     if (!response.ok || payload?.ok === false) {
       throw new ApiError(payload?.error ?? `HTTP ${response.status}`, {
@@ -215,7 +223,9 @@ export class Api {
   }
 
   Describe(runId, signal) {
-    return this._request(`/api/runs/${encodeURIComponent(runId)}/describe`, { signal });
+    return this._request(`/api/runs/${encodeURIComponent(runId)}/describe`, {
+      signal,
+    });
   }
 
   Context(runId, appRunId, signal) {
@@ -230,7 +240,8 @@ export class Api {
       params: {
         app_run_id: query.appRunId,
         signal_ids: query.signalIds,
-        begin_us: query.beginUs === undefined ? undefined : UsText(query.beginUs),
+        begin_us:
+          query.beginUs === undefined ? undefined : UsText(query.beginUs),
         end_us: query.endUs === undefined ? undefined : UsText(query.endUs),
         pixel_width: query.pixelWidth,
       },
@@ -239,26 +250,33 @@ export class Api {
   }
 
   Cursor(query, { signal } = {}) {
-    return this._request(`/api/runs/${encodeURIComponent(query.runId)}/cursor`, {
-      params: {
-        app_run_id: query.appRunId,
-        signal_ids: query.signalIds,
-        cursor_us: UsText(query.cursorUs),
+    return this._request(
+      `/api/runs/${encodeURIComponent(query.runId)}/cursor`,
+      {
+        params: {
+          app_run_id: query.appRunId,
+          signal_ids: query.signalIds,
+          cursor_us: UsText(query.cursorUs),
+        },
+        signal,
       },
-      signal,
-    });
+    );
   }
 
   Events(query, { signal } = {}) {
-    return this._request(`/api/runs/${encodeURIComponent(query.runId)}/events`, {
-      params: {
-        begin_us: query.beginUs === undefined ? undefined : UsText(query.beginUs),
-        end_us: query.endUs === undefined ? undefined : UsText(query.endUs),
-        max_rows: query.maxRows,
-        continuation: query.continuation,
+    return this._request(
+      `/api/runs/${encodeURIComponent(query.runId)}/events`,
+      {
+        params: {
+          begin_us:
+            query.beginUs === undefined ? undefined : UsText(query.beginUs),
+          end_us: query.endUs === undefined ? undefined : UsText(query.endUs),
+          max_rows: query.maxRows,
+          continuation: query.continuation,
+        },
+        signal,
       },
-      signal,
-    });
+    );
   }
 
   LiveSnapshot(query, { signal } = {}) {
@@ -266,7 +284,8 @@ export class Api {
       params: {
         run_id: query.runId,
         signal_ids: query.signalIds,
-        begin_us: query.beginUs === undefined ? undefined : UsText(query.beginUs),
+        begin_us:
+          query.beginUs === undefined ? undefined : UsText(query.beginUs),
         end_us: query.endUs === undefined ? undefined : UsText(query.endUs),
         pixel_width: query.pixelWidth,
         after_revision: query.afterRevision,
@@ -285,7 +304,11 @@ export class Api {
 
   SaveLayout(layout, id = null, signal) {
     if (id === null) {
-      return this._request('/api/layouts', { method: 'POST', body: layout, signal });
+      return this._request('/api/layouts', {
+        method: 'POST',
+        body: layout,
+        signal,
+      });
     }
     return this._request(`/api/layouts/${encodeURIComponent(id)}`, {
       method: 'PUT',

@@ -42,7 +42,10 @@ export function AssignAxis(chart, signal) {
   if (existing !== null) {
     return { chart: next, axisId: existing };
   }
-  const axisId = NextId('axis', next.axes.map((axis) => axis.id));
+  const axisId = NextId(
+    'axis',
+    next.axes.map((axis) => axis.id),
+  );
   next.axes.push({
     id: axisId,
     quantity: signal.quantity ?? '',
@@ -67,7 +70,13 @@ export function AddCurve(chart, signal, style = 'auto') {
   next.curves.push({
     signalId: signal.id,
     axisId: assigned.axisId,
-    style: style === 'auto' ? NextId('style', next.curves.map((curve) => curve.style)) : style,
+    style:
+      style === 'auto'
+        ? NextId(
+            'style',
+            next.curves.map((curve) => curve.style),
+          )
+        : style,
   });
   return next;
 }

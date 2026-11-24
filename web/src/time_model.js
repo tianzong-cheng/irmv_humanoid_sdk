@@ -47,7 +47,13 @@ function InitialState() {
 }
 
 /** Scale a time window about an anchor, retaining its screen fraction. */
-export function ZoomWindow(window, coverage, numerator, denominator, anchorUs = null) {
+export function ZoomWindow(
+  window,
+  coverage,
+  numerator,
+  denominator,
+  anchorUs = null,
+) {
   const begin = Us(window.beginUs);
   const end = Us(window.endUs);
   const span = end - begin;
@@ -59,9 +65,10 @@ export function ZoomWindow(window, coverage, numerator, denominator, anchorUs = 
   }
   // Outward zoom must progress even from a one-microsecond window. Rounding
   // down would otherwise trap the real 6/5 and 5/4 controls at tiny spans.
-  let nextSpan = numerator > denominator
-    ? (span * numerator + denominator - 1n) / denominator
-    : span * numerator / denominator;
+  let nextSpan =
+    numerator > denominator
+      ? (span * numerator + denominator - 1n) / denominator
+      : (span * numerator) / denominator;
   if (nextSpan < 1n) {
     nextSpan = 1n;
   }
@@ -69,8 +76,13 @@ export function ZoomWindow(window, coverage, numerator, denominator, anchorUs = 
     return { beginUs: coverageBegin, endUs: coverageEnd };
   }
   const requestedAnchor = anchorUs === null ? begin + span / 2n : Us(anchorUs);
-  const anchor = requestedAnchor < begin ? begin : requestedAnchor > end ? end : requestedAnchor;
-  let nextBegin = anchor - (anchor - begin) * nextSpan / span;
+  const anchor =
+    requestedAnchor < begin
+      ? begin
+      : requestedAnchor > end
+        ? end
+        : requestedAnchor;
+  let nextBegin = anchor - ((anchor - begin) * nextSpan) / span;
   if (nextBegin < coverageBegin) {
     nextBegin = coverageBegin;
   }
@@ -132,7 +144,11 @@ export class TimeModel {
           next.playing = true;
           next.following = false;
           next.lastAdvanceMs = monotonicNowMs;
-          if (next.cursor < next.window.beginUs || next.cursor > next.window.endUs || next.cursor >= coverage.endUs) {
+          if (
+            next.cursor < next.window.beginUs ||
+            next.cursor > next.window.endUs ||
+            next.cursor >= coverage.endUs
+          ) {
             next.cursor = next.window.beginUs;
           }
           return next;
@@ -148,9 +164,12 @@ export class TimeModel {
       }
       case 'seek': {
         const stamp = Us(action.timeUs);
-        const clamped = stamp < coverage.beginUs
-          ? coverage.beginUs
-          : (stamp > coverage.endUs ? coverage.endUs : stamp);
+        const clamped =
+          stamp < coverage.beginUs
+            ? coverage.beginUs
+            : stamp > coverage.endUs
+              ? coverage.endUs
+              : stamp;
         next.mode = 'history';
         next.following = false;
         next.playing = false;
@@ -171,7 +190,8 @@ export class TimeModel {
         return next;
       }
       case 'stepSample': {
-        const times = (action.times ?? []).map((value) => Us(value))
+        const times = (action.times ?? [])
+          .map((value) => Us(value))
           .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
         if (times.length === 0) {
           return state;
@@ -234,7 +254,10 @@ export class TimeModel {
         const delta = BigInt(Math.round(elapsed * state.speed * 1000));
         const target = state.cursor + delta;
         next.cursor = target < coverage.endUs ? target : coverage.endUs;
-        if (next.cursor > state.window.endUs || next.cursor < state.window.beginUs) {
+        if (
+          next.cursor > state.window.endUs ||
+          next.cursor < state.window.beginUs
+        ) {
           const span = state.window.endUs - state.window.beginUs;
           let begin = next.cursor - span;
           if (begin < coverage.beginUs) begin = coverage.beginUs;
@@ -267,7 +290,7 @@ export function SampleTimes(series) {
       }
     }
   }
-  return [...times].map((value) => BigInt(value)).sort(
-    (left, right) => (left < right ? -1 : left > right ? 1 : 0),
-  );
+  return [...times]
+    .map((value) => BigInt(value))
+    .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
 }
