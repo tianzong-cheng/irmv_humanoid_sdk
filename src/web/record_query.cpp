@@ -339,9 +339,11 @@ std::string StringMember(const Json &object, const char *key) {
   return std::string();
 }
 
-void AddSimulationContext(Json *context, const RunEntry &run) {
+void AddSimulationContext(Json *context, const RunEntry &run,
+                          bool include_evidence) {
   if (!run.metadata.contains("simulation")) return;
   (*context)["simulation"] = run.metadata["simulation"];
+  if (!include_evidence) return;
   const auto relative =
       run.metadata["simulation"].value("sidecar", std::string());
   std::error_code code;
@@ -360,7 +362,7 @@ void AddSimulationContext(Json *context, const RunEntry &run) {
         {"error", "invalid simulation reference"}};
 }
 
-Json RuntimeContext(const RunEntry &run) {
+Json RuntimeContext(const RunEntry &run, bool include_evidence) {
   const telemetry::RecordReader &reader = *run.reader;
   Json context;
   context["run_id"] = run.id;
@@ -373,7 +375,7 @@ Json RuntimeContext(const RunEntry &run) {
   context["backend"] = StringMember(run.metadata, "backend");
   context["sdk_git_sha"] = StringMember(run.metadata, "sdk_git_sha");
   context["clock"] = ClockOf(run.metadata);
-  AddSimulationContext(&context, run);
+  AddSimulationContext(&context, run, include_evidence);
   context["control_hz"] = run.metadata.value("control_hz", 0.0);
   context["sample_hz"] = run.metadata.value("sample_hz", 0U);
   context["joint_count"] = reader.metadata().joint_count;
@@ -473,7 +475,8 @@ AppRead ReadApplication(const std::filesystem::path &directory) {
   return read;
 }
 
-Json ApplicationContext(const RunEntry &run, const AppRead &read) {
+Json ApplicationContext(const RunEntry &run, const AppRead &read,
+                        bool include_evidence) {
   const telemetry::VelocityRecordRange &range = read.range;
   Json context;
   context["run_id"] = run.id;
@@ -488,7 +491,7 @@ Json ApplicationContext(const RunEntry &run, const AppRead &read) {
   context["sdk_git_sha"] = StringMember(run.metadata, "sdk_git_sha");
   context["source"] = StringMember(run.metadata, "source");
   context["clock"] = ClockOf(run.metadata);
-  AddSimulationContext(&context, run);
+  AddSimulationContext(&context, run, include_evidence);
   context["sample_hz"] = run.metadata.value("sample_hz", 0U);
   context["joint_count"] = run.metadata.value("joint_count", 0U);
   if (run.metadata.contains("model")) {
@@ -1691,12 +1694,14 @@ std::string RecordQuery::Execute(std::string_view request_json) {
   }
 
   if (op == "describe" || op == "context") {
+    const bool include_evidence = !request.contains("simulation_evidence") ||
+                                  request["simulation_evidence"] != false;
     Json context;
     if (run->kind == RunKind::Runtime) {
-      context = RuntimeContext(*run);
+      context = RuntimeContext(*run, include_evidence);
     } else {
       const AppRead read = ReadApplication(run->directory);
-      context = ApplicationContext(*run, read);
+      context = ApplicationContext(*run, read, include_evidence);
       if (!read.ok) {
         return ErrorReply(request_id, read.error.empty()
                                           ? "the application run is not "
@@ -1712,7 +1717,7 @@ std::string RecordQuery::Execute(std::string_view request_json) {
                                             "readable"
                                           : app_read.error);
       }
-      Json app_context = ApplicationContext(*app, app_read);
+      Json app_context = ApplicationContext(*app, app_read, include_evidence);
       context["association"] = Association(context, *app, app_read);
       context["application"] = std::move(app_context);
     }

@@ -604,6 +604,14 @@ int main(int argc, char **argv) {
           false);
     CHECK(described["context"]["simulation_evidence"]["error"] ==
           "invalid simulation reference");
+    const auto live = Call(&bounded, {{"op", "context"},
+                                      {"run_id", runtime_a_id},
+                                      {"app_run_id", application_a_id},
+                                      {"simulation_evidence", false}});
+    CHECK(live["context"]["association"]["ok"] == true);
+    CHECK(!live["context"]["signals"].empty());
+    CHECK(live["context"].contains("simulation"));
+    CHECK(!live["context"].contains("simulation_evidence"));
   }
 
   std::filesystem::remove_all(root);

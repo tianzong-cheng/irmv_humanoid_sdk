@@ -534,9 +534,12 @@ export class Workbench {
       );
     if (runtime.kind === 'application') appRunId = null;
     this.BrowserMessage('Opening experiment…');
+    // The live signal catalog and source association do not require a replay
+    // of the full simulation sidecar.
+    const params = mode === 'live' ? { simulation_evidence: '0' } : undefined;
     let described = appRunId
-      ? await this.api.Context(runId, appRunId, signal)
-      : await this.api.Describe(runId, signal);
+      ? await this.api.Context(runId, appRunId, signal, params)
+      : await this.api.Describe(runId, signal, params);
     if (generation !== this.loadGeneration) return;
     if (appRunId && described.context?.association?.ok !== true) {
       throw new Error(
@@ -552,7 +555,12 @@ export class Workbench {
         (run) => run.kind === 'application' && run.readable,
       )) {
         try {
-          const reply = await this.api.Context(runId, candidate.run_id, signal);
+          const reply = await this.api.Context(
+            runId,
+            candidate.run_id,
+            signal,
+            params,
+          );
           if (generation !== this.loadGeneration) return;
           if (reply.context?.association?.ok === true) {
             matched.push({ ...candidate, description: reply });

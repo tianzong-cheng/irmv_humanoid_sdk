@@ -322,9 +322,25 @@ test('history contains experiments while live opens directly without a picker', 
     '0.9',
   ]);
   await page.evaluate(() => __workbench.RefreshRuns());
+  const reportRequests = [];
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (/\/api\/runs\/[^/]+\/(describe|context)$/.test(url.pathname)) {
+      reportRequests.push(url);
+    }
+  });
   await page.click('#live-experiments');
   await expect(page.locator('#experiment-browser')).toBeHidden();
   await expect(page.locator('#experiment-state')).toContainText('Live');
+  await expect(page.locator('#signal-tree')).toContainText('left_hip');
+  expect(reportRequests.some((url) => url.pathname.endsWith('/context'))).toBe(
+    true,
+  );
+  expect(
+    reportRequests.every(
+      (url) => url.searchParams.get('simulation_evidence') === '0',
+    ),
+  ).toBe(true);
 });
 
 test('live availability distinguishes absent, application-only and conflicting runtime telemetry', async ({

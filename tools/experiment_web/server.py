@@ -512,6 +512,12 @@ class _Handler(BaseHTTPRequestHandler):
                 )
                 return
             request["app_run_id"] = app_run_id
+        if operation in {"describe", "context"}:
+            evidence = _one(params, "simulation_evidence")
+            if evidence is not None:
+                if evidence not in {"0", "1"}:
+                    raise CatalogError("simulation_evidence must be 0 or 1")
+                request["simulation_evidence"] = evidence == "1"
         if operation == "describe":
             request["op"] = "describe"
         elif operation == "context":

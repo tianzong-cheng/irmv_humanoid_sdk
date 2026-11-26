@@ -183,6 +183,11 @@ or command the robot.
   verify each chunk's header and payload CRC. A corrupt chunk contributes no
   rows and is named; a truncated run says so. A live envelope is a temporary
   copy until a committed row exists, then the committed value wins.
+- **Live open uses metadata first.** Studio requests `simulation_evidence=0`
+  on live describe and association queries, so they do not replay the
+  simulation sidecar. Signal discovery and clock, runtime and session
+  association still use the normal verified metadata. Explicit full context
+  queries and historical views retain the sidecar audit.
 - **Fault observations are not current state.** The experiment header shows the
   first observed reasons for the newest loaded runtime fault, with detection
   time and joint name when known. The notice can come from live telemetry or

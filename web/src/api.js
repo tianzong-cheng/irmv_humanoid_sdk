@@ -222,15 +222,16 @@ export class Api {
     return this._request('/api/runs', { params, signal });
   }
 
-  Describe(runId, signal) {
+  Describe(runId, signal, params) {
     return this._request(`/api/runs/${encodeURIComponent(runId)}/describe`, {
+      params,
       signal,
     });
   }
 
-  Context(runId, appRunId, signal) {
+  Context(runId, appRunId, signal, params) {
     return this._request(`/api/runs/${encodeURIComponent(runId)}/context`, {
-      params: { app_run_id: appRunId },
+      params: { ...params, app_run_id: appRunId },
       signal,
     });
   }
