@@ -1311,8 +1311,7 @@ int CheckOwnedInvalidCommandLatches() {
   CHECK(f.StartTracking().applied());
   const Sequence epoch = f.state().epoch;
 
-  // A frame from the authorized owner that violates the entry limits is a
-  // command fault, not a silent drop.
+  // A frame from the authorized owner with a negative gain faults.
   JointCommand bad = f.last_frame();
   bad.command_seq = f.state().last_applied_command_seq + 1000;
   bad.source_state_seq = f.state().state_seq;
@@ -1320,7 +1319,7 @@ int CheckOwnedInvalidCommandLatches() {
   bad.session_id = f.state().session_id;
   bad.producer_id = f.state().producer_id;
   bad.epoch = f.state().epoch;
-  bad.joints.q[0] = 5.0;
+  bad.joints.kd[0] = -1.0;
   f.QueueCommand(bad);
   f.Advance(f.ControlPeriodUs());
 
@@ -1440,10 +1439,10 @@ int CheckTrackingSupersededByCommandFault() {
       f.MakeRequest(Operation::Tracking, irmv::test::kAutoSequence,
                     irmv::test::FixtureSecondProducerId());
   f.QueueRequest(start);
-  // A frame of the new authorization that fails the entry limits.
+  // A frame of the new authorization with a negative gain.
   JointCommand bad = start.first_command;
   bad.command_seq = start.first_command.command_seq + 1;
-  bad.joints.q[0] = 5.0;
+  bad.joints.kd[0] = -1.0;
   f.QueueCommand(bad);
   f.Step();
 

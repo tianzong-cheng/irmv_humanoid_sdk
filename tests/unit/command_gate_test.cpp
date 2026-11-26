@@ -477,21 +477,6 @@ int main() {
                                   negative_kd,
                                   RejectReason::InvalidCommand) == 0);
 
-    JointCommand above_max = CommandFor(config);
-    above_max.joints.q[0] = config.position_max[0] + 0.001;
-    CHECK(CheckRejectedOwnerFrame(config, runtime, session, producer, above_max,
-                                  RejectReason::InvalidCommand) == 0);
-
-    JointCommand below_min = CommandFor(config);
-    below_min.joints.q[1] = config.position_min[1] - 0.001;
-    CHECK(CheckRejectedOwnerFrame(config, runtime, session, producer, below_min,
-                                  RejectReason::InvalidCommand) == 0);
-
-    JointCommand fast = CommandFor(config);
-    fast.joints.dq[0] = config.target_velocity_limits[0] + 1e-9;
-    CHECK(CheckRejectedOwnerFrame(config, runtime, session, producer, fast,
-                                  RejectReason::InvalidCommand) == 0);
-
     JointCommand other_layout = CommandFor(config);
     CHECK(other_layout.layout_id.Assign("other_layout"));
     CHECK(CheckRejectedOwnerFrame(config, runtime, session, producer,
@@ -547,7 +532,8 @@ int main() {
     CHECK(gate.last_valid_command_rx_us() == 60'000);
   }
 
-  // ---- limits are inclusive and the accepted frame is stored by value ----
+  // Finite position and velocity targets are accepted unchanged even when
+  // outside the limits used for feedback protection or target generation.
   {
     CommandGate gate(config);
     gate.RecordState(10, 55'000);
@@ -555,20 +541,22 @@ int main() {
 
     JointCommand boundary = CommandFor(config);
     boundary.source_state_seq = 10;
-    boundary.joints.q[0] = config.position_max[0];
-    boundary.joints.q[1] = config.position_min[1];
-    boundary.joints.dq[0] = config.target_velocity_limits[0];
-    boundary.joints.dq[1] = -config.target_velocity_limits[1];
+    boundary.joints.q[0] = config.position_max[0] + 0.001;
+    boundary.joints.q[1] = config.position_min[1] - 0.001;
+    boundary.joints.dq[0] = config.target_velocity_limits[0] + 1.0;
+    boundary.joints.dq[1] = -config.target_velocity_limits[1] - 1.0;
     boundary.joints.kp[0] = 4.0;
     boundary.joints.tau_ff[1] = 1.5;
     CHECK(gate.Accept({boundary, 60'000}, 60'000).accepted());
+    CHECK(gate.current_target().joints.q[0] == boundary.joints.q[0]);
+    CHECK(gate.current_target().joints.q[1] == boundary.joints.q[1]);
 
     boundary.joints.kp[0] = 42.0;
     boundary.joints.tau_ff[1] = 42.0;
     CHECK(gate.current_target().joints.kp[0] == 4.0);
     CHECK(gate.current_target().joints.tau_ff[1] == 1.5);
-    CHECK(gate.current_target().joints.dq[0] ==
-          config.target_velocity_limits[0]);
+    CHECK(gate.current_target().joints.dq[0] == boundary.joints.dq[0]);
+    CHECK(gate.current_target().joints.dq[1] == boundary.joints.dq[1]);
     CHECK(gate.current_target().source_state_seq == 10);
   }
 

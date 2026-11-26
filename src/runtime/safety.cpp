@@ -468,17 +468,6 @@ protocol::ValidationResult ValidateTrackingCommand(
   if (command.layout_id.View() != config.layout_id) {
     return {false, protocol::RejectReason::Malformed};
   }
-  for (std::size_t index = 0; index < joint_count; ++index) {
-    const double target_position = command.joints.q[index];
-    const double target_velocity = command.joints.dq[index];
-    if (target_position < config.position_min[index] ||
-        target_position > config.position_max[index]) {
-      return {false, protocol::RejectReason::InvalidCommand};
-    }
-    if (!(std::abs(target_velocity) <= config.target_velocity_limits[index])) {
-      return {false, protocol::RejectReason::InvalidCommand};
-    }
-  }
   return {true, protocol::RejectReason::None};
 }
 

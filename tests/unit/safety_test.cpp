@@ -1261,42 +1261,27 @@ int main() {
   output = ComputeTracking(config, command, HealthyFeedback(config));
   CHECK(!output.valid);
 
-  // Target position must stay inside the configured range.
+  // Finite targets outside the feedback bounds still produce PD torque.
   command = CommandFor(config);
   command.joints.q[0] = config.position_max[0] + 0.5;
   output = ComputeTracking(config, command, HealthyFeedback(config));
-  CHECK(!output.valid);
+  CHECK(output.valid);
 
   command = CommandFor(config);
   command.joints.q[0] = config.position_min[0] - 0.5;
   output = ComputeTracking(config, command, HealthyFeedback(config));
-  CHECK(!output.valid);
-
-  command = CommandFor(config);
-  command.joints.q[0] = config.position_max[0];
-  output = ComputeTracking(config, command, HealthyFeedback(config));
   CHECK(output.valid);
 
-  command = CommandFor(config);
-  command.joints.q[0] = config.position_min[0];
-  output = ComputeTracking(config, command, HealthyFeedback(config));
-  CHECK(output.valid);
-
-  // Target velocity limit is inclusive.
-  command = CommandFor(config);
-  command.joints.dq[0] = config.target_velocity_limits[0];
-  output = ComputeTracking(config, command, HealthyFeedback(config));
-  CHECK(output.valid);
-
+  // Finite velocity targets are not limited by the initialization rate cap.
   command = CommandFor(config);
   command.joints.dq[0] = config.target_velocity_limits[0] + 0.01;
   output = ComputeTracking(config, command, HealthyFeedback(config));
-  CHECK(!output.valid);
+  CHECK(output.valid);
 
   command = CommandFor(config);
   command.joints.dq[0] = -config.target_velocity_limits[0] - 0.01;
   output = ComputeTracking(config, command, HealthyFeedback(config));
-  CHECK(!output.valid);
+  CHECK(output.valid);
 
   // A finite but huge gain that overflows a product must not produce a
   // clamped or NaN torque.

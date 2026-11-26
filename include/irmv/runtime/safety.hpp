@@ -67,12 +67,8 @@ struct ControlOutput {
   hardware::TorqueOutput output;
 };
 
-// Validates one tracking command against the protocol shape and the configured
-// limits, without touching the measured state: VersionMismatch for a wrong
-// protocol version, Malformed for a wrong joint count or layout, InvalidCommand
-// for non-finite or negative gains, a non-finite motion target, a target
-// position outside [position_min, position_max] or a target velocity above
-// target_velocity_limits (equality is within limit).
+// Validates the protocol shape, joint layout, and command values. Targets
+// must be finite, but position and speed bounds are checked on feedback.
 protocol::ValidationResult ValidateTrackingCommand(
     const configuration::RuntimeConfig &config,
     const protocol::JointCommand &command);

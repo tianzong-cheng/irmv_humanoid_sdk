@@ -257,6 +257,13 @@ Stop reasons: `STOP_NONE`, `STOP_REQUESTED`, `COMMAND_TIMEOUT`,
   old epoch stops being executable the moment the switch is committed, and a
   true replay is answered from the stored result without re-authorizing.
 
+Across backends, runtime position and speed protection use measured joint
+feedback (`JointPositionExceeded` and `JointVelocityExceeded`). Finite tracking
+targets are not rejected or clamped merely for their magnitude. Tracking
+handoff continuity and torque limits still apply. The application can still
+use `target_velocity_limits` to bound initialization trajectories; it is not a
+runtime command rejection threshold.
+
 ## Timeouts and fallbacks
 
 | Deadline | Measured from | Default | On expiry |
