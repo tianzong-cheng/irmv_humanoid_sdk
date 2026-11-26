@@ -11,6 +11,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from irmv_console import notice
+
 BIN = Path(__file__).resolve().parent
 DEFAULT_CONFIG = "@IRMV_LAUNCH_CONFIG@"
 SIMULATION_PYTHON = "@IRMV_SIMULATION_PYTHON@"
@@ -78,7 +80,7 @@ def with_studio(studio, command, environment, records_root):
                 return 128 + pending_signal
             if not url.startswith("http://127.0.0.1:") or service.poll() is not None:
                 raise ValueError("Studio failed to start")
-            print(f"Studio: {url}", flush=True)
+            notice("Studio", url, level="ready")
             child = subprocess.Popen(command, env=environment)
             service_reported = False
             while True:
@@ -178,7 +180,7 @@ def main():
             snapshot = run / "sdk.json"
             snapshot.write_text(snapshot_json(data), encoding="utf-8")
             common[1] = str(snapshot)
-            print(f"Simulation evidence: {run / 'run'}", flush=True)
+            notice("Evidence", str(run / "run"))
             command = [launcher, *common, "--python", python, *viewer]
         else:
             command = [executable(BIN / "sdk_launch.py"), *common]

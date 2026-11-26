@@ -354,6 +354,10 @@ shutdown through runtime ZeroTorque and engine close.
 Engine startup diagnostics and native viewer output are written to
 `simulator.log` in the run directory. The launching terminal still shows
 startup failures, application status, and whether shutdown was confirmed.
+A final `Result` line states `OK` only when the coordinator proved
+`ZeroTorque`; `FAILED: ZeroTorque was not confirmed at shutdown` means the
+lower layer was still in `Fault`/`Damping` and reporting nonzero damping
+torque in the shutdown phase, so physical stop was not proven.
 
 Interactive launch prints the configured key map and follows application status
 in the launching terminal while retaining the full `run/application.log`.

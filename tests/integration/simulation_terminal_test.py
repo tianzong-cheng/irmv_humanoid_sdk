@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 import pty
+import re
 import select
 import signal
 import sys
@@ -67,6 +68,11 @@ def run_case(build, quit_application):
                     os.dup2(slave, fd)
                 if slave > 2:
                     os.close(slave)
+                os.environ["TERM"] = "xterm-256color"
+                if quit_application:
+                    os.environ["NO_COLOR"] = "1"
+                else:
+                    os.environ.pop("NO_COLOR", None)
                 os.execv(
                     sys.executable,
                     [
@@ -121,6 +127,15 @@ def run_case(build, quit_application):
             expect("[application] behavior=Ready")
             os.write(master, b"l")
             expect("[application] behavior=Locomotion")
+            plain = re.sub(r"\x1b\[[0-9;]*m", "", text)
+            lines = [
+                line
+                for line in plain.splitlines()
+                if line.startswith("[application] behavior=")
+            ]
+            for field in ("runtime=", "output=", "session="):
+                assert len({line.index(field) for line in lines}) == 1, lines
+            assert ("\x1b[" in text) != quit_application, text
             if quit_application:
                 os.write(master, b"x")
                 expect("exit stop=confirmed state=Damping")
@@ -154,6 +169,11 @@ def run_case(build, quit_application):
                     assert os.waitstatus_to_exitcode(status) == 0, text
                     break
             assert reaped, ("launcher ignored terminal Ctrl-C", text)
+            # The final Result line can follow the reaped child in the PTY
+            # buffer; read it before asserting on the transcript.
+            drain_deadline = time.monotonic() + 1
+            while time.monotonic() < drain_deadline:
+                drain(0.05)
             assert termios.tcgetattr(master) == before, (
                 "launcher left terminal attributes changed"
             )
@@ -161,6 +181,20 @@ def run_case(build, quit_application):
             assert evidence["stop_proven"] and evidence["state"] == "Closed", evidence
             assert evidence["final_child_codes"] == [0, 0], evidence
             recorded = (directory / "run/application.log").read_text()
+            assert "\x1b[" not in recorded
+            from irmv_console import shutdown_result
+
+            assert shutdown_result(
+                "shutdown stopped-unproven: fresh ZeroTorque required", 1
+            ) == (
+                "FAILED: ZeroTorque was not confirmed at shutdown "
+                "(fresh ZeroTorque required)",
+                "fault",
+            )
+            assert shutdown_result("", 0) == (
+                "OK: ZeroTorque confirmed; all processes exited",
+                "ready",
+            )
             assert all(
                 state in recorded
                 for state in (

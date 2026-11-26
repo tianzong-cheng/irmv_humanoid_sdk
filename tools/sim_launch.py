@@ -13,6 +13,7 @@ import time
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
+from irmv_console import application_line, notice, shutdown_result
 from simulation.assets import verify_binding
 from simulation.main import Runner, load_bootstrap, warp_engine
 
@@ -109,7 +110,7 @@ class Experiment:
     def _open_application_console(self):
         path = self.directory / "application.log"
         self.application_output = path.open("r", encoding="utf-8", errors="replace")
-        print("sim_launch: application status and log: " + str(path), flush=True)
+        notice("Run log", str(path))
         try:
             bindings = json.loads(self.config.read_text())["input"]["bindings"]
         except (OSError, ValueError, KeyError, TypeError):
@@ -120,11 +121,15 @@ class Experiment:
             if isinstance(key, str) and len(key) == 1
         ]
         if keys:
-            print("sim_launch: keys: " + "  ".join(keys), flush=True)
-        print(
-            "sim_launch: type keys in this terminal without Enter; wait for "
-            "behavior=Ready before starting locomotion. Ctrl-C stops the whole experiment.",
-            flush=True,
+            notice("Keys", "  ".join(keys))
+        notice(
+            "Controls",
+            "type without Enter. Press d, i, then l; wait for Ready before l.",
+        )
+        notice(
+            "Stop",
+            "Ctrl-C ends the experiment and confirms ZeroTorque; "
+            "x only leaves the application.",
         )
 
     def _mirror_application_output(self):
@@ -135,7 +140,8 @@ class Experiment:
         text = self.application_output.read(8192)
         if text:
             try:
-                sys.stdout.write(text)
+                for line in text.splitlines(keepends=True):
+                    sys.stdout.write(application_line(line, sys.stdout))
                 sys.stdout.flush()
             except (BrokenPipeError, BlockingIOError) as exc:
                 self.evidence["console_output_error"] = str(exc)
@@ -221,7 +227,7 @@ class Experiment:
             json.dump(n, f)
         path = self.directory / "simulator.log"
         if capture_startup_log:
-            print(f"Simulation engine and viewer log: {path}", flush=True)
+            notice("Simulator log", str(path))
         with startup_log(path) if capture_startup_log else nullcontext():
             if not self._start_simulator(n, bootstrap, asset_digest):
                 return self
@@ -284,13 +290,8 @@ class Experiment:
                 previous = self.evidence.get("viewer", {}).get("state")
                 self.evidence["viewer"] = status
                 if status["state"] != previous:
-                    print(
-                        "simulation viewer: "
-                        + status["state"]
-                        + (": " + status["error"] if status.get("error") else ""),
-                        file=sys.stderr,
-                        flush=True,
-                    )
+                    error = ": " + status["error"] if status.get("error") else ""
+                    notice("Viewer", status["state"] + error, level="warning")
         codes = [p.wait(timeout=5) for p in self.children]
         self._mirror_application_output()
         c = self.runner.coordinator
@@ -425,19 +426,10 @@ def main():
         experiment.start(capture_startup_log=True)
         if experiment.evidence.get("startup_cancelled"):
             return experiment.wait()
-        print(
-            "Simulation engine ready; SDK peers started. App exit retains runtime; Ctrl-C shuts down.",
-            flush=True,
-        )
+        notice("Simulation", "engine ready; SDK peers running")
         result = experiment.wait()
-        if result:
-            print(
-                "Simulation did not shut down cleanly: "
-                + (experiment.evidence.get("failure") or "see experiment logs"),
-                file=sys.stderr,
-            )
-        else:
-            print("Simulation stopped with ZeroTorque confirmed.", flush=True)
+        text, level = shutdown_result(experiment.evidence.get("failure") or "", result)
+        notice("Result", text, level=level, stream=sys.stderr if result else sys.stdout)
         return result
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         print("simulation launch failed: " + str(exc), file=sys.stderr)

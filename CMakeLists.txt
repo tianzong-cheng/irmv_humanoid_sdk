@@ -1765,6 +1765,7 @@ if(TARGET application)
     install(TARGETS simulation_normalize RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
     install(PROGRAMS tools/sim_launch.py tools/prepare_simulation_asset.py
       DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    install(FILES tools/irmv_console.py DESTINATION "${CMAKE_INSTALL_BINDIR}")
     install(DIRECTORY tools/simulation DESTINATION "${CMAKE_INSTALL_BINDIR}"
       FILES_MATCHING PATTERN "*.py")
     install(FILES config/simulation.example.json config/simulation-physical-profile.json DESTINATION "${CMAKE_INSTALL_SYSCONFDIR}/irmv")

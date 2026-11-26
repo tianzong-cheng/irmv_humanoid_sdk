@@ -248,7 +248,11 @@ not known, otherwise `Requested`, `CommandTimeout`, `SourceStateTimeout` or
 `SupervisorTimeout`). `fault` shows the distinct latched reasons from fresh
 runtime feedback, for example `cause=RuntimeFault fault=JointVelocityExceeded`.
 An application-only fault still reports its own `cause` without inventing a
-runtime failure. The line is printed once initially, then only when the
+runtime failure. The interactive simulation launcher aligns the leading
+`behavior`, `runtime`, `output` and `session` columns, drops the fields that do
+not apply, and colors readiness, warnings and faults; `NO_COLOR` or a
+non-terminal stream keeps the plain line. `application.log` is always plain.
+The line is printed once initially, then only when the
 displayed fields change. A single
 request may produce multiple lines as those fields change; a repeated request
 that leaves them unchanged produces none. Idle operation does not repeat the
