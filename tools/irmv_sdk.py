@@ -15,7 +15,11 @@ BIN = Path(__file__).resolve().parent
 DEFAULT_CONFIG = "@IRMV_LAUNCH_CONFIG@"
 SIMULATION_PYTHON = "@IRMV_SIMULATION_PYTHON@"
 REAL_ENABLED = "@IRMV_ENABLE_REAL_BACKEND@" in ("ON", "TRUE", "1")
-VIEWER_FLAGS = ("viewer", "viewer-follow", "viewer-no-shadow")
+VIEWER_FLAGS = {
+    "viewer": "open the read-only native MuJoCo viewer",
+    "camera-follow": "open the viewer with the camera following the robot base",
+    "no-shadow": "open the viewer without ground shadows to reduce rendering cost",
+}
 
 
 class JsonNumber:
@@ -117,10 +121,8 @@ def main():
     parser.add_argument(
         "--web", action="store_true", help="start the local Studio service"
     )
-    for flag in VIEWER_FLAGS:
-        parser.add_argument(
-            "--" + flag, action="store_true", help="simulation viewer option"
-        )
+    for flag, help_text in VIEWER_FLAGS.items():
+        parser.add_argument("--" + flag, action="store_true", help=help_text)
     args = parser.parse_args()
     try:
         config = args.config or (BIN / DEFAULT_CONFIG if DEFAULT_CONFIG else None)

@@ -338,9 +338,9 @@ python3 tools/sim_launch.py --config /path/to/fresh/prepared/sdk.json \
   --python "$PWD/build/simulation-venv/bin/python" --viewer
 ```
 
-Use `--viewer-follow` instead for an initially base-following camera (it also
-enables the viewer). `--viewer-no-shadow` opens the viewer without the cast
-ground shadow; lighting, sky gradient and the checker ground stay. That pass
+Use `--camera-follow` to open the viewer with the camera initially following
+the robot base. `--no-shadow` opens the viewer without the cast ground shadow;
+lighting, sky gradient and the checker ground stay. That pass
 costs about 0.24 ms per control interval on the same GPU the physics engine
 uses, which is the difference between roughly 0.9x and 1.0x real time on the
 laptop GPU measured here, so it is an explicit opt-in rather than the default.
@@ -438,7 +438,7 @@ matched CycloneDDS 11.0.1 pair, held base, Standby and zero torque:
 |---|---:|---:|
 |Full SDK, headless|1.74|1.15|
 |Full SDK, viewer with shadow|2.20|0.91|
-|Full SDK, viewer `--viewer-no-shadow`|1.95|1.02|
+|Full SDK, viewer `--no-shadow`|1.95|1.02|
 
 Each row is a 10 s steady window after 100 warm intervals; all runs ended
 `Closed` with independent stop proof, SDK exits[0,0] and a clean viewer exit.

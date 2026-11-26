@@ -345,14 +345,14 @@ def main():
         "--viewer", action="store_true", help="open read-only native MuJoCo window"
     )
     parser.add_argument(
-        "--viewer-follow",
+        "--camera-follow",
         action="store_true",
-        help="open viewer with base-follow camera",
+        help="open the viewer with the camera following the robot base",
     )
     parser.add_argument(
-        "--viewer-no-shadow",
+        "--no-shadow",
         action="store_true",
-        help="open viewer without the cast ground shadow: costs ~0.24 ms/cycle less on the same GPU (real-time on a laptop); lighting, sky and ground stay",
+        help="open the viewer without ground shadows to reduce rendering cost",
     )
     parser.add_argument(
         "--simulation-worker", action="store_true", help=argparse.SUPPRESS
@@ -380,8 +380,8 @@ def main():
         args.normalizer,
         domain=args.domain,
         viewer=args.viewer,
-        viewer_follow=args.viewer_follow,
-        viewer_no_shadow=args.viewer_no_shadow,
+        viewer_follow=args.camera_follow,
+        viewer_no_shadow=args.no_shadow,
     )
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, experiment.notify_shutdown)
