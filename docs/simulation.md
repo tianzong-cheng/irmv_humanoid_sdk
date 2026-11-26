@@ -46,9 +46,11 @@ manifest is refused by configure rather than silently accepted.
 For daily use, install the `sim` preset as described in the
 [README](../README.md#launch-an-installed-sdk), provision the prepared
 configuration at `etc/irmv/deployment-sdk.json`, and run `irmv-sdk`.
-Use `--web` for IRMV Studio and `--viewer` for a native window. The installed
-entry allocates a fresh private simulation run directory on each invocation
-and prints its evidence path. It leaves the provisioned configuration and
+Use `--web` for IRMV Studio and `--viewer` for a native window. `--web`
+always prints the URL once Studio is ready and tries to open it in the
+default browser on a desktop. If it doesn't open, use the printed URL.
+The installed entry allocates a fresh private simulation run directory on each
+invocation and prints its evidence path. It leaves the provisioned configuration and
 prepared assets unchanged.
 
 For direct execution from the source tree:

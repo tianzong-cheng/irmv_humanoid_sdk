@@ -82,6 +82,18 @@ def with_studio(studio, command, environment, records_root):
                 raise ValueError("Studio failed to start")
             notice("Studio", url, level="ready")
             child = subprocess.Popen(command, env=environment)
+            browser = None
+            if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+                try:
+                    browser = subprocess.Popen(
+                        ["xdg-open", url],
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        start_new_session=True,
+                    )
+                except OSError:
+                    pass  # The printed URL remains usable without a browser opener.
             service_reported = False
             while True:
                 if pending_signal is not None:
@@ -91,6 +103,8 @@ def with_studio(studio, command, environment, records_root):
                     code = child.wait(timeout=0.25)
                     return code if code >= 0 else 128 - code
                 except subprocess.TimeoutExpired:
+                    if browser is not None and browser.poll() is not None:
+                        browser = None
                     if not service_reported and service.poll() is not None:
                         print(
                             "irmv-sdk: Studio stopped; SDK is still running",
@@ -121,7 +135,9 @@ def main():
     )
     parser.add_argument("--domain", type=int, help="override the configured DDS domain")
     parser.add_argument(
-        "--web", action="store_true", help="start the local Studio service"
+        "--web",
+        action="store_true",
+        help="start Studio, print its URL, and open it on a desktop if available",
     )
     for flag, help_text in VIEWER_FLAGS.items():
         parser.add_argument("--" + flag, action="store_true", help=help_text)
