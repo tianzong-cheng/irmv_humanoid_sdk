@@ -351,6 +351,10 @@ window. Closing the window closes visualization only; application `x` still
 leaves through Damping, and Ctrl-C in the launcher requests whole-experiment
 shutdown through runtime ZeroTorque and engine close.
 
+Engine startup diagnostics and native viewer output are written to
+`simulator.log` in the run directory. The launching terminal still shows
+startup failures, application status, and whether shutdown was confirmed.
+
 Interactive launch prints the configured key map and follows application status
 in the launching terminal while retaining the full `run/application.log`.
 Keys are immediate: Enter is not required. Wait for Standby first. With the

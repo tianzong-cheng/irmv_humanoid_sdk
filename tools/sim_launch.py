@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 from simulation.assets import verify_binding
@@ -21,6 +22,26 @@ def identities():
     while a == b:
         b = secrets.token_hex(16)
     return dict(run_id=a, runtime_id=b)
+
+
+@contextmanager
+def startup_log(path):
+    """Capture native and Python output before starting the SDK peers."""
+    with path.open("w") as log:
+        streams = (sys.stdout, sys.stderr)
+        saved = [os.dup(stream.fileno()) for stream in streams]
+        try:
+            for stream in streams:
+                stream.flush()
+                os.dup2(log.fileno(), stream.fileno())
+            yield
+        finally:
+            for stream, fd in zip(streams, saved):
+                try:
+                    stream.flush()
+                finally:
+                    os.dup2(fd, stream.fileno())
+                    os.close(fd)
 
 
 def reserve_directory(path):
@@ -134,20 +155,7 @@ class Experiment:
         self.evidence = self.binding(normalized)
         return normalized
 
-    def start(self):
-        if self._cancel_startup():
-            return self
-        n = self.preflight()
-        asset_digest = n["asset_digest"]
-        n.pop("asset_digest")
-        n.pop("policy_path")
-        n.update(identities())
-        reserve_directory(self.directory)
-        self.directory_owned = True
-        bootstrap = self.directory / "bootstrap.json"
-        fd = os.open(bootstrap, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as f:
-            json.dump(n, f)
+    def _start_simulator(self, n, bootstrap, asset_digest):
         ready = threading.Event()
 
         class ReadyRunner(self.runner_type):
@@ -178,7 +186,7 @@ class Experiment:
             self.viewer.cancelled = lambda: self.shutdown_notified
             self.viewer.start(min(30, n["startup_timeout_us"] / 1e6))
             if self._cancel_startup():
-                return self
+                return False
             self.runner.viewer = self.viewer
 
         def run():
@@ -189,13 +197,34 @@ class Experiment:
         deadline = time.monotonic() + n["startup_timeout_us"] / 1e6
         while True:
             if self._cancel_startup():
-                return self
+                return False
             if ready.wait(0.01):
-                break
+                return True
             if self.result is not None or time.monotonic() > deadline:
                 raise RuntimeError(
                     "engine startup failed: " + self.runner.coordinator.failure
                 )
+
+    def start(self, *, capture_startup_log=False):
+        if self._cancel_startup():
+            return self
+        n = self.preflight()
+        asset_digest = n["asset_digest"]
+        n.pop("asset_digest")
+        n.pop("policy_path")
+        n.update(identities())
+        reserve_directory(self.directory)
+        self.directory_owned = True
+        bootstrap = self.directory / "bootstrap.json"
+        fd = os.open(bootstrap, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(n, f)
+        path = self.directory / "simulator.log"
+        if capture_startup_log:
+            print(f"Simulation engine and viewer log: {path}", flush=True)
+        with startup_log(path) if capture_startup_log else nullcontext():
+            if not self._start_simulator(n, bootstrap, asset_digest):
+                return self
         # Engine coherent initial feedback and listening socket precede both SDK peers.
         self.evidence.update(
             run_id=n["run_id"], runtime_id=n["runtime_id"], engine_ready_before_sdk=True
@@ -391,14 +420,25 @@ def main():
         if args.check_config:
             experiment.preflight()
             return 0
-        experiment.start()
+        # CLI runs own the process descriptors during startup; embedded users
+        # of Experiment do not.
+        experiment.start(capture_startup_log=True)
         if experiment.evidence.get("startup_cancelled"):
             return experiment.wait()
         print(
             "Simulation engine ready; SDK peers started. App exit retains runtime; Ctrl-C shuts down.",
             flush=True,
         )
-        return experiment.wait()
+        result = experiment.wait()
+        if result:
+            print(
+                "Simulation did not shut down cleanly: "
+                + (experiment.evidence.get("failure") or "see experiment logs"),
+                file=sys.stderr,
+            )
+        else:
+            print("Simulation stopped with ZeroTorque confirmed.", flush=True)
+        return result
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         print("simulation launch failed: " + str(exc), file=sys.stderr)
         return 1
