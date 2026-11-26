@@ -17,8 +17,8 @@ SIMULATION_PYTHON = "@IRMV_SIMULATION_PYTHON@"
 REAL_ENABLED = "@IRMV_ENABLE_REAL_BACKEND@" in ("ON", "TRUE", "1")
 VIEWER_FLAGS = {
     "viewer": "open the read-only native MuJoCo viewer",
-    "camera-follow": "open the viewer with the camera following the robot base",
-    "no-shadow": "open the viewer without ground shadows to reduce rendering cost",
+    "camera-follow": "start with the camera following the robot base (requires --viewer)",
+    "no-shadow": "disable ground shadows to reduce rendering cost (requires --viewer)",
 }
 
 
@@ -124,6 +124,8 @@ def main():
     for flag, help_text in VIEWER_FLAGS.items():
         parser.add_argument("--" + flag, action="store_true", help=help_text)
     args = parser.parse_args()
+    if not args.viewer and (args.camera_follow or args.no_shadow):
+        parser.error("--camera-follow and --no-shadow require --viewer")
     try:
         config = args.config or (BIN / DEFAULT_CONFIG if DEFAULT_CONFIG else None)
         if config is None or not config.is_file():

@@ -64,7 +64,7 @@ class Experiment:
         self.runner = None
         self.shutdown_notified = False
         self.evidence = {}
-        self.viewer_enabled = viewer or viewer_follow or viewer_no_shadow
+        self.viewer_enabled = viewer
         self.viewer_follow = viewer_follow
         self.viewer_no_shadow = viewer_no_shadow
         self.viewer_factory = viewer_factory
@@ -347,12 +347,12 @@ def main():
     parser.add_argument(
         "--camera-follow",
         action="store_true",
-        help="open the viewer with the camera following the robot base",
+        help="start with the camera following the robot base (requires --viewer)",
     )
     parser.add_argument(
         "--no-shadow",
         action="store_true",
-        help="open the viewer without ground shadows to reduce rendering cost",
+        help="disable ground shadows to reduce rendering cost (requires --viewer)",
     )
     parser.add_argument(
         "--simulation-worker", action="store_true", help=argparse.SUPPRESS
@@ -363,6 +363,8 @@ def main():
         help="validate configuration and asset binding without starting the engine",
     )
     args = parser.parse_args()
+    if not args.viewer and (args.camera_follow or args.no_shadow):
+        parser.error("--camera-follow and --no-shadow require --viewer")
     if not args.simulation_worker:
         os.execvp(
             args.python,
