@@ -232,6 +232,7 @@ add_library(
   src/application/policy_session_record.cpp
   src/application/producer_supervisor.cpp
   src/application/robot_client.cpp
+  src/application/viewer_input.cpp
 )
 target_compile_features(irmv_application PUBLIC cxx_std_17)
 target_include_directories(
@@ -385,6 +386,27 @@ target_link_libraries(input_router_test PRIVATE irmv_application irmv_configurat
 add_test(NAME input_router_test COMMAND input_router_test)
 set_tests_properties(
   input_router_test PROPERTIES LABELS core
+  WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+)
+
+add_executable(viewer_input_test tests/unit/viewer_input_test.cpp)
+target_compile_features(viewer_input_test PRIVATE cxx_std_17)
+target_include_directories(
+  viewer_input_test
+  PRIVATE
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/tests"
+)
+# The helper owns the datagram read and the lease; the router it feeds is the
+# same application library the loop uses, and the shipped bindings are read
+# from the source tree like input_router_test.
+target_link_libraries(
+  viewer_input_test PRIVATE irmv_application irmv_configuration
+)
+
+add_test(NAME viewer_input_test COMMAND viewer_input_test)
+set_tests_properties(
+  viewer_input_test PROPERTIES LABELS core
   WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
 )
 endif()

@@ -13,8 +13,9 @@ constexpr double kUnitVelocity = 1.0;
 
 }  // namespace
 
-InputRouter::InputRouter(const configuration::ApplicationConfig &config)
-    : config_(config) {}
+InputRouter::InputRouter(const configuration::ApplicationConfig &config,
+                         bool key_up_aware)
+    : config_(config), key_up_aware_(key_up_aware) {}
 
 InputEvent InputRouter::OnKey(char key, bool pressed, protocol::TimeUs now_us) {
   // The table is indexed by the byte, not by its signed value, so every one of
@@ -48,8 +49,8 @@ InputEvent InputRouter::OnKey(char key, bool pressed, protocol::TimeUs now_us) {
     case InputAction::VelocityYawLeft:
     case InputAction::VelocityYawRight:
       // Velocity keys are held, not latched: every byte refreshes the intent.
-      return pressed ? PressVelocity(action, now_us)
-                     : ReleaseVelocity(action, now_us);
+      return pressed ? PressVelocity(byte, action, now_us)
+                     : ReleaseVelocity(byte, action, now_us);
   }
   return InputEvent::None;
 }
@@ -116,61 +117,144 @@ InputEvent InputRouter::OneShot(std::size_t byte, bool pressed,
   return event;
 }
 
-InputEvent InputRouter::PressVelocity(InputAction action,
-                                      protocol::TimeUs now_us) {
+bool InputRouter::VelocityAxis(InputAction action, std::size_t *axis,
+                               double *value) noexcept {
   switch (action) {
     case InputAction::VelocityForward:
-      intent_.forward = kUnitVelocity;
-      break;
+      *axis = 0;
+      *value = kUnitVelocity;
+      return true;
     case InputAction::VelocityBackward:
-      intent_.forward = -kUnitVelocity;
-      break;
+      *axis = 0;
+      *value = -kUnitVelocity;
+      return true;
     case InputAction::VelocityLeft:
-      intent_.lateral = kUnitVelocity;
-      break;
+      *axis = 1;
+      *value = kUnitVelocity;
+      return true;
     case InputAction::VelocityRight:
-      intent_.lateral = -kUnitVelocity;
-      break;
+      *axis = 1;
+      *value = -kUnitVelocity;
+      return true;
     case InputAction::VelocityYawLeft:
-      intent_.yaw = kUnitVelocity;
-      break;
+      *axis = 2;
+      *value = kUnitVelocity;
+      return true;
     case InputAction::VelocityYawRight:
-      intent_.yaw = -kUnitVelocity;
+      *axis = 2;
+      *value = -kUnitVelocity;
+      return true;
+    default:
+      return false;
+  }
+}
+
+void InputRouter::SetAxis(std::size_t axis, double value) noexcept {
+  switch (axis) {
+    case 0:
+      intent_.forward = value;
+      break;
+    case 1:
+      intent_.lateral = value;
+      break;
+    case 2:
+      intent_.yaw = value;
       break;
     default:
       break;
   }
+}
+
+InputEvent InputRouter::PressVelocity(std::size_t byte, InputAction action,
+                                      protocol::TimeUs now_us) {
+  std::size_t axis = 0;
+  double value = 0.0;
+  if (!VelocityAxis(action, &axis, &value)) {
+    return InputEvent::None;
+  }
+  if (key_up_aware_) {
+    // A real key-up stream: the newest held key owns the axis until it is
+    // released, and a repeated press is the same key held, not a new claim.
+    velocity_held_[byte] = true;
+    velocity_pressed_us_[byte] = now_us;
+    velocity_owner_[axis] = byte;
+  }
+  SetAxis(axis, value);
   intent_.active = true;
   intent_.stamp_us = now_us;
   Push(InputEvent::VelocityIntent);
   return InputEvent::VelocityIntent;
 }
 
-InputEvent InputRouter::ReleaseVelocity(InputAction action,
+InputEvent InputRouter::ReleaseVelocity(std::size_t byte, InputAction action,
                                         protocol::TimeUs now_us) {
-  // A release gives back only the component of its own key; the other axes and
-  // the deadline the held keys refreshed are untouched.
-  switch (action) {
-    case InputAction::VelocityForward:
-    case InputAction::VelocityBackward:
-      intent_.forward = 0.0;
-      break;
-    case InputAction::VelocityLeft:
-    case InputAction::VelocityRight:
-      intent_.lateral = 0.0;
-      break;
-    case InputAction::VelocityYawLeft:
-    case InputAction::VelocityYawRight:
-      intent_.yaw = 0.0;
-      break;
-    default:
-      break;
+  std::size_t axis = 0;
+  double value = 0.0;
+  if (!VelocityAxis(action, &axis, &value)) {
+    return InputEvent::None;
+  }
+  if (key_up_aware_) {
+    if (!velocity_held_[byte]) {
+      // A release of a key this router does not hold says nothing about the
+      // keys it does: it must not cancel the axis.
+      return InputEvent::None;
+    }
+    velocity_held_[byte] = false;
+    if (velocity_owner_[axis] == byte) {
+      // The owner let go: the newest still-held key of this axis takes over,
+      // which is what keeps an opposite or duplicate key from cancelling it.
+      ReclaimAxis(axis);
+    }
+  } else {
+    // A terminal has no key-up, so a release gives back the whole component of
+    // its axis; the other axes and the deadline are untouched.
+    SetAxis(axis, 0.0);
   }
   intent_.active =
       intent_.forward != 0.0 || intent_.lateral != 0.0 || intent_.yaw != 0.0;
   intent_.stamp_us = now_us;
   Push(InputEvent::VelocityIntent);
   return InputEvent::VelocityIntent;
+}
+
+void InputRouter::ReclaimAxis(std::size_t axis) {
+  std::size_t owner = kKeyCount;
+  protocol::TimeUs newest = 0;
+  for (std::size_t byte = 0; byte < kKeyCount; ++byte) {
+    if (!velocity_held_[byte]) {
+      continue;
+    }
+    std::size_t candidate_axis = 0;
+    double candidate = 0.0;
+    if (!VelocityAxis(config_.input.actions[byte], &candidate_axis,
+                      &candidate) ||
+        candidate_axis != axis) {
+      continue;
+    }
+    // `>=` makes the newest press win, and a repeated press of the same key
+    // moves its own stamp without changing which key wins.
+    if (owner == kKeyCount || velocity_pressed_us_[byte] >= newest) {
+      owner = byte;
+      newest = velocity_pressed_us_[byte];
+    }
+  }
+  velocity_owner_[axis] = owner;
+  if (owner == kKeyCount) {
+    SetAxis(axis, 0.0);
+    return;
+  }
+  std::size_t held_axis = 0;
+  double held_value = 0.0;
+  static_cast<void>(
+      VelocityAxis(config_.input.actions[owner], &held_axis, &held_value));
+  SetAxis(axis, held_value);
+}
+
+void InputRouter::ReleaseAllVelocity() {
+  velocity_held_.fill(false);
+  velocity_pressed_us_.fill(0);
+  velocity_owner_.fill(kKeyCount);
+  ExpireIntent();
 }
 
 void InputRouter::Push(InputEvent event) {

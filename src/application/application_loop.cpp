@@ -24,6 +24,7 @@
 #include "irmv/application/policy_session_record.hpp"
 #include "irmv/application/producer_supervisor.hpp"
 #include "irmv/application/robot_client.hpp"
+#include "irmv/application/viewer_input.hpp"
 #include "irmv/build_identity.hpp"
 #include "irmv/configuration/application_config.hpp"
 #include "irmv/policy/action.hpp"
@@ -266,8 +267,12 @@ protocol::TimeUs LoopPeriodUs(const configuration::ApplicationConfig &config) {
 // it). That flag is what makes "nothing to read" return EAGAIN instead of
 // waiting for a byte, so this read, the pacing poll at the end of the iteration
 // and the supervision heartbeat stay independent of the typing hand.
+// `gui_session` is true when a viewer input channel was handed to this
+// simulation. A terminal that is absent (a run without a tty) is then only one
+// source of two: its EOF retires the terminal without asking the application to
+// exit, which is the same semantics a terminal-only run keeps unchanged.
 bool ReadTerminal(InputRouter *router, std::array<char, kReadChunk> *buffer,
-                  protocol::TimeUs now_us) {
+                  protocol::TimeUs now_us, bool gui_session) {
   for (int attempt = 0; attempt < kReadAttempts; ++attempt) {
     const ssize_t count = ::read(STDIN_FILENO, buffer->data(), buffer->size());
     if (count > 0) {
@@ -280,17 +285,17 @@ bool ReadTerminal(InputRouter *router, std::array<char, kReadChunk> *buffer,
       }
       continue;
     }
-    if (count == 0) {
-      router->OnInputLost();
-      return true;
-    }
-    if (errno == EINTR) {
+    if (count < 0 && errno == EINTR) {
       continue;
     }
-    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+    if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
       return false;
     }
-    router->OnInputLost();
+    if (gui_session) {
+      router->ReleaseAllVelocity();
+    } else {
+      router->OnInputLost();
+    }
     return true;
   }
   return false;
@@ -311,14 +316,16 @@ int PollTimeoutMs(protocol::TimeUs timeout_us) {
 }
 
 // Waits up to `timeout_us` for the next simulation-space progress: endpoint
-// traffic, DDS simulation receipts, the policy response signal, or terminal
-// input. Only the level-triggered notices are drained; the queues that carry
+// traffic, DDS simulation receipts, the policy response signal, terminal input,
+// or a viewer frame. A site passes only the input descriptors it is about to
+// read (or -1), and the caller still bounds the whole wait with its own
+// deadline. Only the level-triggered notices are drained; the queues that carry
 // the data are read by the caller's own condition checks. Every wait site
 // checks its condition before calling this and after it returns.
 void WaitSimulationProgress(simulation::ApplicationDriver *driver,
-                            policy::InferenceWorker *worker, bool input_lost,
-                            protocol::TimeUs timeout_us) {
-  struct pollfd descriptors[4] = {};
+                            policy::InferenceWorker *worker, int terminal_fd,
+                            int viewer_fd, protocol::TimeUs timeout_us) {
+  struct pollfd descriptors[5] = {};
   nfds_t count = 0;
   const auto add = [&](int fd) {
     if (fd >= 0) descriptors[count++] = {fd, POLLIN, 0};
@@ -326,7 +333,8 @@ void WaitSimulationProgress(simulation::ApplicationDriver *driver,
   add(driver->WaitFd());
   add(driver->TransportWaitFd());
   add(worker->ResponseFd());
-  if (!input_lost) add(STDIN_FILENO);
+  add(terminal_fd);
+  add(viewer_fd);
   const int ready = ::poll(descriptors, count, PollTimeoutMs(timeout_us));
   if (ready < 0 && errno == EINTR) {
     // Let the caller recheck its absolute host deadline and stop flags with a
@@ -681,6 +689,32 @@ int RunApplication(const ApplicationOptions &options,
   RobotClient client(sink, config, MakeSupervisorId());
   BehaviorFsm fsm(config, client, source);
   InputRouter router(config);
+  // The viewer channel belongs to a simulation run only. A terminal-only run
+  // never constructs it, and a non-simulation deployment ignores the flag: it
+  // did not launch a viewer and gains no input source it cannot own.
+  const bool gui_session =
+      simulation_driver != nullptr && options.viewer_input_fd.has_value();
+  std::optional<ViewerInput> viewer_input;
+  if (gui_session) {
+    viewer_input.emplace(*options.viewer_input_fd, config, MonotonicUs());
+    if (!viewer_input->usable()) {
+      std::fprintf(stderr,
+                   "application: viewer input fd %d is unusable; continuing "
+                   "without viewer input\n",
+                   *options.viewer_input_fd);
+      std::fflush(stderr);
+    }
+  }
+  // A held viewer intent takes precedence as a whole. A focused but idle
+  // viewer must not mask terminal movement, and the sources never mix axes.
+  const auto effective_intent = [&router,
+                                 &viewer_input]() -> const VelocityIntent & {
+    if (viewer_input && viewer_input->active() &&
+        viewer_input->velocity_intent().active) {
+      return viewer_input->velocity_intent();
+    }
+    return router.velocity_intent();
+  };
 
   // The local policy source: its model, the gains its frames are sent with and
   // the worker that runs it. Everything that could refuse the model is decided
@@ -781,7 +815,9 @@ int RunApplication(const ApplicationOptions &options,
         if (stop_requested.load() || now >= end)
           throw std::runtime_error(
               "simulation model warmup cancelled or timed out");
-        WaitSimulationProgress(simulation_driver.get(), worker.get(), true,
+        // Startup has no input read of its own: the wait stays bounded to the
+        // host slice and does not park on a descriptor it would not drain.
+        WaitSimulationProgress(simulation_driver.get(), worker.get(), -1, -1,
                                std::min(end - now, kHostWakeSliceUs));
       }
       if (!warmed.ok)
@@ -956,7 +992,10 @@ int RunApplication(const ApplicationOptions &options,
 
   StatusFields last{};
   bool have_status = false;
-  bool input_lost = false;
+  // The terminal retired (EOF/error) and is no longer polled. In a
+  // terminal-only run that also asked the router for the ordered exit; in a GUI
+  // session it is just one of two sources going quiet.
+  bool terminal_closed = false;
 
   // The loop's own pacing, counted the way the runtime counts its ticks: an
   // iteration is an overrun when it started more than two loop periods after
@@ -1028,11 +1067,15 @@ int RunApplication(const ApplicationOptions &options,
     const protocol::TimeUs input_now =
         simulation_clock ? simulation_clock->NowUs() : MonotonicUs();
 
-    // (1) The terminal. A read that would block is not the loop's pacing: the
-    // poll at the end of the iteration is, so the terminal can never stall the
-    // heartbeat.
-    if (!input_lost) {
-      input_lost = ReadTerminal(&router, &bytes, input_now);
+    // (1) The input sources. A read that would block is not the loop's pacing:
+    // the poll at the end of the iteration is, so no source can stall the
+    // heartbeat. The viewer's lease is host-monotonic even when the terminal
+    // stamps use the simulation clock.
+    if (!terminal_closed) {
+      terminal_closed = ReadTerminal(&router, &bytes, input_now, gui_session);
+    }
+    if (viewer_input) {
+      viewer_input->Poll(&router, input_now, MonotonicUs());
     }
 
     // (2) Everything the transport thread received since the last iteration.
@@ -1139,7 +1182,7 @@ int RunApplication(const ApplicationOptions &options,
         sample.session_id = client.session_id();
       }
       sample.latest_state_seq = view.state_known ? view.state.state_seq : 0;
-      const VelocityIntent &intent = router.velocity_intent();
+      const VelocityIntent &intent = effective_intent();
       sample.forward = intent.forward;
       sample.lateral = intent.lateral;
       sample.yaw = intent.yaw;
@@ -1177,7 +1220,7 @@ int RunApplication(const ApplicationOptions &options,
           (!submitted_once || decision_now - last_submit_us >=
                                   model->contract().policy_period_us) &&
           view.state_known && view.state_fresh) {
-        const VelocityIntent &intent = router.velocity_intent();
+        const VelocityIntent &intent = effective_intent();
         policy::VelocityCommand command;
         command.forward = intent.forward;
         command.lateral = intent.lateral;
@@ -1243,8 +1286,13 @@ int RunApplication(const ApplicationOptions &options,
                 "application: simulation inference cancelled or timed out\n");
             return kExitStopUnknown;
           }
-          if (!input_lost)
-            input_lost = ReadTerminal(&router, &bytes, decision_now);
+          if (!terminal_closed) {
+            terminal_closed =
+                ReadTerminal(&router, &bytes, decision_now, gui_session);
+          }
+          if (viewer_input) {
+            viewer_input->Poll(&router, decision_now, MonotonicUs());
+          }
           const auto event =
               stop_requested.load() ? InputEvent::Exit : router.TakeEvent();
           if (event != InputEvent::None) {
@@ -1261,6 +1309,8 @@ int RunApplication(const ApplicationOptions &options,
               break;
             }
           }
+          have_response = take_response();
+          if (have_response) break;
           const auto wait_now = simulation::DriverHostUs();
           if (worker->ResponseWakeFailed()) {
             std::fprintf(stderr,
@@ -1268,9 +1318,10 @@ int RunApplication(const ApplicationOptions &options,
             return kExitStopUnknown;
           }
           WaitSimulationProgress(
-              simulation_driver.get(), worker.get(), input_lost,
+              simulation_driver.get(), worker.get(),
+              terminal_closed ? -1 : STDIN_FILENO,
+              viewer_input ? viewer_input->fd() : -1,
               std::min(end > wait_now ? end - wait_now : 0, kHostWakeSliceUs));
-          have_response = take_response();
         }
       }
       if (have_response) {
@@ -1458,9 +1509,10 @@ int RunApplication(const ApplicationOptions &options,
       // The velocity intent the producer should track, at this source's own
       // cadence: the newest one the operator holds, republished when it changes
       // and otherwise once per target period, so the producer never has to
-      // guess whether a stale intent still holds. An intent the router expired
-      // is a zero command like any other, and it is published the same way.
-      const VelocityIntent &intent = router.velocity_intent();
+      // guess whether a stale intent still holds. An intent the active source
+      // expired or released is a zero command like any other, and it is
+      // published the same way.
+      const VelocityIntent &intent = effective_intent();
       policy::VelocityCommand current_intent;
       current_intent.forward = intent.forward;
       current_intent.lateral = intent.lateral;
@@ -1789,29 +1841,36 @@ int RunApplication(const ApplicationOptions &options,
       return exit_code;
     }
 
-    // The wait that paces the iteration, and the terminal wait with it. Once
-    // the input device is gone the descriptor reports it forever, so the
-    // pacing becomes a plain sleep instead of a spin. In both forms the wait is
-    // the loop's own period capped at the next velocity sample deadline: the
-    // cap can only shorten this idle stretch, so every heartbeat and FSM
-    // deadline - judged at the next iteration's decision instant - keeps the
-    // same bound it had before.
+    // The wait that paces the iteration, and the live input waits with it. A
+    // source that is gone is not polled at all - a terminal that reported EOF
+    // would report it forever - so with no descriptor left the pacing becomes a
+    // plain sleep instead of a spin. In both forms the wait is the loop's own
+    // period capped at the next velocity sample deadline: the cap can only
+    // shorten this idle stretch, so every heartbeat and FSM deadline - judged
+    // at the next iteration's decision instant - keeps the same bound it had
+    // before.
     const protocol::TimeUs next_sample_us =
         velocity_recorder ? velocity_schedule.NextDeadlineUs() : 0;
-    if (input_lost) {
+    const int viewer_fd = viewer_input ? viewer_input->fd() : -1;
+    if (terminal_closed && viewer_fd < 0) {
       const protocol::TimeUs budget =
           WaitBudgetUs(period_us, next_sample_us, decision_now);
       std::this_thread::sleep_for(std::chrono::microseconds(budget));
     } else {
-      struct pollfd descriptor {};
-      descriptor.fd = STDIN_FILENO;
-      descriptor.events = POLLIN;
+      struct pollfd descriptors[2] = {};
+      nfds_t count = 0;
+      if (!terminal_closed) {
+        descriptors[count++] = {STDIN_FILENO, POLLIN, 0};
+      }
+      if (viewer_fd >= 0) {
+        descriptors[count++] = {viewer_fd, POLLIN, 0};
+      }
       const int wait_timeout_ms =
           WaitTimeoutMs(period_us, next_sample_us, decision_now);
       // An interrupted wait and every other result just end the wait: the next
       // iteration re-reads the clock and re-runs its checks, which is also what
       // keeps a signalled exit bounded.
-      static_cast<void>(::poll(&descriptor, 1, wait_timeout_ms));
+      static_cast<void>(::poll(descriptors, count, wait_timeout_ms));
     }
   }
 }

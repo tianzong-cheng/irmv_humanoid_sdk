@@ -35,10 +35,12 @@ enum class InputEvent {
 // unit value of the bound key (+1 or -1); the intent is never a ramp and never
 // accumulates, so a held key cannot drive an unbounded command.
 //
-// Releasing either direction key of one axis clears that axis (the two keys of
-// an axis are one component, so releasing the one that is not claimed is a
-// no-op anyway) and refreshes `stamp_us`; the other axes and the deadline the
-// held keys keep refreshing are untouched.
+// In the default terminal model, releasing either direction key of one axis
+// clears that axis (the terminal has no key-up, so the two keys of an axis are
+// one component) and refreshes `stamp_us`; the other axes and the deadline the
+// held keys keep refreshing are untouched. A key-up aware router instead gives
+// the axis back to the newest still-held key, so releasing an opposite key
+// cannot cancel one that is still down.
 //
 // Units: `forward` and `lateral` are m/s in the body frame (positive forward,
 // positive left), `yaw` is rad/s (positive counter-clockwise). `stamp_us` is
@@ -78,7 +80,14 @@ struct VelocityIntent {
 // particular releasing the reserved emergency-stop key is not a Reset.
 class InputRouter {
  public:
-  explicit InputRouter(const configuration::ApplicationConfig &config);
+  // A terminal reports presses only, so by default the two keys of one axis
+  // are a single component and a release gives the whole axis back. A device
+  // that really reports key-up (the simulation viewer) asks for
+  // `key_up_aware`: the axis is then owned by the newest still-held key of
+  // that axis, so releasing an opposite key cannot cancel one that is still
+  // held. The default keeps the terminal's documented behaviour unchanged.
+  explicit InputRouter(const configuration::ApplicationConfig &config,
+                       bool key_up_aware = false);
 
   // Routes one key byte. `pressed` is the transition the device reported: a
   // bound press raises (and returns) its event, an unbound byte and the release
@@ -106,6 +115,12 @@ class InputRouter {
   // The live body-velocity intent; zero and inactive while no velocity key has
   // been pressed or after its deadline.
   const VelocityIntent &velocity_intent() const { return intent_; }
+
+  // Gives back every velocity key this router holds and zeroes the intent.
+  // A key-up aware device calls this when its source is blurred, closed or
+  // has outlived its lease; a pending velocity event of the cleared intent is
+  // dropped, exactly like an expiry.
+  void ReleaseAllVelocity();
 
   // The input device reported EOF or a terminal error. That asks for the
   // orderly exit - whose first step is the ordinary damping stop - so it raises
@@ -136,11 +151,22 @@ class InputRouter {
                      InputEvent event);
 
   // Velocity routing: a press claims the axis, a release gives it back, both
-  // raise `VelocityIntent`.
-  InputEvent PressVelocity(configuration::InputAction action,
+  // raise `VelocityIntent`. `byte` is the key that raised the transition; it
+  // is the identity a key-up aware router keeps.
+  InputEvent PressVelocity(std::size_t byte, configuration::InputAction action,
                            protocol::TimeUs now_us);
-  InputEvent ReleaseVelocity(configuration::InputAction action,
+  InputEvent ReleaseVelocity(std::size_t byte,
+                             configuration::InputAction action,
                              protocol::TimeUs now_us);
+
+  // Maps a velocity action to its axis (0 forward, 1 lateral, 2 yaw) and its
+  // unit value; false for every other action.
+  static bool VelocityAxis(configuration::InputAction action, std::size_t *axis,
+                           double *value) noexcept;
+  // Writes one component of the intent.
+  void SetAxis(std::size_t axis, double value) noexcept;
+  // Recomputes one axis from the still-held keys, newest press first.
+  void ReclaimAxis(std::size_t axis);
 
   // Queues `event` unless an identical one is already queued.
   void Push(InputEvent event);
@@ -151,10 +177,17 @@ class InputRouter {
 
   // The loop owns the configuration for the process life, like RobotClient's.
   const configuration::ApplicationConfig &config_;
+  // The terminal's axis-level key model, or the viewer's key-level one.
+  const bool key_up_aware_;
   // Last press of each byte and whether it was ever seen, so the very first
   // press of a byte raises even at a time below the guard.
   std::array<protocol::TimeUs, kKeyCount> last_seen_us_{};
   std::array<bool, kKeyCount> seen_{};
+  // Key-up aware velocity state: the keys still held, when each was pressed
+  // (newest wins an axis), and the byte that currently owns each axis.
+  std::array<bool, kKeyCount> velocity_held_{};
+  std::array<protocol::TimeUs, kKeyCount> velocity_pressed_us_{};
+  std::array<std::size_t, 3> velocity_owner_{kKeyCount, kKeyCount, kKeyCount};
   std::array<InputEvent, kBatchCapacity> batch_{};
   std::size_t batch_size_{0};
   VelocityIntent intent_{};

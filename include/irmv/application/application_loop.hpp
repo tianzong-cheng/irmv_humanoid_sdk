@@ -124,6 +124,11 @@ struct ApplicationOptions {
   // explicit `local` on a configuration without a model is refused at startup
   // rather than silently ignored.
   std::optional<LocomotionSource> locomotion_source;
+  // The inherited datagram descriptor of the simulation viewer's input
+  // channel. Only the simulation backend reads it; another backend ignores it
+  // so no deployment gains a viewer it did not launch. Unset leaves the
+  // terminal as the only input source.
+  std::optional<int> viewer_input_fd;
 };
 
 // Runs the supervision loop until the ordered exit completes and returns the
@@ -143,6 +148,12 @@ struct ApplicationOptions {
 // in a blocking tty would stall inside the raw-mode read with the heartbeat
 // stopped - the non-blocking flag is what keeps the pacing, the status line and
 // the supervision heartbeat alive while no key arrives.
+//
+// A simulation started by the launcher may instead inherit a viewer input
+// descriptor (`viewer_input_fd`). The loop reads it as a second, leased input
+// source; its EOF is not the terminal's EOF, so a run without a tty keeps
+// supervising as long as that channel exists. A terminal-only run keeps the
+// documented terminal EOF exit unchanged.
 //
 // `stop_requested` is the only thing a signal handler may set; the loop turns
 // it into the same RequestExit the exit key raises, so every exit is the one

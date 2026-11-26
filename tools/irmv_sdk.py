@@ -18,7 +18,7 @@ DEFAULT_CONFIG = "@IRMV_LAUNCH_CONFIG@"
 SIMULATION_PYTHON = "@IRMV_SIMULATION_PYTHON@"
 REAL_ENABLED = "@IRMV_ENABLE_REAL_BACKEND@" in ("ON", "TRUE", "1")
 VIEWER_FLAGS = {
-    "viewer": "open the read-only native MuJoCo viewer",
+    "viewer": "open the GLFW simulation window with keyboard controls",
     "camera-follow": "start with the camera following the robot base (requires --viewer)",
     "no-shadow": "disable ground shadows to reduce rendering cost (requires --viewer)",
 }

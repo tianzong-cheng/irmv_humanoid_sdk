@@ -93,6 +93,14 @@ class ViewerPublisher:
         self.dt = physics_dt_us
         self.follow = follow
         self.no_shadow = no_shadow
+        # The launcher hands the viewer one end of its private AF_UNIX
+        # SOCK_SEQPACKET socketpair before start().  It is an inherited fd in
+        # this process; the launcher closes its own copy after Popen.
+        self.input_fd = None
+        # Single ASCII keys whose presses/releases the focused window forwards.
+        # The launcher fills this from the same configuration the application
+        # uses, so both input sources share one binding table.
+        self.input_bindings = ()
         self.process = None
         self.socket = None
         self.state = "not_started"
@@ -124,6 +132,7 @@ class ViewerPublisher:
                     physics_dt_us=self.dt,
                     follow=self.follow,
                     no_shadow=self.no_shadow,
+                    input_bindings=list(self.input_bindings),
                 )
             )
             environment = dict(os.environ)
@@ -131,15 +140,25 @@ class ViewerPublisher:
             environment["PYTHONPATH"] = (
                 package_root + os.pathsep + environment.get("PYTHONPATH", "")
             )
+            command = [
+                sys.executable,
+                "-m",
+                "simulation.viewer",
+                "--fd",
+                str(child.fileno()),
+            ]
+            inherited = [child.fileno()]
+            if self.input_fd is not None:
+                input_fd = self.input_fd
+                if type(input_fd) is not int:
+                    input_fd = input_fd.fileno()
+                if type(input_fd) is not int or input_fd < 0:
+                    raise ValueError("viewer input_fd must be a non-negative fd")
+                command.extend(["--input-fd", str(input_fd)])
+                inherited.append(input_fd)
             self.process = subprocess.Popen(
-                [
-                    sys.executable,
-                    "-m",
-                    "simulation.viewer",
-                    "--fd",
-                    str(child.fileno()),
-                ],
-                pass_fds=(child.fileno(),),
+                command,
+                pass_fds=tuple(dict.fromkeys(inherited)),
                 env=environment,
                 start_new_session=True,
             )
@@ -351,20 +370,22 @@ def _load_display_model(config):
     return spec.compile()
 
 
-def child_main(fd):
+def child_main(fd, input_fd=None):
     channel = socket.socket(fileno=fd)
     channel.settimeout(10)
     raw = channel.recv(MAX_PACKET + 1)
     message = json.loads(raw)
     run_id, asset = message["run_id"], message["asset_digest"]
-    render_threads = ()
+    window = None
+    input_channel = None
+    input_stream = None
     try:
         decode(raw, run_id, asset)
         # Rendering resources are compiled only in this child process.
         import mujoco as mj
-        import mujoco.viewer
 
         from .assets import closure
+        from .glfw_viewer import ViewerInput, ViewerWindow
 
         config = message["config"]
         if closure(config["model_path"])["digest"] != asset:
@@ -377,65 +398,45 @@ def child_main(fd):
             index = mj.mj_name2id(model, mj.mjtObj.mjOBJ_JOINT, name)
             data.qpos[model.jnt_qposadr[index]] = q
         mj.mj_forward(model, data)  # Kinematics only; never CPU stepping.
-        threads_before = set(threading.enumerate())
-        with mujoco.viewer.launch_passive(model, data) as window:
-            render_threads = tuple(set(threading.enumerate()) - threads_before)
-            with window.lock():
-                base = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, config["base_body"])
-                window.cam.lookat[:] = data.xpos[base]
-                window.cam.distance = 2.0
-                window.cam.azimuth = 135
-                window.cam.elevation = -15
-            window.set_texts(
-                [(None, None, "Waiting for coherent GPU pose", "READ ONLY")]
-            )
-            if message["follow"]:
-                with window.lock():
-                    window.cam.type = mj.mjtCamera.mjCAMERA_TRACKING
-                    window.cam.trackbodyid = mj.mj_name2id(
-                        model, mj.mjtObj.mjOBJ_BODY, config["base_body"]
-                    )
-            # The default daylight scene keeps its cast ground shadow. Rendering
-            # that pass costs about a quarter millisecond per control interval on
-            # the same GPU the physics engine uses, which is the difference
-            # between 0.9x and 1.0x real time on a laptop GPU, so an explicit
-            # opt-in may clear it while keeping every other visual element.
-            if message.get("no_shadow"):
-                window.user_scn.flags[mj.mjtRndFlag.mjRND_SHADOW] = 1
-                window.sync(state_only=True)
-                window.user_scn.flags[mj.mjtRndFlag.mjRND_SHADOW] = 0
-            else:
-                window.sync(state_only=True)
-            channel.send(encode("ready", run_id, asset))
-            channel.setblocking(False)
-            last = -1
-            while window.is_running():
-                try:
-                    newest = receive_latest(channel, run_id, asset, model.nq, last)
-                except EOFError:
-                    return 0
-                if newest is not None:
-                    with window.lock():
-                        data.qpos[:] = newest["qpos"]
-                        data.qvel[:] = 0
-                        data.qfrc_applied[:] = 0
-                        data.xfrc_applied[:] = 0
-                        mj.mj_forward(model, data)
-                    last = newest["physics_step"]
-                    held = "RELEASED" if newest["released"] else "BASE HELD"
-                    # Native text overlay is display-only, not control evidence.
-                    window.set_texts(
-                        [
-                            (
-                                mj.mjtFontScale.mjFONTSCALE_150,
-                                mj.mjtGridPos.mjGRID_TOPLEFT,
-                                f"Simulation {last * message['physics_dt_us'] / 1e6:.3f}s",
-                                held,
-                            )
-                        ]
-                    )
-                window.sync(state_only=True)
-                time.sleep(1 / 60)
+
+        if input_fd is not None and input_fd != fd:
+            try:
+                input_channel = socket.socket(fileno=input_fd)
+            except OSError:
+                # A bad optional endpoint must not take the presentation with
+                # it; the application simply never sees a viewer press.
+                input_channel = None
+        bindings = message.get("input_bindings", ())
+        if not isinstance(bindings, (list, tuple)):
+            bindings = ()
+        if input_channel is not None:
+            input_stream = ViewerInput(input_channel, bindings)
+
+        window = ViewerWindow(
+            model,
+            data,
+            config,
+            follow=message["follow"],
+            no_shadow=bool(message.get("no_shadow")),
+            input_stream=input_stream,
+        )
+        window.render()
+        channel.send(encode("ready", run_id, asset))
+        channel.setblocking(False)
+        last = -1
+        while window.is_running():
+            try:
+                newest = receive_latest(channel, run_id, asset, model.nq, last)
+            except EOFError:
+                return 0
+            if newest is not None:
+                window.set_pose(newest, message["physics_dt_us"])
+                last = newest["physics_step"]
+            window.render()
+            # swap_buffers already paces against the display; this only keeps
+            # a fallback yield so a disabled vsync cannot spin a core.  The
+            # short interval also keeps the 30 ms heartbeat cadence.
+            time.sleep(0.002)
         channel.send(encode("closed", run_id, asset))
         return 0
     except Exception as exc:
@@ -446,16 +447,18 @@ def child_main(fd):
         print("simulation viewer: " + str(exc), file=sys.stderr)
         return 1
     finally:
-        # launch_passive owns a daemon GUI thread; close requests its exit but
-        # does not join it. Keep model/GL resources alive until it has unwound.
-        for thread in render_threads:
-            thread.join(timeout=2)
-            if thread.is_alive():
-                raise RuntimeError("native viewer thread close deadline")
+        if input_stream is not None:
+            input_stream.close()
+        elif input_channel is not None:
+            input_channel.close()
+        if window is not None:
+            window.close()
         channel.close()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--fd", type=int, required=True)
-    raise SystemExit(child_main(parser.parse_args().fd))
+    parser.add_argument("--input-fd", type=int, default=None)
+    arguments = parser.parse_args()
+    raise SystemExit(child_main(arguments.fd, arguments.input_fd))

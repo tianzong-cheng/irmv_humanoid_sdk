@@ -347,10 +347,11 @@ gradient and the checker ground stay. The shadow pass
 costs about 0.24 ms per control interval on the same GPU the physics engine
 uses, which is the difference between roughly 0.9x and 1.0x real time on the
 laptop GPU measured here, so it is an explicit opt-in rather than the default.
-Native left-drag rotates, right-drag pans and the mouse
-wheel zooms. Send SDK behavior keys from the launching terminal, not the viewer
-window. Closing the window closes visualization only; application `x` still
-leaves through Damping, and Ctrl-C in the launcher requests whole-experiment
+The GLFW window has no MuJoCo sidebar. Left-drag rotates, right-drag pans,
+and the mouse wheel zooms. Press Escape to leave camera-follow mode.
+Both the focused window and the launching terminal accept SDK keys. Closing
+the window leaves the experiment running; application `x` exits through
+Damping, and Ctrl-C in the launching terminal requests whole-experiment
 shutdown through runtime ZeroTorque and engine close.
 
 Engine startup diagnostics and native viewer output are written to
@@ -367,6 +368,11 @@ Keys are immediate: Enter is not required. Wait for Standby first. With the
 example bindings, press `d`, wait for `[application] behavior=Damping`, press
 `i`, then wait for the actual `[application] behavior=Ready` status before
 pressing `l`.
+For the example bindings, hold `w` / `a` / `s` / `f` to move and `q` / `e`
+to turn. Release a window key to stop that input. Focus loss, window closure,
+or loss of the window input channel clears window movement without clearing
+terminal input. With the default bindings, `Space` requests an emergency stop
+instead of pausing the display.
 Locomotion input during Initializing is deliberately ignored, not queued for
 later execution. Initialization uses logical time and can take longer in wall
 time when physics is slow. The viewer's BASE HELD label does not mean keyboard
@@ -383,19 +389,19 @@ application exit and active-experiment Ctrl-C shutdown. It is not GPU policy
 acceptance evidence.
 
 The viewer process owns a separate CPU model/data, uses CPU forward kinematics
-only, and displays immutable completed GPU qpos snapshots. It cannot command or
-perturb authoritative physics. Logical time and BASE HELD/RELEASED are displayed;
-the initial view explicitly says it is waiting for a coherent GPU pose.
-Display publication is capped near30Hz of host time, nonblocking and bounded.
-A slow display drops visual samples; it cannot add a control barrier or age
-logical commands. Display time must not be used as the authoritative evidence
-stream. Native UI edits affect only its disposable display copy.
+only, and displays immutable completed GPU qpos snapshots. Keyboard events
+go to the application's `InputRouter` over a separate local channel; the viewer
+cannot command torque or perturb authoritative physics. Logical time and
+BASE HELD/RELEASED are displayed; the initial view waits for a coherent GPU
+pose. Display publication is capped near 30 Hz of host time, nonblocking and
+bounded. A slow display drops visual samples without adding a control barrier.
+Display time is not authoritative evidence.
 
 Explicit native startup failure is reported before SDK peers start. Later
 window closure/failure retires visualization without cancelling the experiment;
 the launcher records separate viewer status and owns bounded child cleanup.
 Without either flag, no renderer process or optional rendering import is used.
-No pause, single-step, reset, force injection or graphical replay is provided.
+No direct physics editing, pause, single-step, or graphical replay is provided.
 This adapter revision changes the engine binding: explicitly re-prepare assets
 before launching; never patch or bypass an old digest. Visualization does not
 select calibration or continuity-bypass configurations automatically.

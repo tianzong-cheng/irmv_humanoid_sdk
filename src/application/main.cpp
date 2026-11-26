@@ -1,4 +1,5 @@
 #include <fcntl.h>
+#include <sys/socket.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -7,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <exception>
+#include <limits>
 #include <string>
 #include <string_view>
 
@@ -111,7 +113,8 @@ class TerminalGuard {
 
 constexpr std::string_view kUsageLine =
     "usage: application --config PATH [--domain N]"
-    " [--locomotion-source local|external|none]";
+    " [--locomotion-source local|external|none]"
+    " [--viewer-input-fd N]";
 
 std::string DomainRangeMessage(const std::string &value) {
   return "--domain must be between 0 and " +
@@ -159,6 +162,46 @@ CommandLine ParseCommandLine(int argc, char **argv) {
                        value + "\"";
         return result;
       }
+      continue;
+    }
+    if (argument == "--viewer-input-fd") {
+      if (!has_value) {
+        result.error = "--viewer-input-fd requires a descriptor";
+        return result;
+      }
+      const std::string value(argv[++index]);
+      std::size_t consumed = 0;
+      long long descriptor = 0;
+      try {
+        descriptor = std::stoll(value, &consumed);
+      } catch (const std::exception &) {
+        result.error =
+            "--viewer-input-fd must be a non-negative integer, got \"" + value +
+            "\"";
+        return result;
+      }
+      if (consumed != value.size() || descriptor < 0 ||
+          descriptor > std::numeric_limits<int>::max()) {
+        result.error =
+            "--viewer-input-fd must be a non-negative integer, got \"" + value +
+            "\"";
+        return result;
+      }
+      int type = 0;
+      socklen_t type_size = sizeof(type);
+      sockaddr_storage peer{};
+      socklen_t peer_size = sizeof(peer);
+      const int fd = static_cast<int>(descriptor);
+      if (fd <= STDERR_FILENO ||
+          ::getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &type_size) != 0 ||
+          type != SOCK_SEQPACKET ||
+          ::getpeername(fd, reinterpret_cast<sockaddr *>(&peer), &peer_size) !=
+              0 ||
+          peer.ss_family != AF_UNIX) {
+        result.error = "--viewer-input-fd requires an inherited UNIX socket";
+        return result;
+      }
+      result.options.viewer_input_fd = static_cast<int>(descriptor);
       continue;
     }
     if (argument == "--domain") {

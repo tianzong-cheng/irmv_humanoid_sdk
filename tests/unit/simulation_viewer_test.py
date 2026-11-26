@@ -1,6 +1,7 @@
 """Display transport tests: standard library only, no renderer or GPU imports."""
 
 import json
+import os
 import select
 import socket
 import sys
@@ -9,6 +10,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
+from simulation.glfw_viewer import GLFW_PRESS, GLFW_RELEASE, ViewerInput
 from simulation.viewer import (
     MAX_PACKET,
     ViewerPublisher,
@@ -16,6 +18,49 @@ from simulation.viewer import (
     encode,
     receive_latest,
 )
+
+
+class RecordingChannel:
+    """Minimal nonblocking endpoint; records exactly what the viewer sent."""
+
+    def __init__(self):
+        self.packets = []
+        self.timestamps = []
+        self.closed = False
+        self.ack = True
+
+    def recv(self, _size):
+        if not self.ack:
+            raise BlockingIOError
+        self.ack = False
+        return b"\x01"
+
+    def send(self, packet):
+        if self.closed:
+            raise OSError("endpoint closed")
+        assert len(packet) == 10
+        self.packets.append(packet[:2])
+        self.timestamps.append(int.from_bytes(packet[2:], "little"))
+        return len(packet)
+
+    def shutdown(self, _how):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
+class FailingChannel(RecordingChannel):
+    def __init__(self):
+        super().__init__()
+        self.attempts = 0
+
+    def send(self, _packet):
+        self.attempts += 1
+        raise BlockingIOError("no room")
+
+    def close(self):
+        self.closed = True
 
 
 class ViewerTest(unittest.TestCase):
@@ -231,6 +276,142 @@ class ViewerTest(unittest.TestCase):
         finally:
             os.close(writer)
             publisher.close()
+
+    def test_viewer_input_configuration_travels_in_initialize_handshake(self):
+        publisher = ViewerPublisher({}, "run", "asset", 1000)
+        self.assertIsNone(publisher.input_fd)
+        self.assertEqual(tuple(publisher.input_bindings), ())
+        packet = encode(
+            "initialize",
+            "run",
+            "asset",
+            config={},
+            physics_dt_us=1000,
+            follow=False,
+            no_shadow=False,
+            input_bindings=["w", "A", " "],
+        )
+        self.assertEqual(
+            decode(packet, "run", "asset")["input_bindings"], ["w", "A", " "]
+        )
+
+    def test_input_fd_is_inherited_and_named_on_child_command_line(self):
+        import simulation.viewer as module
+
+        publisher = ViewerPublisher({}, "run", "asset", 1000)
+        read_fd, write_fd = os.pipe()
+        captured = {}
+
+        class Stop(Exception):
+            pass
+
+        def fake_popen(args, **kwargs):
+            captured["args"] = args
+            captured["pass_fds"] = kwargs["pass_fds"]
+            raise Stop()
+
+        original = module.subprocess.Popen
+        module.subprocess.Popen = fake_popen
+        try:
+            publisher.input_fd = read_fd
+            with self.assertRaises(Stop):
+                publisher.start(0.1)
+        finally:
+            module.subprocess.Popen = original
+            os.close(read_fd)
+            os.close(write_fd)
+        index = captured["args"].index("--input-fd")
+        self.assertEqual(captured["args"][index + 1], str(read_fd))
+        self.assertIn(read_fd, captured["pass_fds"])
+
+
+class GlfwViewerInputTest(unittest.TestCase):
+    def press(self, viewer, scan, char, mods=0):
+        viewer.key_event(scan, GLFW_PRESS, mods)
+        viewer.text_event(ord(char))
+
+    def start(self, channel, bindings, clock=lambda: 123.5):
+        viewer = ViewerInput(channel, bindings, clock)
+        viewer.poll()
+        self.assertEqual(channel.packets, [b"H\0"])
+        channel.packets.clear()
+        channel.timestamps.clear()
+        return viewer
+
+    def test_waits_for_reader_and_discards_pre_start_keys(self):
+        channel = RecordingChannel()
+        channel.ack = False
+        now = [100.0]
+        viewer = ViewerInput(channel, ["w"], clock=lambda: now[0])
+        for _ in range(1000):
+            now[0] += 0.03
+            viewer.poll()
+        self.press(viewer, 13, "w")
+        self.assertEqual(channel.packets, [])
+        channel.ack = True
+        viewer.poll()
+        viewer.key_event(13, GLFW_RELEASE, 0)
+        self.press(viewer, 13, "w")
+        self.assertEqual(channel.packets, [b"H\0", b"Pw"])
+
+    def test_layout_translated_ascii_and_release_preserve_sender_time(self):
+        channel = RecordingChannel()
+        viewer = self.start(channel, "wW 2")
+        for scan, char, mods in ((13, "W", 1), (20, " ", 0), (19, "2", 1)):
+            self.press(viewer, scan, char, mods)
+            viewer.key_event(scan, GLFW_RELEASE, 0)
+        self.press(viewer, 19, "é")
+        self.assertEqual(channel.packets, [b"PW", b"RW", b"P ", b"R ", b"P2", b"R2"])
+        self.assertEqual(channel.timestamps, [123_500_000] * 6)
+
+    def test_repeat_chords_and_alias_key_do_not_strand_intent(self):
+        channel = RecordingChannel()
+        viewer = self.start(channel, "w")
+        for mod in (2, 4, 8):
+            self.press(viewer, 13, "w", mod)
+        self.assertEqual(channel.packets, [])
+        self.press(viewer, 13, "w")
+        viewer.key_event(13, 2, 0)  # GLFW_REPEAT
+        viewer.text_event(ord("w"))
+        self.press(viewer, 30, "w")
+        viewer.key_event(13, GLFW_RELEASE, 2)
+        self.assertEqual(channel.packets, [b"Pw"])
+        viewer.key_event(30, GLFW_RELEASE, 0)
+        self.assertEqual(channel.packets, [b"Pw", b"Rw"])
+
+    def test_focus_loss_revokes_held_keys_and_heartbeat_continues(self):
+        channel = RecordingChannel()
+        now = [100.0]
+        viewer = self.start(channel, "wa", clock=lambda: now[0])
+        self.press(viewer, 13, "w")
+        viewer.focus_event(False)
+        viewer.key_event(13, GLFW_RELEASE, 0)
+        self.press(viewer, 19, "a")
+        now[0] += 0.029
+        viewer.poll()
+        self.assertEqual(channel.packets, [b"Pw", b"B\0"])
+        now[0] += 0.002
+        viewer.poll()
+        viewer.focus_event(True)
+        self.press(viewer, 13, "w")
+        self.assertEqual(channel.packets, [b"Pw", b"B\0", b"H\0", b"Pw"])
+
+    def test_endpoint_failure_and_exit_stop_writes(self):
+        channel = FailingChannel()
+        viewer = ViewerInput(channel, "w")
+        viewer.poll()
+        self.assertTrue(channel.closed)
+        self.press(viewer, 13, "w")
+        viewer.poll()
+        self.assertEqual(channel.attempts, 1)
+
+        channel = RecordingChannel()
+        viewer = self.start(channel, "w")
+        self.press(viewer, 13, "w")
+        viewer.close()
+        viewer.key_event(13, GLFW_RELEASE, 0)
+        self.assertTrue(channel.closed)
+        self.assertEqual(channel.packets, [b"Pw"])
 
 
 if __name__ == "__main__":

@@ -406,6 +406,34 @@ def test_startup_rejections(workspace):
             2,
             "--domain must be an integer",
         ),
+        (
+            "viewer input fd missing",
+            ["--config", str(workspace / "config.json"), "--viewer-input-fd"],
+            2,
+            "--viewer-input-fd requires a descriptor",
+        ),
+        (
+            "viewer input fd negative",
+            [
+                "--config",
+                str(workspace / "config.json"),
+                "--viewer-input-fd",
+                "-1",
+            ],
+            2,
+            "--viewer-input-fd must be a non-negative integer",
+        ),
+        (
+            "viewer input fd not an integer",
+            [
+                "--config",
+                str(workspace / "config.json"),
+                "--viewer-input-fd",
+                "abc",
+            ],
+            2,
+            "--viewer-input-fd must be a non-negative integer",
+        ),
     ]
     for name, arguments, expected_code, expected in cases:
         with Application(arguments, workspace, terminal=False) as app:

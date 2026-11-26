@@ -6,11 +6,12 @@ import json
 import os
 import secrets
 import signal
+import socket
 import subprocess
 import sys
 import threading
 import time
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
 
 from irmv_console import application_line, notice, shutdown_result
@@ -92,6 +93,7 @@ class Experiment:
         self.viewer_factory = viewer_factory
         self.viewer = None
         self.application_output = None
+        self.key_bindings = {}
 
     def notify_shutdown(self, signum=None, frame=None):
         self.shutdown_notified = True
@@ -111,10 +113,7 @@ class Experiment:
         path = self.directory / "application.log"
         self.application_output = path.open("r", encoding="utf-8", errors="replace")
         notice("Run log", str(path))
-        try:
-            bindings = json.loads(self.config.read_text())["input"]["bindings"]
-        except (OSError, ValueError, KeyError, TypeError):
-            bindings = {}
+        bindings = self.key_bindings
         keys = [
             "{}={}".format("space" if key == " " else key, action)
             for action, key in bindings.items()
@@ -124,7 +123,12 @@ class Experiment:
             notice("Keys", "  ".join(keys))
         notice(
             "Controls",
-            "type without Enter. Press d, i, then l; wait for Ready before l.",
+            (
+                "focus the GLFW window or type in this terminal; "
+                if self.viewer_enabled
+                else "type in this terminal without Enter; "
+            )
+            + "wait for Ready before starting locomotion.",
         )
         notice(
             "Stop",
@@ -161,7 +165,7 @@ class Experiment:
         self.evidence = self.binding(normalized)
         return normalized
 
-    def _start_simulator(self, n, bootstrap, asset_digest):
+    def _start_simulator(self, n, bootstrap, asset_digest, viewer_input):
         ready = threading.Event()
 
         class ReadyRunner(self.runner_type):
@@ -189,6 +193,12 @@ class Experiment:
                 follow=self.viewer_follow,
                 no_shadow=self.viewer_no_shadow,
             )
+            self.viewer.input_fd = viewer_input.fileno()
+            self.viewer.input_bindings = tuple(
+                key
+                for key in self.key_bindings.values()
+                if isinstance(key, str) and len(key) == 1 and " " <= key <= "~"
+            )
             self.viewer.cancelled = lambda: self.shutdown_notified
             self.viewer.start(min(30, n["startup_timeout_us"] / 1e6))
             if self._cancel_startup():
@@ -215,6 +225,12 @@ class Experiment:
         if self._cancel_startup():
             return self
         n = self.preflight()
+        try:
+            bindings = json.loads(self.config.read_text())["input"]["bindings"]
+            if isinstance(bindings, dict):
+                self.key_bindings = bindings
+        except (OSError, ValueError, KeyError, TypeError):
+            pass  # The application reports configuration errors.
         asset_digest = n["asset_digest"]
         n.pop("asset_digest")
         n.pop("policy_path")
@@ -228,9 +244,22 @@ class Experiment:
         path = self.directory / "simulator.log"
         if capture_startup_log:
             notice("Simulator log", str(path))
-        with startup_log(path) if capture_startup_log else nullcontext():
-            if not self._start_simulator(n, bootstrap, asset_digest):
-                return self
+        with ExitStack() as endpoints:
+            application_input = viewer_input = None
+            if self.viewer_enabled:
+                application_input, viewer_input = socket.socketpair(
+                    socket.AF_UNIX, socket.SOCK_SEQPACKET
+                )
+                endpoints.enter_context(application_input)
+                endpoints.enter_context(viewer_input)
+            with startup_log(path) if capture_startup_log else nullcontext():
+                if not self._start_simulator(n, bootstrap, asset_digest, viewer_input):
+                    return self
+            if viewer_input is not None:
+                viewer_input.close()
+            return self._start_peers(n, application_input)
+
+    def _start_peers(self, n, application_input):
         # Engine coherent initial feedback and listening socket precede both SDK peers.
         self.evidence.update(
             run_id=n["run_id"], runtime_id=n["runtime_id"], engine_ready_before_sdk=True
@@ -245,6 +274,9 @@ class Experiment:
             self.logs.append(log)
             if self._cancel_startup():
                 return self
+            fds = ()
+            if name == "application" and application_input is not None:
+                fds = (application_input.fileno(),)
             self.children.append(
                 subprocess.Popen(
                     [str(binary), "--config", str(self.config)]
@@ -252,7 +284,9 @@ class Experiment:
                         ["--domain", str(self.domain)]
                         if self.domain is not None
                         else []
-                    ),
+                    )
+                    + (["--viewer-input-fd", str(fds[0])] if fds else []),
+                    pass_fds=fds,
                     stdin=self.application_stdin
                     if name == "application"
                     else subprocess.DEVNULL,
@@ -372,7 +406,9 @@ def main():
         help="override dds.domain for this run; the normalized digest and both SDK peers use it",
     )
     parser.add_argument(
-        "--viewer", action="store_true", help="open read-only native MuJoCo window"
+        "--viewer",
+        action="store_true",
+        help="open the GLFW simulation window with keyboard controls",
     )
     parser.add_argument(
         "--camera-follow",
