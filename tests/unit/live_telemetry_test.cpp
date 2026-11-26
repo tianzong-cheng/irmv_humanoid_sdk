@@ -266,6 +266,7 @@ int main() {
       if (envelope["kind"] == "sample") {
         ++samples;
       } else if (envelope["kind"] == "fault") {
+        CHECK(envelope["payload"]["reason_name"] == "JointPositionExceeded");
         ++faults;
       }
     }

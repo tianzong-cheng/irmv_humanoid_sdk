@@ -16,6 +16,7 @@ def main() -> int:
     parser.add_argument("--start", type=int, default=9007199270000000)
     parser.add_argument("--count", type=int, default=8)
     parser.add_argument("--value", type=float, default=0.9)
+    parser.add_argument("--fault", action="store_true")
     args = parser.parse_args()
     client = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
     emitter = "e" * 32
@@ -64,6 +65,27 @@ def main() -> int:
                 "imu_linear_acceleration": [0.0, 0.0, 0.0],
             },
         )
+    if args.fault:
+        for offset, (reason, condition, name) in enumerate(
+            [(6, 9, "JointVelocityExceeded"), (2, 5, "JointFeedbackStale")]
+        ):
+            send(
+                args.count + 2 + offset,
+                "fault",
+                {
+                    "record_seq": str(100 + offset),
+                    "fault_id": "99",
+                    "reason": reason,
+                    "reason_name": "FeedbackInvalid" if offset else name,
+                    "condition": condition,
+                    "condition_name": name,
+                    "joint_index": 0,
+                    "detected_stamp_us": str(args.start + offset * 10_000),
+                    "sample_stamp_us": str(args.start),
+                    "output_action": 1,
+                    "message": name,
+                },
+            )
     return 0
 
 

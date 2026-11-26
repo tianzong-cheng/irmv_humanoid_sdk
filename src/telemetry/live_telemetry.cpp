@@ -334,6 +334,7 @@ std::string EncodeLiveFault(const RecordedFault &fault) {
   payload["state_seq"] = std::to_string(fault.state_seq);
   payload["fault_id"] = std::to_string(fault.fault_id);
   payload["reason"] = static_cast<std::uint32_t>(detail.reason);
+  payload["reason_name"] = protocol::FaultReasonName(detail.reason);
   payload["condition"] = static_cast<std::uint32_t>(detail.condition);
   payload["condition_name"] = protocol::FaultConditionName(detail.condition);
   payload["joint_index"] = detail.joint_index == protocol::kNoJointIndex

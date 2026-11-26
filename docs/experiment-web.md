@@ -183,6 +183,11 @@ or command the robot.
   verify each chunk's header and payload CRC. A corrupt chunk contributes no
   rows and is named; a truncated run says so. A live envelope is a temporary
   copy until a committed row exists, then the committed value wins.
+- **Fault observations are not current state.** The experiment header shows the
+  first observed reasons for the newest loaded runtime fault, with detection
+  time and joint name when known. The notice can come from live telemetry or
+  a recording and does not imply that the runtime is still in Fault. The Events
+  panel retains individual observations, measured values and limits.
 - **Gaps are data.** Queue/write losses, an open run, a missing fault sidecar
   and an empty complete fault stream are different facts. `complete: false` is
   not a query failure. A missing `faults.jsonl` is an error, because the

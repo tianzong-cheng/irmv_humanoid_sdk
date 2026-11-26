@@ -610,6 +610,10 @@ def test_latched_runtime_fault(workspace):
                     "the application did not report the latched lower fault",
                 ),
             )
+            check(
+                any("fault=WriteFailed" in line for line in faults),
+                failure_report("latched fault", app, "missing the lower fault reason"),
+            )
             app.send_keys("x")
             exit_line = app.wait_for(
                 lambda line: line.startswith("application: exit "), EXIT_WAIT_S

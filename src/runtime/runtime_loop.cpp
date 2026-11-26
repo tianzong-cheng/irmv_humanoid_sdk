@@ -25,6 +25,7 @@
 #include "irmv/build_identity.hpp"
 #include "irmv/hardware/backend_factory.hpp"
 #include "irmv/hardware/sim_backend.hpp"
+#include "irmv/protocol/validation.hpp"
 #include "irmv/runtime/execution_fsm.hpp"
 #include "irmv/runtime/shutdown_authorization.hpp"
 #include "irmv/simulation/runtime_driver.hpp"
@@ -207,32 +208,6 @@ const char *RejectReasonName(protocol::RejectReason reason) {
       return "WriteFailed";
     case protocol::RejectReason::QueueFull:
       return "QueueFull";
-  }
-  return "Unknown";
-}
-
-const char *FaultReasonName(protocol::FaultReason reason) {
-  switch (reason) {
-    case protocol::FaultReason::None:
-      return "None";
-    case protocol::FaultReason::BootFailed:
-      return "BootFailed";
-    case protocol::FaultReason::FeedbackInvalid:
-      return "FeedbackInvalid";
-    case protocol::FaultReason::DriverError:
-      return "DriverError";
-    case protocol::FaultReason::ImuInvalid:
-      return "ImuInvalid";
-    case protocol::FaultReason::JointPositionExceeded:
-      return "JointPositionExceeded";
-    case protocol::FaultReason::JointVelocityExceeded:
-      return "JointVelocityExceeded";
-    case protocol::FaultReason::CommandInvalid:
-      return "CommandInvalid";
-    case protocol::FaultReason::WriteFailed:
-      return "WriteFailed";
-    case protocol::FaultReason::ProtocolExhausted:
-      return "ProtocolExhausted";
   }
   return "Unknown";
 }
@@ -955,7 +930,7 @@ void LogTickEvents(telemetry::Logger &logger, const ExecutionFsm &fsm,
     record.Field("from", StateName(event.from));
     record.Field("to", StateName(event.to));
     if (event.fault_reason != protocol::FaultReason::None) {
-      record.Field("fault", FaultReasonName(event.fault_reason));
+      record.Field("fault", protocol::FaultReasonName(event.fault_reason));
     }
     if (event.reject_reason != protocol::RejectReason::None) {
       record.Field("reason", RejectReasonName(event.reject_reason));

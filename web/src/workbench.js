@@ -664,6 +664,7 @@ export class Workbench {
       title.textContent = this.run ? this.run.name : 'Choose an experiment';
     }
     this.RenderExperimentState();
+    this.RenderFaultNotice();
     const detail = this.$('#run-detail');
     if (detail) {
       const context = this.run?.context ?? {};
@@ -683,6 +684,14 @@ export class Workbench {
         .filter(Boolean)
         .join(' · ');
     }
+  }
+
+  RenderFaultNotice() {
+    const notice = this.$('#fault-notice');
+    if (!notice) return;
+    const text = this.eventsView.FaultNotice(this.run?.context?.joints);
+    if (notice.textContent !== text) notice.textContent = text;
+    notice.hidden = !text;
   }
 
   RenderExperimentState() {
@@ -1497,10 +1506,14 @@ export class Workbench {
           );
           this.ApplyTimeState({ ...state, offline: snapshot.active !== true });
         }
-        for (const fault of snapshot.faults ?? []) {
+        if (snapshot.faults?.length) {
           this.eventsView.Append({
-            events: [{ ...fault, event_id: String(fault.record_seq) }],
+            events: snapshot.faults.map((fault) => ({
+              ...fault,
+              event_id: String(fault.record_seq),
+            })),
           });
+          this.RenderFaultNotice();
         }
         this.eventsView.Render(this.$('#events-list'));
         this.dock?.SetMarkers(this.eventsView.markers);
@@ -1529,9 +1542,6 @@ export class Workbench {
     if (!this.run) {
       return;
     }
-    if (continuation === null) {
-      this.eventsView.Reset(this.timeOriginUs);
-    }
     const generation = this.loadGeneration;
     const payload = await this.api.Events({
       runId: this.run.id,
@@ -1543,6 +1553,7 @@ export class Workbench {
     if (generation !== this.loadGeneration) return;
     this.eventsView.Append(payload);
     this.eventsView.Render(this.$('#events-list'));
+    this.RenderFaultNotice();
     const summary = this.$('#events-summary');
     if (summary) {
       summary.textContent = this.eventsView.Summary();

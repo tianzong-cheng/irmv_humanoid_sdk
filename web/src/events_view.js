@@ -8,6 +8,10 @@
 import { Us } from './api.js';
 import { RelativeTime } from './time_display.js';
 
+function ReasonName(event) {
+  return event.reason_name ?? event.condition_name ?? `reason ${event.reason}`;
+}
+
 export class EventsView {
   constructor(callbacks = {}) {
     this.callbacks = callbacks;
@@ -32,14 +36,23 @@ export class EventsView {
     if (payload?.integrity) {
       this.integrity = payload.integrity;
     }
-    const seen = new Set(this.events.map((event) => event.event_id));
+    const byId = new Map(
+      this.events.map((event, index) => [event.event_id, index]),
+    );
     for (const event of payload?.events ?? []) {
-      if (!seen.has(event.event_id)) {
+      const index = byId.get(event.event_id);
+      if (index === undefined) {
+        byId.set(event.event_id, this.events.length);
         this.events.push(event);
-        seen.add(event.event_id);
+      } else if (payload.integrity) {
+        // A committed row supersedes its live copy, without clearing the tail.
+        this.events[index] = event;
+        if (this.selected?.event_id === event.event_id) this.selected = event;
       }
     }
-    this.continuation = payload?.continuation ?? null;
+    if (payload && Object.hasOwn(payload, 'continuation')) {
+      this.continuation = payload.continuation;
+    }
     this.BuildMarkers();
   }
 
@@ -86,6 +99,31 @@ export class EventsView {
       .join(' · ');
   }
 
+  FaultNotice(joints) {
+    let latestId = 0n;
+    let firstStamp = 0n;
+    const details = new Set();
+    for (const event of this.events) {
+      const id = Us(event.fault_id ?? '0');
+      if (id === 0n || id < latestId) continue;
+      const stamp = Us(event.detected_stamp_us);
+      // Fault IDs increase per runtime. Later observations from the same
+      // latch must not replace the reasons seen at its first detection.
+      if (id > latestId || stamp < firstStamp) {
+        latestId = id;
+        firstStamp = stamp;
+        details.clear();
+      }
+      if (stamp !== firstStamp) continue;
+      const joint = event.joint_name ?? joints?.[event.joint_index];
+      const reason = ReasonName(event);
+      details.add(joint ? `${reason} (${joint})` : reason);
+    }
+    return details.size
+      ? `Fault observed: ${[...details].join(', ')} · t=${RelativeTime(firstStamp, this.timeOriginUs)}`
+      : '';
+  }
+
   Render(container) {
     if (!container || !container.ownerDocument) {
       return;
@@ -106,7 +144,7 @@ export class EventsView {
       time.textContent = `t=${RelativeTime(event.detected_stamp_us, this.timeOriginUs)}`;
       const reason = document.createElement('span');
       reason.className = 'event-reason';
-      reason.textContent = event.reason_name ?? `reason ${event.reason}`;
+      reason.textContent = ReasonName(event);
       const message = document.createElement('span');
       message.className = 'event-message';
       message.textContent = event.message ?? '';
@@ -137,7 +175,7 @@ export class EventsView {
     return [
       `event ${event.event_id}`,
       `detected ${RelativeTime(event.detected_stamp_us, this.timeOriginUs)} · sample ${RelativeTime(event.sample_stamp_us, this.timeOriginUs)}`,
-      `reason ${event.reason_name} (${event.reason})`,
+      `reason ${ReasonName(event)} (${event.reason})`,
       `condition ${event.condition_name} (${event.condition})`,
       `joint ${event.joint_name ?? event.joint_index ?? '—'}`,
       `error ${event.error_code}`,

@@ -659,31 +659,6 @@ std::string HexBytes(std::string_view bytes) {
   return text;
 }
 
-const char *FaultReasonText(protocol::FaultReason reason) {
-  switch (reason) {
-    case protocol::FaultReason::BootFailed:
-      return "BootFailed";
-    case protocol::FaultReason::FeedbackInvalid:
-      return "FeedbackInvalid";
-    case protocol::FaultReason::DriverError:
-      return "DriverError";
-    case protocol::FaultReason::ImuInvalid:
-      return "ImuInvalid";
-    case protocol::FaultReason::JointPositionExceeded:
-      return "JointPositionExceeded";
-    case protocol::FaultReason::JointVelocityExceeded:
-      return "JointVelocityExceeded";
-    case protocol::FaultReason::CommandInvalid:
-      return "CommandInvalid";
-    case protocol::FaultReason::WriteFailed:
-      return "WriteFailed";
-    case protocol::FaultReason::ProtocolExhausted:
-      return "ProtocolExhausted";
-    default:
-      return "None";
-  }
-}
-
 const char *OutputActionText(protocol::OutputAction action) {
   switch (action) {
     case protocol::OutputAction::ZeroTorque:
@@ -1377,7 +1352,7 @@ Json EncodeFault(const telemetry::RecordedFault &fault,
   event["state_seq"] = Decimal(fault.state_seq);
   event["fault_id"] = Decimal(fault.fault_id);
   event["reason"] = static_cast<std::uint32_t>(detail.reason);
-  event["reason_name"] = FaultReasonText(detail.reason);
+  event["reason_name"] = protocol::FaultReasonName(detail.reason);
   event["condition"] = static_cast<std::uint32_t>(detail.condition);
   event["condition_name"] = protocol::FaultConditionName(detail.condition);
   if (detail.joint_index == protocol::kNoJointIndex) {

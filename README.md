@@ -225,7 +225,7 @@ unbound, and is then inert like every other unbound byte.
 ### Status line
 
 ```text
-[application] behavior=<X> runtime=<Y> output=<Z> session=<owned|lost|none> pending=<operation|-> reject=<reason|-> fresh=<yes|no> init=<ok|refused|-> cause=<fault cause|-> stop=<lower stop reason|->
+[application] behavior=<X> runtime=<Y> output=<Z> session=<owned|lost|none> pending=<operation|-> reject=<reason|-> fresh=<yes|no> init=<ok|refused|-> cause=<fault cause|-> stop=<lower stop reason|-> fault=<runtime fault reasons|->
 ```
 
 `behavior` is the upper behaviour (`Starting`, `Standby`, `Damping`,
@@ -245,10 +245,11 @@ otherwise `OperatorEmergencyStop`, `RuntimeFault`, `RuntimeUnreachable`,
 `UnexpectedContext`), and `stop` is the lower layer's own reason for the last
 stop it made, as its current state reports it (`-` when it reports none or is
 not known, otherwise `Requested`, `CommandTimeout`, `SourceStateTimeout` or
-`SupervisorTimeout`). The two together are what tells an operator emergency stop
-from an unreachable runtime, and a lower command timeout from a supervisor
-timeout; without them a `behavior=Fault` line names no cause at all. The line is
-printed once initially, then only when the displayed fields change. A single
+`SupervisorTimeout`). `fault` shows the distinct latched reasons from fresh
+runtime feedback, for example `cause=RuntimeFault fault=JointVelocityExceeded`.
+An application-only fault still reports its own `cause` without inventing a
+runtime failure. The line is printed once initially, then only when the
+displayed fields change. A single
 request may produce multiple lines as those fields change; a repeated request
 that leaves them unchanged produces none. Idle operation does not repeat the
 line.

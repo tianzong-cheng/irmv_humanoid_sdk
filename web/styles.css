@@ -283,6 +283,11 @@ main {
 .experiment-heading {
   flex: 1;
 }
+.fault-notice {
+  margin: var(--space-1) 0 0;
+  color: var(--error);
+  overflow-wrap: anywhere;
+}
 .experiment-state {
   display: block;
   margin-bottom: var(--space-1);

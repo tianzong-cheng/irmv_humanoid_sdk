@@ -114,6 +114,32 @@ bool IsValid(FaultCondition value) {
   return false;
 }
 
+const char *FaultReasonName(protocol::FaultReason reason) {
+  switch (reason) {
+    case protocol::FaultReason::None:
+      return "None";
+    case protocol::FaultReason::BootFailed:
+      return "BootFailed";
+    case protocol::FaultReason::FeedbackInvalid:
+      return "FeedbackInvalid";
+    case protocol::FaultReason::DriverError:
+      return "DriverError";
+    case protocol::FaultReason::ImuInvalid:
+      return "ImuInvalid";
+    case protocol::FaultReason::JointPositionExceeded:
+      return "JointPositionExceeded";
+    case protocol::FaultReason::JointVelocityExceeded:
+      return "JointVelocityExceeded";
+    case protocol::FaultReason::CommandInvalid:
+      return "CommandInvalid";
+    case protocol::FaultReason::WriteFailed:
+      return "WriteFailed";
+    case protocol::FaultReason::ProtocolExhausted:
+      return "ProtocolExhausted";
+  }
+  return "Unknown";
+}
+
 const char *FaultConditionName(FaultCondition value) {
   switch (value) {
     case FaultCondition::None:

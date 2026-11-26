@@ -632,6 +632,9 @@ test('displays fault events as text, seeks to one and keeps the live tail honest
 }) => {
   await page.goto('/');
   await openRun(page, 'run_web_a');
+  const notice = page.locator('#fault-notice');
+  await expect(notice).toContainText('Fault observed: JointPositionExceeded');
+  await expect(notice).toContainText('left_hip');
   await drop(page, 'runtime/left_hip/q', null, 'empty');
   await page.click('#load-events');
   await expect(page.locator('.event-item')).toHaveCount(3);
@@ -656,9 +659,14 @@ test('displays fault events as text, seeks to one and keeps the live tail honest
     '8',
     '--value',
     '0.9',
+    '--fault',
   ]);
   await page.click('#go-live');
   await expect(page.locator('#live-status')).toContainText('Receiving data');
+  await expect(notice).toContainText('Fault observed: JointVelocityExceeded');
+  await expect(notice).not.toContainText('FeedbackInvalid');
+  await page.click('#load-events');
+  await expect(notice).toContainText('Fault observed: JointVelocityExceeded');
   const pausedBefore = await page.evaluate(() =>
     window.__workbench.time.window.endUs.toString(),
   );

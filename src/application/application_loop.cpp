@@ -30,6 +30,7 @@
 #include "irmv/policy/inference.hpp"
 #include "irmv/policy/observation.hpp"
 #include "irmv/policy/onnx_model.hpp"
+#include "irmv/protocol/validation.hpp"
 #include "irmv/simulation/application_driver.hpp"
 #include "irmv/telemetry/record_context.hpp"
 #include "irmv/telemetry/velocity_record.hpp"
@@ -404,6 +405,9 @@ struct StatusFields {
   // unreachable runtime, or a lower command timeout from a supervisor timeout.
   const char *cause{"-"};
   const char *stop{"-"};
+  protocol::Id fault_runtime{};
+  protocol::Sequence fault_id{0};
+  std::uint32_t fault_reasons{0};
 };
 
 bool SameFields(const StatusFields &left, const StatusFields &right) {
@@ -416,21 +420,38 @@ bool SameFields(const StatusFields &left, const StatusFields &right) {
          std::strcmp(left.fresh, right.fresh) == 0 &&
          std::strcmp(left.init, right.init) == 0 &&
          std::strcmp(left.cause, right.cause) == 0 &&
-         std::strcmp(left.stop, right.stop) == 0;
+         std::strcmp(left.stop, right.stop) == 0 &&
+         left.fault_runtime == right.fault_runtime &&
+         left.fault_id == right.fault_id &&
+         left.fault_reasons == right.fault_reasons;
 }
 
 void PrintStatus(const StatusFields &fields) {
+  // Fault details are a latched set, not ordered by primary reason. Print
+  // each distinct reported reason without implying a priority.
+  std::array<char, 256> reasons{};
+  std::size_t reason_length = 0;
+  for (std::uint32_t code = 1; code < 32; ++code) {
+    if (!(fields.fault_reasons & (std::uint32_t{1} << code))) continue;
+    const char *name =
+        protocol::FaultReasonName(static_cast<protocol::FaultReason>(code));
+    const auto length = std::strlen(name);
+    if (reason_length + length + 1 >= reasons.size()) break;
+    if (reason_length != 0) reasons[reason_length++] = ',';
+    std::memcpy(reasons.data() + reason_length, name, length);
+    reason_length += length;
+  }
   // Sized for the longest names of every field with room to spare; a line that
   // did not fit would be truncated, which the length clamp below turns into a
   // shorter line rather than an unterminated one.
-  std::array<char, 320> line{};
+  std::array<char, 640> line{};
   const int written = std::snprintf(
       line.data(), line.size(),
       "[application] behavior=%s runtime=%s output=%s session=%s pending=%s "
-      "reject=%s fresh=%s init=%s cause=%s stop=%s\n",
+      "reject=%s fresh=%s init=%s cause=%s stop=%s fault=%s\n",
       fields.behavior, fields.runtime, fields.output, fields.session,
       fields.pending, fields.reject, fields.fresh, fields.init, fields.cause,
-      fields.stop);
+      fields.stop, reason_length != 0 ? reasons.data() : "-");
   if (written <= 0) {
     return;
   }
@@ -1580,6 +1601,26 @@ int RunApplication(const ApplicationOptions &options,
     fields.stop = behavior.runtime_state_known
                       ? StopReasonName(behavior.runtime_stop_reason)
                       : "-";
+    if (view.state_known && view.state_fresh &&
+        view.state.execution_state == protocol::ExecutionState::Fault) {
+      fields.fault_runtime = view.state.runtime_id;
+      fields.fault_id = view.state.fault_id;
+      if (have_status && fields.fault_runtime == last.fault_runtime &&
+          fields.fault_id == last.fault_id) {
+        fields.fault_reasons = last.fault_reasons;
+      } else {
+        const auto &report = view.state.faults;
+        for (std::size_t i = 0;
+             i < std::min<std::size_t>(report.count, report.details.size());
+             ++i) {
+          const auto code =
+              static_cast<std::uint32_t>(report.details[i].reason);
+          if (code != 0 && code < 32) {
+            fields.fault_reasons |= std::uint32_t{1} << code;
+          }
+        }
+      }
+    }
     if (!have_status || !SameFields(fields, last)) {
       PrintStatus(fields);
       last = fields;
