@@ -5,6 +5,7 @@
 # Scratch build directory of the documented ThreadSanitizer channel check
 /build-tsan/
 /logs/
+MUJOCO_LOG.TXT
 /.tools/
 __pycache__/
 /build-real/
